@@ -600,12 +600,18 @@ with right:
     # ── SCANNER ─────────────────────────────────────────────
     elif pg == "scanner":
         section("WATCHLIST SCANNER")
+
+        # Auto-load from Supabase if not in session
+        if not st.session_state.watchlist:
+            wl = db_load_watchlist()
+            if wl:
+                st.session_state.watchlist = wl
+
         with st.expander("How to export from TradingView"):
             st.write("TradingView → Watchlist → three-dot menu → Export data → save CSV → Upload below")
-        uploaded = st.file_uploader("Upload Watchlist CSV", type=["csv","txt"], label_visibility="collapsed")
-        if not uploaded:
-            st.info("Upload your TradingView watchlist CSV to start scanning.")
-        else:
+
+        uploaded = st.file_uploader("Upload new watchlist CSV (optional)", type=["csv","txt"], label_visibility="collapsed")
+        if uploaded:
             syms = parse_csv(uploaded)
             if not syms:
                 st.error("No symbols found.")
@@ -613,13 +619,20 @@ with right:
                 st.session_state.watchlist = syms
                 if db_save_watchlist(syms):
                     st.success(f"✅ {len(syms)} stocks loaded and saved to cloud!")
-                sc1,sc2,sc3,sc4 = st.columns([1,1,1,2])
-                filt    = sc1.selectbox("Show",["All","Above PDH","Below PDL","In Range"])
-                l10     = sc2.checkbox("10s Live")
-                l60     = sc3.checkbox("60s Auto")
-                scanbtn = sc4.button("SCAN NOW", use_container_width=True, type="primary")
 
-                if scanbtn or l10 or l60:
+        # Show watchlist if available
+        syms = st.session_state.watchlist
+        if not syms:
+            st.info("Upload your TradingView watchlist CSV to start scanning.")
+        else:
+            st.success(f"✅ {len(syms)} stocks in your watchlist")
+            sc1,sc2,sc3,sc4 = st.columns([1,1,1,2])
+            filt    = sc1.selectbox("Show",["All","Above PDH","Below PDL","In Range"])
+            l10     = sc2.checkbox("10s Live")
+            l60     = sc3.checkbox("60s Auto")
+            scanbtn = sc4.button("SCAN NOW", use_container_width=True, type="primary")
+
+            if scanbtn or l10 or l60:
                     results,failed = [],[]
                     bar = st.progress(0, text="Scanning...")
                     for i,sym in enumerate(syms):
@@ -868,4 +881,3 @@ with right:
                     else: st.warning("Fill name and message.")
 
     st.markdown('</div>', unsafe_allow_html=True)
-
