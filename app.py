@@ -1,9 +1,70 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import time
 import requests
+from supabase import create_client, Client
+
+# ── Supabase Config ─────────────────────────────────────────
+SUPABASE_URL = "https://vpxagxjgtonynblhddwh.supabase.co"
+SUPABASE_KEY = "sb_publishable_J709kk-CNgm4GVkd5jemEg_XZb5wPDA"
+
+@st.cache_resource
+def get_supabase() -> Client:
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
+
+supabase = get_supabase()
+
+# ── Supabase Helpers ─────────────────────────────────────────
+def db_save_watchlist(symbols: list):
+    """Save watchlist to Supabase — clears old and inserts new."""
+    try:
+        supabase.table("watchlist").delete().neq("id", 0).execute()
+        rows = [{"symbol": s} for s in symbols]
+        supabase.table("watchlist").insert(rows).execute()
+        return True
+    except Exception as e:
+        st.error(f"Save error: {e}")
+        return False
+
+def db_load_watchlist() -> list:
+    """Load watchlist from Supabase."""
+    try:
+        res = supabase.table("watchlist").select("symbol").execute()
+        return [r["symbol"] for r in res.data] if res.data else []
+    except:
+        return []
+
+def db_save_alert(symbol: str, alert_type: str, price: float):
+    """Save or update an alert."""
+    try:
+        supabase.table("alerts").delete().eq("symbol", symbol).execute()
+        supabase.table("alerts").insert({
+            "symbol": symbol, "alert_type": alert_type,
+            "price": price, "active": True
+        }).execute()
+        return True
+    except Exception as e:
+        st.error(f"Alert save error: {e}")
+        return False
+
+def db_delete_alert(symbol: str):
+    """Remove an alert."""
+    try:
+        supabase.table("alerts").delete().eq("symbol", symbol).execute()
+        return True
+    except:
+        return False
+
+def db_load_alerts() -> dict:
+    """Load all active alerts as dict."""
+    try:
+        res = supabase.table("alerts").select("*").eq("active", True).execute()
+        return {r["symbol"]: {"type": r["alert_type"], "price": float(r["price"]), "active": True}
+                for r in res.data} if res.data else {}
+    except:
+        return {}
 
 st.set_page_config(page_title="Arka Trades", layout="wide", page_icon="📈", initial_sidebar_state="collapsed")
 
@@ -39,9 +100,20 @@ for k, v in {
     "watchlist":       [],
     "alerts":          {},
     "alert_fired":     set(),
+    "db_loaded":       False,
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
+
+# Load from Supabase once per session
+if not st.session_state.db_loaded:
+    wl = db_load_watchlist()
+    if wl:
+        st.session_state.watchlist = wl
+    al = db_load_alerts()
+    if al:
+        st.session_state.alerts = al
+    st.session_state.db_loaded = True
 
 name    = st.session_state.profile.get("name","Trader") or "Trader"
 initial = name[0].upper()
@@ -497,7 +569,6 @@ with right:
             </div>""", unsafe_allow_html=True)
 
         section("TODAY AT A GLANCE")
-        from datetime import timezone, timedelta
         IST = timezone(timedelta(hours=5, minutes=30))
         now = datetime.now(IST)
         mkt = now.replace(hour=9,minute=15,second=0,microsecond=0) <= now <= now.replace(hour=15,minute=30,second=0,microsecond=0)
@@ -540,7 +611,8 @@ with right:
                 st.error("No symbols found.")
             else:
                 st.session_state.watchlist = syms
-                st.success(f"{len(syms)} stocks loaded")
+                if db_save_watchlist(syms):
+                    st.success(f"✅ {len(syms)} stocks loaded and saved to cloud!")
                 sc1,sc2,sc3,sc4 = st.columns([1,1,1,2])
                 filt    = sc1.selectbox("Show",["All","Above PDH","Below PDL","In Range"])
                 l10     = sc2.checkbox("10s Live")
@@ -664,6 +736,7 @@ with right:
                             if has_alert:
                                 if st.button("Off",key=f"rm_{sym}",use_container_width=True):
                                     del st.session_state.alerts[sym]
+                                    db_delete_alert(sym)
                                     if sym in st.session_state.alert_fired: st.session_state.alert_fired.remove(sym)
                                     st.rerun()
                         if st.session_state.get(f"open_{sym}"):
@@ -682,6 +755,7 @@ with right:
                                         elif alert_type=="PDL": price=st_["pdl"]; atype="pdl"
                                         else:                   price=cp; atype="custom"
                                         st.session_state.alerts[sym]={"type":atype,"price":price,"active":True}
+                                        db_save_alert(sym, atype, price)
                                         if sym in st.session_state.alert_fired: st.session_state.alert_fired.remove(sym)
                                         send_telegram(f"Alert set!\n{sym} · {atype.upper()} · Rs{price:.2f}")
                                         st.session_state[f"open_{sym}"]=False
@@ -794,3 +868,4 @@ with right:
                     else: st.warning("Fill name and message.")
 
     st.markdown('</div>', unsafe_allow_html=True)
+
