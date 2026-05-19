@@ -497,7 +497,9 @@ with right:
             </div>""", unsafe_allow_html=True)
 
         section("TODAY AT A GLANCE")
-        now = datetime.now()
+        from datetime import timezone, timedelta
+        IST = timezone(timedelta(hours=5, minutes=30))
+        now = datetime.now(IST)
         mkt = now.replace(hour=9,minute=15,second=0,microsecond=0) <= now <= now.replace(hour=15,minute=30,second=0,microsecond=0)
         g1,g2,g3,g4 = st.columns(4)
         g1.metric("Market Status", "OPEN" if mkt else "CLOSED")
