@@ -5,6 +5,7 @@ from datetime import datetime, timezone, timedelta
 import time
 import requests
 from supabase import create_client, Client
+from news_feed import news_panel, get_news_dot, _ensure_news_state
 
 # ── Supabase Config ─────────────────────────────────────────
 SUPABASE_URL = "https://vpxagxjgtonynblhddwh.supabase.co"
@@ -403,6 +404,7 @@ with left:
     nav_btn("Home",      "home",     "🏠")
     nav_btn("Scanner",   "scanner",  "📋")
     nav_btn("Alerts",    "alerts",   "🔔")
+    nav_btn("News",      "news",     "📰")
 
     st.markdown(f"""
     <div style="padding:14px 12px 4px;font-family:'Bebas Neue',sans-serif;
@@ -674,6 +676,7 @@ with right:
                             ha=s["sym"] in st.session_state.alerts and st.session_state.alerts[s["sym"]].get("active")
                             bell_on=f'<svg width="14" height="14" viewBox="0 0 24 24" fill="{IVORY}"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
                             bell_off=f'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="{T2}" stroke-width="2"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
+                            news_dot = get_news_dot(s["sym"])
                             with cols5[i%5]:
                                 st.markdown(f"""
                                 <div style="background:{bg};border:1px solid {bd};
@@ -681,7 +684,7 @@ with right:
                                      padding:18px 10px;text-align:center;margin-bottom:8px;">
                                     <div style="font-family:'Inter',sans-serif;font-weight:900;
                                          font-size:13px;color:{IVORY};margin-bottom:6px;">
-                                         {s['sym']} {bell_on if ha else bell_off}</div>
+                                         {s['sym']} {news_dot} {bell_on if ha else bell_off}</div>
                                     <div style="font-family:'JetBrains Mono',monospace;
                                          font-weight:700;font-size:16px;color:{IVORY};">
                                          Rs {s['cur']:.2f}</div>
@@ -696,9 +699,14 @@ with right:
                                          H {s['pdh']:.1f} | L {s['pdl']:.1f}</div>
                                 </div>""", unsafe_allow_html=True)
 
-                        st.caption(f"Scanned: {datetime.now().strftime('%d %b %Y  %H:%M:%S')}  ·  10s cache")
+                        st.caption(f"Scanned: {datetime.now(IST).strftime('%d %b %Y  %H:%M:%S')}  ·  10s cache")
                         if l10: time.sleep(10); st.cache_data.clear(); st.rerun()
                         elif l60: time.sleep(60); st.cache_data.clear(); st.rerun()
+
+        # ── News Panel (auto-refreshes independently)
+        if syms:
+            _ensure_news_state()
+            news_panel(syms)
 
     # ── ALERTS ──────────────────────────────────────────────
     elif pg == "alerts":
@@ -773,6 +781,16 @@ with right:
                                         send_telegram(f"Alert set!\n{sym} · {atype.upper()} · Rs{price:.2f}")
                                         st.session_state[f"open_{sym}"]=False
                                         st.success(f"Alert set for {sym}!"); st.rerun()
+
+    # ── NEWS PAGE ────────────────────────────────────────────
+    elif pg == "news":
+        section("STOCK NEWS")
+        watchlist = st.session_state.get("watchlist", [])
+        if not watchlist:
+            st.warning("Go to Scanner first and upload your watchlist.")
+        else:
+            _ensure_news_state()
+            news_panel(watchlist)
 
     # ── ANALYSIS / COMING SOON ──────────────────────────────
     elif pg in ["analysis","heatmap","autoalert"]:
