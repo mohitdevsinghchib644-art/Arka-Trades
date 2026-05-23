@@ -212,16 +212,34 @@ def get_static(sym):
     try:
         h = yf.Ticker(sym+".NS").history(period="30d", interval="1d")
         if len(h) < 16: return None
-        return {"pdh":float(h.iloc[-2]["High"]),"pdl":float(h.iloc[-2]["Low"]),"rsi":calc_rsi(h["Close"])}
+        prev = h.iloc[-2]
+        return {
+            "pdh":        float(prev["High"]),
+            "pdl":        float(prev["Low"]),
+            "prev_close": float(prev["Close"]),   # ← official prev day close
+            "rsi":        calc_rsi(h["Close"])
+        }
     except: return None
 
 @st.cache_data(ttl=10, show_spinner=False)
 def get_price(sym):
+    """
+    Current price via 1-minute intraday.
+    Percentage is against PREVIOUS DAY CLOSE (not first minute of today).
+    """
     try:
-        h = yf.Ticker(sym+".NS").history(period="2d", interval="1m")
-        if h.empty: return None
-        cur = float(h["Close"].iloc[-1]); pc = float(h["Close"].iloc[0])
-        return {"price":cur,"chg":((cur-pc)/pc)*100}
+        # Current price — latest 1-min bar
+        intra = yf.Ticker(sym+".NS").history(period="1d", interval="1m")
+        if intra.empty: return None
+        cur = float(intra["Close"].iloc[-1])
+
+        # Previous day close — daily data (reliable official close)
+        daily = yf.Ticker(sym+".NS").history(period="5d", interval="1d")
+        if len(daily) < 2: return None
+        prev_close = float(daily["Close"].iloc[-2])
+
+        chg = ((cur - prev_close) / prev_close) * 100
+        return {"price": cur, "chg": chg, "prev_close": prev_close}
     except: return None
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -666,40 +684,117 @@ with right:
                             with st.expander(f"{len(failed)} skipped"): st.write(", ".join(failed))
 
                         section("RESULTS")
-                        cols5 = st.columns(5)
-                        for i,s in enumerate(filtered):
-                            if s["cls"]=="g":   bg=f"linear-gradient(160deg,{DARK},{GREEN}15)"; bd=f"rgba(0,179,122,0.35)"; top=GREEN
-                            elif s["cls"]=="r": bg=f"linear-gradient(160deg,{DARK},{RED}15)";   bd=f"rgba(232,69,69,0.35)";  top=RED
-                            else:               bg=DARK2; bd=BORDER; top=BORDER
-                            cc=GREEN if s["chg"]>=0 else RED; arr="▲" if s["chg"]>=0 else "▼"
-                            rc=GREEN if s["rsi"]<35 else RED if s["rsi"]>65 else T2
-                            ha=s["sym"] in st.session_state.alerts and st.session_state.alerts[s["sym"]].get("active")
-                            bell_on=f'<svg width="14" height="14" viewBox="0 0 24 24" fill="{IVORY}"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
-                            bell_off=f'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="{T2}" stroke-width="2"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
+                        # ── 7 cards per row ──────────────────
+                        cols7 = st.columns(7)
+                        for i, s in enumerate(filtered):
+                            # Colors
+                            if s["cls"] == "g":
+                                bg  = f"linear-gradient(160deg,{DARK},{GREEN}18)"
+                                bd  = f"rgba(0,179,122,0.4)"
+                                top = GREEN
+                            elif s["cls"] == "r":
+                                bg  = f"linear-gradient(160deg,{DARK},{RED}18)"
+                                bd  = f"rgba(232,69,69,0.4)"
+                                top = RED
+                            else:
+                                bg  = DARK2
+                                bd  = BORDER
+                                top = BORDER
+
+                            cc  = GREEN if s["chg"] >= 0 else RED
+                            arr = "▲"   if s["chg"] >= 0 else "▼"
+                            rc  = GREEN if s["rsi"] < 35 else RED if s["rsi"] > 65 else T2
+                            ha  = (s["sym"] in st.session_state.alerts and
+                                   st.session_state.alerts[s["sym"]].get("active"))
                             news_dot = get_news_dot(s["sym"])
-                            with cols5[i%5]:
+
+                            # Bell SVGs — 16px (+14% vs old 14px)
+                            bell_on  = f'<svg width="16" height="16" viewBox="0 0 24 24" fill="{IVORY}"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
+                            bell_off = f'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="{T2}" stroke-width="2"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
+                            bell_html = bell_on if ha else bell_off
+
+                            # News dot — only if has news
+                            dot_html = (
+                                f'<span style="color:#F5C518;font-size:9px;'
+                                f'margin:0 3px;vertical-align:middle;">●</span>'
+                                if news_dot else
+                                '<span style="margin:0 3px;"></span>'
+                            )
+
+                            with cols7[i % 7]:
                                 st.markdown(f"""
-                                <div style="background:{bg};border:1px solid {bd};
-                                     border-top:3px solid {top};border-radius:14px;
-                                     padding:18px 10px;text-align:center;margin-bottom:8px;">
-                                    <div style="font-family:'Inter',sans-serif;font-weight:900;
-                                         font-size:13px;color:{IVORY};margin-bottom:6px;">
-                                         {s['sym']} {news_dot} {bell_on if ha else bell_off}</div>
-                                    <div style="font-family:'JetBrains Mono',monospace;
-                                         font-weight:700;font-size:16px;color:{IVORY};">
-                                         Rs {s['cur']:.2f}</div>
-                                    <div style="font-family:'JetBrains Mono',monospace;
-                                         font-size:12px;font-weight:600;
-                                         color:{cc};margin-top:4px;">{arr} {abs(s['chg']):.2f}%</div>
-                                    <div style="font-family:'JetBrains Mono',monospace;
-                                         font-size:12px;font-weight:700;
-                                         color:{rc};margin-top:6px;">RSI {s['rsi']}</div>
-                                    <div style="font-family:'JetBrains Mono',monospace;
-                                         font-size:10px;color:{T2};margin-top:4px;">
-                                         H {s['pdh']:.1f} | L {s['pdl']:.1f}</div>
+                                <div style="
+                                    background:{bg};
+                                    border:1px solid {bd};
+                                    border-top:3px solid {top};
+                                    border-radius:10px;
+                                    padding:10px 7px 9px;
+                                    text-align:center;
+                                    margin-bottom:6px;
+                                ">
+                                    <!-- ROW 1: Name · Dot · Change% · Bell -->
+                                    <div style="
+                                        display:flex;
+                                        align-items:center;
+                                        justify-content:center;
+                                        gap:3px;
+                                        flex-wrap:nowrap;
+                                        margin-bottom:6px;
+                                        overflow:hidden;
+                                    ">
+                                        <span style="
+                                            font-family:'Inter',sans-serif;
+                                            font-weight:900;
+                                            font-size:11px;
+                                            color:{IVORY};
+                                            white-space:nowrap;
+                                            overflow:hidden;
+                                            text-overflow:ellipsis;
+                                            max-width:54px;
+                                        ">{s['sym']}</span>
+
+                                        {dot_html}
+
+                                        <span style="
+                                            font-family:'JetBrains Mono',monospace;
+                                            font-size:10px;
+                                            font-weight:700;
+                                            color:{cc};
+                                            white-space:nowrap;
+                                        ">{arr}{abs(s['chg']):.2f}%</span>
+
+                                        <span style="
+                                            display:flex;
+                                            align-items:center;
+                                            margin-left:2px;
+                                            flex-shrink:0;
+                                        ">{bell_html}</span>
+                                    </div>
+
+                                    <!-- ROW 2: Price -->
+                                    <div style="
+                                        font-family:'JetBrains Mono',monospace;
+                                        font-weight:700;
+                                        font-size:13px;
+                                        color:{IVORY};
+                                        line-height:1;
+                                        margin-bottom:5px;
+                                    ">₹{s['cur']:.2f}</div>
+
+                                    <!-- ROW 3: RSI -->
+                                    <div style="
+                                        font-family:'JetBrains Mono',monospace;
+                                        font-size:11px;
+                                        font-weight:700;
+                                        color:{rc};
+                                    ">RSI {s['rsi']}</div>
                                 </div>""", unsafe_allow_html=True)
 
-                        st.caption(f"Scanned: {datetime.now(IST).strftime('%d %b %Y  %H:%M:%S')}  ·  10s cache")
+                        IST = timezone(timedelta(hours=5, minutes=30))
+                        st.caption(
+                            f"Scanned: {datetime.now(IST).strftime('%d %b %Y  %H:%M:%S')}"
+                            f"  ·  % vs prev close  ·  Price: 10s cache"
+                        )
                         if l10: time.sleep(10); st.cache_data.clear(); st.rerun()
                         elif l60: time.sleep(60); st.cache_data.clear(); st.rerun()
 
