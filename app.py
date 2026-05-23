@@ -91,9 +91,6 @@ DARK3  = "#091525"
 BORDER = "#0F2040"
 T2     = "#8A9AB5"
 
-# Define the Indian Standard Time zone globally to prevent any NameError issues
-IST = timezone(timedelta(hours=5, minutes=30))
-
 # ── Session State ────────────────────────────────────────────
 for k, v in {
     "logged_in":       False,
@@ -219,24 +216,18 @@ def get_static(sym):
         return {
             "pdh":        float(prev["High"]),
             "pdl":        float(prev["Low"]),
-            "prev_close": float(prev["Close"]),   # ← official prev day close
+            "prev_close": float(prev["Close"]),
             "rsi":        calc_rsi(h["Close"])
         }
     except: return None
 
 @st.cache_data(ttl=10, show_spinner=False)
 def get_price(sym):
-    """
-    Current price via 1-minute intraday.
-    Percentage is explicitly calculated against official PREVIOUS DAY CLOSE.
-    """
     try:
-        # Current price — latest 1-min bar
         intra = yf.Ticker(sym+".NS").history(period="1d", interval="1m")
         if intra.empty: return None
         cur = float(intra["Close"].iloc[-1])
 
-        # Previous day close — daily data (reliable official close)
         daily = yf.Ticker(sym+".NS").history(period="5d", interval="1d")
         if len(daily) < 2: return None
         prev_close = float(daily["Close"].iloc[-2])
@@ -303,7 +294,6 @@ if not st.session_state.logged_in:
             <div style="font-family:'Bebas Neue',sans-serif;font-size:28px;
                  letter-spacing:8px;color:{GOLD};">LOGIN</div>
         </div>""", unsafe_allow_html=True)
-        
         with st.form("lf"):
             u = st.text_input("Username", placeholder="Enter username")
             p = st.text_input("Password", placeholder="Enter password", type="password")
@@ -319,7 +309,9 @@ if not st.session_state.logged_in:
         st.markdown(f"<div style='text-align:center;font-size:11px;color:{T2};margin-top:12px;font-style:italic;'>Not SEBI registered · Educational use only</div>", unsafe_allow_html=True)
     st.stop()
 
-# ── DISCLAIMER ───────────────────────────────────────
+# ════════════════════════════════════════════════════
+# DISCLAIMER
+# ════════════════════════════════════════════════════
 if not st.session_state.disclaimer_done:
     _, col, _ = st.columns([1,3,1])
     with col:
@@ -411,183 +403,28 @@ with left:
     def nav_btn(label, key, icon=""):
         active = pg == key
         css_class = "nav-btn-active" if active else "nav-btn"
-        st.markdown(f'<div class="{css_class}">', unsafe_allow_html=True)
-        if st.button(f"{icon}  {label}", key=f"nav_{key}", use_container_width=True):
-            st.session_state.page = key; st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    nav_btn("Home",      "home",     "🏠")
-    nav_btn("Scanner",   "scanner",  "📋")
-    nav_btn("Alerts",    "alerts",   "🔔")
-    nav_btn("News",      "news",     "📰")
-
-    st.markdown(f"""
-    <div style="padding:14px 12px 4px;font-family:'Bebas Neue',sans-serif;
-         font-size:13px;letter-spacing:3px;color:{T2};">COMING SOON</div>
-    """, unsafe_allow_html=True)
-    nav_btn("Analysis",     "analysis", "📊")
-    nav_btn("Heatmap",      "heatmap",  "🗺️")
-    nav_btn("Auto Alerts",  "autoalert","⚡")
-
-    st.markdown(f"""
-    <div style="padding:14px 12px 4px;font-family:'Bebas Neue',sans-serif;
-         font-size:13px;letter-spacing:3px;color:{GOLD};">ACCOUNT</div>
-    """, unsafe_allow_html=True)
-    nav_btn("Profile",    "profile",  "👤")
-    nav_btn("Settings",   "settings", "⚙️")
-    nav_btn("Contact Us", "contact",  "📬")
-
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.divider()
-    st.markdown('<div class="nav-btn">', unsafe_allow_html=True)
-    if st.button("🚪  Logout", use_container_width=True):
-        for k in ["logged_in","disclaimer_done"]: st.session_state[k]=False
-        st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
-
-# ── RIGHT CONTENT ────────────────────────────────────────────
-with right:
-    pg = st.session_state.page
-
-    # ── TOP NAVBAR ──────────────────────────────────────────
-    n1, n2, n3 = st.columns([3,4,1])
-    with n1:
-        photo = st.session_state.get("profile_photo")
-        if photo:
-            c_a,c_b = st.columns([1,3])
-            with c_a: st.image(photo, width=60)
-            with c_b:
-                st.markdown(f"""
-                <div style="padding:6px 0;">
-                    <div style="font-size:12px;color:{T2};">Welcome back,</div>
-                    <div style="font-family:'Inter',sans-serif;font-weight:900;
-                         font-size:18px;color:{GOLD};">{name}</div>
-                </div>""", unsafe_allow_html=True)
-        else:
-            st.markdown(f"""
-            <div style="display:flex;align-items:center;gap:12px;padding:8px 0;">
-                <div style="width:60px;height:60px;border-radius:12px;
-                     background:linear-gradient(135deg,{NAVY},{GOLD});
-                     border:2px solid rgba(200,169,106,0.4);
-                     display:flex;align-items:center;justify-content:center;
-                     font-family:'Inter',sans-serif;font-weight:900;
-                     font-size:22px;color:{DARK};">{initial}</div>
-                <div>
-                    <div style="font-size:12px;color:{T2};">Welcome back,</div>
-                    <div style="font-family:'Inter',sans-serif;font-weight:900;
-                         font-size:18px;color:{GOLD};">{name}</div>
-                </div>
-            </div>""", unsafe_allow_html=True)
-
-    with n2:
-        st.markdown(f"""
-        <div style="text-align:center;padding:12px 0;
-             border-bottom:1px solid {BORDER};margin-bottom:4px;">
-            <div style="font-family:'Bebas Neue',sans-serif;font-size:36px;
-                 letter-spacing:9px;color:{GOLD};line-height:1;">ARKA TRADES</div>
-            <div style="font-family:'Inter',sans-serif;font-weight:900;
-                 font-size:12px;letter-spacing:4px;color:{IVORY};
-                 text-transform:uppercase;margin-top:2px;">Finance &nbsp;&middot;&nbsp; Market Education</div>
-        </div>""", unsafe_allow_html=True)
-
-    with n3:
-        st.markdown(f"""
-        <div style="display:flex;align-items:center;justify-content:flex-end;
-             height:78px;padding-right:8px;">
-            <div style="font-family:'Inter',sans-serif;font-weight:700;
-                 font-size:10px;letter-spacing:2px;color:{GREEN};
-                 border:1px solid rgba(0,179,122,0.4);padding:4px 10px;
-                 border-radius:20px;">LIVE</div>
-        </div>""", unsafe_allow_html=True)
-
-    st.markdown(f"<div style='height:1px;background:{BORDER};margin-bottom:8px;'></div>", unsafe_allow_html=True)
-
-    # ── INDEX BAR ─────────────────────────────────────────────
-    def show_idx(col, label, sym, color):
-        d = get_index(sym)
-        with col:
-            if d:
-                cc   = GREEN if d["chg"]>=0 else RED
-                ar   = "▲" if d["chg"]>=0 else "▼"
-                pts = abs(d["pts"])
-                st.markdown(f"""
-                <div style="background:{DARK};border:1px solid {BORDER};
-                     border-top:3px solid {color};border-radius:12px;
-                     padding:14px;margin:4px 2px;">
-                    <div style="font-family:'Inter',sans-serif;font-weight:800;
-                         font-size:9px;letter-spacing:3px;color:{T2};
-                         text-transform:uppercase;margin-bottom:8px;">{label}</div>
-                    <div style="font-family:'JetBrains Mono',monospace;
-                         font-weight:700;font-size:20px;color:{IVORY};
-                         line-height:1;">{d['price']:,.2f}</div>
-                    <div style="font-family:'JetBrains Mono',monospace;
-                         font-size:12px;font-weight:600;color:{cc};margin-top:5px;">
-                         {ar} {pts:,.2f} pts</div>
-                    <div style="font-size:11px;color:{cc};margin-top:2px;">
-                         {abs(d['chg']):.2f}%</div>
-                </div>""", unsafe_allow_html=True)
-            else:
-                st.markdown(f"""
-                <div style="background:{DARK};border:1px solid {BORDER};
-                     border-top:3px solid {color};border-radius:12px;
-                     padding:14px;margin:4px 2px;opacity:0.5;">
-                    <div style="font-family:'Inter',sans-serif;font-weight:800;
-                         font-size:9px;letter-spacing:3px;color:{T2};
-                         text-transform:uppercase;margin-bottom:8px;">{label}</div>
-                    <div style="font-family:'JetBrains Mono',monospace;
-                         font-size:20px;color:{T2};">--</div>
-                    <div style="font-size:11px;color:{T2};margin-top:4px;">No data</div>
-                </div>""", unsafe_allow_html=True)
-
-    st.markdown(f"<div style='height:3px;background:linear-gradient(90deg,{NAVY} 50%,{IVORY} 50%);border-radius:2px;margin-bottom:8px;'></div>", unsafe_allow_html=True)
-    r1a,r1b = st.columns(2)
-    show_idx(r1a,"NIFTY 50",   "^NSEI",    GOLD)
-    show_idx(r1b,"BANK NIFTY", "^NSEBANK", GREEN)
-    r2a,r2b = st.columns(2)
-    show_idx(r2a,"MIDCAP 100",   "NIFTY_MIDCAP_100.NS", "#A78BFA")
-    show_idx(r2b,"SMALLCAP 250", "NIFTYSMLCAP250.NS",   "#7B9FFF")
-    _,r3c,_ = st.columns([1,2,1])
-    show_idx(r3c,"SENSEX","^BSESN","#FF8C42")
-
-    st.markdown(f"<div style='height:1px;background:{BORDER};margin:8px 0 16px;'></div>", unsafe_allow_html=True)
-
-    # ══════════════════════════════════════════════════════════
-    # PAGES
-    # ══════════════════════════════════════════════════════════
-    st.markdown(f'<div style="padding:0 8px 80px;">', unsafe_allow_html=True)
-
-    # ── HOME ────────────────────────────────────────────────
-    if pg == "home":
-        h1,h2 = st.columns(2)
-        with h1:
-            st.markdown(f"""
-            <div style="background:{NAVY};border-radius:16px 0 0 16px;
-                 padding:44px 36px;min-height:240px;">
-                <div style="font-family:'Bebas Neue',sans-serif;font-size:56px;
-                     letter-spacing:6px;color:{GOLD};line-height:1;margin-bottom:10px;">
-                     ARKA<br>TRADES</div>
-                <div style="font-family:'Inter',sans-serif;font-weight:900;
-                     font-size:11px;letter-spacing:5px;color:{IVORY};
-                     text-transform:uppercase;">Finance · Market Education</div>
-            </div>""", unsafe_allow_html=True)
+        st.markdown(f'<div class="{css_class}">',
         with h2:
-            st.markdown(f"""
-            <div style="background:{IVORY};border-radius:0 16px 16px 0;
-                 padding:44px 36px;min-height:240px;">
-                <div style="font-family:'Inter',sans-serif;font-weight:700;
-                     font-size:15px;color:{NAVY};line-height:1.9;margin-bottom:14px;">
-                    Trade smarter with<br><strong>precision-based alerts.</strong><br>
-                    Real-time breakout insights and watchlist<br>
-                    analysis — built for traders who value<br>
-                    <strong>clarity and control.</strong>
-                </div>
-                <div style="font-size:11px;color:#888;font-style:italic;">
-                    Not SEBI registered. Educational use only.</div>
-            </div>""", unsafe_allow_html=True)
+        st.markdown(f"""
+        <div style="background:{IVORY};border-radius:0 16px 16px 0;
+             padding:44px 36px;min-height:240px;">
+            <div style="font-family:'Inter',sans-serif;font-weight:700;
+                 font-size:15px;color:{NAVY};line-height:1.9;margin-bottom:14px;">
+                Trade smarter with<br><strong>precision-based alerts.</strong><br>
+                Real-time breakout insights and watchlist<br>
+                analysis — built for traders who value<br>
+                <strong>clarity and control.</strong>
+            </div>
+            <div style="font-size:11px;color:#888;font-style:italic;">
+                Not SEBI registered. Educational use only.</div>
+        </div>""", unsafe_allow_html=True)
 
         section("TODAY AT A GLANCE")
+        # Define IST timezone using a standard timedelta offset (+5:30) to eliminate undefined NameErrors
+        IST = timezone(timedelta(hours=5, minutes=30))
         now = datetime.now(IST)
         mkt = now.replace(hour=9,minute=15,second=0,microsecond=0) <= now <= now.replace(hour=15,minute=30,second=0,microsecond=0)
+        
         g1,g2,g3,g4 = st.columns(4)
         g1.metric("Market Status", "OPEN" if mkt else "CLOSED")
         g2.metric("Date", now.strftime("%d %b %Y"))
