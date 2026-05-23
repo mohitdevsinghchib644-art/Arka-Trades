@@ -319,9 +319,7 @@ if not st.session_state.logged_in:
         st.markdown(f"<div style='text-align:center;font-size:11px;color:{T2};margin-top:12px;font-style:italic;'>Not SEBI registered · Educational use only</div>", unsafe_allow_html=True)
     st.stop()
 
-# ════════════════════════════════════════════════════
-# DISCLAIMER
-# ════════════════════════════════════════════════════
+# ── DISCLAIMER ───────────────────────────────────────
 if not st.session_state.disclaimer_done:
     _, col, _ = st.columns([1,3,1])
     with col:
@@ -715,7 +713,7 @@ with right:
                         
                         card_html = f"""
                         <div style="background:{DARK2}; border:1px solid {card_border}; border-radius:16px; padding:20px; margin-bottom:16px; position:relative;">
-                            <div style="display:flex; justify-content:between; align-items:center; margin-bottom:12px;">
+                            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
                                 <div style="font-family:'Inter',sans-serif; font-weight:800; font-size:14px; color:{IVORY}; letter-spacing:0.5px;">{s['sym']}</div>
                                 <div style="cursor:pointer; display:flex; align-items:center;">{bell_icon_html}</div>
                             </div>
@@ -728,7 +726,7 @@ with right:
                                 {arrow} {abs(s['chg']):.2f}%
                             </div>
                             
-                            <div style="font-size:12px; color:{T2}; font-family:'Inter',sans-serif; display:flex; justify-content:between;">
+                            <div style="font-size:12px; color:{T2}; font-family:'Inter',sans-serif; display:flex; justify-content:space-between;">
                                 <span>RSI:</span>
                                 <span style="font-weight:700; color:{IVORY};">{s['rsi']}</span>
                             </div>
