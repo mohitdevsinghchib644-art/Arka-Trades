@@ -216,18 +216,24 @@ def get_static(sym):
         return {
             "pdh":        float(prev["High"]),
             "pdl":        float(prev["Low"]),
-            "prev_close": float(prev["Close"]),
+            "prev_close": float(prev["Close"]),   # ← official prev day close
             "rsi":        calc_rsi(h["Close"])
         }
     except: return None
 
 @st.cache_data(ttl=10, show_spinner=False)
 def get_price(sym):
+    """
+    Current price via 1-minute intraday.
+    Percentage is against PREVIOUS DAY CLOSE (not first minute of today).
+    """
     try:
+        # Current price — latest 1-min bar
         intra = yf.Ticker(sym+".NS").history(period="1d", interval="1m")
         if intra.empty: return None
         cur = float(intra["Close"].iloc[-1])
 
+        # Previous day close — daily data (reliable official close)
         daily = yf.Ticker(sym+".NS").history(period="5d", interval="1d")
         if len(daily) < 2: return None
         prev_close = float(daily["Close"].iloc[-2])
@@ -321,7 +327,7 @@ if not st.session_state.disclaimer_done:
                  letter-spacing:6px;color:{GOLD};">DISCLAIMER &amp; TERMS</div>
             <div style="font-size:11px;letter-spacing:3px;color:{T2};
                  text-transform:uppercase;margin-top:6px;margin-bottom:24px;">
-                 Read all terms carefully before continuing</div>
+                Read all terms carefully before continuing</div>
         </div>
         <div style="background:{DARK2};border:1px solid {BORDER};border-radius:16px;
              padding:28px;font-size:13px;color:{T2};line-height:2;
@@ -361,6 +367,7 @@ left, right = st.columns([1, 4])
 
 # ── LEFT NAV PANEL ────────────────────────────────────────────
 with left:
+    # Brand section
     st.markdown(f"""
     <div style="background:{DARK2};border-right:1px solid {BORDER};padding:0;">
         <div style="padding:20px 16px 16px;border-bottom:1px solid {BORDER};text-align:center;">
@@ -370,9 +377,12 @@ with left:
                  font-size:8px;letter-spacing:3px;color:{IVORY};
                  text-transform:uppercase;margin-top:4px;">Finance · Market Education</div>
         </div>
+        <div style="padding:14px 16px;border-bottom:1px solid {BORDER};text-align:center;">
+        </div>
     </div>
     """, unsafe_allow_html=True)
 
+    # Profile section
     photo = st.session_state.get("profile_photo")
     if photo:
         st.image(photo, width=70)
@@ -396,6 +406,7 @@ with left:
     st.markdown(f"""
         <div style="padding:14px 12px 4px;font-family:'Bebas Neue',sans-serif;
              font-size:13px;letter-spacing:3px;color:{GOLD};">SERVICES</div>
+    </div>
     """, unsafe_allow_html=True)
 
     pg = st.session_state.page
@@ -403,28 +414,184 @@ with left:
     def nav_btn(label, key, icon=""):
         active = pg == key
         css_class = "nav-btn-active" if active else "nav-btn"
-        st.markdown(f'<div class="{css_class}">',
-        with h2:
+        st.markdown(f'<div class="{css_class}">', unsafe_allow_html=True)
+        if st.button(f"{icon}  {label}", key=f"nav_{key}", use_container_width=True):
+            st.session_state.page = key; st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    nav_btn("Home",      "home",     "🏠")
+    nav_btn("Scanner",   "scanner",  "📋")
+    nav_btn("Alerts",    "alerts",   "🔔")
+    nav_btn("News",      "news",     "📰")
+
+    st.markdown(f"""
+    <div style="padding:14px 12px 4px;font-family:'Bebas Neue',sans-serif;
+         font-size:13px;letter-spacing:3px;color:{T2};">COMING SOON</div>
+    """, unsafe_allow_html=True)
+    nav_btn("Analysis",     "analysis", "📊")
+    nav_btn("Heatmap",      "heatmap",  "🗺️")
+    nav_btn("Auto Alerts",  "autoalert","⚡")
+
+    st.markdown(f"""
+    <div style="padding:14px 12px 4px;font-family:'Bebas Neue',sans-serif;
+         font-size:13px;letter-spacing:3px;color:{GOLD};">ACCOUNT</div>
+    """, unsafe_allow_html=True)
+    nav_btn("Profile",    "profile",  "👤")
+    nav_btn("Settings",   "settings", "⚙️")
+    nav_btn("Contact Us", "contact",  "📬")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.divider()
+    st.markdown('<div class="nav-btn">', unsafe_allow_html=True)
+    if st.button("🚪  Logout", use_container_width=True):
+        for k in ["logged_in","disclaimer_done"]: st.session_state[k]=False
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# ── RIGHT CONTENT ────────────────────────────────────────────
+with right:
+    pg = st.session_state.page
+
+    # ── TOP NAVBAR ──────────────────────────────────────────
+    n1, n2, n3 = st.columns([3,4,1])
+    with n1:
+        photo = st.session_state.get("profile_photo")
+        if photo:
+            c_a,c_b = st.columns([1,3])
+            with c_a: st.image(photo, width=60)
+            with c_b:
+                st.markdown(f"""
+                <div style="padding:6px 0;">
+                    <div style="font-size:12px;color:{T2};">Welcome back,</div>
+                    <div style="font-family:'Inter',sans-serif;font-weight:900;
+                         font-size:18px;color:{GOLD};">{name}</div>
+                </div>""", unsafe_allow_html=True)
+        else:
+            st.markdown(f"""
+            <div style="display:flex;align-items:center;gap:12px;padding:8px 0;">
+                <div style="width:60px;height:60px;border-radius:12px;
+                     background:linear-gradient(135deg,{NAVY},{GOLD});
+                     border:2px solid rgba(200,169,106,0.4);
+                     display:flex;align-items:center;justify-content:center;
+                     font-family:'Inter',sans-serif;font-weight:900;
+                     font-size:22px;color:{DARK};">{initial}</div>
+                <div>
+                    <div style="font-size:12px;color:{T2};">Welcome back,</div>
+                    <div style="font-family:'Inter',sans-serif;font-weight:900;
+                         font-size:18px;color:{GOLD};">{name}</div>
+                </div>
+            </div>""", unsafe_allow_html=True)
+
+    with n2:
         st.markdown(f"""
-        <div style="background:{IVORY};border-radius:0 16px 16px 0;
-             padding:44px 36px;min-height:240px;">
-            <div style="font-family:'Inter',sans-serif;font-weight:700;
-                 font-size:15px;color:{NAVY};line-height:1.9;margin-bottom:14px;">
-                Trade smarter with<br><strong>precision-based alerts.</strong><br>
-                Real-time breakout insights and watchlist<br>
-                analysis — built for traders who value<br>
-                <strong>clarity and control.</strong>
-            </div>
-            <div style="font-size:11px;color:#888;font-style:italic;">
-                Not SEBI registered. Educational use only.</div>
+        <div style="text-align:center;padding:12px 0;
+             border-bottom:1px solid {BORDER};margin-bottom:4px;">
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:36px;
+                 letter-spacing:9px;color:{GOLD};line-height:1;">ARKA TRADES</div>
+            <div style="font-family:'Inter',sans-serif;font-weight:900;
+                 font-size:12px;letter-spacing:4px;color:{IVORY};
+                 text-transform:uppercase;margin-top:2px;">Finance &nbsp;&middot;&nbsp; Market Education</div>
         </div>""", unsafe_allow_html=True)
 
+    with n3:
+        st.markdown(f"""
+        <div style="display:flex;align-items:center;justify-content:flex-end;
+             height:78px;padding-right:8px;">
+            <div style="font-family:'Inter',sans-serif;font-weight:700;
+                 font-size:10px;letter-spacing:2px;color:{GREEN};
+                 border:1px solid rgba(0,179,122,0.4);padding:4px 10px;
+                 border-radius:20px;">LIVE</div>
+        </div>""", unsafe_allow_html=True)
+
+    st.markdown(f"<div style='height:1px;background:{BORDER};margin-bottom:8px;'></div>", unsafe_allow_html=True)
+
+    # ── INDEX BAR ─────────────────────────────────────────────
+    def show_idx(col, label, sym, color):
+        d = get_index(sym)
+        with col:
+            if d:
+                cc  = GREEN if d["chg"]>=0 else RED
+                ar  = "▲" if d["chg"]>=0 else "▼"
+                pts = abs(d["pts"])
+                st.markdown(f"""
+                <div style="background:{DARK};border:1px solid {BORDER};
+                     border-top:3px solid {color};border-radius:12px;
+                     padding:14px;margin:4px 2px;">
+                    <div style="font-family:'Inter',sans-serif;font-weight:800;
+                         font-size:9px;letter-spacing:3px;color:{T2};
+                         text-transform:uppercase;margin-bottom:8px;">{label}</div>
+                    <div style="font-family:'JetBrains Mono',monospace;
+                         font-weight:700;font-size:20px;color:{IVORY};
+                         line-height:1;">{d['price']:,.2f}</div>
+                    <div style="font-family:'JetBrains Mono',monospace;
+                         font-size:12px;font-weight:600;color:{cc};margin-top:5px;">
+                         {ar} {pts:,.2f} pts</div>
+                    <div style="font-size:11px;color:{cc};margin-top:2px;">
+                         {abs(d['chg']):.2f}%</div>
+                </div>""", unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+                <div style="background:{DARK};border:1px solid {BORDER};
+                     border-top:3px solid {color};border-radius:12px;
+                     padding:14px;margin:4px 2px;opacity:0.5;">
+                    <div style="font-family:'Inter',sans-serif;font-weight:800;
+                         font-size:9px;letter-spacing:3px;color:{T2};
+                         text-transform:uppercase;margin-bottom:8px;">{label}</div>
+                    <div style="font-family:'JetBrains Mono',monospace;
+                         font-size:20px;color:{T2};">--</div>
+                    <div style="font-size:11px;color:{T2};margin-top:4px;">No data</div>
+                </div>""", unsafe_allow_html=True)
+
+    st.markdown(f"<div style='height:3px;background:linear-gradient(90deg,{NAVY} 50%,{IVORY} 50%);border-radius:2px;margin-bottom:8px;'></div>", unsafe_allow_html=True)
+    r1a,r1b = st.columns(2)
+    show_idx(r1a,"NIFTY 50",   "^NSEI",    GOLD)
+    show_idx(r1b,"BANK NIFTY", "^NSEBANK", GREEN)
+    r2a,r2b = st.columns(2)
+    show_idx(r2a,"MIDCAP 100",   "NIFTY_MIDCAP_100.NS", "#A78BFA")
+    show_idx(r2b,"SMALLCAP 250", "NIFTYSMLCAP250.NS",   "#7B9FFF")
+    _,r3c,_ = st.columns([1,2,1])
+    show_idx(r3c,"SENSEX","^BSESN","#FF8C42")
+
+    st.markdown(f"<div style='height:1px;background:{BORDER};margin:8px 0 16px;'></div>", unsafe_allow_html=True)
+
+    # ══════════════════════════════════════════════════════════
+    # PAGES
+    # ══════════════════════════════════════════════════════════
+    st.markdown(f'<div style="padding:0 8px 80px;">', unsafe_allow_html=True)
+
+    # ── HOME ────────────────────────────────────────────────
+    if pg == "home":
+        h1,h2 = st.columns(2)
+        with h1:
+            st.markdown(f"""
+            <div style="background:{NAVY};border-radius:16px 0 0 16px;
+                 padding:44px 36px;min-height:240px;">
+                <div style="font-family:'Bebas Neue',sans-serif;font-size:56px;
+                     letter-spacing:6px;color:{GOLD};line-height:1;margin-bottom:10px;">
+                     ARKA<br>TRADES</div>
+                <div style="font-family:'Inter',sans-serif;font-weight:900;
+                     font-size:11px;letter-spacing:5px;color:{IVORY};
+                     text-transform:uppercase;">Finance · Market Education</div>
+            </div>""", unsafe_allow_html=True)
+        with h2:
+            st.markdown(f"""
+            <div style="background:{IVORY};border-radius:0 16px 16px 0;
+                 padding:44px 36px;min-height:240px;">
+                <div style="font-family:'Inter',sans-serif;font-weight:700;
+                     font-size:15px;color:{NAVY};line-height:1.9;margin-bottom:14px;">
+                    Trade smarter with<br><strong>precision-based alerts.</strong><br>
+                    Real-time breakout insights and watchlist<br>
+                    analysis — built for traders who value<br>
+                    <strong>clarity and control.</strong>
+                </div>
+                <div style="font-size:11px;color:#888;font-style:italic;">
+                    Not SEBI registered. Educational use only.</div>
+            </div>""", unsafe_allow_html=True)
+
         section("TODAY AT A GLANCE")
-        # Define IST timezone using a standard timedelta offset (+5:30) to eliminate undefined NameErrors
         IST = timezone(timedelta(hours=5, minutes=30))
         now = datetime.now(IST)
         mkt = now.replace(hour=9,minute=15,second=0,microsecond=0) <= now <= now.replace(hour=15,minute=30,second=0,microsecond=0)
-        
         g1,g2,g3,g4 = st.columns(4)
         g1.metric("Market Status", "OPEN" if mkt else "CLOSED")
         g2.metric("Date", now.strftime("%d %b %Y"))
@@ -454,6 +621,7 @@ with left:
     elif pg == "scanner":
         section("WATCHLIST SCANNER")
 
+        # Auto-load from Supabase if not in session
         if not st.session_state.watchlist:
             wl = db_load_watchlist()
             if wl:
@@ -472,126 +640,295 @@ with left:
                 if db_save_watchlist(syms):
                     st.success(f"✅ {len(syms)} stocks loaded and saved to cloud!")
 
+        # Show watchlist if available
         syms = st.session_state.watchlist
         if not syms:
             st.info("Upload your TradingView watchlist CSV to start scanning.")
         else:
-            sc1,sc2,sc3,sc4 = st.columns([2,1,1,2])
+            st.success(f"✅ {len(syms)} stocks in your watchlist")
+            sc1,sc2,sc3,sc4 = st.columns([1,1,1,2])
             filt    = sc1.selectbox("Show",["All","Above PDH","Below PDL","In Range"])
             l10     = sc2.checkbox("10s Live")
             l60     = sc3.checkbox("60s Auto")
             scanbtn = sc4.button("SCAN NOW", use_container_width=True, type="primary")
 
             if scanbtn or l10 or l60:
-                results, failed = [], []
-                bar = st.progress(0, text="Scanning...")
-                for i, sym in enumerate(syms):
-                    st_ = get_static(sym); lv = get_price(sym)
-                    if st_ and lv:
-                        cur = lv["price"]; chg = lv["chg"]
-                        cls = "g" if cur > st_["pdh"] else "r" if cur < st_["pdl"] else "n"
-                        results.append({"sym":sym,"cur":cur,"chg":chg,"pdh":st_["pdh"],"pdl":st_["pdl"],"rsi":st_["rsi"],"cls":cls})
-                    else: 
-                        failed.append(sym)
-                    bar.progress((i+1)/len(syms), text=f"Fetching {sym}...")
-                bar.empty()
-                check_alerts(results)
+                    results,failed = [],[]
+                    bar = st.progress(0, text="Scanning...")
+                    for i,sym in enumerate(syms):
+                        st_ = get_static(sym); lv = get_price(sym)
+                        if st_ and lv:
+                            cur=lv["price"]; chg=lv["chg"]
+                            cls="g" if cur>st_["pdh"] else "r" if cur<st_["pdl"] else "n"
+                            results.append({"sym":sym,"cur":cur,"chg":chg,"pdh":st_["pdh"],"pdl":st_["pdl"],"rsi":st_["rsi"],"cls":cls})
+                        else: failed.append(sym)
+                        bar.progress((i+1)/len(syms), text=f"Fetching {sym}...")
+                    bar.empty()
+                    check_alerts(results)
 
-                if results:
-                    filtered = results
-                    if filt == "Above PDH":    filtered = [r for r in results if r["cls"]=="g"]
-                    elif filt == "Below PDL":  filtered = [r for r in results if r["cls"]=="r"]
-                    elif filt == "In Range":   filtered = [r for r in results if r["cls"]=="n"]
-                    filtered.sort(key=lambda x: {"g":0,"r":1,"n":2}[x["cls"]])
+                    if results:
+                        filtered=results
+                        if filt=="Above PDH":  filtered=[r for r in results if r["cls"]=="g"]
+                        elif filt=="Below PDL":filtered=[r for r in results if r["cls"]=="r"]
+                        elif filt=="In Range": filtered=[r for r in results if r["cls"]=="n"]
+                        filtered.sort(key=lambda x:{"g":0,"r":1,"n":2}[x["cls"]])
 
-                    g = sum(1 for r in results if r["cls"]=="g")
-                    r = sum(1 for r in results if r["cls"]=="r")
-                    n = sum(1 for r in results if r["cls"]=="n")
-                    
-                    m1,m2,m3,m4 = st.columns(4)
-                    m1.metric("Above PDH", g)
-                    m2.metric("Below PDL", r)
-                    m3.metric("In Range", n)
-                    m4.metric("Total", len(results))
+                        g=sum(1 for r in results if r["cls"]=="g")
+                        r=sum(1 for r in results if r["cls"]=="r")
+                        n=sum(1 for r in results if r["cls"]=="n")
+                        m1,m2,m3,m4=st.columns(4)
+                        m1.metric("Above PDH",g); m2.metric("Below PDL",r)
+                        m3.metric("In Range",n);  m4.metric("Total",len(results))
 
-                    if failed:
-                        with st.expander(f"{len(failed)} skipped"): 
-                            st.write(", ".join(failed))
+                        if failed:
+                            with st.expander(f"{len(failed)} skipped"): st.write(", ".join(failed))
 
-                    section("RESULTS")
-                    
-                    # ── Modern Grid Card Layout Engine Implementation ──
-                    _ensure_news_state()
-                    grid_cols = st.columns(4)
-                    for idx, s in enumerate(filtered):
-                        col_target = grid_cols[idx % 4]
-                        
-                        # Set proper colors based on the boundary checks
-                        card_border = GREEN if s["cls"] == "g" else (RED if s["cls"] == "r" else BORDER)
-                        txt_color = GREEN if s["chg"] >= 0 else RED
-                        arrow = "▲" if s["chg"] >= 0 else "▼"
-                        
-                        # Determine dynamic YouTube style bell alert state icon
-                        is_alert_active = s["sym"] in st.session_state.alerts
-                        if is_alert_active:
-                            # Solid White Filled YouTube Bell SVG
-                            bell_icon_html = """
-                            <svg viewBox="0 0 24 24" style="width:20px;height:20px;fill:#FFFFFF;">
-                                <path d="M10 21h4c0 1.1-.9 2-2 2s-2-.9-2-2zm11-2v1H3v1h18v-2zm-2-1.3V11c0-2.87-1.53-5.28-4.2-5.92V4.5c0-1.38-1.12-2.5-2.5-2.5S9.8 3.12 9.8 4.5v.58C7.13 5.72 5.6 8.12 5.6 11v6.7L4 19h16l-1.6-1.3z"/>
-                            </svg>
-                            """
-                        else:
-                            # Hollow Transparent YouTube Outlined Bell SVG
-                            bell_icon_html = f"""
-                            <svg viewBox="0 0 24 24" style="width:20px;height:20px;fill:none;stroke:{T2};stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;">
-                                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0"/>
-                            </svg>
-                            """
-                        
-                        card_html = f"""
-                        <div style="background:{DARK2}; border:1px solid {card_border}; border-radius:16px; padding:20px; margin-bottom:16px; position:relative;">
-                            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-                                <div style="font-family:'Inter',sans-serif; font-weight:800; font-size:14px; color:{IVORY}; letter-spacing:0.5px;">{s['sym']}</div>
-                                <div style="cursor:pointer; display:flex; align-items:center;">{bell_icon_html}</div>
-                            </div>
-                            
-                            <div style="font-family:'JetBrains Mono',monospace; font-size:18px; font-weight:700; color:{IVORY}; margin-bottom:4px;">
-                                ₹ {s['cur']:.2f}
-                            </div>
-                            
-                            <div style="font-family:'JetBrains Mono',monospace; font-size:12px; font-weight:600; color:{txt_color}; margin-bottom:12px;">
-                                {arrow} {abs(s['chg']):.2f}%
-                            </div>
-                            
-                            <div style="font-size:12px; color:{T2}; font-family:'Inter',sans-serif; display:flex; justify-content:space-between;">
-                                <span>RSI:</span>
-                                <span style="font-weight:700; color:{IVORY};">{s['rsi']}</span>
-                            </div>
-                        </div>
-                        """
-                        with col_target:
-                            st.markdown(card_html, unsafe_allow_html=True)
+                        section("RESULTS")
+                        cols7 = st.columns(7)
+                        for i, s in enumerate(filtered):
+                            if s["cls"] == "g":
+                                bg=f"linear-gradient(160deg,{DARK},{GREEN}18)"; bd=f"rgba(0,179,122,0.4)"; top=GREEN
+                            elif s["cls"] == "r":
+                                bg=f"linear-gradient(160deg,{DARK},{RED}18)"; bd=f"rgba(232,69,69,0.4)"; top=RED
+                            else:
+                                bg=DARK2; bd=BORDER; top=BORDER
+
+                            cc  = GREEN if s["chg"] >= 0 else RED
+                            arr = "▲"   if s["chg"] >= 0 else "▼"
+                            rc  = GREEN if s["rsi"] < 35 else RED if s["rsi"] > 65 else T2
+                            ha  = s["sym"] in st.session_state.alerts and st.session_state.alerts[s["sym"]].get("active")
+                            nd  = get_news_dot(s["sym"])
+                            dot = f'<span style="color:#F5C518;font-size:9px;margin:0 2px;">&#9679;</span>' if nd else ""
+                            bon = f'<svg width="16" height="16" viewBox="0 0 24 24" fill="{IVORY}"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
+                            bof = f'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="{T2}" stroke-width="2"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
+                            bell = bon if ha else bof
+
+                            card = (
+                                f'<div style="background:{bg};border:1px solid {bd};border-top:3px solid {top};'
+                                f'border-radius:10px;padding:10px 6px 9px;text-align:center;margin-bottom:6px;">'
+
+                                f'<div style="display:flex;align-items:center;justify-content:center;'
+                                f'gap:2px;flex-wrap:nowrap;margin-bottom:6px;overflow:hidden;">'
+                                f'<span style="font-family:Inter,sans-serif;font-weight:900;font-size:11px;'
+                                f'color:{IVORY};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:52px;">'
+                                f'{s["sym"]}</span>'
+                                f'{dot}'
+                                f'<span style="font-family:JetBrains Mono,monospace;font-size:10px;font-weight:700;'
+                                f'color:{cc};white-space:nowrap;">{arr}{abs(s["chg"]):.2f}%</span>'
+                                f'<span style="display:flex;align-items:center;margin-left:2px;flex-shrink:0;">{bell}</span>'
+                                f'</div>'
+
+                                f'<div style="font-family:JetBrains Mono,monospace;font-weight:700;font-size:13px;'
+                                f'color:{IVORY};line-height:1;margin-bottom:5px;">&#8377;{s["cur"]:.2f}</div>'
+
+                                f'<div style="font-family:JetBrains Mono,monospace;font-size:11px;font-weight:700;'
+                                f'color:{rc};">RSI {s["rsi"]}</div>'
+
+                                f'</div>'
+                            )
+
+                            with cols7[i % 7]:
+                                st.markdown(card, unsafe_allow_html=True)
+
+                        IST = timezone(timedelta(hours=5, minutes=30))
+                        st.caption(f"Scanned: {datetime.now(IST).strftime('%d %b %Y  %H:%M:%S')}  ·  % vs prev close  ·  Price: 10s cache")
+                        if l10: time.sleep(10); st.cache_data.clear(); st.rerun()
+                        elif l60: time.sleep(60); st.cache_data.clear(); st.rerun()
+
+        # ── News Panel (auto-refreshes independently)
+        if syms:
+            _ensure_news_state()
+            news_panel(syms)
 
     # ── ALERTS ──────────────────────────────────────────────
     elif pg == "alerts":
         section("TELEGRAM ALERTS")
-        st.write("Manage active price monitoring configurations.")
+        watchlist = st.session_state.get("watchlist",[])
+        if not watchlist:
+            st.warning("Go to Scanner first and upload your watchlist.")
+        else:
+            st.markdown(f"""
+            <div style="background:{DARK2};border:1px solid {BORDER};border-left:4px solid {GOLD};
+                 border-radius:14px;padding:16px 20px;margin-bottom:20px;">
+                <div style="font-size:13px;color:{T2};line-height:1.8;">
+                    Tap <strong style="color:{IVORY}">Set</strong> next to any stock.
+                    White bell = alert ON. Outline bell = alert OFF.
+                    You get a Telegram notification when price hits the level.
+                </div>
+            </div>""", unsafe_allow_html=True)
 
-    # ── NEWS ────────────────────────────────────────────────
+            COLS=4; rows=[watchlist[i:i+COLS] for i in range(0,len(watchlist),COLS)]
+            for row in rows:
+                cols=st.columns(COLS)
+                for j,sym in enumerate(row):
+                    has_alert=sym in st.session_state.alerts and st.session_state.alerts[sym].get("active",False)
+                    alert_info=""
+                    if has_alert:
+                        a=st.session_state.alerts[sym]
+                        alert_info=f"{a['type'].upper()}<br>Rs {a['price']:.2f}"
+                    bell_on=f'<svg width="26" height="26" viewBox="0 0 24 24" fill="{IVORY}"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
+                    bell_off=f'<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="{T2}" stroke-width="1.5"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
+                    card_bd=GOLD if has_alert else BORDER
+                    card_bg=f"rgba(200,169,106,0.06)" if has_alert else DARK2
+                    with cols[j]:
+                        st.markdown(f"""
+                        <div style="background:{card_bg};border:1px solid {card_bd};
+                             border-radius:14px;padding:16px 12px;text-align:center;margin-bottom:8px;">
+                            <div style="font-family:'Inter',sans-serif;font-weight:900;
+                                 font-size:13px;color:{IVORY};margin-bottom:8px;">{sym}</div>
+                            <div style="display:flex;justify-content:center;margin-bottom:6px;">
+                                 {bell_on if has_alert else bell_off}</div>
+                            <div style="font-size:11px;color:{GOLD};line-height:1.5;">
+                                 {alert_info if alert_info else f"<span style='color:{T2}'>No alert</span>"}</div>
+                        </div>""", unsafe_allow_html=True)
+                        ba,bb = st.columns(2)
+                        with ba:
+                            if st.button("Set",key=f"sa_{sym}",use_container_width=True):
+                                st.session_state[f"open_{sym}"]=True
+                        with bb:
+                            if has_alert:
+                                if st.button("Off",key=f"rm_{sym}",use_container_width=True):
+                                    del st.session_state.alerts[sym]
+                                    db_delete_alert(sym)
+                                    if sym in st.session_state.alert_fired: st.session_state.alert_fired.remove(sym)
+                                    st.rerun()
+                        if st.session_state.get(f"open_{sym}"):
+                            st_=get_static(sym)
+                            alert_type=st.radio("Type",["PDH","PDL","Custom"],key=f"at_{sym}",horizontal=True)
+                            cp=0.0
+                            if alert_type=="Custom": cp=st.number_input("Price",key=f"cp_{sym}",min_value=0.0,step=0.5)
+                            bc1,bc2=st.columns(2)
+                            with bc1:
+                                if st.button("Cancel",key=f"can_{sym}"):
+                                    st.session_state[f"open_{sym}"]=False; st.rerun()
+                            with bc2:
+                                if st.button("OK",key=f"ok_{sym}",type="primary"):
+                                    if st_:
+                                        if alert_type=="PDH":   price=st_["pdh"]; atype="pdh"
+                                        elif alert_type=="PDL": price=st_["pdl"]; atype="pdl"
+                                        else:                   price=cp; atype="custom"
+                                        st.session_state.alerts[sym]={"type":atype,"price":price,"active":True}
+                                        db_save_alert(sym, atype, price)
+                                        if sym in st.session_state.alert_fired: st.session_state.alert_fired.remove(sym)
+                                        send_telegram(f"Alert set!\n{sym} · {atype.upper()} · Rs{price:.2f}")
+                                        st.session_state[f"open_{sym}"]=False
+                                        st.success(f"Alert set for {sym}!"); st.rerun()
+
+    # ── NEWS PAGE ────────────────────────────────────────────
     elif pg == "news":
-        section("MARKET NEWS")
-        news_panel()
+        section("STOCK NEWS")
+        watchlist = st.session_state.get("watchlist", [])
+        if not watchlist:
+            st.warning("Go to Scanner first and upload your watchlist.")
+        else:
+            _ensure_news_state()
+            news_panel(watchlist)
+
+    # ── ANALYSIS / COMING SOON ──────────────────────────────
+    elif pg in ["analysis","heatmap","autoalert"]:
+        section("COMING SOON")
+        labels = {"analysis":"Analytics Dashboard","heatmap":"Market Heatmap","autoalert":"Auto Smart Alerts"}
+        st.markdown(f"""
+        <div style="background:{DARK2};border:1px dashed {BORDER};border-radius:20px;
+             padding:100px 20px;text-align:center;margin:20px 0;">
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:36px;
+                 letter-spacing:5px;color:{T2};margin-bottom:12px;">{labels.get(pg,'Coming Soon')}</div>
+            <div style="font-size:15px;color:{T2};opacity:.6;">This feature is under development</div>
+        </div>""", unsafe_allow_html=True)
 
     # ── PROFILE ─────────────────────────────────────────────
     elif pg == "profile":
         section("MY PROFILE")
+        p1,p2 = st.columns([1,2])
+        with p1:
+            photo=st.session_state.get("profile_photo")
+            if photo:
+                st.image(photo,width=120); st.caption(name)
+            else:
+                st.markdown(f"""
+                <div style="width:100px;height:100px;border-radius:14px;
+                     background:linear-gradient(135deg,{NAVY},{GOLD});
+                     border:3px solid rgba(200,169,106,0.4);
+                     display:flex;align-items:center;justify-content:center;
+                     font-family:'Inter',sans-serif;font-weight:900;
+                     font-size:38px;color:{DARK};margin-bottom:12px;">{initial}</div>
+                <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;
+                     letter-spacing:3px;color:{GOLD};">{name}</div>
+                <div style="font-size:11px;color:{T2};letter-spacing:2px;
+                     text-transform:uppercase;margin-top:4px;">Arka Trades Member</div>
+                """, unsafe_allow_html=True)
+        with p2:
+            with st.form("pf"):
+                a,b=st.columns(2)
+                nn=a.text_input("Full Name",      value=st.session_state.profile["name"])
+                np=b.text_input("Contact Number", value=st.session_state.profile["phone"])
+                ne=st.text_input("Email Address", value=st.session_state.profile["email"])
+                ph=st.file_uploader("Upload Profile Photo",type=["jpg","jpeg","png"])
+                if st.form_submit_button("Save Profile",use_container_width=True):
+                    st.session_state.profile.update({"name":nn,"phone":np,"email":ne})
+                    if ph: st.session_state["profile_photo"]=ph
+                    st.success(f"Saved! Welcome, {nn}!"); st.rerun()
 
     # ── SETTINGS ────────────────────────────────────────────
     elif pg == "settings":
         section("SETTINGS")
+        st.markdown("#### 🎨 Background Theme")
+        t1,t2=st.columns(2)
+        with t1:
+            st.markdown(f"""
+            <div style="background:{DARK2};border:2px solid {GOLD};border-radius:14px;
+                 padding:20px;text-align:center;">
+                <div style="font-size:28px;margin-bottom:8px;">🌙</div>
+                <div style="font-family:'Inter',sans-serif;font-weight:800;
+                     font-size:14px;color:{GOLD};">DARK MODE</div>
+                <div style="font-size:12px;color:{T2};margin-top:4px;">Currently Active</div>
+            </div>""", unsafe_allow_html=True)
+        with t2:
+            st.markdown(f"""
+            <div style="background:#F7EBE0;border:2px solid #c0b0a0;border-radius:14px;
+                 padding:20px;text-align:center;">
+                <div style="font-size:28px;margin-bottom:8px;">☀️</div>
+                <div style="font-family:'Inter',sans-serif;font-weight:800;
+                     font-size:14px;color:{NAVY};">LIGHT MODE</div>
+                <div style="font-size:12px;color:#666;margin-top:4px;">Coming Soon</div>
+            </div>""", unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("#### 🔔 Telegram")
+        st.info(f"Bot connected · Chat ID: {CHAT_ID}")
+        if st.button("Send Test Notification",use_container_width=True):
+            send_telegram(f"✅ <b>Arka Trades</b>\nTest successful!")
+            st.success("Test sent to Telegram!")
+        st.divider()
+        st.markdown("#### 📡 Broker API — Coming Soon")
 
     # ── CONTACT ─────────────────────────────────────────────
     elif pg == "contact":
-        section("GET IN TOUCH")
+        section("CONTACT US")
+        c1,c2=st.columns([1,1])
+        with c1:
+            st.markdown(f"""
+            <div style="background:{DARK2};border:1px solid {BORDER};
+                 border-left:4px solid {GOLD};border-radius:16px;padding:28px;">
+                <div style="font-family:'Inter',sans-serif;font-weight:800;
+                     font-size:12px;letter-spacing:2px;color:{GOLD};
+                     text-transform:uppercase;margin-bottom:14px;">GET IN TOUCH</div>
+                <div style="font-size:14px;color:{T2};line-height:2;margin-bottom:18px;">
+                    Questions, feedback or suggestions?<br>We would love to hear from you.
+                </div>
+                <div style="font-family:'JetBrains Mono',monospace;font-size:13px;
+                     color:{GOLD};font-weight:700;word-break:break-all;">
+                    Mohitdevsinghchib644@gmail.com</div>
+                <div style="font-size:12px;color:{T2};margin-top:10px;">
+                    Mention ARKA TRADES in subject line.<br>Reply within 24 hours.</div>
+            </div>""", unsafe_allow_html=True)
+        with c2:
+            with st.form("cf"):
+                n=st.text_input("Your Name")
+                e=st.text_input("Your Email")
+                m=st.text_area("Message",height=120)
+                if st.form_submit_button("Send Message",use_container_width=True):
+                    if n and m: st.success("Please email: Mohitdevsinghchib644@gmail.com")
+                    else: st.warning("Fill name and message.")
 
     st.markdown('</div>', unsafe_allow_html=True)
+
