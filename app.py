@@ -979,14 +979,13 @@ with right:
                 <div style="font-size:12px;color:{T2};margin-top:10px;">
                     Mention ARKA TRADES in subject line.<br>Reply within 24 hours.</div>
             </div>""", unsafe_allow_html=True)
-            with c2:
-        with st.form("cf"):
-            n = st.text_input("Your Name")
-            e = st.text_input("Your Email")
-            m = st.text_area("Message", height=120)
-            if st.form_submit_button("Send Message", use_container_width=True):
-                if n and m: st.success("Please email: mohitdevsinghchib644@gmail.com")
-                else: st.warning("Fill name and message.")
-        
-        # This closes the column wrapper layout correctly
-        st.markdown('</div>', unsafe_allow_html=True)
+        with c2:
+            with st.form("cf"):
+                n=st.text_input("Your Name")
+                e=st.text_input("Your Email")
+                m=st.text_area("Message",height=120)
+                if st.form_submit_button("Send Message",use_container_width=True):
+                    if n and m: st.success("Please email: Mohitdevsinghchib644@gmail.com")
+                    else: st.warning("Fill name and message.")
+
+    st.markdown('</div>', unsafe_allow_html=True)
