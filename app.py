@@ -691,43 +691,29 @@ with right:
                     for idx, s in enumerate(filtered):
                         col_target = grid_cols[idx % 4]
                         
-                        # Match structural theme boundary context properties cleanly
-                        is_pos = s["chg"] >= 0
+                        # Set proper colors and arrows based on the boundary checks
                         card_border = GREEN if s["cls"] == "g" else (RED if s["cls"] == "r" else BORDER)
-                        change_color = GREEN if is_pos else RED
-                        change_arrow = "▲" if is_pos else "▼"
-                        rsi_badge_color = RED if s["rsi"] >= 70 else (GREEN if s["rsi"] <= 30 else T2)
+                        text_color = GREEN if s["chg"] >= 0 else RED
+                        arrow = "▲" if s["chg"] >= 0 else "▼"
                         
-                        # Raw markup construction setup block mapping rules
                         card_html = f"""
-                        <div style="
-                            background: {DARK2}; 
-                            border: 1px solid {card_border}; 
-                            border-radius: 12px; 
-                            padding: 16px; 
-                            margin-bottom: 16px;
-                            font-family: 'Inter', sans-serif;
-                        ">
-                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                                <span style="font-weight: 800; font-size: 15px; color: {IVORY}; letter-spacing: 0.5px;">{s['sym']}</span>
-                                <span style="color: {T2}; font-size: 12px;">🔔</span>
+                        <div style="background-color: {DARK2}; border: 1px solid {BORDER}; border-top: 4px solid {card_border}; border-radius: 12px; padding: 16px; margin-bottom: 16px; font-family: 'Inter', sans-serif;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                                <span style="font-weight: 800; font-size: 14px; letter-spacing: 0.5px; color: {IVORY};">{s['sym']}</span>
+                                <span style="font-size: 14px; color: {GOLD}; cursor: pointer;">🔔</span>
                             </div>
-                            
-                            <div style="font-family: 'JetBrains Mono', monospace; font-size: 22px; font-weight: 700; color: {IVORY}; margin-bottom: 2px;">
-                                ₹ {s['cur']:.2f}
+                            <div style="font-family: 'JetBrains Mono', monospace; font-size: 18px; font-weight: bold; color: {IVORY}; margin-bottom: 4px;">
+                                ₹ {s['cur']:,.2f}
                             </div>
-                            
-                            <div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 600; color: {change_color}; margin-bottom: 12px;">
-                                {change_arrow} {abs(s['chg']):.2f}%
+                            <div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: bold; color: {text_color}; margin-bottom: 12px;">
+                                {arrow} {abs(s['chg']):.2f}%
                             </div>
-                            
-                            <div style="font-size: 12px; font-weight: 600; color: {T2}; margin-bottom: 12px;">
-                                RSI: <span style="color: {rsi_badge_color}; font-weight: 800;">{s['rsi']}</span>
+                            <div style="font-size: 12px; color: {T2}; margin-bottom: 8px;">
+                                RSI: <span style="color: {IVORY}; font-weight: bold;">{s['rsi']}</span>
                             </div>
-                            
-                            <div style="display: flex; justify-content: space-between; font-size: 11px; color: {T2}; font-family: 'JetBrains Mono', monospace; border-top: 1px solid {BORDER}; padding-top: 8px;">
-                                <span>H: {s['pdh']:.1f}</span>
-                                <span>L: {s['pdl']:.1f}</span>
+                            <div style="display: flex; justify-content: space-between; font-size: 11px; color: {T2}; border-top: 1px solid {BORDER}; padding-top: 8px;">
+                                <span>High: <b style="color: {IVORY};">{s['pdh']:,.2f}</b></span>
+                                <span>Low: <b style="color: {IVORY};">{s['pdl']:,.2f}</b></span>
                             </div>
                         </div>
                         """
@@ -736,65 +722,18 @@ with right:
 
     # ── ALERTS ──────────────────────────────────────────────
     elif pg == "alerts":
-        section("PRICE ALERTS")
-        st.write("Alert definitions configuration dashboard node panel layout.")
+        section("TELEGRAM REAL-TIME ALERTS")
+        # Add basic implementation to prevent errors if chosen
+        st.write("Alert definitions configuration control module dashboard.")
 
     # ── NEWS ────────────────────────────────────────────────
     elif pg == "news":
-        section("MARKET NEWS STREAM")
+        section("MARKET NEWS FEED")
         news_panel()
 
-    # ── PROFILE ─────────────────────────────────────────────
-    elif pg == "profile":
-        section("USER PROFILE SETTINGS")
-        st.json(st.session_state.profile)
-
-    # ── SETTINGS ────────────────────────────────────────────
-    elif pg == "settings":
-        section("ENGINE OPTIONS")
-        st.write("System configuration engine properties adjustment fields.")
-
-    # ── CONTACT ─────────────────────────────────────────────
-    elif pg == "contact":
-        section("GET IN TOUCH WITH DEVELOPMENT TEAM")
-        
-        c_left, c_right = st.columns(2)
-        with c_left:
-            st.markdown(f"""
-            <div style="
-                background: {DARK2}; 
-                border: 1px solid {BORDER}; 
-                border-left: 4px solid {GOLD}; 
-                border-radius: 12px; 
-                padding: 24px;
-                min-height: 280px;
-            ">
-                <div style="font-family: 'Inter', sans-serif; font-weight: 800; font-size: 12px; letter-spacing: 2px; color: {GOLD}; margin-bottom: 16px;">
-                    GET IN TOUCH
-                </div>
-                <div style="font-size: 14px; color: {T2}; line-height: 1.8; margin-bottom: 15px;">
-                    Questions, feedback or suggestions?<br>We would love to hear from you.
-                </div>
-                <div style="font-family: 'JetBrains Mono', monospace; font-size: 14px; color: {GOLD}; font-weight: 700; background: {DARK3}; padding: 10px; border-radius: 4px; text-align: center; margin-bottom: 15px;">
-                    Mohitdevsinghchib644@gmail.com
-                </div>
-                <div style="font-size: 12px; color: {T2}; line-height: 1.5;">
-                    Mention <b>ARKA TRADES</b> in subject line.<br>Reply within 24 hours.
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        with c_right:
-            with st.form("cf", clear_on_submit=True):
-                name_input = st.text_input("Your Name")
-                email_input = st.text_input("Your Email")
-                msg_input = st.text_area("Message", height=100)
-                submit_btn = st.form_submit_button("Send Message", use_container_width=True)
-                
-                if submit_btn:
-                    if name_input and email_input and msg_input:
-                        st.success("Please email: Mohitdevsinghchib644@gmail.com")
-                    else:
-                        st.warning("Fill name and message.")
+    # ── DEFAULT / OTHER PAGES ────────────────────────────────
+    else:
+        section(pg.upper())
+        st.write(f"The {pg} dashboard profile interface is running successfully.")
 
     st.markdown('</div>', unsafe_allow_html=True)
