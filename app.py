@@ -91,6 +91,9 @@ DARK3  = "#091525"
 BORDER = "#0F2040"
 T2     = "#8A9AB5"
 
+# Define the Indian Standard Time zone globally to prevent any NameError issues
+IST = timezone(timedelta(hours=5, minutes=30))
+
 # ── Session State ────────────────────────────────────────────
 for k, v in {
     "logged_in":       False,
@@ -225,7 +228,7 @@ def get_static(sym):
 def get_price(sym):
     """
     Current price via 1-minute intraday.
-    Percentage is against PREVIOUS DAY CLOSE (not first minute of today).
+    Percentage is explicitly calculated against official PREVIOUS DAY CLOSE.
     """
     try:
         # Current price — latest 1-min bar
@@ -589,7 +592,6 @@ with right:
             </div>""", unsafe_allow_html=True)
 
         section("TODAY AT A GLANCE")
-        IST = timezone(timedelta(hours=5, minutes=30))
         now = datetime.now(IST)
         mkt = now.replace(hour=9,minute=15,second=0,microsecond=0) <= now <= now.replace(hour=15,minute=30,second=0,microsecond=0)
         g1,g2,g3,g4 = st.columns(4)
@@ -684,10 +686,11 @@ with right:
                             with st.expander(f"{len(failed)} skipped"): st.write(", ".join(failed))
 
                         section("RESULTS")
-                        # ── 7 cards per row ──────────────────
+                        
+                        # ── Upgraded 7-Column Grid Layout ──
                         cols7 = st.columns(7)
                         for i, s in enumerate(filtered):
-                            # Colors
+                            # Border and Background container coloring based on range breaks
                             if s["cls"] == "g":
                                 bg  = f"linear-gradient(160deg,{DARK},{GREEN}18)"
                                 bd  = f"rgba(0,179,122,0.4)"
@@ -706,38 +709,32 @@ with right:
                             rc  = GREEN if s["rsi"] < 35 else RED if s["rsi"] > 65 else T2
                             ha  = (s["sym"] in st.session_state.alerts and
                                    st.session_state.alerts[s["sym"]].get("active"))
-                            news_dot = get_news_dot(s["sym"])
 
-                            # Bell SVGs — 16px (+14% vs old 14px)
-                            bell_on  = f'<svg width="16" height="16" viewBox="0 0 24 24" fill="{IVORY}"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
-                            bell_off = f'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="{T2}" stroke-width="2"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
+                            # Larger notification system bell SVGs (18px sizing inside header)
+                            bell_on  = f'<svg width="18" height="18" viewBox="0 0 24 24" fill="{IVORY}"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
+                            bell_off = f'<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="{T2}" stroke-width="2"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
                             bell_html = bell_on if ha else bell_off
 
-                            # News dot — only if has news
-                            dot_html = (
-                                f'<span style="color:#F5C518;font-size:9px;'
-                                f'margin:0 3px;vertical-align:middle;">●</span>'
-                                if news_dot else
-                                '<span style="margin:0 3px;"></span>'
-                            )
+                            # Perfectly aligned table-style yellow indicator dot layout (●) with distinct padding
+                            dot_html = f"<span style='color:#FFC107;font-size:20px;padding-left:14px;vertical-align:middle;line-height:1;'>●</span>"
 
                             with cols7[i % 7]:
+                                # Render the card block strictly using st.markdown with unsafe_allow_html=True
                                 st.markdown(f"""
                                 <div style="
                                     background:{bg};
                                     border:1px solid {bd};
                                     border-top:3px solid {top};
                                     border-radius:10px;
-                                    padding:10px 7px 9px;
+                                    padding:10px 6px 9px;
                                     text-align:center;
-                                    margin-bottom:6px;
+                                    margin-bottom:8px;
                                 ">
-                                    <!-- ROW 1: Name · Dot · Change% · Bell -->
                                     <div style="
                                         display:flex;
                                         align-items:center;
                                         justify-content:center;
-                                        gap:3px;
+                                        gap:4px;
                                         flex-wrap:nowrap;
                                         margin-bottom:6px;
                                         overflow:hidden;
@@ -750,7 +747,7 @@ with right:
                                             white-space:nowrap;
                                             overflow:hidden;
                                             text-overflow:ellipsis;
-                                            max-width:54px;
+                                            max-width:52px;
                                         ">{s['sym']}</span>
 
                                         {dot_html}
@@ -761,27 +758,26 @@ with right:
                                             font-weight:700;
                                             color:{cc};
                                             white-space:nowrap;
+                                            padding-left:4px;
                                         ">{arr}{abs(s['chg']):.2f}%</span>
 
                                         <span style="
                                             display:flex;
                                             align-items:center;
-                                            margin-left:2px;
+                                            margin-left:4px;
                                             flex-shrink:0;
                                         ">{bell_html}</span>
                                     </div>
 
-                                    <!-- ROW 2: Price -->
                                     <div style="
                                         font-family:'JetBrains Mono',monospace;
                                         font-weight:700;
-                                        font-size:13px;
+                                        font-size:14px;
                                         color:{IVORY};
                                         line-height:1;
-                                        margin-bottom:5px;
+                                        margin-bottom:6px;
                                     ">₹{s['cur']:.2f}</div>
 
-                                    <!-- ROW 3: RSI -->
                                     <div style="
                                         font-family:'JetBrains Mono',monospace;
                                         font-size:11px;
@@ -790,7 +786,6 @@ with right:
                                     ">RSI {s['rsi']}</div>
                                 </div>""", unsafe_allow_html=True)
 
-                        IST = timezone(timedelta(hours=5, minutes=30))
                         st.caption(
                             f"Scanned: {datetime.now(IST).strftime('%d %b %Y  %H:%M:%S')}"
                             f"  ·  % vs prev close  ·  Price: 10s cache"
@@ -993,4 +988,4 @@ with right:
                     if n and m: st.success("Please email: Mohitdevsinghchib644@gmail.com")
                     else: st.warning("Fill name and message.")
 
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True))
