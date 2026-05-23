@@ -65,7 +65,7 @@ def db_load_alerts() -> dict:
         return {r["symbol"]: {"type": r["alert_type"], "price": float(r["price"]), "active": True}
                 for r in res.data} if res.data else {}
     except:
-        return []
+        return {}
 
 st.set_page_config(page_title="Arka Trades", layout="wide", page_icon="📈", initial_sidebar_state="collapsed")
 
@@ -691,29 +691,46 @@ with right:
                     for idx, s in enumerate(filtered):
                         col_target = grid_cols[idx % 4]
                         
-                        # Set proper colors and arrows based on the boundary checks
+                        # Set proper colors based on the boundary checks
                         card_border = GREEN if s["cls"] == "g" else (RED if s["cls"] == "r" else BORDER)
-                        text_color = GREEN if s["chg"] >= 0 else RED
+                        txt_color = GREEN if s["chg"] >= 0 else RED
                         arrow = "▲" if s["chg"] >= 0 else "▼"
                         
+                        # Determine dynamic YouTube style bell alert state icon
+                        is_alert_active = s["sym"] in st.session_state.alerts
+                        if is_alert_active:
+                            # Solid White Filled YouTube Bell SVG
+                            bell_icon_html = """
+                            <svg viewBox="0 0 24 24" style="width:20px;height:20px;fill:#FFFFFF;">
+                                <path d="M10 21h4c0 1.1-.9 2-2 2s-2-.9-2-2zm11-2v1H3v1h18v-2zm-2-1.3V11c0-2.87-1.53-5.28-4.2-5.92V4.5c0-1.38-1.12-2.5-2.5-2.5S9.8 3.12 9.8 4.5v.58C7.13 5.72 5.6 8.12 5.6 11v6.7L4 19h16l-1.6-1.3z"/>
+                            </svg>
+                            """
+                        else:
+                            # Hollow Transparent YouTube Outlined Bell SVG
+                            bell_icon_html = f"""
+                            <svg viewBox="0 0 24 24" style="width:20px;height:20px;fill:none;stroke:{T2};stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;">
+                                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0"/>
+                            </svg>
+                            """
+                        
                         card_html = f"""
-                        <div style="background-color: {DARK2}; border: 1px solid {BORDER}; border-top: 4px solid {card_border}; border-radius: 12px; padding: 16px; margin-bottom: 16px; font-family: 'Inter', sans-serif;">
-                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-                                <span style="font-weight: 800; font-size: 14px; letter-spacing: 0.5px; color: {IVORY};">{s['sym']}</span>
-                                <span style="font-size: 14px; color: {GOLD}; cursor: pointer;">🔔</span>
+                        <div style="background:{DARK2}; border:1px solid {card_border}; border-radius:16px; padding:20px; margin-bottom:16px; position:relative;">
+                            <div style="display:flex; justify-content:between; align-items:center; margin-bottom:12px;">
+                                <div style="font-family:'Inter',sans-serif; font-weight:800; font-size:14px; color:{IVORY}; letter-spacing:0.5px;">{s['sym']}</div>
+                                <div style="cursor:pointer; display:flex; align-items:center;">{bell_icon_html}</div>
                             </div>
-                            <div style="font-family: 'JetBrains Mono', monospace; font-size: 18px; font-weight: bold; color: {IVORY}; margin-bottom: 4px;">
-                                ₹ {s['cur']:,.2f}
+                            
+                            <div style="font-family:'JetBrains Mono',monospace; font-size:18px; font-weight:700; color:{IVORY}; margin-bottom:4px;">
+                                ₹ {s['cur']:.2f}
                             </div>
-                            <div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: bold; color: {text_color}; margin-bottom: 12px;">
+                            
+                            <div style="font-family:'JetBrains Mono',monospace; font-size:12px; font-weight:600; color:{txt_color}; margin-bottom:12px;">
                                 {arrow} {abs(s['chg']):.2f}%
                             </div>
-                            <div style="font-size: 12px; color: {T2}; margin-bottom: 8px;">
-                                RSI: <span style="color: {IVORY}; font-weight: bold;">{s['rsi']}</span>
-                            </div>
-                            <div style="display: flex; justify-content: space-between; font-size: 11px; color: {T2}; border-top: 1px solid {BORDER}; padding-top: 8px;">
-                                <span>High: <b style="color: {IVORY};">{s['pdh']:,.2f}</b></span>
-                                <span>Low: <b style="color: {IVORY};">{s['pdl']:,.2f}</b></span>
+                            
+                            <div style="font-size:12px; color:{T2}; font-family:'Inter',sans-serif; display:flex; justify-content:between;">
+                                <span>RSI:</span>
+                                <span style="font-weight:700; color:{IVORY};">{s['rsi']}</span>
                             </div>
                         </div>
                         """
@@ -722,18 +739,24 @@ with right:
 
     # ── ALERTS ──────────────────────────────────────────────
     elif pg == "alerts":
-        section("TELEGRAM REAL-TIME ALERTS")
-        # Add basic implementation to prevent errors if chosen
-        st.write("Alert definitions configuration control module dashboard.")
+        section("TELEGRAM ALERTS")
+        st.write("Manage active price monitoring configurations.")
 
     # ── NEWS ────────────────────────────────────────────────
     elif pg == "news":
-        section("MARKET NEWS FEED")
+        section("MARKET NEWS")
         news_panel()
 
-    # ── DEFAULT / OTHER PAGES ────────────────────────────────
-    else:
-        section(pg.upper())
-        st.write(f"The {pg} dashboard profile interface is running successfully.")
+    # ── PROFILE ─────────────────────────────────────────────
+    elif pg == "profile":
+        section("MY PROFILE")
+
+    # ── SETTINGS ────────────────────────────────────────────
+    elif pg == "settings":
+        section("SETTINGS")
+
+    # ── CONTACT ─────────────────────────────────────────────
+    elif pg == "contact":
+        section("GET IN TOUCH")
 
     st.markdown('</div>', unsafe_allow_html=True)
