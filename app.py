@@ -828,7 +828,7 @@ with right:
     # ── ANALYSIS — ARKA AI ──────────────────────────────────
     elif pg in ["analysis","heatmap","autoalert"]:
         if pg == "analysis":
-            arka_ai_page()
+            render_arka_ai()
         else:
             section("COMING SOON")
             labels = {"heatmap":"Market Heatmap","autoalert":"Auto Smart Alerts"}
