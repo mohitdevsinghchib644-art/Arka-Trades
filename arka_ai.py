@@ -26,10 +26,10 @@ except ImportError:
     HAS_PINECONE = False
  
 try:
-    import pdfplumber
-    HAS_PDF = True
+    from PIL import Image, ImageDraw  # ← Make sure ", ImageDraw" is exactly here
+    HAS_PIL = True
 except ImportError:
-    HAS_PDF = False
+    HAS_PIL = False
  
 try:
     from PIL import Image
