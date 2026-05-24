@@ -10,11 +10,12 @@ PDF Parse : pdfplumber
 
 import streamlit as st
 import base64, io, json, time, hashlib, traceback
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 
 # ── Safe imports ────────────────────────────────────────────
 try:
-    import google.generativeai as genai
+    from google import genai
+    from google.genai import types
     HAS_GEMINI = True
 except ImportError:
     HAS_GEMINI = False
@@ -66,14 +67,18 @@ NAVY   = "#0A1D4B"
 # ══════════════════════════════════════════════════════════
 
 @st.cache_resource
-def get_gemini():
+def get_gemini_client():
     if not HAS_GEMINI or not GEMINI_KEY:
         return None
     try:
-        genai.configure(api_key=GEMINI_KEY)
-        return genai.GenerativeModel(
-            model_name="gemini-2.5-flash",
-            system_instruction="""You are Arka AI — an elite, zero-emotion technical analysis companion.
+        # Modern initialization for Google GenAI SDK
+        return genai.Client(api_key=GEMINI_KEY)
+    except Exception as e:
+        print(f"❌ Gemini initialization failed: {e}")
+        return None
+
+def get_system_instruction() -> str:
+    return """You are Arka AI — an elite, zero-emotion technical analysis companion.
 
 CORE RULES:
 - Strip ALL emotional phrases: no "Great setup!", "Nice trade!", "Good job!"
@@ -99,11 +104,6 @@ OUTPUT FORMAT (always return valid JSON):
     {"x1": 150, "y1": 300, "x2": 200, "y2": 250, "color": "#FF4444", "label": "Stop Loss"}
   ]
 }"""
-        )
-    except Exception as e:
-        print(f"❌ Gemini initialization failed: {e}")
-        return None
-
 
 # ══════════════════════════════════════════════════════════
 # 2. PINECONE VECTOR MEMORY
@@ -115,10 +115,8 @@ def get_pinecone_index():
         return None
     try:
         pc = Pinecone(api_key=PINECONE_KEY)
-        # Direct fallback execution targeting host explicitly if provided
         if PINECONE_HOST:
-            clean_host = PINECONE_HOST.strip()
-            return pc.Index(name=INDEX_NAME, host=clean_host)
+            return pc.Index(name=INDEX_NAME, host=PINECONE_HOST.strip())
             
         existing = [i.name for i in pc.list_indexes()]
         if INDEX_NAME not in existing:
@@ -136,54 +134,26 @@ def get_pinecone_index():
 
 
 def get_embedding(text: str) -> list:
-    """Get text embedding via Gemini embedding model with debug logging."""
-    if not HAS_GEMINI or not GEMINI_KEY:
-        print("❌ GEMINI not available or GEMINI_KEY not set")
+    """Get text embedding using stable modern client syntax."""
+    client = get_gemini_client()
+    if not client:
+        print("❌ Gemini client not available for embedding generation.")
         return None
     
     if not text or not text.strip():
-        print("❌ Empty text provided to embed")
         return None
     
     try:
-        print(f"🔹 Attempting to embed text: {text[:60]}...")
-        result = genai.embed_content(
-            model="models/text-embedding-004",
-            content=text.strip()
+        response = client.models.embed_content(
+            model="text-embedding-004",
+            contents=text.strip()
         )
         
-        # Accommodate various dictionary response formats gracefully
-        embedding = []
-        if isinstance(result, dict):
-            embedding = result.get("embedding", result.get("values", []))
-        elif hasattr(result, "embedding"):
-            embedding = result.embedding
-        elif hasattr(result, "get"):
-            embedding = result.get("embedding", [])
-
-        print(f"🔹 Received embedding with {len(embedding)} dimensions")
-        
-        if not embedding:
-            print("❌ Empty embedding returned from API")
-            return None
-        
-        if len(embedding) != 768:
-            print(f"❌ Wrong embedding dimension: {len(embedding)} (expected 768)")
-            return None
-        
-        non_zero_count = sum(1 for v in embedding if abs(v) > 1e-7)
-        print(f"🔹 Non-zero dimensions: {non_zero_count}/768")
-        
-        if non_zero_count == 0:
-            print("❌ All-zero embedding detected!")
-            return None
-        
-        print(f"✅ Valid embedding generated with {non_zero_count} non-zero values")
-        return embedding
-        
+        if response and response.embeddings:
+            return response.embeddings[0].values
+        return None
     except Exception as e:
         print(f"❌ Embedding API error: {str(e)}")
-        traceback.print_exc()
         return None
 
 
@@ -191,29 +161,22 @@ def save_rule_to_memory(rule_type: str, rule_name: str, rule_text: str, tags: li
     """Save a trading rule into Pinecone vector memory."""
     idx = get_pinecone_index()
     if not idx:
-        st.error("❌ Pinecone index not available. Check credentials and Host configuration in secrets.")
+        st.error("❌ Pinecone index connection offline.")
         return False
     
     if not rule_text or not rule_text.strip():
-        st.error("❌ Cannot save rule: description is empty")
-        return False
-    
-    if len(rule_text.strip()) < 5:
-        st.error("❌ Rule description is too short (minimum 5 characters)")
+        st.error("❌ Cannot save empty description.")
         return False
     
     try:
         full_text = f"{rule_type}: {rule_name}\n{rule_text}".strip()
-        print(f"\n📝 Preparing to save rule: {rule_name}")
-        
         embedding = get_embedding(full_text)
         
         if embedding is None:
-            st.error(f"❌ Embedding failed for '{rule_name}'. API key restrictions or quotas may have hit.")
+            st.error(f"❌ Embedding failed for '{rule_name}'. Verify API availability.")
             return False
         
-        vector_id = f"rule_{int(time.time())}_{rule_name[:20].replace(' ','_').upper()}"
-        print(f"📤 Upserting to Pinecone with ID: {vector_id}")
+        vector_id = f"rule_{int(time.time())}_{hashlib.md5(rule_name.encode()).hexdigest()[:8].upper()}"
         
         idx.upsert(vectors=[{
             "id":     vector_id,
@@ -229,10 +192,8 @@ def save_rule_to_memory(rule_type: str, rule_name: str, rule_text: str, tags: li
         
         st.success(f"✅ Rule saved to Pinecone: {rule_name}")
         return True
-        
     except Exception as e:
         st.error(f"❌ Save error: {str(e)}")
-        traceback.print_exc()
         return False
 
 
@@ -252,7 +213,7 @@ def search_memory(query: str, top_k: int = 5) -> list[dict]:
         )
         return [
             {
-                "score":      m.score,
+                "score":     m.score,
                 "rule_type": m.metadata.get("rule_type", ""),
                 "rule_name": m.metadata.get("rule_name", ""),
                 "rule_text": m.metadata.get("rule_text", ""),
@@ -283,10 +244,52 @@ def build_rules_context(query: str = "trading setup entry exit rules") -> str:
 # 3. CHART ANALYSIS ENGINE
 # ══════════════════════════════════════════════════════════
 
-def image_to_base64(img: Image.Image) -> str:
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode()
+def analyze_chart(img: Image.Image, click_x: int = None, click_y: int = None, user_note: str = "") -> dict:
+    """Send chart image + click coordinates + rules context to Gemini."""
+    client = get_gemini_client()
+    if not client:
+        return {
+            "verdict": "ERROR", "score": 0,
+            "voice_summary": "System initialization error.",
+            "detailed_analysis": "Gemini client is currently offline. Review API key configs.",
+            "rules_matched": [], "rules_violated": [], "draw_boxes": [], "draw_arrows": []
+        }
+
+    rules_ctx = build_rules_context(user_note or "trading entry setup validation")
+
+    click_info = ""
+    if click_x is not None and click_y is not None:
+        pct_x = round((click_x / img.width)  * 100, 1)
+        pct_y = round((click_y / img.height) * 100, 1)
+        click_info = (
+            f"\n\nUSER CLICKED AT: pixel ({click_x}, {click_y}) "
+            f"= {pct_x}% from left, {pct_y}% from top.\n"
+            f"Focus your primary analysis on the candlestick/area at this exact location."
+        )
+
+    prompt = f"""{rules_ctx}
+{click_info}
+TASK: Analyze this trading chart. {'Focus on the clicked area.' if click_x else 'Provide overall structure analysis.'}
+{f'USER NOTE: {user_note}' if user_note else ''}
+
+Return ONLY a valid JSON object matching the specified format. No markdown block formatting, no preamble.
+Coordinates in draw_boxes/draw_arrows must be valid pixel positions matching the chart image size ({img.width}x{img.height}).
+"""
+
+    try:
+        # Standard PIL conversion for modern Google GenAI Client
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[img, prompt],
+            config=types.GenerateContentConfig(
+                system_instruction=get_system_instruction(),
+                response_mime_type="application/json"
+            )
+        )
+        return json.loads(response.text.strip())
+    except Exception as e:
+        return {"verdict":"ERROR","score":0,"voice_summary":str(e), "detailed_analysis":str(e),
+                "rules_matched":[], "rules_violated":[], "draw_boxes":[], "draw_arrows":[]}
 
 
 def draw_annotations(img: Image.Image, analysis: dict) -> Image.Image:
@@ -319,60 +322,6 @@ def draw_annotations(img: Image.Image, analysis: dict) -> Image.Image:
         except: pass
 
     return img
-
-
-def analyze_chart(img: Image.Image, click_x: int = None, click_y: int = None, user_note: str = "") -> dict:
-    """Send chart image + click coordinates + rules context to Gemini."""
-    model = get_gemini()
-    if not model:
-        return {
-            "verdict": "ERROR", "score": 0,
-            "voice_summary": "System initialization error.",
-            "detailed_analysis": "Gemini engine client is currently offline. Review API key configs.",
-            "rules_matched": [], "rules_violated": [], "draw_boxes": [], "draw_arrows": []
-        }
-
-    rules_ctx = build_rules_context(user_note or "trading entry setup validation")
-
-    click_info = ""
-    if click_x is not None and click_y is not None:
-        pct_x = round((click_x / img.width)  * 100, 1)
-        pct_y = round((click_y / img.height) * 100, 1)
-        click_info = (
-            f"\n\nUSER CLICKED AT: pixel ({click_x}, {click_y}) "
-            f"= {pct_x}% from left, {pct_y}% from top.\n"
-            f"Focus your primary analysis on the candlestick/area at this exact location."
-        )
-
-    prompt = f"""{rules_ctx}
-{click_info}
-TASK: Analyze this trading chart. {'Focus on the clicked area.' if click_x else 'Provide overall structure analysis.'}
-{f'USER NOTE: {user_note}' if user_note else ''}
-
-Return ONLY a valid JSON object matching the specified format. No markdown, no preamble.
-Coordinates in draw_boxes/draw_arrows must be valid pixel positions matching the chart image size ({img.width}x{img.height}).
-"""
-
-    try:
-        img_data = {"mime_type": "image/png", "data": image_to_base64(img)}
-        response = model.generate_content([prompt, img_data])
-        raw = response.text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        return json.loads(raw.strip())
-    except json.JSONDecodeError:
-        return {
-            "verdict":          "FLAGGED",
-            "score":            5,
-            "voice_summary":    "Analysis complete with minor string variations.",
-            "detailed_analysis": response.text if 'response' in dir() else "Error parsing response.",
-            "rules_matched":    [], "rules_violated":   [], "draw_boxes":       [], "draw_arrows":      []
-        }
-    except Exception as e:
-        return {"verdict":"ERROR","score":0,"voice_summary":str(e), "detailed_analysis":str(e),
-                "rules_matched":[], "rules_violated":[], "draw_boxes":[], "draw_arrows":[]}
 
 
 # ══════════════════════════════════════════════════════════
@@ -517,7 +466,7 @@ def render_mode1():
             with st.expander("Full Analysis", expanded=True):
                 st.markdown(f"""
                 <div style="background:{DARK3};border-radius:10px;padding:16px;
-                     font-size:13px;color:{IVORY};line-height:1.9;">
+                     font-size:13px;color:#F7EBE0;line-height:1.9;">
                 {result.get('detailed_analysis','').replace(chr(10),'<br>')}
                 </div>""", unsafe_allow_html=True)
 
@@ -544,19 +493,15 @@ def render_mode2():
 
     with tab_manual:
         st.markdown(f"<div style='font-size:13px;color:{T2};margin-bottom:16px;'>Add individual trading rules to AI memory</div>", unsafe_allow_html=True)
-        if "m2_rule_name" not in st.session_state: st.session_state.m2_rule_name = ""
-        if "m2_rule_text" not in st.session_state: st.session_state.m2_rule_text = ""
-
-        rule_name = st.text_input("Rule Name", placeholder="e.g. PDH Breakout Confirmation", key="m2_rule_name")
-        rule_text = st.text_area("Exact Conditions", placeholder="e.g. Volume must be 1.5x average.", height=130, key="m2_rule_text")
+        
+        rule_name = st.text_input("Rule Name", placeholder="e.g. PDH Breakout Confirmation", key="m2_manual_rule_name")
+        rule_text = st.text_area("Exact Conditions", placeholder="e.g. Volume must be 1.5x average.", height=130, key="m2_manual_rule_text")
 
         if st.button("SAVE TO MEMORY", use_container_width=True, type="primary", key="m2_save_btn"):
             if rule_name.strip() and rule_text.strip():
                 with st.spinner("Saving to Pinecone..."):
-                    ok = save_rule_to_memory("", rule_name.strip(), rule_text.strip(), [])
+                    ok = save_rule_to_memory("Manual", rule_name.strip(), rule_text.strip(), [])
                 if ok:
-                    st.session_state.m2_rule_name = ""
-                    st.session_state.m2_rule_text = ""
                     speak(f"Rule saved. I have learned your {rule_name} setup.")
                     st.rerun()
             else:
@@ -578,11 +523,8 @@ def render_mode2():
             else:
                 st.image(raw_img, use_container_width=True)
 
-        if "m2_setup_name" not in st.session_state: st.session_state.m2_setup_name = ""
-        if "m2_setup_rules" not in st.session_state: st.session_state.m2_setup_rules = ""
-
-        setup_name = st.text_input("Setup Name", placeholder="e.g. Low Volume Consolidation", key="m2_setup_name")
-        setup_rules = st.text_area("What should AI learn from this chart?", placeholder="Enter details...", height=100, key="m2_setup_rules")
+        setup_name = st.text_input("Setup Name", placeholder="e.g. Low Volume Consolidation", key="m2_setup_name_input")
+        setup_rules = st.text_area("What should AI learn from this chart?", placeholder="Enter details...", height=100, key="m2_setup_rules_input")
 
         if st.button("TEACH THIS SETUP", type="primary", use_container_width=True, key="m2_teach_btn"):
             if setup_name.strip() and setup_rules.strip():
@@ -592,8 +534,6 @@ def render_mode2():
                 with st.spinner("Teaching Arka AI..."):
                     ok = save_rule_to_memory("Visual-Pattern", setup_name.strip(), full_rule, ["chart-trained"])
                 if ok:
-                    st.session_state.m2_setup_name  = ""
-                    st.session_state.m2_setup_rules = ""
                     speak(f"Understood. Taught setup {setup_name}.")
                     st.rerun()
             else:
