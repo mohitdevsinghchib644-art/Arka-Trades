@@ -26,10 +26,10 @@ except ImportError:
     HAS_PINECONE = False
  
 try:
-    from PIL import Image, ImageDraw  # ← Make sure ", ImageDraw" is exactly here
-    HAS_PIL = True
+    import pdfplumber
+    HAS_PDF = True
 except ImportError:
-    HAS_PIL = False
+    HAS_PDF = False
  
 try:
     from PIL import Image
@@ -509,82 +509,146 @@ def render_mode2():
         "✍️ Add Rule", "📊 Annotate Chart", "📄 Upload PDF", "🧠 View Memory"
     ])
  
-    # ── Manual Rule Entry ──────────────────────────────────
+    # ── TAB 1: Manual Rule Entry ───────────────────────────
     with tab_manual:
-        st.markdown(f"<div style='font-size:13px;color:{T2};margin-bottom:16px;'>Add individual trading rules to AI memory</div>",
-                    unsafe_allow_html=True)
-        with st.form("add_rule_form"):
-            rule_type = st.selectbox("Rule Category",
-                ["Candlestick", "Volume", "Indicator", "Structure",
-                 "Entry", "Exit", "Risk Management", "VSA", "Order Flow"])
-            rule_name = st.text_input("Rule Name", placeholder="e.g. PDH Breakout Confirmation")
-            rule_text = st.text_area("Exact Conditions", height=120,
-                placeholder="e.g. Price must close above PDH on the breakout candle. Volume must be 1.5x average. RSI above 55.")
-            tags_raw  = st.text_input("Tags (comma separated)",
-                placeholder="breakout, momentum, high-volume")
+        st.markdown(
+            f"<div style='font-size:13px;color:{T2};margin-bottom:16px;'>"
+            f"Add individual trading rules to AI memory</div>",
+            unsafe_allow_html=True
+        )
  
-            if st.form_submit_button("Save to Memory", use_container_width=True, type="primary"):
-                if rule_name and rule_text:
-                    tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
-                    with st.spinner("Saving to Pinecone..."):
-                        ok = save_rule_to_memory(rule_type, rule_name, rule_text, tags)
-                    if ok:
-                        st.success(f"Learned: **{rule_name}** — I will apply this in every analysis!")
-                        speak(f"Rule saved. I have permanently learned your {rule_name} setup.")
-                    else:
-                        st.error("Save failed. Check Pinecone connection.")
+        # Use session state keys for auto-clear
+        if "m2_rule_name" not in st.session_state: st.session_state.m2_rule_name = ""
+        if "m2_rule_text" not in st.session_state: st.session_state.m2_rule_text = ""
+ 
+        rule_name = st.text_input(
+            "Rule Name",
+            placeholder="e.g. PDH Breakout Confirmation",
+            key="m2_rule_name"
+        )
+        rule_text = st.text_area(
+            "Exact Conditions",
+            placeholder="e.g. Price must close above PDH on breakout candle. Volume must be 1.5x average. RSI above 55.",
+            height=130,
+            key="m2_rule_text"
+        )
+ 
+        if st.button("SAVE TO MEMORY", use_container_width=True,
+                     type="primary", key="m2_save_btn"):
+            if rule_name.strip() and rule_text.strip():
+                with st.spinner("Saving to Pinecone..."):
+                    ok = save_rule_to_memory("", rule_name.strip(), rule_text.strip(), [])
+                if ok:
+                    # Auto-clear fields
+                    st.session_state.m2_rule_name = ""
+                    st.session_state.m2_rule_text = ""
+                    st.success(f"Learned: **{rule_name}** — Applied in every future analysis.")
+                    speak(f"Rule saved. I have permanently learned your {rule_name} setup.")
+                    st.rerun()
                 else:
-                    st.warning("Fill in rule name and conditions.")
+                    st.error("Save failed. Check Pinecone connection in Streamlit Secrets.")
+            else:
+                st.warning("Fill in both Rule Name and Conditions.")
  
-    # ── Chart Annotation Training ──────────────────────────
+    # ── TAB 2: Chart Annotation ────────────────────────────
     with tab_chart:
-        st.markdown(f"<div style='font-size:13px;color:{T2};margin-bottom:12px;'>Upload an example setup chart. Click on the key area. AI will learn from it.</div>",
-                    unsafe_allow_html=True)
-        train_img_file = st.file_uploader("Upload example setup chart",
-                                          type=["png","jpg","jpeg"], key="train_chart")
+        st.markdown(
+            f"<div style='font-size:13px;color:{T2};margin-bottom:12px;'>"
+            f"Upload a setup chart. Click on the key candle. AI learns the visual pattern.</div>",
+            unsafe_allow_html=True
+        )
+ 
+        train_img_file = st.file_uploader(
+            "Upload example setup chart",
+            type=["png","jpg","jpeg"],
+            key="train_chart"
+        )
+ 
+        tx, ty = None, None
+ 
         if train_img_file:
-            train_img   = Image.open(train_img_file).convert("RGB")
-            train_coords = streamlit_image_coordinates(train_img, key="train_click")
-            tx = train_coords["x"] if train_coords else None
-            ty = train_coords["y"] if train_coords else None
+            raw_img    = Image.open(train_img_file).convert("RGB")
+            orig_w, orig_h = raw_img.size
  
-            if tx:
-                st.markdown(f"<div style='color:{GOLD};font-size:12px;font-family:monospace;'>Clicked: ({tx}, {ty})</div>",
-                            unsafe_allow_html=True)
+            # ── Render image at natural aspect ratio — no squishing
+            if HAS_IMG_COORDS:
+                st.markdown(
+                    f"<div style='font-size:11px;color:{GOLD};margin-bottom:6px;'>"
+                    f"Click on a key candle or zone to target it</div>",
+                    unsafe_allow_html=True
+                )
+                # Pass the PIL image directly — no resizing, no height cap
+                train_coords = streamlit_image_coordinates(
+                    raw_img,
+                    key="train_click",
+                    use_column_width=True
+                )
+                if train_coords and train_coords.get("x") is not None:
+                    tx = train_coords["x"]
+                    ty = train_coords["y"]
+                    st.markdown(
+                        f"<div style='color:{GOLD};font-size:12px;"
+                        f"font-family:monospace;margin-top:6px;'>"
+                        f"Target locked: ({tx}, {ty}) — "
+                        f"{round(tx/orig_w*100,1)}% H · {round(ty/orig_h*100,1)}% V</div>",
+                        unsafe_allow_html=True
+                    )
+            else:
+                st.image(raw_img, use_container_width=True)
+                st.caption("Tip: install streamlit-image-coordinates for click targeting")
  
-            setup_name  = st.text_input("What setup is this?",
-                                        placeholder="e.g. Low Volume Handle — Cup & Handle")
-            setup_rules = st.text_area("What should AI learn from this chart?", height=100,
-                                       placeholder="e.g. Volume drops 40% during consolidation. Entry on breakout above left cup rim.")
-            rule_cat    = st.selectbox("Category", ["Candlestick","Volume","Structure","VSA","Order Flow"], key="train_cat")
+        # Input fields — outside image block so they always show
+        if "m2_setup_name" not in st.session_state: st.session_state.m2_setup_name = ""
+        if "m2_setup_rules" not in st.session_state: st.session_state.m2_setup_rules = ""
  
-            if st.button("Teach This Setup", type="primary", use_container_width=True):
-                if setup_name and setup_rules:
-                    full_rule = setup_rules
-                    if tx:
-                        full_rule += f"\n[Chart coordinate reference: click at ({tx},{ty}) = {round((tx/train_img.width)*100,1)}% X, {round((ty/train_img.height)*100,1)}% Y]"
-                    with st.spinner("Teaching Arka AI..."):
-                        ok = save_rule_to_memory(rule_cat, setup_name, full_rule,
-                                                 ["chart-trained", rule_cat.lower()])
-                    if ok:
-                        st.success(f"Taught: {setup_name}")
-                        speak(f"Understood. I have learned the {setup_name} setup and will recognize it in live analysis.")
+        setup_name  = st.text_input(
+            "Setup Name",
+            placeholder="e.g. Low Volume Handle — Cup and Handle",
+            key="m2_setup_name"
+        )
+        setup_rules = st.text_area(
+            "What should AI learn from this chart?",
+            placeholder="e.g. Volume drops 40% during consolidation. Entry on breakout above left cup rim.",
+            height=100,
+            key="m2_setup_rules"
+        )
+ 
+        if st.button("TEACH THIS SETUP", type="primary",
+                     use_container_width=True, key="m2_teach_btn"):
+            if setup_name.strip() and setup_rules.strip():
+                full_rule = setup_rules.strip()
+                if tx and train_img_file:
+                    full_rule += (
+                        f"\n[Chart coordinate reference: click at ({tx},{ty}) = "
+                        f"{round(tx/orig_w*100,1)}% X, {round(ty/orig_h*100,1)}% Y]"
+                    )
+                with st.spinner("Teaching Arka AI..."):
+                    ok = save_rule_to_memory("", setup_name.strip(), full_rule, ["chart-trained"])
+                if ok:
+                    # Auto-clear
+                    st.session_state.m2_setup_name  = ""
+                    st.session_state.m2_setup_rules = ""
+                    st.success(f"Taught: {setup_name}")
+                    speak(f"Understood. I have learned the {setup_name} setup.")
+                    st.rerun()
                 else:
-                    st.warning("Enter setup name and description.")
+                    st.error("Save failed. Check Pinecone connection.")
+            else:
+                st.warning("Enter setup name and description.")
  
-    # ── PDF Upload ─────────────────────────────────────────
+    # ── TAB 3: PDF Upload ──────────────────────────────────
     with tab_pdf:
-        st.markdown(f"<div style='font-size:13px;color:{T2};margin-bottom:12px;'>Upload trading rules as PDF. AI will read and store everything.</div>",
-                    unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='font-size:13px;color:{T2};margin-bottom:12px;'>"
+            f"Upload trading rules as PDF. AI reads and stores everything.</div>",
+            unsafe_allow_html=True
+        )
         pdf_file = st.file_uploader("Upload PDF", type=["pdf"], key="pdf_upload")
-        pdf_cat  = st.selectbox("Assign category to all rules in this PDF",
-                                ["Structure","Volume","VSA","Order Flow","Risk Management"], key="pdf_cat")
  
         if pdf_file and st.button("Extract & Learn from PDF", type="primary",
-                                  use_container_width=True):
+                                  use_container_width=True, key="pdf_learn_btn"):
             with st.spinner("Reading PDF..."):
                 chunks = extract_pdf_rules(pdf_file)
- 
             if not chunks:
                 st.error("No text found in PDF.")
             else:
@@ -593,22 +657,23 @@ def render_mode2():
                 saved = 0
                 for i, chunk in enumerate(chunks):
                     ok = save_rule_to_memory(
-                        pdf_cat,
+                        "",
                         f"{pdf_file.name} — Chunk {i+1}",
                         chunk,
-                        ["pdf-trained", pdf_cat.lower(), pdf_file.name[:30]]
+                        ["pdf-trained", pdf_file.name[:30]]
                     )
-                    if ok:
-                        saved += 1
+                    if ok: saved += 1
                     progress.progress((i+1)/len(chunks))
- 
                 st.success(f"Learned {saved}/{len(chunks)} rule segments from {pdf_file.name}")
-                speak(f"PDF processed. I have learned {saved} trading rules from your document.")
+                speak(f"PDF processed. I have learned {saved} trading rules.")
  
-    # ── Memory Viewer ──────────────────────────────────────
+    # ── TAB 4: Memory Viewer ───────────────────────────────
     with tab_memory:
-        st.markdown(f"<div style='font-size:13px;color:{T2};margin-bottom:12px;'>Search and browse everything Arka AI has learned</div>",
-                    unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='font-size:13px;color:{T2};margin-bottom:12px;'>"
+            f"Browse everything Arka AI has learned</div>",
+            unsafe_allow_html=True
+        )
         query = st.text_input("Search memory", placeholder="e.g. volume breakout", key="mem_search")
         if query:
             with st.spinner("Searching..."):
@@ -618,21 +683,41 @@ def render_mode2():
             else:
                 st.success(f"Found {len(results)} matching rules:")
                 for r in results:
-                    score_color = GREEN if r["score"] > 0.8 else GOLD if r["score"] > 0.6 else T2
+                    sc = GREEN if r["score"] > 0.8 else GOLD if r["score"] > 0.6 else T2
                     st.markdown(f"""
                     <div style="background:{DARK3};border:1px solid {BORDER};
-                         border-left:3px solid {score_color};border-radius:10px;
+                         border-left:3px solid {sc};border-radius:10px;
                          padding:14px 16px;margin-bottom:8px;">
                         <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
                             <span style="font-family:Inter,sans-serif;font-weight:800;
                                  font-size:13px;color:{IVORY};">{r['rule_name']}</span>
                             <span style="font-family:JetBrains Mono,monospace;font-size:11px;
-                                 color:{score_color};">{r['score']:.2f} match</span>
+                                 color:{sc};">{r['score']:.2f} match</span>
                         </div>
-                        <div style="font-size:11px;color:{GOLD};margin-bottom:6px;
-                             letter-spacing:1px;text-transform:uppercase;">{r['rule_type']}</div>
-                        <div style="font-size:13px;color:{T2};line-height:1.7;">{r['rule_text'][:300]}...</div>
+                        <div style="font-size:13px;color:{T2};line-height:1.7;">
+                            {r['rule_text'][:300]}...</div>
                     </div>""", unsafe_allow_html=True)
+        else:
+            # Show all recent rules when no search query
+            with st.spinner("Loading memory..."):
+                all_rules = search_memory("trading setup rule entry exit", top_k=20)
+            if all_rules:
+                st.markdown(f"<div style='font-size:12px;color:{T2};margin-bottom:12px;'>"
+                            f"Showing {len(all_rules)} stored rules:</div>", unsafe_allow_html=True)
+                for r in all_rules:
+                    st.markdown(f"""
+                    <div style="background:{DARK3};border:1px solid {BORDER};
+                         border-left:3px solid {GOLD};border-radius:10px;
+                         padding:12px 16px;margin-bottom:6px;">
+                        <div style="font-family:Inter,sans-serif;font-weight:800;
+                             font-size:13px;color:{IVORY};margin-bottom:4px;">{r['rule_name']}</div>
+                        <div style="font-size:13px;color:{T2};line-height:1.6;">
+                            {r['rule_text'][:250]}...</div>
+                    </div>""", unsafe_allow_html=True)
+            else:
+                st.markdown(f"<div style='color:{T2};font-size:13px;text-align:center;"
+                            f"padding:40px;'>No rules stored yet. Use Add Rule or Annotate Chart to teach Arka AI.</div>",
+                            unsafe_allow_html=True)
  
  
 # ══════════════════════════════════════════════════════════
