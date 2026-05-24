@@ -32,7 +32,7 @@ except ImportError:
     HAS_PDF = False
  
 try:
-    from PIL import Image
+    from PIL import Image, ImageDraw
     HAS_PIL = True
 except ImportError:
     HAS_PIL = False
@@ -66,9 +66,7 @@ NAVY   = "#0A1D4B"
  
 @st.cache_resource
 def get_gemini():
-    if not HAS_GEMINI:
-        return None
-    if not GEMINI_KEY:
+    if not HAS_GEMINI or not GEMINI_KEY:
         return None
     try:
         genai.configure(api_key=GEMINI_KEY)
@@ -101,7 +99,7 @@ OUTPUT FORMAT (always return valid JSON):
   ]
 }"""
         )
-    except Exception as e:
+    except Exception:
         return None
  
  
@@ -111,9 +109,7 @@ OUTPUT FORMAT (always return valid JSON):
  
 @st.cache_resource
 def get_pinecone_index():
-    if not HAS_PINECONE:
-        return None
-    if not PINECONE_KEY:
+    if not HAS_PINECONE or not PINECONE_KEY:
         return None
     try:
         pc = Pinecone(api_key=PINECONE_KEY)
@@ -127,7 +123,7 @@ def get_pinecone_index():
             )
             time.sleep(2)
         return pc.Index(INDEX_NAME)
-    except Exception as e:
+    except Exception:
         return None
  
  
@@ -145,13 +141,13 @@ def get_embedding(text: str) -> list:
         return [0.0] * 768
  
  
-def save_rule_to_memory(rule_type: str, rule_name: str, rule_text: str, tags: list = None):
+def save_rule_to_memory(rule_name: str, rule_text: str, tags: list = None):
     """Save a trading rule into Pinecone vector memory."""
     idx = get_pinecone_index()
     if not idx:
         return False
     try:
-        full_text = f"{rule_type}: {rule_name}\n{rule_text}"
+        full_text = f"Rule: {rule_name}\n{rule_text}"
         embedding  = get_embedding(full_text)
         if not embedding:
             return False
@@ -160,7 +156,6 @@ def save_rule_to_memory(rule_type: str, rule_name: str, rule_text: str, tags: li
             "id":     vector_id,
             "values": embedding,
             "metadata": {
-                "rule_type":   rule_type,
                 "rule_name":   rule_name,
                 "rule_text":   rule_text,
                 "tags":        json.dumps(tags or []),
@@ -190,7 +185,6 @@ def search_memory(query: str, top_k: int = 5) -> list[dict]:
         return [
             {
                 "score":     m.score,
-                "rule_type": m.metadata.get("rule_type", ""),
                 "rule_name": m.metadata.get("rule_name", ""),
                 "rule_text": m.metadata.get("rule_text", ""),
                 "tags":      json.loads(m.metadata.get("tags", "[]")),
@@ -210,7 +204,7 @@ def build_rules_context(query: str = "trading setup entry exit rules") -> str:
         return "No custom rules found in memory. Analyzing based on general technical analysis principles."
     lines = ["=== USER'S PERSONAL TRADING RULES (from memory) ==="]
     for r in rules:
-        lines.append(f"\n[{r['rule_type']}] {r['rule_name']} (relevance: {r['score']:.2f})")
+        lines.append(f"\nRule: {r['rule_name']} (relevance: {r['score']:.2f})")
         lines.append(f"  → {r['rule_text']}")
     lines.append("\n=== END OF RULES ===")
     return "\n".join(lines)
@@ -229,9 +223,7 @@ def image_to_base64(img: Image.Image) -> str:
 def draw_annotations(img: Image.Image, analysis: dict) -> Image.Image:
     """Draw bounding boxes and arrows from AI response onto chart image."""
     draw   = ImageDraw.Draw(img, "RGBA")
-    width  = img.width
-    height = img.height
- 
+    
     for box in analysis.get("draw_boxes", []):
         try:
             x, y  = int(box["x"]), int(box["y"])
@@ -239,8 +231,7 @@ def draw_annotations(img: Image.Image, analysis: dict) -> Image.Image:
             color = box.get("color", "#00B8CC")
             label = box.get("label", "")
             r,g,b = int(color[1:3],16), int(color[3:5],16), int(color[5:7],16)
-            draw.rectangle([x, y, x+w, y+h], outline=(r,g,b,255), width=2,
-                           fill=(r,g,b,40))
+            draw.rectangle([x, y, x+w, y+h], outline=(r,g,b,255), width=2, fill=(r,g,b,40))
             if label:
                 draw.text((x+3, y-14), label, fill=(r,g,b,255))
         except: pass
@@ -253,8 +244,7 @@ def draw_annotations(img: Image.Image, analysis: dict) -> Image.Image:
             label  = arrow.get("label", "")
             r,g,b  = int(color[1:3],16), int(color[3:5],16), int(color[5:7],16)
             draw.line([x1,y1,x2,y2], fill=(r,g,b,255), width=2)
-            draw.polygon([x2,y2, x2-8,y2-5, x2-8,y2+5],
-                         fill=(r,g,b,200))
+            draw.polygon([x2,y2, x2-8,y2-5, x2-8,y2+5], fill=(r,g,b,200))
             if label:
                 draw.text((x2+4, y2-10), label, fill=(r,g,b,255))
         except: pass
@@ -262,21 +252,16 @@ def draw_annotations(img: Image.Image, analysis: dict) -> Image.Image:
     return img
  
  
-def analyze_chart(img: Image.Image, click_x: int = None,
-                  click_y: int = None, user_note: str = "") -> dict:
-    """
-    Send chart image + click coordinates + rules context to Gemini.
-    Returns parsed analysis dict.
-    """
+def analyze_chart(img: Image.Image, click_x: int = None, click_y: int = None, user_note: str = "") -> dict:
+    """Send chart image + click coordinates + rules context to Gemini."""
     model = get_gemini()
+    if not model:
+        return {"verdict":"ERROR","score":0,"voice_summary":"AI Model Unconfigured","detailed_analysis":"Gemini Client Unavailable","rules_matched":[],"rules_violated":[],"draw_boxes":[],"draw_arrows":[]}
  
-    # Build context from memory
     rules_ctx = build_rules_context(user_note or "trading entry setup validation")
  
-    # Build prompt
     click_info = ""
     if click_x is not None and click_y is not None:
-        # Normalize coords to percentage of image
         pct_x = round((click_x / img.width)  * 100, 1)
         pct_y = round((click_y / img.height) * 100, 1)
         click_info = (
@@ -295,11 +280,9 @@ Coordinates in draw_boxes/draw_arrows must be valid pixel positions matching the
 """
  
     try:
-        img_data = {"mime_type": "image/png",
-                    "data": image_to_base64(img)}
+        img_data = {"mime_type": "image/png", "data": image_to_base64(img)}
         response = model.generate_content([prompt, img_data])
         raw = response.text.strip()
-        # Strip markdown code fences if present
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
@@ -317,9 +300,7 @@ Coordinates in draw_boxes/draw_arrows must be valid pixel positions matching the
             "draw_arrows":      []
         }
     except Exception as e:
-        return {"verdict":"ERROR","score":0,"voice_summary":str(e),
-                "detailed_analysis":str(e),"rules_matched":[],
-                "rules_violated":[],"draw_boxes":[],"draw_arrows":[]}
+        return {"verdict":"ERROR","score":0,"voice_summary":str(e), "detailed_analysis":str(e),"rules_matched":[], "rules_violated":[],"draw_boxes":[],"draw_arrows":[]}
  
  
 # ══════════════════════════════════════════════════════════
@@ -334,7 +315,6 @@ def extract_pdf_rules(pdf_file) -> list[str]:
             for page in pdf.pages:
                 text = page.extract_text()
                 if text:
-                    # Split into chunks of ~500 chars
                     for i in range(0, len(text), 500):
                         chunk = text[i:i+500].strip()
                         if len(chunk) > 50:
@@ -362,8 +342,7 @@ def speak(text: str, rate: float = 0.95, pitch: float = 1.0):
         u.pitch = {pitch};
         u.lang  = "en-IN";
         var voices = window.speechSynthesis.getVoices();
-        var pref   = voices.find(v => v.lang === "en-IN") ||
-                     voices.find(v => v.lang.startsWith("en"));
+        var pref   = voices.find(v => v.lang === "en-IN") || voices.find(v => v.lang.startsWith("en"));
         if (pref) u.voice = pref;
         window.speechSynthesis.speak(u);
     }})();
@@ -411,8 +390,7 @@ def render_mode1():
     </div>
     """, unsafe_allow_html=True)
  
-    uploaded = st.file_uploader("Upload chart screenshot (PNG/JPG)",
-                                type=["png","jpg","jpeg"], key="m1_upload")
+    uploaded = st.file_uploader("Upload chart screenshot (PNG/JPG)", type=["png","jpg","jpeg"], key="m1_upload")
  
     if not uploaded:
         st.info("Upload a chart screenshot to begin analysis.")
@@ -423,10 +401,8 @@ def render_mode1():
     col_chart, col_panel = st.columns([3, 2])
  
     with col_chart:
-        st.markdown(f"<div style='font-size:12px;color:{T2};margin-bottom:6px;'>Click on any candle to analyze that specific area</div>",
-                    unsafe_allow_html=True)
+        st.markdown(f"<div style='font-size:12px;color:{T2};margin-bottom:6px;'>Click on any candle to analyze that specific area</div>", unsafe_allow_html=True)
  
-        # Clickable image
         coords = streamlit_image_coordinates(img, key="chart_click")
         click_x = coords["x"] if coords else None
         click_y = coords["y"] if coords else None
@@ -441,46 +417,33 @@ def render_mode1():
             </div>""", unsafe_allow_html=True)
  
     with col_panel:
-        user_note = st.text_area("Add context (optional)",
-                                 placeholder="e.g. 'Is this a valid PDH breakout entry?'",
-                                 height=80, key="m1_note")
+        user_note = st.text_area("Add context (optional)", placeholder="e.g. 'Is this a valid PDH breakout entry?'", height=80, key="m1_note")
         auto_voice = st.toggle("Auto-speak analysis", value=True, key="m1_voice")
  
         if st.button("Analyze Chart", type="primary", use_container_width=True, key="m1_analyze"):
             with st.spinner("Gemini is reading your chart..."):
                 result = analyze_chart(img, click_x, click_y, user_note)
  
-            # Verdict badge
-            st.markdown(verdict_badge(result.get("verdict","FLAGGED"),
-                                      result.get("score", 5)),
-                        unsafe_allow_html=True)
+            st.markdown(verdict_badge(result.get("verdict","FLAGGED"), result.get("score", 5)), unsafe_allow_html=True)
  
-            # Voice
             if auto_voice:
                 speak(result.get("voice_summary","Analysis complete."))
  
-            # Draw annotations on chart
             if result.get("draw_boxes") or result.get("draw_arrows"):
                 annotated = draw_annotations(img.copy(), result)
                 with col_chart:
                     st.image(annotated, caption="AI Annotated Chart", use_container_width=True)
  
-            # Rules matched/violated
             if result.get("rules_matched"):
-                st.markdown(f"<div style='color:{GREEN};font-size:13px;font-weight:700;margin-top:8px;'>✅ Rules Matched</div>",
-                            unsafe_allow_html=True)
+                st.markdown(f"<div style='color:{GREEN};font-size:13px;font-weight:700;margin-top:8px;'>✅ Rules Matched</div>", unsafe_allow_html=True)
                 for r in result["rules_matched"]:
-                    st.markdown(f"<div style='color:{GREEN};font-size:12px;margin-left:8px;'>· {r}</div>",
-                                unsafe_allow_html=True)
+                    st.markdown(f"<div style='color:{GREEN};font-size:12px;margin-left:8px;'>· {r}</div>", unsafe_allow_html=True)
  
             if result.get("rules_violated"):
-                st.markdown(f"<div style='color:{RED};font-size:13px;font-weight:700;margin-top:8px;'>❌ Rules Violated</div>",
-                            unsafe_allow_html=True)
+                st.markdown(f"<div style='color:{RED};font-size:13px;font-weight:700;margin-top:8px;'>❌ Rules Violated</div>", unsafe_allow_html=True)
                 for r in result["rules_violated"]:
-                    st.markdown(f"<div style='color:{RED};font-size:12px;margin-left:8px;'>· {r}</div>",
-                                unsafe_allow_html=True)
+                    st.markdown(f"<div style='color:{RED};font-size:12px;margin-left:8px;'>· {r}</div>", unsafe_allow_html=True)
  
-            # Detailed analysis
             with st.expander("Full Analysis", expanded=True):
                 st.markdown(f"""
                 <div style="background:{DARK3};border-radius:10px;padding:16px;
@@ -511,35 +474,19 @@ def render_mode2():
  
     # ── TAB 1: Manual Rule Entry ───────────────────────────
     with tab_manual:
-        st.markdown(
-            f"<div style='font-size:13px;color:{T2};margin-bottom:16px;'>"
-            f"Add individual trading rules to AI memory</div>",
-            unsafe_allow_html=True
-        )
+        st.markdown(f"<div style='font-size:13px;color:{T2};margin-bottom:16px;'>Add individual trading rules to AI memory</div>", unsafe_allow_html=True)
  
-        # Use session state keys for auto-clear
         if "m2_rule_name" not in st.session_state: st.session_state.m2_rule_name = ""
         if "m2_rule_text" not in st.session_state: st.session_state.m2_rule_text = ""
  
-        rule_name = st.text_input(
-            "Rule Name",
-            placeholder="e.g. PDH Breakout Confirmation",
-            key="m2_rule_name"
-        )
-        rule_text = st.text_area(
-            "Exact Conditions",
-            placeholder="e.g. Price must close above PDH on breakout candle. Volume must be 1.5x average. RSI above 55.",
-            height=130,
-            key="m2_rule_text"
-        )
+        rule_name = st.text_input("Rule Name", placeholder="e.g. PDH Breakout Confirmation", key="m2_rule_name")
+        rule_text = st.text_area("Exact Conditions", placeholder="e.g. Price must close above PDH on breakout candle. Volume must be 1.5x average. RSI above 55.", height=130, key="m2_rule_text")
  
-        if st.button("SAVE TO MEMORY", use_container_width=True,
-                     type="primary", key="m2_save_btn"):
+        if st.button("SAVE TO MEMORY", use_container_width=True, type="primary", key="m2_save_btn"):
             if rule_name.strip() and rule_text.strip():
                 with st.spinner("Saving to Pinecone..."):
-                    ok = save_rule_to_memory("", rule_name.strip(), rule_text.strip(), [])
+                    ok = save_rule_to_memory(rule_name.strip(), rule_text.strip(), [])
                 if ok:
-                    # Auto-clear fields
                     st.session_state.m2_rule_name = ""
                     st.session_state.m2_rule_text = ""
                     st.success(f"Learned: **{rule_name}** — Applied in every future analysis.")
@@ -552,32 +499,20 @@ def render_mode2():
  
     # ── TAB 2: Chart Annotation ────────────────────────────
     with tab_chart:
-        st.markdown(
-            f"<div style='font-size:13px;color:{T2};margin-bottom:12px;'>"
-            f"Upload a setup chart. Click on the key candle. AI learns the visual pattern.</div>",
-            unsafe_allow_html=True
-        )
+        st.markdown(f"<div style='font-size:13px;color:{T2};margin-bottom:12px;'>Upload a setup chart. Click on the key candle. AI learns the visual pattern.</div>", unsafe_allow_html=True)
  
-        train_img_file = st.file_uploader(
-            "Upload example setup chart",
-            type=["png","jpg","jpeg"],
-            key="train_chart"
-        )
+        train_img_file = st.file_uploader("Upload example setup chart", type=["png","jpg","jpeg"], key="train_chart")
  
         tx, ty = None, None
  
         if train_img_file:
-            raw_img    = Image.open(train_img_file).convert("RGB")
+            raw_img = Image.open(train_img_file).convert("RGB")
             orig_w, orig_h = raw_img.size
  
-            # ── Render image at natural aspect ratio — no squishing
             if HAS_IMG_COORDS:
-                st.markdown(
-                    f"<div style='font-size:11px;color:{GOLD};margin-bottom:6px;'>"
-                    f"Click on a key candle or zone to target it</div>",
-                    unsafe_allow_html=True
-                )
-                # Pass the PIL image directly — no resizing, no height cap
+                st.markdown(f"<div style='font-size:11px;color:{GOLD};margin-bottom:6px;'>Click on a key candle or zone to target it</div>", unsafe_allow_html=True)
+                
+                # Image alignment framing fixes
                 train_coords = streamlit_image_coordinates(
                     raw_img,
                     key="train_click",
@@ -586,46 +521,25 @@ def render_mode2():
                 if train_coords and train_coords.get("x") is not None:
                     tx = train_coords["x"]
                     ty = train_coords["y"]
-                    st.markdown(
-                        f"<div style='color:{GOLD};font-size:12px;"
-                        f"font-family:monospace;margin-top:6px;'>"
-                        f"Target locked: ({tx}, {ty}) — "
-                        f"{round(tx/orig_w*100,1)}% H · {round(ty/orig_h*100,1)}% V</div>",
-                        unsafe_allow_html=True
-                    )
+                    st.markdown(f"<div style='color:{GOLD};font-size:12px;font-family:monospace;margin-top:6px;'>Target locked: ({tx}, {ty}) — {round(tx/orig_w*100,1)}% H · {round(ty/orig_h*100,1)}% V</div>", unsafe_allow_html=True)
             else:
                 st.image(raw_img, use_container_width=True)
-                st.caption("Tip: install streamlit-image-coordinates for click targeting")
  
-        # Input fields — outside image block so they always show
         if "m2_setup_name" not in st.session_state: st.session_state.m2_setup_name = ""
         if "m2_setup_rules" not in st.session_state: st.session_state.m2_setup_rules = ""
  
-        setup_name  = st.text_input(
-            "Setup Name",
-            placeholder="e.g. Low Volume Handle — Cup and Handle",
-            key="m2_setup_name"
-        )
-        setup_rules = st.text_area(
-            "What should AI learn from this chart?",
-            placeholder="e.g. Volume drops 40% during consolidation. Entry on breakout above left cup rim.",
-            height=100,
-            key="m2_setup_rules"
-        )
+        setup_name  = st.text_input("Setup Name", placeholder="e.g. Low Volume Handle — Cup and Handle", key="m2_setup_name")
+        setup_rules = st.text_area("What should AI learn from this chart?", placeholder="e.g. Volume drops 40% during consolidation. Entry on breakout above left cup rim.", height=100, key="m2_setup_rules")
  
-        if st.button("TEACH THIS SETUP", type="primary",
-                     use_container_width=True, key="m2_teach_btn"):
+        if st.button("TEACH THIS SETUP", type="primary", use_container_width=True, key="m2_teach_btn"):
             if setup_name.strip() and setup_rules.strip():
                 full_rule = setup_rules.strip()
                 if tx and train_img_file:
-                    full_rule += (
-                        f"\n[Chart coordinate reference: click at ({tx},{ty}) = "
-                        f"{round(tx/orig_w*100,1)}% X, {round(ty/orig_h*100,1)}% Y]"
-                    )
+                    full_rule += f"\n[Chart coordinate reference: click at ({tx},{ty}) = {round(tx/orig_w*100,1)}% X, {round(ty/orig_h*100,1)}% Y]"
+                
                 with st.spinner("Teaching Arka AI..."):
-                    ok = save_rule_to_memory("", setup_name.strip(), full_rule, ["chart-trained"])
+                    ok = save_rule_to_memory(setup_name.strip(), full_rule, ["chart-trained"])
                 if ok:
-                    # Auto-clear
                     st.session_state.m2_setup_name  = ""
                     st.session_state.m2_setup_rules = ""
                     st.success(f"Taught: {setup_name}")
@@ -638,15 +552,10 @@ def render_mode2():
  
     # ── TAB 3: PDF Upload ──────────────────────────────────
     with tab_pdf:
-        st.markdown(
-            f"<div style='font-size:13px;color:{T2};margin-bottom:12px;'>"
-            f"Upload trading rules as PDF. AI reads and stores everything.</div>",
-            unsafe_allow_html=True
-        )
+        st.markdown(f"<div style='font-size:13px;color:{T2};margin-bottom:12px;'>Upload trading rules as PDF. AI reads and stores everything.</div>", unsafe_allow_html=True)
         pdf_file = st.file_uploader("Upload PDF", type=["pdf"], key="pdf_upload")
  
-        if pdf_file and st.button("Extract & Learn from PDF", type="primary",
-                                  use_container_width=True, key="pdf_learn_btn"):
+        if pdf_file and st.button("Extract & Learn from PDF", type="primary", use_container_width=True, key="pdf_learn_btn"):
             with st.spinner("Reading PDF..."):
                 chunks = extract_pdf_rules(pdf_file)
             if not chunks:
@@ -657,7 +566,6 @@ def render_mode2():
                 saved = 0
                 for i, chunk in enumerate(chunks):
                     ok = save_rule_to_memory(
-                        "",
                         f"{pdf_file.name} — Chunk {i+1}",
                         chunk,
                         ["pdf-trained", pdf_file.name[:30]]
@@ -669,11 +577,7 @@ def render_mode2():
  
     # ── TAB 4: Memory Viewer ───────────────────────────────
     with tab_memory:
-        st.markdown(
-            f"<div style='font-size:13px;color:{T2};margin-bottom:12px;'>"
-            f"Browse everything Arka AI has learned</div>",
-            unsafe_allow_html=True
-        )
+        st.markdown(f"<div style='font-size:13px;color:{T2};margin-bottom:12px;'>Browse everything Arka AI has learned</div>", unsafe_allow_html=True)
         query = st.text_input("Search memory", placeholder="e.g. volume breakout", key="mem_search")
         if query:
             with st.spinner("Searching..."):
@@ -698,12 +602,10 @@ def render_mode2():
                             {r['rule_text'][:300]}...</div>
                     </div>""", unsafe_allow_html=True)
         else:
-            # Show all recent rules when no search query
             with st.spinner("Loading memory..."):
                 all_rules = search_memory("trading setup rule entry exit", top_k=20)
             if all_rules:
-                st.markdown(f"<div style='font-size:12px;color:{T2};margin-bottom:12px;'>"
-                            f"Showing {len(all_rules)} stored rules:</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:12px;color:{T2};margin-bottom:12px;'>Showing {len(all_rules)} stored rules:</div>", unsafe_allow_html=True)
                 for r in all_rules:
                     st.markdown(f"""
                     <div style="background:{DARK3};border:1px solid {BORDER};
@@ -715,9 +617,7 @@ def render_mode2():
                             {r['rule_text'][:250]}...</div>
                     </div>""", unsafe_allow_html=True)
             else:
-                st.markdown(f"<div style='color:{T2};font-size:13px;text-align:center;"
-                            f"padding:40px;'>No rules stored yet. Use Add Rule or Annotate Chart to teach Arka AI.</div>",
-                            unsafe_allow_html=True)
+                st.markdown(f"<div style='color:{T2};font-size:13px;text-align:center;padding:40px;'>No rules stored yet. Use Add Rule or Annotate Chart to teach Arka AI.</div>", unsafe_allow_html=True)
  
  
 # ══════════════════════════════════════════════════════════
@@ -726,7 +626,6 @@ def render_mode2():
  
 def render_arka_ai():
     """Main Arka AI page — call from app.py page router."""
- 
     st.markdown(f"""
     <div style="text-align:center;margin-bottom:24px;">
         <div style="font-family:'Bebas Neue',sans-serif;font-size:36px;
@@ -737,14 +636,11 @@ def render_arka_ai():
     </div>
     """, unsafe_allow_html=True)
  
-    mode = st.radio("Select Mode", ["Mode 1 — Live Analysis", "Mode 2 — Train AI"],
-                    horizontal=True, key="ai_mode")
+    mode = st.radio("Select Mode", ["Mode 1 — Live Analysis", "Mode 2 — Train AI"], horizontal=True, key="ai_mode")
  
-    st.markdown(f"<div style='height:1px;background:{BORDER};margin:16px 0;'></div>",
-                unsafe_allow_html=True)
+    st.markdown(f"<div style='height:1px;background:{BORDER};margin:16px 0;'></div>", unsafe_allow_html=True)
  
     if mode == "Mode 1 — Live Analysis":
         render_mode1()
     else:
         render_mode2()
-
