@@ -9,7 +9,7 @@ PDF Parse : pdfplumber
 """
  
 import streamlit as st
-import base64, io, json, time, hashlib
+import base64, io, json, time, hashlib, traceback
 from datetime import datetime, timezone, timedelta
  
 # ── Safe imports ────────────────────────────────────────────
@@ -132,22 +132,47 @@ def get_pinecone_index():
  
  
 def get_embedding(text: str) -> list:
-    """Get text embedding via Gemini embedding model."""
+    """Get text embedding via Gemini embedding model with debug logging."""
     if not HAS_GEMINI or not GEMINI_KEY:
+        print("❌ GEMINI not available or GEMINI_KEY not set")
         return None
+    
     if not text or not text.strip():
+        print(f"❌ Empty text provided to embed")
         return None
+    
     try:
+        print(f"🔹 Attempting to embed text: {text[:60]}...")
         result = genai.embed_content(
             model="models/text-embedding-004",
             content=text.strip()
         )
+        
         embedding = result.get("embedding", [])
-        if not embedding or all(v == 0 for v in embedding):
+        print(f"🔹 Received embedding with {len(embedding)} dimensions")
+        
+        if not embedding:
+            print(f"❌ Empty embedding returned from API")
             return None
+        
+        if len(embedding) != 768:
+            print(f"❌ Wrong embedding dimension: {len(embedding)} (expected 768)")
+            return None
+        
+        # Check if all values are zero or near-zero
+        non_zero_count = sum(1 for v in embedding if abs(v) > 1e-7)
+        print(f"🔹 Non-zero dimensions: {non_zero_count}/768")
+        
+        if non_zero_count == 0:
+            print(f"❌ All-zero embedding detected!")
+            return None
+        
+        print(f"✅ Valid embedding generated with {non_zero_count} non-zero values")
         return embedding
+        
     except Exception as e:
-        print(f"Embedding error: {e}")
+        print(f"❌ Embedding API error: {str(e)}")
+        traceback.print_exc()
         return None
  
  
@@ -155,23 +180,34 @@ def save_rule_to_memory(rule_type: str, rule_name: str, rule_text: str, tags: li
     """Save a trading rule into Pinecone vector memory."""
     idx = get_pinecone_index()
     if not idx:
+        st.error("❌ Pinecone index not available. Check PINECONE_KEY in secrets.")
         return False
     
     # Validate inputs
     if not rule_text or not rule_text.strip():
-        st.error("Cannot save rule: description is empty")
+        st.error("❌ Cannot save rule: description is empty")
+        return False
+    
+    if len(rule_text.strip()) < 5:
+        st.error("❌ Rule description is too short (minimum 5 characters)")
         return False
     
     try:
         full_text = f"{rule_type}: {rule_name}\n{rule_text}".strip()
+        print(f"\n📝 Preparing to save rule: {rule_name}")
+        print(f"   Full text: {full_text[:100]}...")
+        
         embedding = get_embedding(full_text)
         
-        # CRITICAL: Reject None or zero embeddings
+        # CRITICAL: Reject None or invalid embeddings
         if embedding is None:
-            st.error(f"Embedding failed for '{rule_name}'. Check Gemini API.")
+            st.error(f"❌ Embedding failed for '{rule_name}'. Gemini API may be having issues or GEMINI_KEY is invalid.")
+            print(f"❌ Embedding failed - returning False")
             return False
         
         vector_id = f"rule_{int(time.time())}_{rule_name[:20].replace(' ','_').upper()}"
+        print(f"📤 Upserting to Pinecone with ID: {vector_id}")
+        
         idx.upsert(vectors=[{
             "id":     vector_id,
             "values": embedding,
@@ -183,10 +219,16 @@ def save_rule_to_memory(rule_type: str, rule_name: str, rule_text: str, tags: li
                 "saved_at":    datetime.now().isoformat()
             }
         }])
-        st.success(f"✅ Saved: {rule_name}")
+        
+        st.success(f"✅ Rule saved to Pinecone: {rule_name}")
+        print(f"✅ Successfully saved {rule_name} to Pinecone")
         return True
+        
     except Exception as e:
-        st.error(f"Save error: {e}")
+        error_msg = str(e)
+        st.error(f"❌ Save error: {error_msg}")
+        print(f"❌ Exception during save: {error_msg}")
+        traceback.print_exc()
         return False
  
  
@@ -743,6 +785,23 @@ def render_mode2():
  
 def render_arka_ai():
     """Main Arka AI page — call from app.py page router."""
+ 
+    # DEBUG: Show API key status
+    with st.expander("🔧 API Status (Click to expand)", expanded=False):
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("GEMINI_KEY", "✅ SET" if GEMINI_KEY else "❌ NOT SET")
+        with col2:
+            st.metric("PINECONE_KEY", "✅ SET" if PINECONE_KEY else "❌ NOT SET")
+        with col3:
+            st.metric("HAS_GEMINI", "✅ YES" if HAS_GEMINI else "❌ NO")
+        with col4:
+            st.metric("HAS_PINECONE", "✅ YES" if HAS_PINECONE else "❌ NO")
+        
+        if not GEMINI_KEY:
+            st.error("⚠️ GEMINI_KEY is not set in Streamlit secrets!")
+        if not PINECONE_KEY:
+            st.error("⚠️ PINECONE_KEY is not set in Streamlit secrets!")
  
     st.markdown(f"""
     <div style="text-align:center;margin-bottom:24px;">
