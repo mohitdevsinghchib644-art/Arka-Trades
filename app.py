@@ -6,18 +6,18 @@ import time
 import requests
 from supabase import create_client, Client
 from news_feed import news_panel, get_news_dot, _ensure_news_state
-from arka_ai import render_arka_ai
-
+from arka_ai import arka_ai_page
+ 
 # ── Supabase Config ─────────────────────────────────────────
 SUPABASE_URL = "https://vpxagxjgtonynblhddwh.supabase.co"
 SUPABASE_KEY = "sb_publishable_J709kk-CNgm4GVkd5jemEg_XZb5wPDA"
-
+ 
 @st.cache_resource
 def get_supabase() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_KEY)
-
+ 
 supabase = get_supabase()
-
+ 
 # ── Supabase Helpers ─────────────────────────────────────────
 def db_save_watchlist(symbols: list):
     """Save watchlist to Supabase — clears old and inserts new."""
@@ -29,7 +29,7 @@ def db_save_watchlist(symbols: list):
     except Exception as e:
         st.error(f"Save error: {e}")
         return False
-
+ 
 def db_load_watchlist() -> list:
     """Load watchlist from Supabase."""
     try:
@@ -37,7 +37,7 @@ def db_load_watchlist() -> list:
         return [r["symbol"] for r in res.data] if res.data else []
     except:
         return []
-
+ 
 def db_save_alert(symbol: str, alert_type: str, price: float):
     """Save or update an alert."""
     try:
@@ -50,7 +50,7 @@ def db_save_alert(symbol: str, alert_type: str, price: float):
     except Exception as e:
         st.error(f"Alert save error: {e}")
         return False
-
+ 
 def db_delete_alert(symbol: str):
     """Remove an alert."""
     try:
@@ -58,7 +58,7 @@ def db_delete_alert(symbol: str):
         return True
     except:
         return False
-
+ 
 def db_load_alerts() -> dict:
     """Load all active alerts as dict."""
     try:
@@ -67,19 +67,19 @@ def db_load_alerts() -> dict:
                 for r in res.data} if res.data else {}
     except:
         return {}
-
+ 
 st.set_page_config(page_title="Arka Trades", layout="wide", page_icon="📈", initial_sidebar_state="collapsed")
-
+ 
 # ── Telegram ───────────────────────────────────────────────
 BOT_TOKEN = "8720913228:AAEJEpA30KiJ5H0XwIdqxfOA5YSjxW3cfK8"
 CHAT_ID   = "1987688902"
-
+ 
 def send_telegram(msg):
     try:
         requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
             data={"chat_id":CHAT_ID,"text":msg,"parse_mode":"HTML"}, timeout=5)
     except: pass
-
+ 
 # ── Colors ──────────────────────────────────────────────────
 NAVY   = "#0A1D4B"
 IVORY  = "#F7EBE0"
@@ -91,7 +91,7 @@ DARK2  = "#060D1A"
 DARK3  = "#091525"
 BORDER = "#0F2040"
 T2     = "#8A9AB5"
-
+ 
 # ── Session State ────────────────────────────────────────────
 for k, v in {
     "logged_in":       False,
@@ -106,7 +106,7 @@ for k, v in {
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
-
+ 
 # Load from Supabase once per session
 if not st.session_state.db_loaded:
     wl = db_load_watchlist()
@@ -116,10 +116,10 @@ if not st.session_state.db_loaded:
     if al:
         st.session_state.alerts = al
     st.session_state.db_loaded = True
-
+ 
 name    = st.session_state.profile.get("name","Trader") or "Trader"
 initial = name[0].upper()
-
+ 
 # ── Global CSS ───────────────────────────────────────────────
 st.markdown(f"""
 <style>
@@ -160,7 +160,7 @@ section[data-testid="stSidebar"]{{display:none !important;}}
 hr{{border-color:{BORDER} !important;}}
 .stProgress>div>div{{background:{GOLD} !important;}}
 .stRadio label{{color:{IVORY} !important;}}
-
+ 
 /* Nav buttons */
 .nav-btn .stButton>button{{
     width:100% !important;
@@ -188,7 +188,7 @@ hr{{border-color:{BORDER} !important;}}
 }}
 </style>
 """, unsafe_allow_html=True)
-
+ 
 # ── Helpers ───────────────────────────────────────────────────
 def parse_csv(file):
     try: df = pd.read_csv(file, header=None)
@@ -200,14 +200,14 @@ def parse_csv(file):
         v = v.split(',')[0].strip()
         if v and v.lower() != 'nan': syms.append(v.upper())
     return list(dict.fromkeys(syms))
-
+ 
 def calc_rsi(close, period=14):
     d = close.diff(); g = d.clip(lower=0).rolling(period).mean()
     l = (-d.clip(upper=0)).rolling(period).mean()
     rs = g / l.replace(0, float('nan'))
     v  = (100 - 100/(1+rs)).iloc[-1]
     return int(v) if pd.notna(v) else 0
-
+ 
 @st.cache_data(ttl=14400, show_spinner=False)
 def get_static(sym):
     try:
@@ -221,7 +221,7 @@ def get_static(sym):
             "rsi":        calc_rsi(h["Close"])
         }
     except: return None
-
+ 
 @st.cache_data(ttl=10, show_spinner=False)
 def get_price(sym):
     """
@@ -233,16 +233,16 @@ def get_price(sym):
         intra = yf.Ticker(sym+".NS").history(period="1d", interval="1m")
         if intra.empty: return None
         cur = float(intra["Close"].iloc[-1])
-
+ 
         # Previous day close — daily data (reliable official close)
         daily = yf.Ticker(sym+".NS").history(period="5d", interval="1d")
         if len(daily) < 2: return None
         prev_close = float(daily["Close"].iloc[-2])
-
+ 
         chg = ((cur - prev_close) / prev_close) * 100
         return {"price": cur, "chg": chg, "prev_close": prev_close}
     except: return None
-
+ 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_index(sym):
     try:
@@ -251,7 +251,7 @@ def get_index(sym):
         cur = float(h["Close"].iloc[-1]); pc = float(h["Close"].iloc[-2])
         return {"price":cur,"chg":((cur-pc)/pc)*100,"pts":cur-pc}
     except: return None
-
+ 
 def check_alerts(results):
     for s in results:
         sym = s["sym"]
@@ -267,7 +267,7 @@ def check_alerts(results):
         if fired:
             send_telegram(msg)
             st.session_state.alert_fired.add(sym)
-
+ 
 def section(title):
     st.markdown(f"""
     <div style="display:flex;align-items:center;gap:16px;margin:32px 0 18px;">
@@ -276,7 +276,7 @@ def section(title):
              letter-spacing:5px;color:{GOLD};white-space:nowrap;">{title}</div>
         <div style="flex:1;height:1px;background:{BORDER};"></div>
     </div>""", unsafe_allow_html=True)
-
+ 
 # ════════════════════════════════════════════════════
 # LOGIN
 # ════════════════════════════════════════════════════
@@ -292,7 +292,7 @@ if not st.session_state.logged_in:
         <div style="font-size:12px;letter-spacing:4px;color:rgba(200,169,106,0.5);
              text-transform:uppercase;margin-top:32px;">&#8595; Scroll down to login &#8595;</div>
     </div>""", unsafe_allow_html=True)
-
+ 
     _, col, _ = st.columns([1,2,1])
     with col:
         st.markdown(f"""
@@ -315,7 +315,7 @@ if not st.session_state.logged_in:
                     ph.error("Invalid username or password.")
         st.markdown(f"<div style='text-align:center;font-size:11px;color:{T2};margin-top:12px;font-style:italic;'>Not SEBI registered · Educational use only</div>", unsafe_allow_html=True)
     st.stop()
-
+ 
 # ════════════════════════════════════════════════════
 # DISCLAIMER
 # ════════════════════════════════════════════════════
@@ -360,12 +360,12 @@ if not st.session_state.disclaimer_done:
         if not all_ok:
             st.caption("Accept all 4 terms above to continue")
     st.stop()
-
+ 
 # ════════════════════════════════════════════════════
 # MAIN LAYOUT: Left Nav | Right Content
 # ════════════════════════════════════════════════════
 left, right = st.columns([1, 4])
-
+ 
 # ── LEFT NAV PANEL ────────────────────────────────────────────
 with left:
     # Brand section
@@ -382,7 +382,7 @@ with left:
         </div>
     </div>
     """, unsafe_allow_html=True)
-
+ 
     # Profile section
     photo = st.session_state.get("profile_photo")
     if photo:
@@ -403,15 +403,15 @@ with left:
         </div>
         <div style="height:1px;background:{BORDER};margin-bottom:4px;"></div>
         """, unsafe_allow_html=True)
-
+ 
     st.markdown(f"""
         <div style="padding:14px 12px 4px;font-family:'Bebas Neue',sans-serif;
              font-size:13px;letter-spacing:3px;color:{GOLD};">SERVICES</div>
     </div>
     """, unsafe_allow_html=True)
-
+ 
     pg = st.session_state.page
-
+ 
     def nav_btn(label, key, icon=""):
         active = pg == key
         css_class = "nav-btn-active" if active else "nav-btn"
@@ -419,20 +419,20 @@ with left:
         if st.button(f"{icon}  {label}", key=f"nav_{key}", use_container_width=True):
             st.session_state.page = key; st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
-
+ 
     nav_btn("Home",      "home",     "🏠")
     nav_btn("Scanner",   "scanner",  "📋")
     nav_btn("Alerts",    "alerts",   "🔔")
     nav_btn("News",      "news",     "📰")
-
+    nav_btn("Arka AI",   "analysis", "🤖")
+ 
     st.markdown(f"""
     <div style="padding:14px 12px 4px;font-family:'Bebas Neue',sans-serif;
          font-size:13px;letter-spacing:3px;color:{T2};">COMING SOON</div>
     """, unsafe_allow_html=True)
-    nav_btn("Analysis  ✦ Arka AI", "analysis", "🤖")
     nav_btn("Heatmap",      "heatmap",  "🗺️")
     nav_btn("Auto Alerts",  "autoalert","⚡")
-
+ 
     st.markdown(f"""
     <div style="padding:14px 12px 4px;font-family:'Bebas Neue',sans-serif;
          font-size:13px;letter-spacing:3px;color:{GOLD};">ACCOUNT</div>
@@ -440,7 +440,7 @@ with left:
     nav_btn("Profile",    "profile",  "👤")
     nav_btn("Settings",   "settings", "⚙️")
     nav_btn("Contact Us", "contact",  "📬")
-
+ 
     st.markdown("<br>", unsafe_allow_html=True)
     st.divider()
     st.markdown('<div class="nav-btn">', unsafe_allow_html=True)
@@ -448,11 +448,11 @@ with left:
         for k in ["logged_in","disclaimer_done"]: st.session_state[k]=False
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
-
+ 
 # ── RIGHT CONTENT ────────────────────────────────────────────
 with right:
     pg = st.session_state.page
-
+ 
     # ── TOP NAVBAR ──────────────────────────────────────────
     n1, n2, n3 = st.columns([3,4,1])
     with n1:
@@ -482,7 +482,7 @@ with right:
                          font-size:18px;color:{GOLD};">{name}</div>
                 </div>
             </div>""", unsafe_allow_html=True)
-
+ 
     with n2:
         st.markdown(f"""
         <div style="text-align:center;padding:12px 0;
@@ -493,7 +493,7 @@ with right:
                  font-size:12px;letter-spacing:4px;color:{IVORY};
                  text-transform:uppercase;margin-top:2px;">Finance &nbsp;&middot;&nbsp; Market Education</div>
         </div>""", unsafe_allow_html=True)
-
+ 
     with n3:
         st.markdown(f"""
         <div style="display:flex;align-items:center;justify-content:flex-end;
@@ -503,9 +503,9 @@ with right:
                  border:1px solid rgba(0,179,122,0.4);padding:4px 10px;
                  border-radius:20px;">LIVE</div>
         </div>""", unsafe_allow_html=True)
-
+ 
     st.markdown(f"<div style='height:1px;background:{BORDER};margin-bottom:8px;'></div>", unsafe_allow_html=True)
-
+ 
     # ── INDEX BAR ─────────────────────────────────────────────
     def show_idx(col, label, sym, color):
         d = get_index(sym)
@@ -542,7 +542,7 @@ with right:
                          font-size:20px;color:{T2};">--</div>
                     <div style="font-size:11px;color:{T2};margin-top:4px;">No data</div>
                 </div>""", unsafe_allow_html=True)
-
+ 
     st.markdown(f"<div style='height:3px;background:linear-gradient(90deg,{NAVY} 50%,{IVORY} 50%);border-radius:2px;margin-bottom:8px;'></div>", unsafe_allow_html=True)
     r1a,r1b = st.columns(2)
     show_idx(r1a,"NIFTY 50",   "^NSEI",    GOLD)
@@ -552,14 +552,14 @@ with right:
     show_idx(r2b,"SMALLCAP 250", "NIFTYSMLCAP250.NS",   "#7B9FFF")
     _,r3c,_ = st.columns([1,2,1])
     show_idx(r3c,"SENSEX","^BSESN","#FF8C42")
-
+ 
     st.markdown(f"<div style='height:1px;background:{BORDER};margin:8px 0 16px;'></div>", unsafe_allow_html=True)
-
+ 
     # ══════════════════════════════════════════════════════════
     # PAGES
     # ══════════════════════════════════════════════════════════
     st.markdown(f'<div style="padding:0 8px 80px;">', unsafe_allow_html=True)
-
+ 
     # ── HOME ────────────────────────────────────────────────
     if pg == "home":
         h1,h2 = st.columns(2)
@@ -588,7 +588,7 @@ with right:
                 <div style="font-size:11px;color:#888;font-style:italic;">
                     Not SEBI registered. Educational use only.</div>
             </div>""", unsafe_allow_html=True)
-
+ 
         section("TODAY AT A GLANCE")
         IST = timezone(timedelta(hours=5, minutes=30))
         now = datetime.now(IST)
@@ -598,7 +598,7 @@ with right:
         g2.metric("Date", now.strftime("%d %b %Y"))
         g3.metric("Time", now.strftime("%H:%M:%S"))
         g4.metric("Refresh", "10 Seconds")
-
+ 
         section("WHAT YOU GET")
         w1,w2,w3 = st.columns(3)
         for col,icon,title,color,desc in [
@@ -617,20 +617,20 @@ with right:
                          text-transform:uppercase;margin-bottom:8px;">{title}</div>
                     <div style="font-size:13px;color:{T2};line-height:1.8;">{desc}</div>
                 </div>""", unsafe_allow_html=True)
-
+ 
     # ── SCANNER ─────────────────────────────────────────────
     elif pg == "scanner":
         section("WATCHLIST SCANNER")
-
+ 
         # Auto-load from Supabase if not in session
         if not st.session_state.watchlist:
             wl = db_load_watchlist()
             if wl:
                 st.session_state.watchlist = wl
-
+ 
         with st.expander("How to export from TradingView"):
             st.write("TradingView → Watchlist → three-dot menu → Export data → save CSV → Upload below")
-
+ 
         uploaded = st.file_uploader("Upload new watchlist CSV (optional)", type=["csv","txt"], label_visibility="collapsed")
         if uploaded:
             syms = parse_csv(uploaded)
@@ -640,7 +640,7 @@ with right:
                 st.session_state.watchlist = syms
                 if db_save_watchlist(syms):
                     st.success(f"✅ {len(syms)} stocks loaded and saved to cloud!")
-
+ 
         # Show watchlist if available
         syms = st.session_state.watchlist
         if not syms:
@@ -652,7 +652,7 @@ with right:
             l10     = sc2.checkbox("10s Live")
             l60     = sc3.checkbox("60s Auto")
             scanbtn = sc4.button("SCAN NOW", use_container_width=True, type="primary")
-
+ 
             if scanbtn or l10 or l60:
                     results,failed = [],[]
                     bar = st.progress(0, text="Scanning...")
@@ -666,24 +666,24 @@ with right:
                         bar.progress((i+1)/len(syms), text=f"Fetching {sym}...")
                     bar.empty()
                     check_alerts(results)
-
+ 
                     if results:
                         filtered=results
                         if filt=="Above PDH":  filtered=[r for r in results if r["cls"]=="g"]
                         elif filt=="Below PDL":filtered=[r for r in results if r["cls"]=="r"]
                         elif filt=="In Range": filtered=[r for r in results if r["cls"]=="n"]
                         filtered.sort(key=lambda x:{"g":0,"r":1,"n":2}[x["cls"]])
-
+ 
                         g=sum(1 for r in results if r["cls"]=="g")
                         r=sum(1 for r in results if r["cls"]=="r")
                         n=sum(1 for r in results if r["cls"]=="n")
                         m1,m2,m3,m4=st.columns(4)
                         m1.metric("Above PDH",g); m2.metric("Below PDL",r)
                         m3.metric("In Range",n);  m4.metric("Total",len(results))
-
+ 
                         if failed:
                             with st.expander(f"{len(failed)} skipped"): st.write(", ".join(failed))
-
+ 
                         section("RESULTS")
                         cols7 = st.columns(7)
                         for i, s in enumerate(filtered):
@@ -693,7 +693,7 @@ with right:
                                 bg=f"linear-gradient(160deg,{DARK},{RED}18)"; bd=f"rgba(232,69,69,0.4)"; top=RED
                             else:
                                 bg=DARK2; bd=BORDER; top=BORDER
-
+ 
                             cc  = GREEN if s["chg"] >= 0 else RED
                             arr = "▲"   if s["chg"] >= 0 else "▼"
                             rc  = GREEN if s["rsi"] < 35 else RED if s["rsi"] > 65 else T2
@@ -703,11 +703,11 @@ with right:
                             bon = f'<svg width="16" height="16" viewBox="0 0 24 24" fill="{IVORY}"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
                             bof = f'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="{T2}" stroke-width="2"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
                             bell = bon if ha else bof
-
+ 
                             card = (
                                 f'<div style="background:{bg};border:1px solid {bd};border-top:3px solid {top};'
                                 f'border-radius:10px;padding:10px 6px 9px;text-align:center;margin-bottom:6px;">'
-
+ 
                                 f'<div style="display:flex;align-items:center;justify-content:center;'
                                 f'gap:2px;flex-wrap:nowrap;margin-bottom:6px;overflow:hidden;">'
                                 f'<span style="font-family:Inter,sans-serif;font-weight:900;font-size:11px;'
@@ -718,29 +718,29 @@ with right:
                                 f'color:{cc};white-space:nowrap;">{arr}{abs(s["chg"]):.2f}%</span>'
                                 f'<span style="display:flex;align-items:center;margin-left:2px;flex-shrink:0;">{bell}</span>'
                                 f'</div>'
-
+ 
                                 f'<div style="font-family:JetBrains Mono,monospace;font-weight:700;font-size:13px;'
                                 f'color:{IVORY};line-height:1;margin-bottom:5px;">&#8377;{s["cur"]:.2f}</div>'
-
+ 
                                 f'<div style="font-family:JetBrains Mono,monospace;font-size:11px;font-weight:700;'
                                 f'color:{rc};">RSI {s["rsi"]}</div>'
-
+ 
                                 f'</div>'
                             )
-
+ 
                             with cols7[i % 7]:
                                 st.markdown(card, unsafe_allow_html=True)
-
+ 
                         IST = timezone(timedelta(hours=5, minutes=30))
                         st.caption(f"Scanned: {datetime.now(IST).strftime('%d %b %Y  %H:%M:%S')}  ·  % vs prev close  ·  Price: 10s cache")
                         if l10: time.sleep(10); st.cache_data.clear(); st.rerun()
                         elif l60: time.sleep(60); st.cache_data.clear(); st.rerun()
-
+ 
         # ── News Panel (auto-refreshes independently)
         if syms:
             _ensure_news_state()
             news_panel(syms)
-
+ 
     # ── ALERTS ──────────────────────────────────────────────
     elif pg == "alerts":
         section("TELEGRAM ALERTS")
@@ -757,7 +757,7 @@ with right:
                     You get a Telegram notification when price hits the level.
                 </div>
             </div>""", unsafe_allow_html=True)
-
+ 
             COLS=4; rows=[watchlist[i:i+COLS] for i in range(0,len(watchlist),COLS)]
             for row in rows:
                 cols=st.columns(COLS)
@@ -814,7 +814,7 @@ with right:
                                         send_telegram(f"Alert set!\n{sym} · {atype.upper()} · Rs{price:.2f}")
                                         st.session_state[f"open_{sym}"]=False
                                         st.success(f"Alert set for {sym}!"); st.rerun()
-
+ 
     # ── NEWS PAGE ────────────────────────────────────────────
     elif pg == "news":
         section("STOCK NEWS")
@@ -824,11 +824,11 @@ with right:
         else:
             _ensure_news_state()
             news_panel(watchlist)
-
+ 
     # ── ANALYSIS — ARKA AI ──────────────────────────────────
     elif pg in ["analysis","heatmap","autoalert"]:
         if pg == "analysis":
-            render_arka_ai()
+            arka_ai_page()
         else:
             section("COMING SOON")
             labels = {"heatmap":"Market Heatmap","autoalert":"Auto Smart Alerts"}
@@ -839,7 +839,7 @@ with right:
                      letter-spacing:5px;color:{T2};margin-bottom:12px;">{labels.get(pg,'Coming Soon')}</div>
                 <div style="font-size:15px;color:{T2};opacity:.6;">This feature is under development</div>
             </div>""", unsafe_allow_html=True)
-
+ 
     # ── PROFILE ─────────────────────────────────────────────
     elif pg == "profile":
         section("MY PROFILE")
@@ -872,7 +872,7 @@ with right:
                     st.session_state.profile.update({"name":nn,"phone":np,"email":ne})
                     if ph: st.session_state["profile_photo"]=ph
                     st.success(f"Saved! Welcome, {nn}!"); st.rerun()
-
+ 
     # ── SETTINGS ────────────────────────────────────────────
     elif pg == "settings":
         section("SETTINGS")
@@ -904,7 +904,7 @@ with right:
             st.success("Test sent to Telegram!")
         st.divider()
         st.markdown("#### 📡 Broker API — Coming Soon")
-
+ 
     # ── CONTACT ─────────────────────────────────────────────
     elif pg == "contact":
         section("CONTACT US")
@@ -933,5 +933,5 @@ with right:
                 if st.form_submit_button("Send Message",use_container_width=True):
                     if n and m: st.success("Please email: Mohitdevsinghchib644@gmail.com")
                     else: st.warning("Fill name and message.")
-
+ 
     st.markdown('</div>', unsafe_allow_html=True)
