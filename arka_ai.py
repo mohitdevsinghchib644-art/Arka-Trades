@@ -32,7 +32,7 @@ except ImportError:
     HAS_PDF = False
  
 try:
-    from PIL import Image
+    from PIL import Image, ImageDraw
     HAS_PIL = True
 except ImportError:
     HAS_PIL = False
@@ -156,12 +156,22 @@ def save_rule_to_memory(rule_type: str, rule_name: str, rule_text: str, tags: li
     idx = get_pinecone_index()
     if not idx:
         return False
+    
+    # Validate inputs
+    if not rule_text or not rule_text.strip():
+        st.error("Cannot save rule: description is empty")
+        return False
+    
     try:
-        full_text = f"{rule_type}: {rule_name}\n{rule_text}"
-        embedding  = get_embedding(full_text)
-        if not embedding:
+        full_text = f"{rule_type}: {rule_name}\n{rule_text}".strip()
+        embedding = get_embedding(full_text)
+        
+        # CRITICAL: Reject None or zero embeddings
+        if embedding is None:
+            st.error(f"Embedding failed for '{rule_name}'. Check Gemini API.")
             return False
-        vector_id = f"rule_{int(time.time())}_{rule_name[:20].replace(' ','_')}"
+        
+        vector_id = f"rule_{int(time.time())}_{rule_name[:20].replace(' ','_').upper()}"
         idx.upsert(vectors=[{
             "id":     vector_id,
             "values": embedding,
@@ -173,6 +183,7 @@ def save_rule_to_memory(rule_type: str, rule_name: str, rule_text: str, tags: li
                 "saved_at":    datetime.now().isoformat()
             }
         }])
+        st.success(f"✅ Saved: {rule_name}")
         return True
     except Exception as e:
         st.error(f"Save error: {e}")
