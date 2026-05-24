@@ -134,15 +134,21 @@ def get_pinecone_index():
 def get_embedding(text: str) -> list:
     """Get text embedding via Gemini embedding model."""
     if not HAS_GEMINI or not GEMINI_KEY:
-        return [0.0] * 768
+        return None
+    if not text or not text.strip():
+        return None
     try:
         result = genai.embed_content(
             model="models/text-embedding-004",
-            content=text
+            content=text.strip()
         )
-        return result["embedding"]
-    except Exception:
-        return [0.0] * 768
+        embedding = result.get("embedding", [])
+        if not embedding or all(v == 0 for v in embedding):
+            return None
+        return embedding
+    except Exception as e:
+        print(f"Embedding error: {e}")
+        return None
  
  
 def save_rule_to_memory(rule_type: str, rule_name: str, rule_text: str, tags: list = None):
