@@ -135,7 +135,6 @@ def get_pinecone_index():
 
 def get_embedding(text: str) -> list:
     """Get text embedding using the fully qualified model path with strict case matching."""
-    # Using lowercase 'client' to exactly match the variable usage below
     client = get_gemini_client()
     if not client:
         print("❌ Gemini client not available for embedding generation.")
