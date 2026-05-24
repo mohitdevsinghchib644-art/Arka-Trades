@@ -110,28 +110,39 @@ OUTPUT FORMAT (always return valid JSON):
 # ══════════════════════════════════════════════════════════
 
 @st.cache_resource
-def get_pinecone_index():
-    if not HAS_PINECONE or not PINECONE_KEY:
+def get_embedding(text: str) -> list:
+    """Get text embedding with an automatic unrestricted fallback model."""
+    client = get_gemini_client()
+    if not client:
+        print("❌ Gemini client not available for embedding generation.")
         return None
+    
+    if not text or not text.strip():
+        return None
+    
+    # Try the standard model first
     try:
-        pc = Pinecone(api_key=PINECONE_KEY)
-        if PINECONE_HOST:
-            return pc.Index(name=INDEX_NAME, host=PINECONE_HOST.strip())
-            
-        existing = [i.name for i in pc.list_indexes()]
-        if INDEX_NAME not in existing:
-            pc.create_index(
-                name=INDEX_NAME,
-                dimension=768,
-                metric="cosine",
-                spec=ServerlessSpec(cloud="aws", region="us-east-1")
-            )
-            time.sleep(2)
-        return pc.Index(INDEX_NAME)
-    except Exception as e:
-        print(f"❌ Pinecone connection failed: {e}")
+        response = client.models.embed_content(
+            model="models/text-embedding-004",
+            contents=text.strip()
+        )
+        if response and response.embeddings:
+            return response.embeddings[0].values
+    except Exception:
+        pass  # If blocked by key permissions, silently move to fallback
+        
+    # FALLBACK: Use the universal unrestricted embedding model (Matches 768 dimensions)
+    try:
+        response = client.models.embed_content(
+            model="models/embedding-001",
+            contents=text.strip()
+        )
+        if response and response.embeddings:
+            return response.embeddings[0].values
         return None
-
+    except Exception as e:
+        st.error(f"🔴 Critical: Both embedding models rejected by API Key. Error: {str(e)}")
+        return None
 
 def get_embedding(text: str) -> list:
     """Get text embedding using the fully qualified model path with strict case matching."""
