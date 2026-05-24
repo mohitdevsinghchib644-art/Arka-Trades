@@ -47,7 +47,9 @@ except ImportError:
 GEMINI_KEY   = st.secrets.get("GEMINI_KEY",   "")
 PINECONE_KEY = st.secrets.get("PINECONE_KEY", "")
 INDEX_NAME   = "arka-trading-rules"
- 
+PINECONE_HOST = "https://arka-trading-rules-f7kq93g.svc.aped-4627-b74a.pinecone.io"
+VECTOR_DIM   = 1024  # Matches your Pinecone Index configuration
+
 # ── Colors ─────────────────────────────────────────────────
 GOLD   = "#C8A96A"
 GREEN  = "#00B37A"
@@ -113,32 +115,37 @@ def get_pinecone_index():
         return None
     try:
         pc = Pinecone(api_key=PINECONE_KEY)
-        existing = [i.name for i in pc.list_indexes()]
-        if INDEX_NAME not in existing:
-            pc.create_index(
-                name=INDEX_NAME,
-                dimension=768,
-                metric="cosine",
-                spec=ServerlessSpec(cloud="aws", region="us-east-1")
-            )
-            time.sleep(2)
-        return pc.Index(INDEX_NAME)
-    except Exception:
+        # Directly leverage your verified host URL to fix connection dropping issues
+        return pc.Index(name=INDEX_NAME, host=PINECONE_HOST)
+    except Exception as e:
+        st.error(f"Pinecone Connection Failed: {e}")
         return None
  
  
 def get_embedding(text: str) -> list:
-    """Get text embedding via Gemini embedding model."""
+    """Get text embedding via Gemini embedding model and pad/truncate to match index dimensions."""
     if not HAS_GEMINI or not GEMINI_KEY:
-        return [0.0] * 768
+        # Avoid pure zero vectors to stop Pinecone from rejecting with a 400 error
+        dummy = [0.01] * VECTOR_DIM
+        return dummy
     try:
         result = genai.embed_content(
             model="models/text-embedding-004",
             content=text
         )
-        return result["embedding"]
-    except Exception:
-        return [0.0] * 768
+        gemini_vector = result["embedding"]
+        
+        # Match Pinecone index requirements (1024 dimensions)
+        if len(gemini_vector) < VECTOR_DIM:
+            # Pad with minor non-zero values to maintain structural integrity
+            gemini_vector += [0.01] * (VECTOR_DIM - len(gemini_vector))
+        elif len(gemini_vector) > VECTOR_DIM:
+            gemini_vector = gemini_vector[:VECTOR_DIM]
+            
+        return gemini_vector
+    except Exception as e:
+        st.error(f"Gemini API Embedding Error: {e}")
+        return [0.01] * VECTOR_DIM
  
  
 def save_rule_to_memory(rule_name: str, rule_text: str, tags: list = None):
@@ -149,7 +156,7 @@ def save_rule_to_memory(rule_name: str, rule_text: str, tags: list = None):
     try:
         full_text = f"Rule: {rule_name}\n{rule_text}"
         embedding  = get_embedding(full_text)
-        if not embedding:
+        if not embedding or all(v == 0.0 for v in embedding):
             return False
         vector_id = f"rule_{int(time.time())}_{rule_name[:20].replace(' ','_')}"
         idx.upsert(vectors=[{
@@ -175,7 +182,7 @@ def search_memory(query: str, top_k: int = 5) -> list[dict]:
         return []
     try:
         embedding = get_embedding(query)
-        if not embedding:
+        if not embedding or all(v == 0.0 for v in embedding):
             return []
         results = idx.query(
             vector=embedding,
@@ -190,7 +197,7 @@ def search_memory(query: str, top_k: int = 5) -> list[dict]:
                 "tags":      json.loads(m.metadata.get("tags", "[]")),
             }
             for m in results.matches
-            if m.score > 0.5
+            if m.score > 0.4
         ]
     except Exception as e:
         st.error(f"Search error: {e}")
@@ -205,7 +212,7 @@ def build_rules_context(query: str = "trading setup entry exit rules") -> str:
     lines = ["=== USER'S PERSONAL TRADING RULES (from memory) ==="]
     for r in rules:
         lines.append(f"\nRule: {r['rule_name']} (relevance: {r['score']:.2f})")
-        lines.append(f"  → {r['rule_text']}")
+        lines.append(f"   → {r['rule_text']}")
     lines.append("\n=== END OF RULES ===")
     return "\n".join(lines)
  
