@@ -4,8 +4,8 @@ pandas>=2.0.0
 requests>=2.28.0
 supabase>=2.0.0
 feedparser>=6.0.0
-google-generativeai>=0.8.0
-pinecone-client>=3.0.0
+google-genai
+pinecone
 streamlit-image-coordinates>=0.1.6
 pdfplumber>=0.10.0
 plotly>=5.18.0
