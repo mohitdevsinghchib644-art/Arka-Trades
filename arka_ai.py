@@ -1,4 +1,3 @@
-
 """
 arka_ai.py  —  Arka AI Trading Companion
 ==========================================
