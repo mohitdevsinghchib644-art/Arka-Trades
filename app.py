@@ -6,7 +6,7 @@ import time
 import requests
 from supabase import create_client, Client
 from news_feed import news_panel, get_news_dot, _ensure_news_state
-from arka_ai import arka_ai_page
+from arka_ai import render_arka_ai
 
 # ── Supabase Config ─────────────────────────────────────────
 SUPABASE_URL = "https://vpxagxjgtonynblhddwh.supabase.co"
