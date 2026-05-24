@@ -6,6 +6,7 @@ import time
 import requests
 from supabase import create_client, Client
 from news_feed import news_panel, get_news_dot, _ensure_news_state
+from arka_ai import arka_ai_page
 
 # ── Supabase Config ─────────────────────────────────────────
 SUPABASE_URL = "https://vpxagxjgtonynblhddwh.supabase.co"
@@ -428,7 +429,7 @@ with left:
     <div style="padding:14px 12px 4px;font-family:'Bebas Neue',sans-serif;
          font-size:13px;letter-spacing:3px;color:{T2};">COMING SOON</div>
     """, unsafe_allow_html=True)
-    nav_btn("Analysis",     "analysis", "📊")
+    nav_btn("Analysis  ✦ Arka AI", "analysis", "🤖")
     nav_btn("Heatmap",      "heatmap",  "🗺️")
     nav_btn("Auto Alerts",  "autoalert","⚡")
 
@@ -824,17 +825,20 @@ with right:
             _ensure_news_state()
             news_panel(watchlist)
 
-    # ── ANALYSIS / COMING SOON ──────────────────────────────
+    # ── ANALYSIS — ARKA AI ──────────────────────────────────
     elif pg in ["analysis","heatmap","autoalert"]:
-        section("COMING SOON")
-        labels = {"analysis":"Analytics Dashboard","heatmap":"Market Heatmap","autoalert":"Auto Smart Alerts"}
-        st.markdown(f"""
-        <div style="background:{DARK2};border:1px dashed {BORDER};border-radius:20px;
-             padding:100px 20px;text-align:center;margin:20px 0;">
-            <div style="font-family:'Bebas Neue',sans-serif;font-size:36px;
-                 letter-spacing:5px;color:{T2};margin-bottom:12px;">{labels.get(pg,'Coming Soon')}</div>
-            <div style="font-size:15px;color:{T2};opacity:.6;">This feature is under development</div>
-        </div>""", unsafe_allow_html=True)
+        if pg == "analysis":
+            arka_ai_page()
+        else:
+            section("COMING SOON")
+            labels = {"heatmap":"Market Heatmap","autoalert":"Auto Smart Alerts"}
+            st.markdown(f"""
+            <div style="background:{DARK2};border:1px dashed {BORDER};border-radius:20px;
+                 padding:100px 20px;text-align:center;margin:20px 0;">
+                <div style="font-family:'Bebas Neue',sans-serif;font-size:36px;
+                     letter-spacing:5px;color:{T2};margin-bottom:12px;">{labels.get(pg,'Coming Soon')}</div>
+                <div style="font-size:15px;color:{T2};opacity:.6;">This feature is under development</div>
+            </div>""", unsafe_allow_html=True)
 
     # ── PROFILE ─────────────────────────────────────────────
     elif pg == "profile":
@@ -931,4 +935,3 @@ with right:
                     else: st.warning("Fill name and message.")
 
     st.markdown('</div>', unsafe_allow_html=True)
-
