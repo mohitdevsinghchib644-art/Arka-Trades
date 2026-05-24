@@ -145,7 +145,7 @@ def get_embedding(text: str) -> list:
     
     try:
         response = client.models.embed_content(
-            model="text-embedding-004",
+            model="models/text-embedding-004",
             contents=text.strip()
         )
         
