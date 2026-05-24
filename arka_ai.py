@@ -134,7 +134,8 @@ def get_pinecone_index():
 
 
 def get_embedding(text: str) -> list:
-    """Get text embedding using stable modern client syntax."""
+    """Get text embedding using the fully qualified model path with strict case matching."""
+    # Using lowercase 'client' to exactly match the variable usage below
     client = get_gemini_client()
     if not client:
         print("❌ Gemini client not available for embedding generation.")
@@ -144,6 +145,7 @@ def get_embedding(text: str) -> list:
         return None
     
     try:
+        # Correctly formatted lowercase client call with the required 'models/' endpoint task prefix
         response = client.models.embed_content(
             model="models/text-embedding-004",
             contents=text.strip()
@@ -155,7 +157,6 @@ def get_embedding(text: str) -> list:
     except Exception as e:
         print(f"❌ Embedding API error: {str(e)}")
         return None
-
 
 def save_rule_to_memory(rule_type: str, rule_name: str, rule_text: str, tags: list = None):
     """Save a trading rule into Pinecone vector memory."""
