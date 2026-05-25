@@ -63,7 +63,7 @@ NAVY   = "#0A1D4B"
 # ══════════════════════════════════════════════════════════
 # 1. GEMINI CLIENT
 # ══════════════════════════════════════════════════════════
-@st.cache_resourced
+@st.cache_resource
 def get_gemini_client():
     if not HAS_GEMINI or not GEMINI_KEY:
         return None
