@@ -87,7 +87,7 @@ OUTPUT FORMAT — return ONLY valid JSON:
 def get_embedding(text: str) -> list:
     """
     FIXED: uses 'content' (singular) not 'contents'.
-    embedding-001 returns 768 dims matching Pinecone index.
+    text-embedding-004 returns 768 dims matching Pinecone index.
     """
     if not GEMINI_KEY or not text or not text.strip():
         return None
