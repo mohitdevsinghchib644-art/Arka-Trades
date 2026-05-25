@@ -63,7 +63,7 @@ NAVY   = "#0A1D4B"
 # ══════════════════════════════════════════════════════════
 # 1. GEMINI CLIENT
 # ══════════════════════════════════════════════════════════
-@st.cache_resourced
+@st.cache_resource
 def get_gemini_client():
     if not HAS_GEMINI or not GEMINI_KEY:
         return None
@@ -116,9 +116,9 @@ def get_embedding(text: str) -> list:
         }
         resp = requests.post(url, json=payload, timeout=10)
         if resp.status_code == 200:
-            res_json = resp.json()
-            if "embedding" in res_json and "values" in res_json["embedding"]:
-                return res_json["embedding"]["values"]
+            容_json = resp.json()
+            if "embedding" in resp.json() and "values" in resp.json()["embedding"]:
+                return resp.json()["embedding"]["values"]
         print(f"❌ REST Embedding Request Failed with status: {resp.status_code}")
     except Exception as e:
         print(f"❌ Direct embedding exception: {str(e)}")
@@ -128,7 +128,7 @@ def get_embedding(text: str) -> list:
 # ══════════════════════════════════════════════════════════
 # 3. PINECONE VECTOR MEMORY
 # ══════════════════════════════════════════════════════════
-@st.cache_resourced
+@st.cache_resource
 def get_pinecone_index():
     if not HAS_PINECONE or not PINECONE_KEY:
         return None
@@ -400,7 +400,7 @@ def render_mode1():
         st.markdown(
             f"<div style='font-size:12px;color:{T2};margin-bottom:6px;'>"
             f"Click on any candle to focus the analysis on that exact area</div>",
-            unsafe_allow_html=True
+            f"Target locked: ({tx}, {ty}) — "
         )
         if HAS_IMG_COORDS:
             coords  = streamlit_image_coordinates(img, key="chart_click", use_column_width=True)
