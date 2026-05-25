@@ -386,9 +386,9 @@ def render_mode1():
                     st.image(annotated, caption="AI Annotated", use_container_width=True)
 
             if result.get("rules_matched"):
-                st.markdown(f'<div style="color:{GREEN};font-size:13px;font-weight:700;margin-top:8px;">Rules Matched</div>', unsafe_allow_html=True)
+                st.markdown(f'<div style="color:{GREEN};font-size:16px;font-weight:700;margin-top:12px;">Rules Matched</div>', unsafe_allow_html=True)
                 for r in result["rules_matched"]:
-                    st.markdown(f'<div style="color:{GREEN};font-size:12px;margin-left:8px;">· {r}</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div style="color:{GREEN};font-size:15px;margin-left:8px;">· {r}</div>', unsafe_allow_html=True)
 
             if result.get("rules_violated"):
                 st.markdown(f'<div style="color:{RED};font-size:13px;font-weight:700;margin-top:8px;">Rules Violated</div>', unsafe_allow_html=True)
