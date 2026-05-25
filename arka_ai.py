@@ -1,6 +1,3 @@
-bash
-
-cat > /mnt/user-data/outputs/nse_scanner/arka_ai.py << 'PYEOF'
 """
 arka_ai.py — Arka AI Trading Companion
 Brain: Gemini 2.5 Flash | Memory: Pinecone | Voice: Web Speech API
