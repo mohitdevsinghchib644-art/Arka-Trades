@@ -85,36 +85,19 @@ OUTPUT FORMAT — return ONLY valid JSON:
 # 2. EMBEDDING — REST API (correct payload)
 # ══════════════════════════════════════════
 def get_embedding(text: str) -> list:
-    """
-    FIXED: uses 'content' (singular) not 'contents'.
-    text-embedding-004 returns 768 dims matching Pinecone index.
-    """
     if not GEMINI_KEY or not text or not text.strip():
         return None
     try:
-        url = (
-            "https://generativelanguage.googleapis.com/v1/"
-           f"models/text-embedding-004:embedContent?key={GEMINI_KEY}"
+        client = get_gemini_client()
+        if not client:
+            return None
+        result = client.models.embed_content(
+            model="gemini-embedding-001",
+            contents=text.strip()[:2000]
         )
-        # CORRECT payload structure for embedContent endpoint
-        payload = {
-            "model": "models/text-embedding-004",
-            "content": {
-                "parts": [{"text": text.strip()[:2000]}]
-            }
-        }
-        resp = requests.post(url, json=payload, timeout=15)
-        if resp.status_code == 200:
-            data = resp.json()
-            if "embedding" in data and "values" in data["embedding"]:
-                return data["embedding"]["values"]
-            st.error(f"Embedding response missing values: {data}")
-            return None
-        else:
-            st.error(f"Embedding API {resp.status_code}: {resp.text[:300]}")
-            return None
+        return result.embeddings[0].values
     except Exception as e:
-        st.error(f"Embedding exception: {e}")
+        st.error(f"Embedding error: {e}")
         return None
 
 # ══════════════════════════════════════════
