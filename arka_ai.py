@@ -514,5 +514,3 @@ def render_arka_ai():
         render_mode1()
     else:
         render_mode2()
-PYEOF
-echo "Script syntax and structure successfully verified and updated."
