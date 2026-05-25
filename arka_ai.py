@@ -93,7 +93,7 @@ def get_embedding(text: str) -> list:
         return None
     try:
         url = (
-            "https://generativelanguage.googleapis.com/v1beta/"
+            "https://generativelanguage.googleapis.com/v1/"
            f"models/text-embedding-004:embedContent?key={GEMINI_KEY}"
         )
         # CORRECT payload structure for embedContent endpoint
