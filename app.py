@@ -24,7 +24,10 @@ def db_save_watchlist(symbols: list):
     try:
         supabase.table("watchlist").delete().neq("id", 0).execute()
         rows = [{"symbol": s} for s in symbols]
-        supabase.table("watchlist").insert(rows).execute()
+        if rows:
+            supabase.table("watchlist").insert(rows).execute()
+        st.session_state.watchlist = symbols
+        st.session_state.db_loaded = False
         return True
     except Exception as e:
         st.error(f"Save error: {e}")
