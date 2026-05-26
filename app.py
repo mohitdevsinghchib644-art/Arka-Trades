@@ -631,15 +631,22 @@ with right:
         with st.expander("How to export from TradingView"):
             st.write("TradingView → Watchlist → three-dot menu → Export data → save CSV → Upload below")
  
-        uploaded = st.file_uploader("Upload new watchlist CSV (optional)", type=["csv","txt"], label_visibility="collapsed")
+       uploaded = st.file_uploader("Upload new watchlist CSV (optional)", type=["csv","txt"], label_visibility="collapsed")
         if uploaded:
             syms = parse_csv(uploaded)
             if not syms:
                 st.error("No symbols found.")
             else:
-                st.session_state.watchlist = syms
-                if db_save_watchlist(syms):
-                    st.success(f"✅ {len(syms)} stocks loaded and saved to cloud!")
+                # 1. Clean the incoming list data to ensure it's a fresh, flat Python list of strings
+                fresh_watchlist = [str(s).strip().upper() for s in syms if s]
+                
+                # 2. Push directly to Supabase first
+                if db_save_watchlist(fresh_watchlist):
+                    # 3. ONLY update the local UI memory if the database write succeeded
+                    st.session_state.watchlist = fresh_watchlist
+                    st.session_state.db_loaded = True
+                    st.success(f"✅ {len(fresh_watchlist)} stocks loaded and saved to cloud!")
+                    st.rerun()  # Hard reload the layout to discard old states immediately
  
         # Show watchlist if available
         syms = st.session_state.watchlist
