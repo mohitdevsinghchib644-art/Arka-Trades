@@ -801,8 +801,8 @@ with right:
                 _ensure_news_state()
                 news_panel(your_syms)
 
-        elif pg == "alerts":
-            section("TELEGRAM ALERTS")
+            elif pg == "alerts":
+                section("TELEGRAM ALERTS")
 
         def render_alert_cards(watchlist, key_suffix=""):
             st.markdown(f"""
