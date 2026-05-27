@@ -624,17 +624,25 @@ with right:
     # ── SCANNER ─────────────────────────────────────────────
     elif pg == "scanner":
         section("WATCHLIST SCANNER")
- 
+
         # Auto-load from Supabase if not in session
         if not st.session_state.watchlist:
             wl = db_load_watchlist()
             if wl:
                 st.session_state.watchlist = wl
- 
-        with st.expander("How to export from TradingView"):
-            st.write("TradingView → Watchlist → three-dot menu → Export data → save CSV → Upload below")
- 
-        uploaded = st.file_uploader("Upload new watchlist CSV (optional)", type=["csv","txt"], label_visibility="collapsed")
+
+        # ── SECTION 1: ADD WATCHLIST ──
+        st.markdown(f"""
+        <div style="background:{DARK2};border:1px solid {BORDER};border-left:4px solid {GOLD};
+             border-radius:14px;padding:20px 24px;margin-bottom:20px;">
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;
+                 letter-spacing:4px;color:{GOLD};margin-bottom:8px;">📤 ADD WATCHLIST</div>
+            <div style="font-size:12px;color:{T2};margin-bottom:12px;">
+                Export from TradingView → Watchlist → three-dot menu → Export data → Upload below
+            </div>
+        </div>""", unsafe_allow_html=True)
+
+        uploaded = st.file_uploader("Upload TradingView watchlist (CSV or TXT)", type=["csv","txt"])
         if uploaded:
             syms = parse_csv(uploaded)
             if not syms:
@@ -642,6 +650,26 @@ with right:
             else:
                 if db_save_watchlist(syms):
                     st.success(f"✅ {len(syms)} stocks loaded and saved!")
+                    st.cache_data.clear()
+                    st.rerun()
+
+        st.markdown(f"<div style='height:1px;background:{BORDER};margin:24px 0;'></div>", unsafe_allow_html=True)
+
+        # ── SECTION 2: YOUR WATCHLIST ──
+        syms = st.session_state.watchlist
+        st.markdown(f"""
+        <div style="background:{DARK2};border:1px solid {BORDER};border-left:4px solid {GREEN};
+             border-radius:14px;padding:20px 24px;margin-bottom:20px;">
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;
+                 letter-spacing:4px;color:{GREEN};margin-bottom:4px;">📋 YOUR WATCHLIST</div>
+            <div style="font-size:12px;color:{T2};">
+                {f"{len(syms)} stocks saved in cloud" if syms else "No watchlist uploaded yet"}
+            </div>
+        </div>""", unsafe_allow_html=True)
+
+        if not syms:
+            st.info("Upload your TradingView watchlist above to start scanning.")
+        else:
                     st.cache_data.clear()
                     st.rerun()
         # Show watchlist if available
