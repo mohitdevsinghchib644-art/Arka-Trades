@@ -626,53 +626,22 @@ with right:
     elif pg == "scanner":
         section("WATCHLIST SCANNER")
 
+        if not st.session_state.admin_watchlist:
+            awl = db_load_admin_watchlist()
+            if awl:
+                st.session_state.admin_watchlist = awl
+
         if not st.session_state.watchlist:
             wl = db_load_watchlist()
             if wl:
                 st.session_state.watchlist = wl
 
-        st.markdown(f"""
-        <div style="background:{DARK2};border:1px solid {BORDER};border-left:4px solid {GOLD};
-             border-radius:14px;padding:20px 24px;margin-bottom:20px;">
-            <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;
-                 letter-spacing:4px;color:{GOLD};margin-bottom:8px;">📤 ADD WATCHLIST</div>
-            <div style="font-size:12px;color:{T2};margin-bottom:12px;">
-                Export from TradingView → Watchlist → three-dot menu → Export data → Upload below
-            </div>
-        </div>""", unsafe_allow_html=True)
-
-        uploaded = st.file_uploader("Upload TradingView watchlist (CSV or TXT)", type=["csv","txt"])
-        if uploaded:
-            syms = parse_csv(uploaded)
-            if not syms:
-                st.error("No symbols found.")
-            else:
-                if db_save_watchlist(syms):
-                    st.success(f"✅ {len(syms)} stocks loaded and saved!")
-                    st.cache_data.clear()
-                    st.rerun()
-
-        st.markdown(f"<div style='height:1px;background:{BORDER};margin:24px 0;'></div>", unsafe_allow_html=True)
-
-        syms = st.session_state.watchlist
-        st.markdown(f"""
-        <div style="background:{DARK2};border:1px solid {BORDER};border-left:4px solid {GREEN};
-             border-radius:14px;padding:20px 24px;margin-bottom:20px;">
-            <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;
-                 letter-spacing:4px;color:{GREEN};margin-bottom:4px;">📋 YOUR WATCHLIST</div>
-            <div style="font-size:12px;color:{T2};">
-                {f"{len(syms)} stocks saved in cloud" if syms else "No watchlist uploaded yet"}
-            </div>
-        </div>""", unsafe_allow_html=True)
-
-        if not syms:
-            st.info("Upload your TradingView watchlist above to start scanning.")
-        else:
+        def render_scan_results(syms, key_prefix=""):
             sc1,sc2,sc3,sc4 = st.columns([1,1,1,2])
-            filt    = sc1.selectbox("Show",["All","Above PDH","Below PDL","In Range"])
-            l10     = sc2.checkbox("10s Live")
-            l60     = sc3.checkbox("60s Auto")
-            scanbtn = sc4.button("SCAN NOW", use_container_width=True, type="primary")
+            filt    = sc1.selectbox("Show",["All","Above PDH","Below PDL","In Range"], key=f"filt_{key_prefix}")
+            l10     = sc2.checkbox("10s Live", key=f"l10_{key_prefix}")
+            l60     = sc3.checkbox("60s Auto", key=f"l60_{key_prefix}")
+            scanbtn = sc4.button("SCAN NOW", use_container_width=True, type="primary", key=f"scan_{key_prefix}")
 
             if scanbtn or l10 or l60:
                 results,failed = [],[]
@@ -744,7 +713,6 @@ with right:
                             f'color:{rc};">RSI {s["rsi"]}</div>'
                             f'</div>'
                         )
-
                         with cols7[i % 7]:
                             st.markdown(card, unsafe_allow_html=True)
 
@@ -753,14 +721,70 @@ with right:
                     if l10: time.sleep(10); st.cache_data.clear(); st.rerun()
                     elif l60: time.sleep(60); st.cache_data.clear(); st.rerun()
 
-        if syms:
+        # ── SECTION 1: ARKA WATCHLIST (Admin only can upload) ──
+        admin_syms = st.session_state.admin_watchlist
+        st.markdown(f"""
+        <div style="background:{DARK2};border:1px solid {BORDER};border-left:4px solid {GOLD};
+             border-radius:14px;padding:20px 24px;margin-bottom:20px;">
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;
+                 letter-spacing:4px;color:{GOLD};margin-bottom:4px;">👑 ARKA WATCHLIST</div>
+            <div style="font-size:12px;color:{T2};">
+                {f"{len(admin_syms)} stocks · Curated by Arka Trades" if admin_syms else "No admin watchlist yet"}
+            </div>
+        </div>""", unsafe_allow_html=True)
+
+        if IS_ADMIN:
+            uploaded_admin = st.file_uploader("Upload Arka Watchlist (Admin Only)", type=["csv","txt"], key="admin_upload")
+            if uploaded_admin:
+                syms = parse_csv(uploaded_admin)
+                if not syms:
+                    st.error("No symbols found.")
+                else:
+                    if db_save_admin_watchlist(syms):
+                        st.success(f"✅ Arka Watchlist updated — {len(syms)} stocks!")
+                        st.cache_data.clear()
+                        st.rerun()
+
+        if not admin_syms:
+            st.info("Admin watchlist not uploaded yet.")
+        else:
+            render_scan_results(admin_syms, key_prefix="admin")
+
+        st.markdown(f"<div style='height:1px;background:{BORDER};margin:32px 0;'></div>", unsafe_allow_html=True)
+
+        # ── SECTION 2: YOUR WATCHLIST (Members upload their own) ──
+        your_syms = st.session_state.watchlist
+        st.markdown(f"""
+        <div style="background:{DARK2};border:1px solid {BORDER};border-left:4px solid {GREEN};
+             border-radius:14px;padding:20px 24px;margin-bottom:20px;">
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;
+                 letter-spacing:4px;color:{GREEN};margin-bottom:4px;">📋 YOUR WATCHLIST</div>
+            <div style="font-size:12px;color:{T2};">
+                {f"{len(your_syms)} stocks saved in cloud" if your_syms else "No watchlist uploaded yet"}
+            </div>
+        </div>""", unsafe_allow_html=True)
+
+        uploaded_yours = st.file_uploader("Upload Your Watchlist (CSV or TXT)", type=["csv","txt"], key="your_upload")
+        if uploaded_yours:
+            syms = parse_csv(uploaded_yours)
+            if not syms:
+                st.error("No symbols found.")
+            else:
+                if db_save_watchlist(syms):
+                    st.success(f"✅ {len(syms)} stocks loaded and saved!")
+                    st.cache_data.clear()
+                    st.rerun()
+
+        if not your_syms:
+            st.info("Upload your TradingView watchlist above to start scanning.")
+        else:
+            render_scan_results(your_syms, key_prefix="yours")
+
+        if your_syms or admin_syms:
             _ensure_news_state()
-            news_panel(syms)
- 
-        # ── News Panel (auto-refreshes independently)
-        if syms:
-            _ensure_news_state()
-            news_panel(syms)
+            news_panel(your_syms or admin_syms)
+
+    # ── ALERTS ──────────────────────────────────────────────
  
     # ── ALERTS ──────────────────────────────────────────────
     elif pg == "alerts":
