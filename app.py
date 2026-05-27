@@ -816,10 +816,8 @@ with right:
             else:
                 render_scan_results(your_syms, key_prefix="yours")
 
-        all_syms = list(set(st.session_state.admin_watchlist + st.session_state.watchlist))
-        if all_syms:
-            _ensure_news_state()
-            news_panel(all_syms)
+       # News shows based on which tab is active — handled inside each tab
+        pass
 
     # ── ALERTS ──────────────────────────────────────────────
 
