@@ -70,6 +70,24 @@ def db_load_alerts() -> dict:
                 for r in res.data} if res.data else {}
     except:
         return {}
+       def db_save_admin_watchlist(symbols: list):
+    try:
+        supabase.table("admin_watchlist").delete().neq("id", 0).execute()
+        rows = [{"symbol": s} for s in symbols]
+        if rows:
+            supabase.table("admin_watchlist").insert(rows).execute()
+        st.session_state.admin_watchlist = symbols
+        return True
+    except Exception as e:
+        st.error(f"Admin save error: {e}")
+        return False
+
+def db_load_admin_watchlist() -> list:
+    try:
+        res = supabase.table("admin_watchlist").select("symbol").execute()
+        return [r["symbol"] for r in res.data] if res.data else []
+    except:
+        return []
  
 st.set_page_config(page_title="Arka Trades", layout="wide", page_icon="📈", initial_sidebar_state="collapsed")
  
