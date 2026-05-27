@@ -967,7 +967,6 @@ with right:
                 render_alert_cards(watchlist, key_suffix="yours")
 
     # ── NEWS PAGE ────────────────────────────────────────────
-    # ── NEWS PAGE ────────────────────────────────────────────
     elif pg == "news":
         section("STOCK NEWS")
         watchlist = st.session_state.get("watchlist", [])
