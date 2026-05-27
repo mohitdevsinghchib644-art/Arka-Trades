@@ -625,13 +625,11 @@ with right:
     elif pg == "scanner":
         section("WATCHLIST SCANNER")
 
-        # Auto-load from Supabase if not in session
         if not st.session_state.watchlist:
             wl = db_load_watchlist()
             if wl:
                 st.session_state.watchlist = wl
 
-        # ── SECTION 1: ADD WATCHLIST ──
         st.markdown(f"""
         <div style="background:{DARK2};border:1px solid {BORDER};border-left:4px solid {GOLD};
              border-radius:14px;padding:20px 24px;margin-bottom:20px;">
@@ -655,7 +653,6 @@ with right:
 
         st.markdown(f"<div style='height:1px;background:{BORDER};margin:24px 0;'></div>", unsafe_allow_html=True)
 
-        # ── SECTION 2: YOUR WATCHLIST ──
         syms = st.session_state.watchlist
         st.markdown(f"""
         <div style="background:{DARK2};border:1px solid {BORDER};border-left:4px solid {GREEN};
@@ -668,101 +665,96 @@ with right:
         </div>""", unsafe_allow_html=True)
 
         if not syms:
-             st.info("Upload your TradingView watchlist above to start scanning.")
-         else:
-             sc1,sc2,sc3,sc4 = st.columns([1,1,1,2])
-             filt    = sc1.selectbox("Show",["All","Above PDH","Below PDL","In Range"])
-             l10     = sc2.checkbox("10s Live")
-             l60     = sc3.checkbox("60s Auto")
-             scanbtn = sc4.button("SCAN NOW", use_container_width=True, type="primary")
-             sc1,sc2,sc3,sc4 = st.columns([1,1,1,2])
+            st.info("Upload your TradingView watchlist above to start scanning.")
+        else:
+            sc1,sc2,sc3,sc4 = st.columns([1,1,1,2])
             filt    = sc1.selectbox("Show",["All","Above PDH","Below PDL","In Range"])
             l10     = sc2.checkbox("10s Live")
             l60     = sc3.checkbox("60s Auto")
             scanbtn = sc4.button("SCAN NOW", use_container_width=True, type="primary")
- 
+
             if scanbtn or l10 or l60:
-                    results,failed = [],[]
-                    bar = st.progress(0, text="Scanning...")
-                    for i,sym in enumerate(syms):
-                        st_ = get_static(sym); lv = get_price(sym)
-                        if st_ and lv:
-                            cur=lv["price"]; chg=lv["chg"]
-                            cls="g" if cur>st_["pdh"] else "r" if cur<st_["pdl"] else "n"
-                            results.append({"sym":sym,"cur":cur,"chg":chg,"pdh":st_["pdh"],"pdl":st_["pdl"],"rsi":st_["rsi"],"cls":cls})
-                        else: failed.append(sym)
-                        bar.progress((i+1)/len(syms), text=f"Fetching {sym}...")
-                    bar.empty()
-                    check_alerts(results)
- 
-                    if results:
-                        filtered=results
-                        if filt=="Above PDH":  filtered=[r for r in results if r["cls"]=="g"]
-                        elif filt=="Below PDL":filtered=[r for r in results if r["cls"]=="r"]
-                        elif filt=="In Range": filtered=[r for r in results if r["cls"]=="n"]
-                        filtered.sort(key=lambda x:{"g":0,"r":1,"n":2}[x["cls"]])
- 
-                        g=sum(1 for r in results if r["cls"]=="g")
-                        r=sum(1 for r in results if r["cls"]=="r")
-                        n=sum(1 for r in results if r["cls"]=="n")
-                        m1,m2,m3,m4=st.columns(4)
-                        m1.metric("Above PDH",g); m2.metric("Below PDL",r)
-                        m3.metric("In Range",n);  m4.metric("Total",len(results))
- 
-                        if failed:
-                            with st.expander(f"{len(failed)} skipped"): st.write(", ".join(failed))
- 
-                        section("RESULTS")
-                        cols7 = st.columns(7)
-                        for i, s in enumerate(filtered):
-                            if s["cls"] == "g":
-                                bg=f"linear-gradient(160deg,{DARK},{GREEN}18)"; bd=f"rgba(0,179,122,0.4)"; top=GREEN
-                            elif s["cls"] == "r":
-                                bg=f"linear-gradient(160deg,{DARK},{RED}18)"; bd=f"rgba(232,69,69,0.4)"; top=RED
-                            else:
-                                bg=DARK2; bd=BORDER; top=BORDER
- 
-                            cc  = GREEN if s["chg"] >= 0 else RED
-                            arr = "▲"   if s["chg"] >= 0 else "▼"
-                            rc  = GREEN if s["rsi"] < 35 else RED if s["rsi"] > 65 else T2
-                            ha  = s["sym"] in st.session_state.alerts and st.session_state.alerts[s["sym"]].get("active")
-                            nd  = get_news_dot(s["sym"])
-                            dot = f'<span style="color:#F5C518;font-size:9px;margin:0 2px;">&#9679;</span>' if nd else ""
-                            bon = f'<svg width="16" height="16" viewBox="0 0 24 24" fill="{IVORY}"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
-                            bof = f'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="{T2}" stroke-width="2"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
-                            bell = bon if ha else bof
- 
-                            card = (
-                                f'<div style="background:{bg};border:1px solid {bd};border-top:3px solid {top};'
-                                f'border-radius:10px;padding:10px 6px 9px;text-align:center;margin-bottom:6px;">'
- 
-                                f'<div style="display:flex;align-items:center;justify-content:center;'
-                                f'gap:2px;flex-wrap:nowrap;margin-bottom:6px;overflow:hidden;">'
-                                f'<span style="font-family:Inter,sans-serif;font-weight:900;font-size:11px;'
-                                f'color:{IVORY};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:52px;">'
-                                f'{s["sym"]}</span>'
-                                f'{dot}'
-                                f'<span style="font-family:JetBrains Mono,monospace;font-size:10px;font-weight:700;'
-                                f'color:{cc};white-space:nowrap;">{arr}{abs(s["chg"]):.2f}%</span>'
-                                f'<span style="display:flex;align-items:center;margin-left:2px;flex-shrink:0;">{bell}</span>'
-                                f'</div>'
- 
-                                f'<div style="font-family:JetBrains Mono,monospace;font-weight:700;font-size:13px;'
-                                f'color:{IVORY};line-height:1;margin-bottom:5px;">&#8377;{s["cur"]:.2f}</div>'
- 
-                                f'<div style="font-family:JetBrains Mono,monospace;font-size:11px;font-weight:700;'
-                                f'color:{rc};">RSI {s["rsi"]}</div>'
- 
-                                f'</div>'
-                            )
- 
-                            with cols7[i % 7]:
-                                st.markdown(card, unsafe_allow_html=True)
- 
-                        IST = timezone(timedelta(hours=5, minutes=30))
-                        st.caption(f"Scanned: {datetime.now(IST).strftime('%d %b %Y  %H:%M:%S')}  ·  % vs prev close  ·  Price: 10s cache")
-                        if l10: time.sleep(10); st.cache_data.clear(); st.rerun()
-                        elif l60: time.sleep(60); st.cache_data.clear(); st.rerun()
+                results,failed = [],[]
+                bar = st.progress(0, text="Scanning...")
+                for i,sym in enumerate(syms):
+                    st_ = get_static(sym); lv = get_price(sym)
+                    if st_ and lv:
+                        cur=lv["price"]; chg=lv["chg"]
+                        cls="g" if cur>st_["pdh"] else "r" if cur<st_["pdl"] else "n"
+                        results.append({"sym":sym,"cur":cur,"chg":chg,"pdh":st_["pdh"],"pdl":st_["pdl"],"rsi":st_["rsi"],"cls":cls})
+                    else: failed.append(sym)
+                    bar.progress((i+1)/len(syms), text=f"Fetching {sym}...")
+                bar.empty()
+                check_alerts(results)
+
+                if results:
+                    filtered=results
+                    if filt=="Above PDH":  filtered=[r for r in results if r["cls"]=="g"]
+                    elif filt=="Below PDL":filtered=[r for r in results if r["cls"]=="r"]
+                    elif filt=="In Range": filtered=[r for r in results if r["cls"]=="n"]
+                    filtered.sort(key=lambda x:{"g":0,"r":1,"n":2}[x["cls"]])
+
+                    g=sum(1 for r in results if r["cls"]=="g")
+                    r=sum(1 for r in results if r["cls"]=="r")
+                    n=sum(1 for r in results if r["cls"]=="n")
+                    m1,m2,m3,m4=st.columns(4)
+                    m1.metric("Above PDH",g); m2.metric("Below PDL",r)
+                    m3.metric("In Range",n);  m4.metric("Total",len(results))
+
+                    if failed:
+                        with st.expander(f"{len(failed)} skipped"): st.write(", ".join(failed))
+
+                    section("RESULTS")
+                    cols7 = st.columns(7)
+                    for i, s in enumerate(filtered):
+                        if s["cls"] == "g":
+                            bg=f"linear-gradient(160deg,{DARK},{GREEN}18)"; bd=f"rgba(0,179,122,0.4)"; top=GREEN
+                        elif s["cls"] == "r":
+                            bg=f"linear-gradient(160deg,{DARK},{RED}18)"; bd=f"rgba(232,69,69,0.4)"; top=RED
+                        else:
+                            bg=DARK2; bd=BORDER; top=BORDER
+
+                        cc  = GREEN if s["chg"] >= 0 else RED
+                        arr = "▲"   if s["chg"] >= 0 else "▼"
+                        rc  = GREEN if s["rsi"] < 35 else RED if s["rsi"] > 65 else T2
+                        ha  = s["sym"] in st.session_state.alerts and st.session_state.alerts[s["sym"]].get("active")
+                        nd  = get_news_dot(s["sym"])
+                        dot = f'<span style="color:#F5C518;font-size:9px;margin:0 2px;">&#9679;</span>' if nd else ""
+                        bon = f'<svg width="16" height="16" viewBox="0 0 24 24" fill="{IVORY}"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
+                        bof = f'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="{T2}" stroke-width="2"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
+                        bell = bon if ha else bof
+
+                        card = (
+                            f'<div style="background:{bg};border:1px solid {bd};border-top:3px solid {top};'
+                            f'border-radius:10px;padding:10px 6px 9px;text-align:center;margin-bottom:6px;">'
+                            f'<div style="display:flex;align-items:center;justify-content:center;'
+                            f'gap:2px;flex-wrap:nowrap;margin-bottom:6px;overflow:hidden;">'
+                            f'<span style="font-family:Inter,sans-serif;font-weight:900;font-size:11px;'
+                            f'color:{IVORY};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:52px;">'
+                            f'{s["sym"]}</span>'
+                            f'{dot}'
+                            f'<span style="font-family:JetBrains Mono,monospace;font-size:10px;font-weight:700;'
+                            f'color:{cc};white-space:nowrap;">{arr}{abs(s["chg"]):.2f}%</span>'
+                            f'<span style="display:flex;align-items:center;margin-left:2px;flex-shrink:0;">{bell}</span>'
+                            f'</div>'
+                            f'<div style="font-family:JetBrains Mono,monospace;font-weight:700;font-size:13px;'
+                            f'color:{IVORY};line-height:1;margin-bottom:5px;">&#8377;{s["cur"]:.2f}</div>'
+                            f'<div style="font-family:JetBrains Mono,monospace;font-size:11px;font-weight:700;'
+                            f'color:{rc};">RSI {s["rsi"]}</div>'
+                            f'</div>'
+                        )
+
+                        with cols7[i % 7]:
+                            st.markdown(card, unsafe_allow_html=True)
+
+                    IST = timezone(timedelta(hours=5, minutes=30))
+                    st.caption(f"Scanned: {datetime.now(IST).strftime('%d %b %Y  %H:%M:%S')}  ·  % vs prev close  ·  Price: 10s cache")
+                    if l10: time.sleep(10); st.cache_data.clear(); st.rerun()
+                    elif l60: time.sleep(60); st.cache_data.clear(); st.rerun()
+
+        if syms:
+            _ensure_news_state()
+            news_panel(syms)
  
         # ── News Panel (auto-refreshes independently)
         if syms:
