@@ -811,11 +811,7 @@ with right:
                 _ensure_news_state()
                 news_panel(your_syms)
 
-       # News shows based on which tab is active — handled inside each tab
-        pass
-# ── ALERTS ──────────────────────────────────────────────
-   # ── ALERTS ──────────────────────────────────────────────
-    elif pg == "alerts":
+      elif pg == "alerts":
         section("TELEGRAM ALERTS")
 
         def render_alert_cards(watchlist, key_suffix=""):
