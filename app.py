@@ -789,6 +789,8 @@ with right:
                 st.info("Arka Watchlist not available yet.")
             else:
                 render_scan_results(admin_syms, key_prefix="admin")
+                _ensure_news_state()
+                news_panel(admin_syms)
 
         with tab2:
             your_syms = st.session_state.watchlist
