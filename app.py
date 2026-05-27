@@ -823,17 +823,11 @@ with right:
        # News shows based on which tab is active — handled inside each tab
         pass
 # ── ALERTS ──────────────────────────────────────────────
+   # ── ALERTS ──────────────────────────────────────────────
     elif pg == "alerts":
         section("TELEGRAM ALERTS")
 
-        alert_tab1, alert_tab2 = st.tabs(["👑 Arka Watchlist", "📋 Your Watchlist"])
-
-        with alert_tab1:
-            watchlist = st.session_state.get("admin_watchlist",[])
-            if not watchlist:
-                st.warning("Arka Watchlist not available yet.")
-            else:
-        else:
+        def render_alert_cards(watchlist, key_suffix=""):
             st.markdown(f"""
             <div style="background:{DARK2};border:1px solid {BORDER};border-left:4px solid {GOLD};
                  border-radius:14px;padding:16px 20px;margin-bottom:20px;">
@@ -843,8 +837,8 @@ with right:
                     You get a Telegram notification when price hits the level.
                 </div>
             </div>""", unsafe_allow_html=True)
- 
-            COLS=4; rows=[watchlist[i:i+COLS] for i in range(0,len(watchlist),COLS)]
+            COLS=4
+            rows=[watchlist[i:i+COLS] for i in range(0,len(watchlist),COLS)]
             for row in rows:
                 cols=st.columns(COLS)
                 for j,sym in enumerate(row):
@@ -870,42 +864,59 @@ with right:
                         </div>""", unsafe_allow_html=True)
                         ba,bb = st.columns(2)
                         with ba:
-                            if st.button("Set",key=f"sa_{sym}",use_container_width=True):
-                                st.session_state[f"open_{sym}"]=True
+                            if st.button("Set",key=f"sa_{sym}_{key_suffix}",use_container_width=True):
+                                st.session_state[f"open_{sym}_{key_suffix}"]=True
                         with bb:
                             if has_alert:
-                                if st.button("Off",key=f"rm_{sym}",use_container_width=True):
+                                if st.button("Off",key=f"rm_{sym}_{key_suffix}",use_container_width=True):
                                     del st.session_state.alerts[sym]
                                     db_delete_alert(sym)
-                                    if sym in st.session_state.alert_fired: st.session_state.alert_fired.remove(sym)
+                                    if sym in st.session_state.alert_fired:
+                                        st.session_state.alert_fired.remove(sym)
                                     st.rerun()
-                        if st.session_state.get(f"open_{sym}"):
+                        if st.session_state.get(f"open_{sym}_{key_suffix}"):
                             st_=get_static(sym)
-                            alert_type=st.radio("Type",["PDH","PDL","Custom"],key=f"at_{sym}",horizontal=True)
+                            alert_type=st.radio("Type",["PDH","PDL","Custom"],key=f"at_{sym}_{key_suffix}",horizontal=True)
                             cp=0.0
-                            if alert_type=="Custom": cp=st.number_input("Price",key=f"cp_{sym}",min_value=0.0,step=0.5)
+                            if alert_type=="Custom":
+                                cp=st.number_input("Price",key=f"cp_{sym}_{key_suffix}",min_value=0.0,step=0.5)
                             bc1,bc2=st.columns(2)
                             with bc1:
-                                if st.button("Cancel",key=f"can_{sym}"):
-                                    st.session_state[f"open_{sym}"]=False; st.rerun()
+                                if st.button("Cancel",key=f"can_{sym}_{key_suffix}"):
+                                    st.session_state[f"open_{sym}_{key_suffix}"]=False
+                                    st.rerun()
                             with bc2:
-                                if st.button("OK",key=f"ok_{sym}",type="primary"):
+                                if st.button("OK",key=f"ok_{sym}_{key_suffix}",type="primary"):
                                     if st_:
                                         if alert_type=="PDH":   price=st_["pdh"]; atype="pdh"
                                         elif alert_type=="PDL": price=st_["pdl"]; atype="pdl"
                                         else:                   price=cp; atype="custom"
                                         st.session_state.alerts[sym]={"type":atype,"price":price,"active":True}
                                         db_save_alert(sym, atype, price)
-                                        if sym in st.session_state.alert_fired: st.session_state.alert_fired.remove(sym)
+                                        if sym in st.session_state.alert_fired:
+                                            st.session_state.alert_fired.remove(sym)
                                         send_telegram(f"Alert set!\n{sym} · {atype.upper()} · Rs{price:.2f}")
-                                        st.session_state[f"open_{sym}"]=False
-                                        st.success(f"Alert set for {sym}!"); st.rerun()
-                            with alert_tab2:                           
-                             watchlist = st.session_state.get("watchlist",[])
-                             if not watchlist:
-                             st.warning("Upload your watchlist in Scanner first.")
-                             else:
- 
+                                        st.session_state[f"open_{sym}_{key_suffix}"]=False
+                                        st.success(f"Alert set for {sym}!")
+                                        st.rerun()
+
+        alert_tab1, alert_tab2 = st.tabs(["👑 Arka Watchlist", "📋 Your Watchlist"])
+
+        with alert_tab1:
+            watchlist = st.session_state.get("admin_watchlist", [])
+            if not watchlist:
+                st.warning("Arka Watchlist not available yet.")
+            else:
+                render_alert_cards(watchlist, key_suffix="admin")
+
+        with alert_tab2:
+            watchlist = st.session_state.get("watchlist", [])
+            if not watchlist:
+                st.warning("Upload your watchlist in Scanner first.")
+            else:
+                render_alert_cards(watchlist, key_suffix="yours")
+
+    # ── NEWS PAGE ────────────────────────────────────────────
     # ── NEWS PAGE ────────────────────────────────────────────
     elif pg == "news":
         section("STOCK NEWS")
