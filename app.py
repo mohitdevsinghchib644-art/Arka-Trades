@@ -655,6 +655,7 @@ with right:
                 </div>""", unsafe_allow_html=True)
  
     # ── SCANNER ─────────────────────────────────────────────
+    # ── SCANNER ─────────────────────────────────────────────
     elif pg == "scanner":
         section("WATCHLIST SCANNER")
 
@@ -675,7 +676,7 @@ with right:
             l60     = sc3.checkbox("60s Auto", key=f"l60_{key_prefix}")
             scanbtn = sc4.button("SCAN NOW", use_container_width=True, type="primary", key=f"scan_{key_prefix}")
 
-            if scanbtn or l10 or l60:
+            if scanbtn:
                 results,failed = [],[]
                 bar = st.progress(0, text="Scanning...")
                 for i,sym in enumerate(syms):
@@ -688,133 +689,140 @@ with right:
                     bar.progress((i+1)/len(syms), text=f"Fetching {sym}...")
                 bar.empty()
                 check_alerts(results)
+                st.session_state[f"results_{key_prefix}"] = results
+                st.session_state[f"failed_{key_prefix}"] = failed
 
-                if results:
-                    filtered=results
-                    if filt=="Above PDH":  filtered=[r for r in results if r["cls"]=="g"]
-                    elif filt=="Below PDL":filtered=[r for r in results if r["cls"]=="r"]
-                    elif filt=="In Range": filtered=[r for r in results if r["cls"]=="n"]
-                    filtered.sort(key=lambda x:{"g":0,"r":1,"n":2}[x["cls"]])
+            results = st.session_state.get(f"results_{key_prefix}", [])
+            failed  = st.session_state.get(f"failed_{key_prefix}", [])
 
-                    g=sum(1 for r in results if r["cls"]=="g")
-                    r=sum(1 for r in results if r["cls"]=="r")
-                    n=sum(1 for r in results if r["cls"]=="n")
-                    m1,m2,m3,m4=st.columns(4)
-                    m1.metric("Above PDH",g); m2.metric("Below PDL",r)
-                    m3.metric("In Range",n);  m4.metric("Total",len(results))
+            if results:
+                filtered=results
+                if filt=="Above PDH":  filtered=[r for r in results if r["cls"]=="g"]
+                elif filt=="Below PDL":filtered=[r for r in results if r["cls"]=="r"]
+                elif filt=="In Range": filtered=[r for r in results if r["cls"]=="n"]
+                filtered.sort(key=lambda x:{"g":0,"r":1,"n":2}[x["cls"]])
 
-                    if failed:
-                        with st.expander(f"{len(failed)} skipped"): st.write(", ".join(failed))
+                g=sum(1 for r in results if r["cls"]=="g")
+                r=sum(1 for r in results if r["cls"]=="r")
+                n=sum(1 for r in results if r["cls"]=="n")
+                m1,m2,m3,m4=st.columns(4)
+                m1.metric("Above PDH",g); m2.metric("Below PDL",r)
+                m3.metric("In Range",n);  m4.metric("Total",len(results))
 
-                    section("RESULTS")
-                    cols7 = st.columns(7)
-                    for i, s in enumerate(filtered):
-                        if s["cls"] == "g":
-                            bg=f"linear-gradient(160deg,{DARK},{GREEN}18)"; bd=f"rgba(0,179,122,0.4)"; top=GREEN
-                        elif s["cls"] == "r":
-                            bg=f"linear-gradient(160deg,{DARK},{RED}18)"; bd=f"rgba(232,69,69,0.4)"; top=RED
-                        else:
-                            bg=DARK2; bd=BORDER; top=BORDER
+                if failed:
+                    with st.expander(f"{len(failed)} skipped"): st.write(", ".join(failed))
 
-                        cc  = GREEN if s["chg"] >= 0 else RED
-                        arr = "▲"   if s["chg"] >= 0 else "▼"
-                        rc  = GREEN if s["rsi"] < 35 else RED if s["rsi"] > 65 else T2
-                        ha  = s["sym"] in st.session_state.alerts and st.session_state.alerts[s["sym"]].get("active")
-                        nd  = get_news_dot(s["sym"])
-                        dot = f'<span style="color:#F5C518;font-size:9px;margin:0 2px;">&#9679;</span>' if nd else ""
-                        bon = f'<svg width="16" height="16" viewBox="0 0 24 24" fill="{IVORY}"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
-                        bof = f'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="{T2}" stroke-width="2"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
-                        bell = bon if ha else bof
+                section("RESULTS")
+                cols7 = st.columns(7)
+                for i, s in enumerate(filtered):
+                    if s["cls"] == "g":
+                        bg=f"linear-gradient(160deg,{DARK},{GREEN}18)"; bd=f"rgba(0,179,122,0.4)"; top=GREEN
+                    elif s["cls"] == "r":
+                        bg=f"linear-gradient(160deg,{DARK},{RED}18)"; bd=f"rgba(232,69,69,0.4)"; top=RED
+                    else:
+                        bg=DARK2; bd=BORDER; top=BORDER
 
-                        card = (
-                            f'<div style="background:{bg};border:1px solid {bd};border-top:3px solid {top};'
-                            f'border-radius:10px;padding:10px 6px 9px;text-align:center;margin-bottom:6px;">'
-                            f'<div style="display:flex;align-items:center;justify-content:center;'
-                            f'gap:2px;flex-wrap:nowrap;margin-bottom:6px;overflow:hidden;">'
-                            f'<span style="font-family:Inter,sans-serif;font-weight:900;font-size:11px;'
-                            f'color:{IVORY};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:52px;">'
-                            f'{s["sym"]}</span>'
-                            f'{dot}'
-                            f'<span style="font-family:JetBrains Mono,monospace;font-size:10px;font-weight:700;'
-                            f'color:{cc};white-space:nowrap;">{arr}{abs(s["chg"]):.2f}%</span>'
-                            f'<span style="display:flex;align-items:center;margin-left:2px;flex-shrink:0;">{bell}</span>'
-                            f'</div>'
-                            f'<div style="font-family:JetBrains Mono,monospace;font-weight:700;font-size:13px;'
-                            f'color:{IVORY};line-height:1;margin-bottom:5px;">&#8377;{s["cur"]:.2f}</div>'
-                            f'<div style="font-family:JetBrains Mono,monospace;font-size:11px;font-weight:700;'
-                            f'color:{rc};">RSI {s["rsi"]}</div>'
-                            f'</div>'
-                        )
-                        with cols7[i % 7]:
-                            st.markdown(card, unsafe_allow_html=True)
+                    cc  = GREEN if s["chg"] >= 0 else RED
+                    arr = "▲"   if s["chg"] >= 0 else "▼"
+                    rc  = GREEN if s["rsi"] < 35 else RED if s["rsi"] > 65 else T2
+                    ha  = s["sym"] in st.session_state.alerts and st.session_state.alerts[s["sym"]].get("active")
+                    nd  = get_news_dot(s["sym"])
+                    dot = f'<span style="color:#F5C518;font-size:9px;margin:0 2px;">&#9679;</span>' if nd else ""
+                    bon = f'<svg width="16" height="16" viewBox="0 0 24 24" fill="{IVORY}"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
+                    bof = f'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="{T2}" stroke-width="2"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
+                    bell = bon if ha else bof
 
-                    IST = timezone(timedelta(hours=5, minutes=30))
-                    st.caption(f"Scanned: {datetime.now(IST).strftime('%d %b %Y  %H:%M:%S')}  ·  % vs prev close  ·  Price: 10s cache")
-                    if l10: time.sleep(10); st.cache_data.clear(); st.rerun()
-                    elif l60: time.sleep(60); st.cache_data.clear(); st.rerun()
+                    card = (
+                        f'<div style="background:{bg};border:1px solid {bd};border-top:3px solid {top};'
+                        f'border-radius:10px;padding:10px 6px 9px;text-align:center;margin-bottom:6px;">'
+                        f'<div style="display:flex;align-items:center;justify-content:center;'
+                        f'gap:2px;flex-wrap:nowrap;margin-bottom:6px;overflow:hidden;">'
+                        f'<span style="font-family:Inter,sans-serif;font-weight:900;font-size:11px;'
+                        f'color:{IVORY};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:52px;">'
+                        f'{s["sym"]}</span>'
+                        f'{dot}'
+                        f'<span style="font-family:JetBrains Mono,monospace;font-size:10px;font-weight:700;'
+                        f'color:{cc};white-space:nowrap;">{arr}{abs(s["chg"]):.2f}%</span>'
+                        f'<span style="display:flex;align-items:center;margin-left:2px;flex-shrink:0;">{bell}</span>'
+                        f'</div>'
+                        f'<div style="font-family:JetBrains Mono,monospace;font-weight:700;font-size:13px;'
+                        f'color:{IVORY};line-height:1;margin-bottom:5px;">&#8377;{s["cur"]:.2f}</div>'
+                        f'<div style="font-family:JetBrains Mono,monospace;font-size:11px;font-weight:700;'
+                        f'color:{rc};">RSI {s["rsi"]}</div>'
+                        f'</div>'
+                    )
+                    with cols7[i % 7]:
+                        st.markdown(card, unsafe_allow_html=True)
 
-        # ── SECTION 1: ARKA WATCHLIST (Admin only can upload) ──
-        admin_syms = st.session_state.admin_watchlist
-        st.markdown(f"""
-        <div style="background:{DARK2};border:1px solid {BORDER};border-left:4px solid {GOLD};
-             border-radius:14px;padding:20px 24px;margin-bottom:20px;">
-            <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;
-                 letter-spacing:4px;color:{GOLD};margin-bottom:4px;">👑 ARKA WATCHLIST</div>
-            <div style="font-size:12px;color:{T2};">
-                {f"{len(admin_syms)} stocks · Curated by Arka Trades" if admin_syms else "No admin watchlist yet"}
-            </div>
-        </div>""", unsafe_allow_html=True)
+                IST = timezone(timedelta(hours=5, minutes=30))
+                st.caption(f"Scanned: {datetime.now(IST).strftime('%d %b %Y  %H:%M:%S')}  ·  % vs prev close  ·  Price: 10s cache")
+                if l10: time.sleep(10); st.cache_data.clear(); st.rerun()
+                elif l60: time.sleep(60); st.cache_data.clear(); st.rerun()
 
-        if IS_ADMIN:
-            uploaded_admin = st.file_uploader("Upload Arka Watchlist (Admin Only)", type=["csv","txt"], key="admin_upload")
-            if uploaded_admin:
-                syms = parse_csv(uploaded_admin)
+        tab1, tab2 = st.tabs(["👑 Arka Watchlist", "📋 Your Watchlist"])
+
+        with tab1:
+            admin_syms = st.session_state.admin_watchlist
+            st.markdown(f"""
+            <div style="background:{DARK2};border:1px solid {BORDER};border-left:4px solid {GOLD};
+                 border-radius:14px;padding:16px 24px;margin:16px 0;">
+                <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;
+                     letter-spacing:4px;color:{GOLD};margin-bottom:4px;">👑 ARKA WATCHLIST</div>
+                <div style="font-size:12px;color:{T2};">
+                    {f"{len(admin_syms)} stocks · Curated by Arka Trades" if admin_syms else "No admin watchlist yet"}
+                </div>
+            </div>""", unsafe_allow_html=True)
+
+            if IS_ADMIN:
+                uploaded_admin = st.file_uploader("Upload Arka Watchlist", type=["csv","txt"], key="admin_upload")
+                if uploaded_admin:
+                    syms = parse_csv(uploaded_admin)
+                    if not syms:
+                        st.error("No symbols found.")
+                    else:
+                        if db_save_admin_watchlist(syms):
+                            st.success(f"✅ Arka Watchlist updated — {len(syms)} stocks!")
+                            st.session_state.admin_watchlist = syms
+                            st.rerun()
+
+            if not admin_syms:
+                st.info("Arka Watchlist not available yet.")
+            else:
+                render_scan_results(admin_syms, key_prefix="admin")
+
+        with tab2:
+            your_syms = st.session_state.watchlist
+            st.markdown(f"""
+            <div style="background:{DARK2};border:1px solid {BORDER};border-left:4px solid {GREEN};
+                 border-radius:14px;padding:16px 24px;margin:16px 0;">
+                <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;
+                     letter-spacing:4px;color:{GREEN};margin-bottom:4px;">📋 YOUR WATCHLIST</div>
+                <div style="font-size:12px;color:{T2};">
+                    {f"{len(your_syms)} stocks saved in cloud" if your_syms else "No watchlist uploaded yet"}
+                </div>
+            </div>""", unsafe_allow_html=True)
+
+            uploaded_yours = st.file_uploader("Upload Your Watchlist (CSV or TXT)", type=["csv","txt"], key="your_upload")
+            if uploaded_yours:
+                syms = parse_csv(uploaded_yours)
                 if not syms:
                     st.error("No symbols found.")
                 else:
-                    if db_save_admin_watchlist(syms):
-                        st.success(f"✅ Arka Watchlist updated — {len(syms)} stocks!")
-                        st.cache_data.clear()
+                    if db_save_watchlist(syms):
+                        st.success(f"✅ {len(syms)} stocks loaded and saved!")
                         st.rerun()
 
-        if not admin_syms:
-            st.info("Admin watchlist not uploaded yet.")
-        else:
-            render_scan_results(admin_syms, key_prefix="admin")
-
-        st.markdown(f"<div style='height:1px;background:{BORDER};margin:32px 0;'></div>", unsafe_allow_html=True)
-
-        # ── SECTION 2: YOUR WATCHLIST (Members upload their own) ──
-        your_syms = st.session_state.watchlist
-        st.markdown(f"""
-        <div style="background:{DARK2};border:1px solid {BORDER};border-left:4px solid {GREEN};
-             border-radius:14px;padding:20px 24px;margin-bottom:20px;">
-            <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;
-                 letter-spacing:4px;color:{GREEN};margin-bottom:4px;">📋 YOUR WATCHLIST</div>
-            <div style="font-size:12px;color:{T2};">
-                {f"{len(your_syms)} stocks saved in cloud" if your_syms else "No watchlist uploaded yet"}
-            </div>
-        </div>""", unsafe_allow_html=True)
-
-        uploaded_yours = st.file_uploader("Upload Your Watchlist (CSV or TXT)", type=["csv","txt"], key="your_upload")
-        if uploaded_yours:
-            syms = parse_csv(uploaded_yours)
-            if not syms:
-                st.error("No symbols found.")
+            if not your_syms:
+                st.info("Upload your TradingView watchlist above to start scanning.")
             else:
-                if db_save_watchlist(syms):
-                    st.success(f"✅ {len(syms)} stocks loaded and saved!")
-                    st.cache_data.clear()
-                    st.rerun()
+                render_scan_results(your_syms, key_prefix="yours")
 
-        if not your_syms:
-            st.info("Upload your TradingView watchlist above to start scanning.")
-        else:
-            render_scan_results(your_syms, key_prefix="yours")
-
-        if your_syms or admin_syms:
+        all_syms = list(set(st.session_state.admin_watchlist + st.session_state.watchlist))
+        if all_syms:
             _ensure_news_state()
-            news_panel(your_syms or admin_syms)
+            news_panel(all_syms)
+
+    # ── ALERTS ──────────────────────────────────────────────
 
     # ── ALERTS ──────────────────────────────────────────────
  
