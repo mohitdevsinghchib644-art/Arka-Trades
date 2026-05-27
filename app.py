@@ -122,6 +122,7 @@ if not st.session_state.db_loaded:
  
 name    = st.session_state.profile.get("name","Trader") or "Trader"
 initial = name[0].upper()
+IS_ADMIN = st.session_state.get("is_admin", False)
  
 # ── Global CSS ───────────────────────────────────────────────
 st.markdown(f"""
