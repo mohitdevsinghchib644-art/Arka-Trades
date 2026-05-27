@@ -709,7 +709,6 @@ with right:
                 </div>""", unsafe_allow_html=True)
  
     # ── SCANNER ─────────────────────────────────────────────
-    # ── SCANNER ─────────────────────────────────────────────
     elif pg == "scanner":
         section("WATCHLIST SCANNER")
 
