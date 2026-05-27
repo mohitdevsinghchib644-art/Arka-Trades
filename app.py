@@ -491,35 +491,16 @@ with right:
     pg = st.session_state.page
  
     # ── TOP NAVBAR ──────────────────────────────────────────
-    n1, n2, n3 = st.columns([3,4,1])
+    # Add menu toggle to session state
+    if "menu_open" not in st.session_state:
+        st.session_state.menu_open = True
+
+    n1, n2, n3 = st.columns([1,6,1])
     with n1:
-        photo = st.session_state.get("profile_photo")
-        if photo:
-            c_a,c_b = st.columns([1,3])
-            with c_a: st.image(photo, width=60)
-            with c_b:
-                st.markdown(f"""
-                <div style="padding:6px 0;">
-                    <div style="font-size:12px;color:{T2};">Welcome back,</div>
-                    <div style="font-family:'Inter',sans-serif;font-weight:900;
-                         font-size:18px;color:{GOLD};">{name}</div>
-                </div>""", unsafe_allow_html=True)
-        else:
-            st.markdown(f"""
-            <div style="display:flex;align-items:center;gap:12px;padding:8px 0;">
-                <div style="width:60px;height:60px;border-radius:12px;
-                     background:linear-gradient(135deg,{NAVY},{GOLD});
-                     border:2px solid rgba(200,169,106,0.4);
-                     display:flex;align-items:center;justify-content:center;
-                     font-family:'Inter',sans-serif;font-weight:900;
-                     font-size:22px;color:{DARK};">{initial}</div>
-                <div>
-                    <div style="font-size:12px;color:{T2};">Welcome back,</div>
-                    <div style="font-family:'Inter',sans-serif;font-weight:900;
-                         font-size:18px;color:{GOLD};">{name}</div>
-                </div>
-            </div>""", unsafe_allow_html=True)
- 
+        if st.button("☰", key="menu_toggle", help="Toggle menu"):
+            st.session_state.menu_open = not st.session_state.menu_open
+            st.rerun()
+
     with n2:
         st.markdown(f"""
         <div style="text-align:center;padding:12px 0;
@@ -530,7 +511,7 @@ with right:
                  font-size:12px;letter-spacing:4px;color:{IVORY};
                  text-transform:uppercase;margin-top:2px;">Finance &nbsp;&middot;&nbsp; Market Education</div>
         </div>""", unsafe_allow_html=True)
- 
+
     with n3:
         st.markdown(f"""
         <div style="display:flex;align-items:center;justify-content:flex-end;
