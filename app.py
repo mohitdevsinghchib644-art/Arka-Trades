@@ -314,7 +314,9 @@ if not st.session_state.logged_in:
                 if u.strip().lower()=="max trades" and p.strip().lower()=="max":
                     ph.success("Login Successful — Welcome to Arka Trades!")
                     time.sleep(1.2)
-                    st.session_state.logged_in = True; st.rerun()
+                    st.session_state.logged_in = True
+                    st.session_state.is_admin = True
+                    st.rerun()
                 else:
                     ph.error("Invalid username or password.")
         st.markdown(f"<div style='text-align:center;font-size:11px;color:{T2};margin-top:12px;font-style:italic;'>Not SEBI registered · Educational use only</div>", unsafe_allow_html=True)
