@@ -825,9 +825,14 @@ with right:
 # ── ALERTS ──────────────────────────────────────────────
     elif pg == "alerts":
         section("TELEGRAM ALERTS")
-        watchlist = st.session_state.get("watchlist",[])
-        if not watchlist:
-            st.warning("Go to Scanner first and upload your watchlist.")
+
+        alert_tab1, alert_tab2 = st.tabs(["👑 Arka Watchlist", "📋 Your Watchlist"])
+
+        with alert_tab1:
+            watchlist = st.session_state.get("admin_watchlist",[])
+            if not watchlist:
+                st.warning("Arka Watchlist not available yet.")
+            else:
         else:
             st.markdown(f"""
             <div style="background:{DARK2};border:1px solid {BORDER};border-left:4px solid {GOLD};
@@ -895,6 +900,11 @@ with right:
                                         send_telegram(f"Alert set!\n{sym} · {atype.upper()} · Rs{price:.2f}")
                                         st.session_state[f"open_{sym}"]=False
                                         st.success(f"Alert set for {sym}!"); st.rerun()
+                            with alert_tab2:                           
+                             watchlist = st.session_state.get("watchlist",[])
+                             if not watchlist:
+                             st.warning("Upload your watchlist in Scanner first.")
+                             else:
  
     # ── NEWS PAGE ────────────────────────────────────────────
     elif pg == "news":
