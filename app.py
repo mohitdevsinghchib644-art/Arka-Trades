@@ -70,7 +70,7 @@ def db_load_alerts() -> dict:
                 for r in res.data} if res.data else {}
     except:
         return {}
-       def db_save_admin_watchlist(symbols: list):
+ def db_save_admin_watchlist(symbols: list):
     try:
         supabase.table("admin_watchlist").delete().neq("id", 0).execute()
         rows = [{"symbol": s} for s in symbols]
