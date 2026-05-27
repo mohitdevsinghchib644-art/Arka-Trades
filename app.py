@@ -667,17 +667,14 @@ with right:
             </div>
         </div>""", unsafe_allow_html=True)
 
-        if not syms:
+       if not syms:
             st.info("Upload your TradingView watchlist above to start scanning.")
         else:
-                    st.cache_data.clear()
-                    st.rerun()
-        # Show watchlist if available
-        syms = st.session_state.watchlist
-        if not syms:
-            st.info("Upload your TradingView watchlist CSV to start scanning.")
-        else:
-            st.success(f"✅ {len(syms)} stocks in your watchlist")
+            sc1,sc2,sc3,sc4 = st.columns([1,1,1,2])
+            filt    = sc1.selectbox("Show",["All","Above PDH","Below PDL","In Range"])
+            l10     = sc2.checkbox("10s Live")
+            l60     = sc3.checkbox("60s Auto")
+            scanbtn = sc4.button("SCAN NOW", use_container_width=True, type="primary")
             sc1,sc2,sc3,sc4 = st.columns([1,1,1,2])
             filt    = sc1.selectbox("Show",["All","Above PDH","Below PDL","In Range"])
             l10     = sc2.checkbox("10s Live")
