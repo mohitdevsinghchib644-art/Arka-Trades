@@ -401,7 +401,13 @@ if not st.session_state.disclaimer_done:
 # ════════════════════════════════════════════════════
 # MAIN LAYOUT: Left Nav | Right Content
 # ════════════════════════════════════════════════════
-left, right = st.columns([1, 4])
+if "menu_open" not in st.session_state:
+    st.session_state.menu_open = True
+
+if st.session_state.menu_open:
+    left, right = st.columns([1, 4])
+else:
+    left, right = st.columns([0.001, 1])
  
 # ── LEFT NAV PANEL ────────────────────────────────────────────
 with left:
