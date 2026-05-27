@@ -429,7 +429,71 @@ with left:
     """, unsafe_allow_html=True)
  
     # Profile section
-    photo = st.session_state.get("profile_photo")
+    # Profile section
+        photo = st.session_state.get("profile_photo")
+        if photo:
+            st.image(photo, width=70)
+        else:
+            st.markdown(f"""
+            <div style="text-align:center;padding:14px 0 8px;">
+                <div style="width:64px;height:64px;border-radius:12px;
+                     background:linear-gradient(135deg,{NAVY},{GOLD});
+                     border:2px solid rgba(200,169,106,0.4);
+                     display:flex;align-items:center;justify-content:center;
+                     font-family:'Inter',sans-serif;font-weight:900;
+                     font-size:24px;color:{DARK};margin:0 auto 8px;">{initial}</div>
+                <div style="font-family:'Inter',sans-serif;font-weight:700;
+                     font-size:13px;color:{T2};">Welcome back,</div>
+                <div style="font-family:'Inter',sans-serif;font-weight:900;
+                     font-size:16px;color:{GOLD};line-height:1.2;">{name}</div>
+            </div>
+            <div style="height:1px;background:{BORDER};margin-bottom:4px;"></div>
+            """, unsafe_allow_html=True)
+
+        st.markdown(f"""
+            <div style="padding:14px 12px 4px;font-family:'Bebas Neue',sans-serif;
+                 font-size:13px;letter-spacing:3px;color:{GOLD};">SERVICES</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        pg = st.session_state.page
+
+        def nav_btn(label, key, icon=""):
+            active = pg == key
+            css_class = "nav-btn-active" if active else "nav-btn"
+            st.markdown(f'<div class="{css_class}">', unsafe_allow_html=True)
+            if st.button(f"{icon}  {label}", key=f"nav_{key}", use_container_width=True):
+                st.session_state.page = key; st.rerun()
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        nav_btn("Home",      "home",     "🏠")
+        nav_btn("Scanner",   "scanner",  "📋")
+        nav_btn("Alerts",    "alerts",   "🔔")
+        nav_btn("News",      "news",     "📰")
+        nav_btn("Arka AI",   "analysis", "🤖")
+
+        st.markdown(f"""
+        <div style="padding:14px 12px 4px;font-family:'Bebas Neue',sans-serif;
+             font-size:13px;letter-spacing:3px;color:{T2};">COMING SOON</div>
+        """, unsafe_allow_html=True)
+        nav_btn("Heatmap",      "heatmap",  "🗺️")
+        nav_btn("Auto Alerts",  "autoalert","⚡")
+
+        st.markdown(f"""
+        <div style="padding:14px 12px 4px;font-family:'Bebas Neue',sans-serif;
+             font-size:13px;letter-spacing:3px;color:{GOLD};">ACCOUNT</div>
+        """, unsafe_allow_html=True)
+        nav_btn("Profile",    "profile",  "👤")
+        nav_btn("Settings",   "settings", "⚙️")
+        nav_btn("Contact Us", "contact",  "📬")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.divider()
+        st.markdown('<div class="nav-btn">', unsafe_allow_html=True)
+        if st.button("🚪  Logout", use_container_width=True):
+            for k in ["logged_in","disclaimer_done"]: st.session_state[k]=False
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
     if photo:
         st.image(photo, width=70)
     else:
