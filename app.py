@@ -103,9 +103,11 @@ for k, v in {
     "profile":         {"name":"Trader","email":"","phone":""},
     "profile_photo":   None,
     "watchlist":       [],
+    "admin_watchlist": [],
     "alerts":          {},
     "alert_fired":     set(),
     "db_loaded":       False,
+    "is_admin":        False,
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
