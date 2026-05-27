@@ -115,6 +115,9 @@ if not st.session_state.db_loaded:
     wl = db_load_watchlist()
     if wl:
         st.session_state.watchlist = wl
+    awl = db_load_admin_watchlist()
+    if awl:
+        st.session_state.admin_watchlist = awl
     al = db_load_alerts()
     if al:
         st.session_state.alerts = al
