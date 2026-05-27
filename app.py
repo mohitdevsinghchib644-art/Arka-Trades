@@ -552,7 +552,7 @@ with right:
     show_idx(r1b,"BANK NIFTY", "^NSEBANK", GREEN)
     r2a,r2b = st.columns(2)
     show_idx(r2a,"MIDCAP 100",   "NIFTY_MIDCAP_100.NS", "#A78BFA")
-    show_idx(r2b,"SMALLCAP 250", "NIFTYSMLCAP250.NS",   "#7B9FFF")
+    show_idx(r2b,"SMALLCAP 100", "^CNXSMALLCAP", "#7B9FFF")
     _,r3c,_ = st.columns([1,2,1])
     show_idx(r3c,"SENSEX","^BSESN","#FF8C42")
  
