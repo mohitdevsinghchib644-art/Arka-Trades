@@ -546,17 +546,17 @@ with right:
                     <div style="font-size:11px;color:{T2};margin-top:4px;">No data</div>
                 </div>""", unsafe_allow_html=True)
  
-    st.markdown(f"<div style='height:3px;background:linear-gradient(90deg,{NAVY} 50%,{IVORY} 50%);border-radius:2px;margin-bottom:8px;'></div>", unsafe_allow_html=True)
-    r1a,r1b = st.columns(2)
-    show_idx(r1a,"NIFTY 50",   "^NSEI",    GOLD)
-    show_idx(r1b,"BANK NIFTY", "^NSEBANK", GREEN)
-    r2a,r2b = st.columns(2)
-    show_idx(r2a,"MIDCAP 100",   "NIFTY_MIDCAP_100.NS", "#A78BFA")
-    show_idx(r2b,"SMALLCAP 100", "^CNXSMALLCAP", "#7B9FFF")
-    _,r3c,_ = st.columns([1,2,1])
-    show_idx(r3c,"SENSEX","^BSESN","#FF8C42")
- 
-    st.markdown(f"<div style='height:1px;background:{BORDER};margin:8px 0 16px;'></div>", unsafe_allow_html=True)
+    if pg == "home":
+        st.markdown(f"<div style='height:3px;background:linear-gradient(90deg,{NAVY} 50%,{IVORY} 50%);border-radius:2px;margin-bottom:8px;'></div>", unsafe_allow_html=True)
+        r1a,r1b = st.columns(2)
+        show_idx(r1a,"NIFTY 50",   "^NSEI",    GOLD)
+        show_idx(r1b,"BANK NIFTY", "^NSEBANK", GREEN)
+        r2a,r2b = st.columns(2)
+        show_idx(r2a,"MIDCAP 100",   "NIFTY_MIDCAP_100.NS", "#A78BFA")
+        show_idx(r2b,"SMALLCAP 100", "^CNXSMALLCAP", "#7B9FFF")
+        _,r3c,_ = st.columns([1,2,1])
+        show_idx(r3c,"SENSEX","^BSESN","#FF8C42")
+        st.markdown(f"<div style='height:1px;background:{BORDER};margin:8px 0 16px;'></div>", unsafe_allow_html=True)
  
     # ══════════════════════════════════════════════════════════
     # PAGES
