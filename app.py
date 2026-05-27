@@ -634,7 +634,7 @@ with right:
         with st.expander("How to export from TradingView"):
             st.write("TradingView → Watchlist → three-dot menu → Export data → save CSV → Upload below")
  
-     uploaded = st.file_uploader("Upload new watchlist CSV (optional)", type=["csv","txt"], label_visibility="collapsed")
+        uploaded = st.file_uploader("Upload new watchlist CSV (optional)", type=["csv","txt"], label_visibility="collapsed")
         if uploaded:
             syms = parse_csv(uploaded)
             if not syms:
