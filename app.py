@@ -813,19 +813,16 @@ with right:
                     if db_save_watchlist(syms):
                         st.success(f"✅ {len(syms)} stocks loaded and saved!")
                         st.session_state.watchlist = syms
-            if not your_syms:
+           if not your_syms:
                 st.info("Upload your TradingView watchlist above to start scanning.")
             else:
                 render_scan_results(your_syms, key_prefix="yours")
+                _ensure_news_state()
+                news_panel(your_syms)
 
        # News shows based on which tab is active — handled inside each tab
         pass
-
-    # ── ALERTS ──────────────────────────────────────────────
-
-    # ── ALERTS ──────────────────────────────────────────────
- 
-    # ── ALERTS ──────────────────────────────────────────────
+# ── ALERTS ──────────────────────────────────────────────
     elif pg == "alerts":
         section("TELEGRAM ALERTS")
         watchlist = st.session_state.get("watchlist",[])
