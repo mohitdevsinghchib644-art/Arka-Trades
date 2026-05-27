@@ -810,8 +810,7 @@ with right:
                 else:
                     if db_save_watchlist(syms):
                         st.success(f"✅ {len(syms)} stocks loaded and saved!")
-                        st.rerun()
-
+                        st.session_state.watchlist = syms
             if not your_syms:
                 st.info("Upload your TradingView watchlist above to start scanning.")
             else:
