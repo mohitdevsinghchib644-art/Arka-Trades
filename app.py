@@ -667,15 +667,15 @@ with right:
             </div>
         </div>""", unsafe_allow_html=True)
 
-       if not syms:
-            st.info("Upload your TradingView watchlist above to start scanning.")
-        else:
-            sc1,sc2,sc3,sc4 = st.columns([1,1,1,2])
-            filt    = sc1.selectbox("Show",["All","Above PDH","Below PDL","In Range"])
-            l10     = sc2.checkbox("10s Live")
-            l60     = sc3.checkbox("60s Auto")
-            scanbtn = sc4.button("SCAN NOW", use_container_width=True, type="primary")
-            sc1,sc2,sc3,sc4 = st.columns([1,1,1,2])
+        if not syms:
+             st.info("Upload your TradingView watchlist above to start scanning.")
+         else:
+             sc1,sc2,sc3,sc4 = st.columns([1,1,1,2])
+             filt    = sc1.selectbox("Show",["All","Above PDH","Below PDL","In Range"])
+             l10     = sc2.checkbox("10s Live")
+             l60     = sc3.checkbox("60s Auto")
+             scanbtn = sc4.button("SCAN NOW", use_container_width=True, type="primary")
+             sc1,sc2,sc3,sc4 = st.columns([1,1,1,2])
             filt    = sc1.selectbox("Show",["All","Above PDH","Below PDL","In Range"])
             l10     = sc2.checkbox("10s Live")
             l60     = sc3.checkbox("60s Auto")
