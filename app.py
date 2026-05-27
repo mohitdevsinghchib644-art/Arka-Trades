@@ -411,8 +411,11 @@ else:
  
 # ── LEFT NAV PANEL ────────────────────────────────────────────
 with left:
-    # Brand section
-    st.markdown(f"""
+    if not st.session_state.menu_open:
+        st.empty()
+    else:
+     # Brand section
+        st.markdown(f"""
     <div style="background:{DARK2};border-right:1px solid {BORDER};padding:0;">
         <div style="padding:20px 16px 16px;border-bottom:1px solid {BORDER};text-align:center;">
             <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;
