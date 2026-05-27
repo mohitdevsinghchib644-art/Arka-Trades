@@ -220,8 +220,26 @@ def analyze_chart(img, click_x=None, click_y=None, user_note="") -> dict:
             f"\n\nUSER CLICKED: pixel ({click_x},{click_y}) = {pct_x}% left, {pct_y}% top. "
             f"Focus PRIMARY analysis on the candlestick at this exact location."
         )
+   # Estimate chart sections based on image dimensions
+    candle_zone_end = int(img.height * 0.70)
+    volume_zone_start = int(img.height * 0.70)
+    volume_zone_end = int(img.height * 0.88)
+    price_scale_start = int(img.width * 0.88)
+
     prompt = (
         f"{rules_ctx}{click_info}\n\n"
+        f"CHART LAYOUT (critical — use these exact zones for annotations):\n"
+        f"- CANDLE ZONE: Y from 0 to {candle_zone_end}px (top portion)\n"
+        f"- VOLUME ZONE: Y from {volume_zone_start} to {volume_zone_end}px (bottom portion)\n"
+        f"- PRICE SCALE: X from {price_scale_start} to {img.width}px (right side, avoid placing boxes here)\n"
+        f"- TIME AXIS: Y from {volume_zone_end} to {img.height}px (very bottom)\n"
+        f"- Total image: {img.width}x{img.height}px\n\n"
+        f"ANNOTATION RULES:\n"
+        f"- Draw boxes on CANDLES only within candle zone (Y 0 to {candle_zone_end})\n"
+        f"- Draw boxes on VOLUME only within volume zone (Y {volume_zone_start} to {volume_zone_end})\n"
+        f"- Never place annotations on price scale or time axis\n"
+        f"- If referencing volume, Y coordinate MUST be between {volume_zone_start} and {volume_zone_end}\n"
+        f"- If referencing candles, Y coordinate MUST be between 0 and {candle_zone_end}\n\n"
         f"TASK: Audit this chart against the rules above.\n"
         f"{f'USER NOTE: {user_note}' if user_note else ''}\n"
         f"Return ONLY valid JSON. No markdown. No preamble.\n"
