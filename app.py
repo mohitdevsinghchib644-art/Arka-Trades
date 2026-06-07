@@ -102,7 +102,6 @@ def send_telegram(msg):
     except: pass
  
 # ── Colors ──────────────────────────────────────────────────
-OBSIDIAN = "#0A0A0F"
 IVORY    = "#EAE6FF"
 GOLD     = "#C9A84C"
 GREEN    = "#00C896"
