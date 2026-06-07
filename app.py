@@ -102,16 +102,16 @@ def send_telegram(msg):
     except: pass
  
 # ── Colors ──────────────────────────────────────────────────
-IVORY    = "#EAE6FF"
-GOLD     = "#C9A84C"
-GREEN    = "#00C896"
-RED      = "#FF4D6D"
-DARK     = "#07070E"
-DARK2    = "#0D0D1A"
-DARK3    = "#12122A"
-BORDER   = "#2A2A5A"
-T2       = "#7B7FA6"
-NAVY     = "#1A1A4E"
+IVORY    = "#ECFDF5"
+GOLD     = "#10B981"
+GREEN    = "#34D399"
+RED      = "#F87171"
+DARK     = "#050A05"
+DARK2    = "#0A140A"
+DARK3    = "#0D1F0D"
+BORDER   = "#0F2A0F"
+T2       = "#6EE7B7"
+NAVY     = "#051A05"
  
 # ── Session State ────────────────────────────────────────────
 for k, v in {
