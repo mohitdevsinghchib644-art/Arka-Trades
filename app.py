@@ -713,7 +713,7 @@ with right:
                     with st.expander(f"{len(failed)} skipped"): st.write(", ".join(failed))
 
                 section("RESULTS")
-                cols7 = st.columns(7)
+                cols7 = st.columns(5)
                 for i, s in enumerate(filtered):
                     if s["cls"] == "g":
                         bg=f"linear-gradient(160deg,{DARK},{GREEN}18)"; bd=f"rgba(0,179,122,0.4)"; top=GREEN
