@@ -751,7 +751,7 @@ with right:
                         f'color:{rc};">RSI {s["rsi"]}</div>'
                         f'</div>'
                     )
-                    with cols7[i % 7]:
+                    with cols7[i % 5]:
                         st.markdown(card, unsafe_allow_html=True)
 
                 IST = timezone(timedelta(hours=5, minutes=30))
