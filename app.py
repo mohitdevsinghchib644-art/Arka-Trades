@@ -728,8 +728,8 @@ with right:
                     ha  = s["sym"] in st.session_state.alerts and st.session_state.alerts[s["sym"]].get("active")
                     nd  = get_news_dot(s["sym"])
                     dot = f'<span style="color:#F5C518;font-size:9px;margin:0 2px;">&#9679;</span>' if nd else ""
-                    bon = f'<svg width="16" height="16" viewBox="0 0 24 24" fill="{IVORY}"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.[...]
-                    bof = f'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="{T2}" stroke-width="2"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5[...]
+                    bon = f'<svg width="16" height="16" viewBox="0 0 24 24" fill="{IVORY}"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.21 6.03 5.57 7.59 5.57 9.5v5.5c0 .55-.45 1-1 1s-1 .45-1 1v1h2.91c.37 1.26 1.5 2.2 2.84 2.2s2.47-.94 2.84-2.2h2.7c.37 1.26 1.5 2.2 2.84 2.2s2.47-.94 2.84-2.2H23v-1c0-.55-.45-1-1-1s-1-.45-1-1v-5.5c0-1.91-1.64-3.47-3.72-3.82z"/></svg>'
+                    bof = f'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="{T2}" stroke-width="2"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.21 6.03 5.57 7.59 5.57 9.5v5.5c0 .55-.45 1-1 1s-1 .45-1 1v1h2.91c.37 1.26 1.5 2.2 2.84 2.2s2.47-.94 2.84-2.2h2.7c.37 1.26 1.5 2.2 2.84 2.2s2.47-.94 2.84-2.2H23v-1c0-.55-.45-1-1-1s-1-.45-1-1v-5.5c0-1.91-1.64-3.47-3.72-3.82z"/></svg>'
                     bell = bon if ha else bof
  
                     card = (
@@ -847,8 +847,8 @@ with right:
                     if has_alert:
                         a=st.session_state.alerts[sym]
                         alert_info=f"{a['type'].upper()}<br>Rs {a['price']:.2f}"
-                    bell_on=f'<svg width="26" height="26" viewBox="0 0 24 24" fill="{IVORY}"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-[...]
-                    bell_off=f'<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="{T2}" stroke-width="1.5"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.6[...]
+                    bell_on=f'<svg width="26" height="26" viewBox="0 0 24 24" fill="{IVORY}"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.21 6.03 5.57 7.59 5.57 9.5v5.5c0 .55-.45 1-1 1s-1 .45-1 1v1h2.91c.37 1.26 1.5 2.2 2.84 2.2s2.47-.94 2.84-2.2h2.7c.37 1.26 1.5 2.2 2.84 2.2s2.47-.94 2.84-2.2H23v-1c0-.55-.45-1-1-1s-1-.45-1-1v-5.5c0-1.91-1.64-3.47-3.72-3.82z"/></svg>'
+                    bell_off=f'<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="{T2}" stroke-width="2"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.21 6.03 5.57 7.59 5.57 9.5v5.5c0 .55-.45 1-1 1s-1 .45-1 1v1h2.91c.37 1.26 1.5 2.2 2.84 2.2s2.47-.94 2.84-2.2h2.7c.37 1.26 1.5 2.2 2.84 2.2s2.47-.94 2.84-2.2H23v-1c0-.55-.45-1-1-1s-1-.45-1-1v-5.5c0-1.91-1.64-3.47-3.72-3.82z"/></svg>'
                     card_bd=GOLD if has_alert else BORDER
                     card_bg=f"rgba(200,169,106,0.06)" if has_alert else DARK2
                     with cols[j]:
