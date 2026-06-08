@@ -81,7 +81,7 @@ def db_save_admin_watchlist(symbols: list):
     except Exception as e:
         st.error(f"Admin save error: {e}")
         return False
-
+ 
 def db_load_admin_watchlist() -> list:
     try:
         res = supabase.table("admin_watchlist").select("symbol").execute()
@@ -304,9 +304,9 @@ def section(title):
         <div style="flex:1;height:1px;background:{BORDER};"></div>
     </div>""", unsafe_allow_html=True)
  
-# ════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════
 # LOGIN
-# ════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════
 if not st.session_state.logged_in:
     st.markdown(f"""
     <style>.stApp{{background:linear-gradient(135deg,{NAVY} 0%,{DARK} 70%) !important;}}</style>
@@ -352,9 +352,9 @@ if not st.session_state.logged_in:
         st.markdown(f"<div style='text-align:center;font-size:11px;color:{T2};margin-top:12px;font-style:italic;'>Not SEBI registered · Educational use only</div>", unsafe_allow_html=True)
     st.stop()
  
-# ════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════
 # DISCLAIMER
-# ════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════
 if not st.session_state.disclaimer_done:
     _, col, _ = st.columns([1,3,1])
     with col:
@@ -397,9 +397,9 @@ if not st.session_state.disclaimer_done:
             st.caption("Accept all 4 terms above to continue")
     st.stop()
  
-# ════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════
 # MAIN LAYOUT: Left Nav | Right Content
-# ════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════
 left, right = st.columns([1, 4])
  
 # ── LEFT NAV PANEL ────────────────────────────────────────────
@@ -658,24 +658,24 @@ with right:
     # ── SCANNER ─────────────────────────────────────────────
     elif pg == "scanner":
         section("WATCHLIST SCANNER")
-
+ 
         if not st.session_state.admin_watchlist:
             awl = db_load_admin_watchlist()
             if awl:
                 st.session_state.admin_watchlist = awl
-
+ 
         if not st.session_state.watchlist:
             wl = db_load_watchlist()
             if wl:
                 st.session_state.watchlist = wl
-
+ 
         def render_scan_results(syms, key_prefix=""):
             sc1,sc2,sc3,sc4 = st.columns([1,1,1,2])
             filt    = sc1.selectbox("Show",["All","Above PDH","Below PDL","In Range"], key=f"filt_{key_prefix}")
             l10     = sc2.checkbox("10s Live", key=f"l10_{key_prefix}")
             l60     = sc3.checkbox("60s Auto", key=f"l60_{key_prefix}")
             scanbtn = sc4.button("SCAN NOW", use_container_width=True, type="primary", key=f"scan_{key_prefix}")
-
+ 
             if scanbtn:
                 results,failed = [],[]
                 bar = st.progress(0, text="Scanning...")
@@ -691,27 +691,27 @@ with right:
                 check_alerts(results)
                 st.session_state[f"results_{key_prefix}"] = results
                 st.session_state[f"failed_{key_prefix}"] = failed
-
+ 
             results = st.session_state.get(f"results_{key_prefix}", [])
             failed  = st.session_state.get(f"failed_{key_prefix}", [])
-
+ 
             if results:
                 filtered=results
                 if filt=="Above PDH":  filtered=[r for r in results if r["cls"]=="g"]
                 elif filt=="Below PDL":filtered=[r for r in results if r["cls"]=="r"]
                 elif filt=="In Range": filtered=[r for r in results if r["cls"]=="n"]
                 filtered.sort(key=lambda x:{"g":0,"r":1,"n":2}[x["cls"]])
-
+ 
                 g=sum(1 for r in results if r["cls"]=="g")
                 r=sum(1 for r in results if r["cls"]=="r")
                 n=sum(1 for r in results if r["cls"]=="n")
                 m1,m2,m3,m4=st.columns(4)
                 m1.metric("Above PDH",g); m2.metric("Below PDL",r)
                 m3.metric("In Range",n);  m4.metric("Total",len(results))
-
+ 
                 if failed:
                     with st.expander(f"{len(failed)} skipped"): st.write(", ".join(failed))
-
+ 
                 section("RESULTS")
                 cols7 = st.columns(5)
                 for i, s in enumerate(filtered):
@@ -721,18 +721,18 @@ with right:
                         bg=f"linear-gradient(160deg,{DARK},{RED}18)"; bd=f"rgba(232,69,69,0.4)"; top=RED
                     else:
                         bg=DARK2; bd=BORDER; top=BORDER
-
+ 
                     cc  = GREEN if s["chg"] >= 0 else RED
                     arr = "▲"   if s["chg"] >= 0 else "▼"
                     rc  = GREEN if s["rsi"] < 35 else RED if s["rsi"] > 65 else T2
                     ha  = s["sym"] in st.session_state.alerts and st.session_state.alerts[s["sym"]].get("active")
                     nd  = get_news_dot(s["sym"])
                     dot = f'<span style="color:#F5C518;font-size:9px;margin:0 2px;">&#9679;</span>' if nd else ""
-                    bon = f'<svg width="16" height="16" viewBox="0 0 24 24" fill="{IVORY}"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
-                    bof = f'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="{T2}" stroke-width="2"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
+                    bon = f'<svg width="16" height="16" viewBox="0 0 24 24" fill="{IVORY}"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.[...]
+                    bof = f'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="{T2}" stroke-width="2"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5[...]
                     bell = bon if ha else bof
-
-                  card = (
+ 
+                    card = (
                         f'<div style="background:{bg};border:1px solid {bd};border-top:3px solid {top};'
                         f'border-radius:10px;padding:12px 8px 10px;text-align:center;margin-bottom:6px;">'
                         f'<div style="display:flex;align-items:center;justify-content:center;'
@@ -753,14 +753,14 @@ with right:
                     )
                     with cols7[i % 5]:
                         st.markdown(card, unsafe_allow_html=True)
-
+ 
                 IST = timezone(timedelta(hours=5, minutes=30))
                 st.caption(f"Scanned: {datetime.now(IST).strftime('%d %b %Y  %H:%M:%S')}  ·  % vs prev close  ·  Price: 10s cache")
                 if l10: time.sleep(10); st.cache_data.clear(); st.rerun()
                 elif l60: time.sleep(60); st.cache_data.clear(); st.rerun()
-
+ 
         tab1, tab2 = st.tabs(["👑 Arka Watchlist", "📋 Your Watchlist"])
-
+ 
         with tab1:
             admin_syms = st.session_state.admin_watchlist
             st.markdown(f"""
@@ -772,7 +772,7 @@ with right:
                     {f"{len(admin_syms)} stocks · Curated by Arka Trades" if admin_syms else "No admin watchlist yet"}
                 </div>
             </div>""", unsafe_allow_html=True)
-
+ 
             if IS_ADMIN:
                 uploaded_admin = st.file_uploader("Upload Arka Watchlist", type=["csv","txt"], key="admin_upload")
                 if uploaded_admin:
@@ -784,14 +784,14 @@ with right:
                             st.success(f"✅ Arka Watchlist updated — {len(syms)} stocks!")
                             st.session_state.admin_watchlist = syms
                             st.rerun()
-
+ 
             if not admin_syms:
                 st.info("Arka Watchlist not available yet.")
             else:
                 render_scan_results(admin_syms, key_prefix="admin")
                 _ensure_news_state()
                 news_panel(admin_syms)
-
+ 
         with tab2:
             your_syms = st.session_state.watchlist
             st.markdown(f"""
@@ -803,7 +803,7 @@ with right:
                     {f"{len(your_syms)} stocks saved in cloud" if your_syms else "No watchlist uploaded yet"}
                 </div>
             </div>""", unsafe_allow_html=True)
-
+ 
             uploaded_yours = st.file_uploader("Upload Your Watchlist (CSV or TXT)", type=["csv","txt"], key="your_upload")
             if uploaded_yours:
                 syms = parse_csv(uploaded_yours)
@@ -819,14 +819,14 @@ with right:
                 render_scan_results(your_syms, key_prefix="yours")
                 _ensure_news_state()
                 news_panel(your_syms)
-
-       # News shows based on which tab is active — handled inside each tab
+ 
+        # News shows based on which tab is active — handled inside each tab
         pass
 # ── ALERTS ──────────────────────────────────────────────
-   # ── ALERTS ──────────────────────────────────────────────
+    # ── ALERTS ──────────────────────────────────────────────
     elif pg == "alerts":
         section("TELEGRAM ALERTS")
-
+ 
         def render_alert_cards(watchlist, key_suffix=""):
             st.markdown(f"""
             <div style="background:{DARK2};border:1px solid {BORDER};border-left:4px solid {GOLD};
@@ -847,8 +847,8 @@ with right:
                     if has_alert:
                         a=st.session_state.alerts[sym]
                         alert_info=f"{a['type'].upper()}<br>Rs {a['price']:.2f}"
-                    bell_on=f'<svg width="26" height="26" viewBox="0 0 24 24" fill="{IVORY}"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
-                    bell_off=f'<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="{T2}" stroke-width="1.5"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>'
+                    bell_on=f'<svg width="26" height="26" viewBox="0 0 24 24" fill="{IVORY}"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-[...]
+                    bell_off=f'<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="{T2}" stroke-width="1.5"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.6[...]
                     card_bd=GOLD if has_alert else BORDER
                     card_bg=f"rgba(200,169,106,0.06)" if has_alert else DARK2
                     with cols[j]:
@@ -899,23 +899,23 @@ with right:
                                         st.session_state[f"open_{sym}_{key_suffix}"]=False
                                         st.success(f"Alert set for {sym}!")
                                         st.rerun()
-
+ 
         alert_tab1, alert_tab2 = st.tabs(["👑 Arka Watchlist", "📋 Your Watchlist"])
-
+ 
         with alert_tab1:
             watchlist = st.session_state.get("admin_watchlist", [])
             if not watchlist:
                 st.warning("Arka Watchlist not available yet.")
             else:
                 render_alert_cards(watchlist, key_suffix="admin")
-
+ 
         with alert_tab2:
             watchlist = st.session_state.get("watchlist", [])
             if not watchlist:
                 st.warning("Upload your watchlist in Scanner first.")
             else:
                 render_alert_cards(watchlist, key_suffix="yours")
-
+ 
     # ── NEWS PAGE ────────────────────────────────────────────
     # ── NEWS PAGE ────────────────────────────────────────────
     elif pg == "news":
