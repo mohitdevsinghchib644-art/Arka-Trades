@@ -9,6 +9,7 @@ PDF Parse : pdfplumber
 """
  
 import streamlit as st
+import streamlit.components.v1 as components
 import base64, io, json, time, hashlib, traceback
 from datetime import datetime, timezone, timedelta
  
