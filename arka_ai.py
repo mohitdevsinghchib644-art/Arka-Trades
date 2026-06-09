@@ -688,11 +688,13 @@ def render_mode1():
         st.markdown(f"<div style='font-size:12px;color:{T2};margin-bottom:6px;'>Live TradingView Chart</div>",
                     unsafe_allow_html=True)
 
-        tv_symbol = load_ticker.upper()
-        if tv_symbol in ["NIFTY50", "NIFTY"]:
-            tv_symbol = "NSE:NIFTY"
-        elif tv_symbol in ["BANKNIFTY"]:
+        tv_symbol = load_ticker.upper().replace(".NS", "").replace("^", "")
+        if tv_symbol == "NSEI":
+            tv_symbol = "NSE:NIFTY50"
+        elif tv_symbol == "NSEBANK":
             tv_symbol = "NSE:BANKNIFTY"
+        elif tv_symbol == "BSESN":
+            tv_symbol = "BSE:SENSEX"
         else:
             tv_symbol = f"NSE:{tv_symbol}"
 
