@@ -314,35 +314,70 @@ def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
         st.error("❌ matplotlib not installed")
         return None
 
-    if not HAS_YFINANCE:
-        st.error("❌ yfinance not installed")
-        return None
-
     try:
-        if "." not in ticker:
-            if ticker.upper() in ["NIFTY50", "BANKNIFTY"]:
-                ticker = f"^{ticker.upper()}"
-            else:
-                ticker = f"{ticker.upper()}.NS"
+        # ── Normalize ticker ──────────────────────────────
+        exchange = "NSE"
+        clean    = ticker.upper().strip()
 
-        end   = datetime.today()
-        start = end - timedelta(days=90)
-        hist  = yf.Ticker(ticker).history(
-            start=start.strftime("%Y-%m-%d"),
-            end=(end + timedelta(days=1)).strftime("%Y-%m-%d"),
-            interval="1d",
-            auto_adjust=True
-        )
-        hist = hist[hist.index <= pd.Timestamp.now(tz=hist.index.tz)]
+        if clean in ["NIFTY50", "^NSEI"]:
+            clean    = "NIFTY"
+            exchange = "NSE"
+        elif clean in ["BANKNIFTY", "^NSEBANK"]:
+            clean    = "BANKNIFTY"
+            exchange = "NSE"
+        elif clean.endswith(".NS"):
+            clean = clean.replace(".NS", "")
+        elif clean.startswith("^"):
+            clean = clean[1:]
 
-        if hist.empty:
+        # ── Fetch from TvDatafeed ─────────────────────────
+        hist = None
+
+        if HAS_TV:
+            try:
+                tv   = TvDatafeed()
+                hist = tv.get_hist(
+                    symbol=clean,
+                    exchange=exchange,
+                    interval=Interval.in_daily,
+                    n_bars=90
+                )
+                if hist is not None and not hist.empty:
+                    hist = hist.rename(columns={
+                        "open":   "Open",
+                        "high":   "High",
+                        "low":    "Low",
+                        "close":  "Close",
+                        "volume": "Volume"
+                    })
+                    print(f"✅ TvDatafeed: got {len(hist)} bars, last: {hist.index[-1]}")
+            except Exception as e:
+                print(f"⚠️ TvDatafeed failed: {e}, falling back to yfinance")
+                hist = None
+
+        # ── Fallback to yfinance ──────────────────────────
+        if hist is None or hist.empty:
+            print("📊 Using yfinance fallback...")
+            end   = datetime.today()
+            start = end - timedelta(days=120)
+            yf_ticker = f"{clean}.NS" if exchange == "NSE" else clean
+            hist = yf.Ticker(yf_ticker).history(
+                start=start.strftime("%Y-%m-%d"),
+                end=(end + timedelta(days=1)).strftime("%Y-%m-%d"),
+                interval="1d",
+                auto_adjust=True
+            )
+
+        if hist is None or hist.empty:
             st.error(f"❌ No data for {ticker}")
             return None
 
-        n = len(hist)
+        # Keep last 90 bars only
+        hist = hist.tail(90)
 
-        fig_w = max(16, n * 0.22)
-        fig, ax = plt.subplots(figsize=(fig_w, 6), facecolor="#04080F")
+        n        = len(hist)
+        fig_w    = max(16, n * 0.22)
+        fig, ax  = plt.subplots(figsize=(fig_w, 6), facecolor="#04080F")
         ax.set_facecolor("#04080F")
 
         for spine in ax.spines.values():
@@ -359,7 +394,7 @@ def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
 
             body_y = min(o, c)
             body_h = max(abs(c - o), (h - l) * 0.01)
-            rect = mpatches.Rectangle(
+            rect   = mpatches.Rectangle(
                 (i - candle_w / 2, body_y),
                 candle_w, body_h,
                 facecolor=color, edgecolor=color,
@@ -367,7 +402,7 @@ def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
             )
             ax.add_patch(rect)
 
-        step = max(1, n // 12)
+        step      = max(1, n // 12)
         positions = list(range(0, n, step))
         labels    = [hist.index[i].strftime("%d %b") for i in positions]
         ax.set_xticks(positions)
@@ -377,11 +412,17 @@ def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
 
         price_min = hist["Low"].min()
         price_max = hist["High"].max()
-        pad = (price_max - price_min) * 0.05
+        pad       = (price_max - price_min) * 0.05
         ax.set_ylim(price_min - pad, price_max + pad)
 
+        last_date = hist.index[-1]
+        if hasattr(last_date, 'strftime'):
+            date_str = last_date.strftime("%d %b %Y")
+        else:
+            date_str = str(last_date)[:10]
+
         ax.set_title(
-            f"{ticker}  ·  3M Daily  ·  {hist.index[-1].strftime('%d %b %Y')}",
+            f"{clean}  ·  NSE Daily  ·  {date_str}",
             color="#C8A96A", fontsize=12, fontweight="bold",
             fontfamily="monospace", pad=10
         )
