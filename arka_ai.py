@@ -328,10 +328,15 @@ def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
 
         # ── Fetch from TvDatafeed ─────────────────────────
         hist = None
-
-       print("📊 Fetching via yfinance...")
-        hist = None
-        if True:
+        end   = datetime.today()
+        start = end - timedelta(days=120)
+        yf_ticker = f"{clean}.NS" if exchange == "NSE" else clean
+        hist = yf.Ticker(yf_ticker).history(
+            start=start.strftime("%Y-%m-%d"),
+            end=(end + timedelta(days=1)).strftime("%Y-%m-%d"),
+            interval="1d",
+            auto_adjust=True
+        )
             end   = datetime.today()
             start = end - timedelta(days=120)
             yf_ticker = f"{clean}.NS" if exchange == "NSE" else clean
