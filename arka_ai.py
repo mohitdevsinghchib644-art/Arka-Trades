@@ -1,4 +1,3 @@
-"""
 arka_ai.py  —  Arka AI Trading Companion
 ==========================================
 Brain     : Gemini 2.5 Flash  (vision + text)
@@ -7,37 +6,37 @@ Voice     : Web Speech API     (browser TTS)
 Click     : streamlit-image-coordinates
 PDF Parse : pdfplumber
 """
- 
+
 import streamlit as st
 import streamlit.components.v1 as components
-import base64, io, json, time, hashlib, traceback
+import base64, io, json, time, hashlib, traceback, csv as _csv
 from datetime import datetime, timezone, timedelta
- 
+
 # ── Safe imports ────────────────────────────────────────────
 try:
     import google.generativeai as genai
     HAS_GEMINI = True
 except ImportError:
     HAS_GEMINI = False
- 
+
 try:
     from pinecone import Pinecone, ServerlessSpec
     HAS_PINECONE = True
 except ImportError:
     HAS_PINECONE = False
- 
+
 try:
     import pdfplumber
     HAS_PDF = True
 except ImportError:
     HAS_PDF = False
- 
+
 try:
     from PIL import Image, ImageDraw
     HAS_PIL = True
 except ImportError:
     HAS_PIL = False
- 
+
 try:
     from streamlit_image_coordinates import streamlit_image_coordinates
     HAS_IMG_COORDS = True
@@ -50,8 +49,6 @@ try:
    import pandas as pd
    HAS_YFINANCE = True
    HAS_PLOTLY = True
-
-
 except ImportError:
     HAS_YFINANCE = False
     HAS_PLOTLY = False
@@ -62,12 +59,12 @@ try:
     HAS_REQUESTS = True
 except ImportError:
     HAS_REQUESTS = False
- 
+
 # ── Keys from Streamlit Secrets ────────────────────────────
 GEMINI_KEY   = st.secrets.get("GEMINI_KEY",   "")
 PINECONE_KEY = st.secrets.get("PINECONE_KEY", "")
 INDEX_NAME   = "arka-trading-rules"
- 
+
 # ── Colors ─────────────────────────────────────────────────
 GOLD   = "#C8A96A"
 GREEN  = "#00B37A"
@@ -79,11 +76,11 @@ BORDER = "#0F2040"
 T2     = "#8A9AB5"
 IVORY  = "#F7EBE0"
 NAVY   = "#0A1D4B"
- 
+
 # ══════════════════════════════════════════════════════════
 # 1. GEMINI CLIENT
 # ══════════════════════════════════════════════════════════
- 
+
 @st.cache_resource
 def get_gemini():
     if not HAS_GEMINI:
@@ -95,7 +92,7 @@ def get_gemini():
         return genai.GenerativeModel(
             model_name="gemini-2.5-flash-preview-05-20",
             system_instruction="""You are Arka AI — an elite, zero-emotion technical analysis companion.
- 
+
 CORE RULES:
 - Strip ALL emotional phrases: no "Great setup!", "Nice trade!", "Good job!"
 - Be precise, surgical, and direct
@@ -104,7 +101,7 @@ CORE RULES:
 - You are NOT SEBI registered — educational analysis only
 - Keep voice-optimized responses: punchy, clear, under 150 words unless asked for detail
 - When flagging issues, be brutally honest about execution blind spots
- 
+
 OUTPUT FORMAT (always return valid JSON):
 {
   "verdict": "VALID | INVALID | FLAGGED",
@@ -123,12 +120,12 @@ OUTPUT FORMAT (always return valid JSON):
         )
     except Exception as e:
         return None
-  
-  
+
+
 # ══════════════════════════════════════════════════════════
 # 2. PINECONE VECTOR MEMORY
 # ══════════════════════════════════════════════════════════
- 
+
 @st.cache_resource
 def get_pinecone_index():
     if not HAS_PINECONE:
@@ -149,86 +146,83 @@ def get_pinecone_index():
         return pc.Index(INDEX_NAME)
     except Exception as e:
         return None
-  
-  
+
+
 def get_embedding(text: str) -> list:
     """Get text embedding via Gemini embedding model with debug logging."""
     if not HAS_GEMINI or not GEMINI_KEY:
         print("❌ GEMINI not available or GEMINI_KEY not set")
         return None
-    
+
     if not text or not text.strip():
         print(f"❌ Empty text provided to embed")
         return None
-    
+
     try:
         print(f"🔹 Attempting to embed text: {text[:60]}...")
         result = genai.embed_content(
             model="models/text-embedding-004",
             content=text.strip()
         )
-        
+
         embedding = result.get("embedding", [])
         print(f"🔹 Received embedding with {len(embedding)} dimensions")
-        
+
         if not embedding:
             print(f"❌ Empty embedding returned from API")
             return None
-        
+
         if len(embedding) != 768:
             print(f"❌ Wrong embedding dimension: {len(embedding)} (expected 768)")
             return None
-        
-        # Check if all values are zero or near-zero
+
         non_zero_count = sum(1 for v in embedding if abs(v) > 1e-7)
         print(f"🔹 Non-zero dimensions: {non_zero_count}/768")
-        
+
         if non_zero_count == 0:
             print(f"❌ All-zero embedding detected!")
             return None
-        
+
         print(f"✅ Valid embedding generated with {non_zero_count} non-zero values")
         return embedding
-        
+
     except Exception as e:
         print(f"❌ Embedding API error: {str(e)}")
         traceback.print_exc()
         return None
-  
-  
+
+
 def save_rule_to_memory(rule_type: str, rule_name: str, rule_text: str, tags: list = None):
     """Save a trading rule into Pinecone vector memory."""
     idx = get_pinecone_index()
     if not idx:
         st.error("❌ Pinecone index not available. Check PINECONE_KEY in secrets.")
         return False
-    
-    # Validate inputs
+
     if not rule_text or not rule_text.strip():
         st.error("❌ Cannot save rule: description is empty")
         return False
-    
+
     if len(rule_text.strip()) < 5:
         st.error("❌ Rule description is too short (minimum 5 characters)")
         return False
-    
+
     try:
         full_text = f"{rule_type}: {rule_name}\n{rule_text}".strip()
         print(f"\n📝 Preparing to save rule: {rule_name}")
         print(f"   Full text: {full_text[:100]}...")
-        
-        time.sleep(2)  # Rate limit protection
+
+        time.sleep(2)
         embedding = get_embedding(full_text)
-        
-        # CRITICAL: Reject None or invalid embeddings
+
         if embedding is None:
             st.error(f"❌ Embedding failed for '{rule_name}'. Gemini API may be having issues or GEMINI_KEY is invalid.")
             print(f"❌ Embedding failed - returning False")
             return False
-        
+
         vector_id = f"rule_{int(time.time())}_{rule_name[:20].replace(' ','_').upper()}"
         print(f"📤 Upserting to Pinecone with ID: {vector_id}")
-        
+
         idx.upsert(vectors=[{
             "id":     vector_id,
             "values": embedding,
@@ -240,19 +234,19 @@ def save_rule_to_memory(rule_type: str, rule_name: str, rule_text: str, tags: li
                 "saved_at":    datetime.now().isoformat()
             }
         }])
-        
+
         st.success(f"✅ Rule saved to Pinecone: {rule_name}")
         print(f"✅ Successfully saved {rule_name} to Pinecone")
         return True
-        
+
     except Exception as e:
         error_msg = str(e)
         st.error(f"❌ Save error: {error_msg}")
         print(f"❌ Exception during save: {error_msg}")
         traceback.print_exc()
         return False
-  
-  
+
+
 def search_memory(query: str, top_k: int = 5) -> list[dict]:
     """Search Pinecone for relevant rules matching the query."""
     idx = get_pinecone_index()
@@ -281,8 +275,8 @@ def search_memory(query: str, top_k: int = 5) -> list[dict]:
     except Exception as e:
         st.error(f"Search error: {e}")
         return []
-  
-  
+
+
 def build_rules_context(query: str = "trading setup entry exit rules") -> str:
     """Pull relevant rules from memory and format as system context."""
     rules = search_memory(query, top_k=8)
@@ -294,10 +288,10 @@ def build_rules_context(query: str = "trading setup entry exit rules") -> str:
         lines.append(f"  → {r['rule_text']}")
     lines.append("\n=== END OF RULES ===")
     return "\n".join(lines)
-  
-  
+
+
 # ══════════════════════════════════════════════════════════
-# 3. FETCH CHART FROM TRADINGVIEW / YFINANCE
+# 3. FETCH CHART IMAGE FOR GEMINI AI ANALYSIS (yfinance)
 # ══════════════════════════════════════════════════════════
 def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
     import matplotlib
@@ -323,10 +317,14 @@ def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
         else:
             yf_ticker = clean + ".NS"
 
-        end = datetime.today()
+        end   = datetime.today()
         start = end - timedelta(days=120)
-        import requests_cache
-        requests_cache.disabled()
+
+        try:
+            import requests_cache
+            requests_cache.disabled()
+        except ImportError:
+            pass
 
         tk = yf.Ticker(yf_ticker)
         tk._history = None
@@ -343,11 +341,11 @@ def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
             st.error(f"❌ No data for {ticker}")
             return None
 
-        hist = hist.tail(90).copy()
-        hist = hist[hist.index.notnull()]
-        n = len(hist)
-        fig_w = max(16, n * 0.22)
-        fig, ax = plt.subplots(figsize=(fig_w, 4), facecolor="#04080F")
+        hist     = hist.tail(90).copy()
+        hist     = hist[hist.index.notnull()]
+        n        = len(hist)
+        fig_w    = max(16, n * 0.22)
+        fig, ax  = plt.subplots(figsize=(fig_w, 4), facecolor="#04080F")
         ax.set_facecolor("#04080F")
 
         for spine in ax.spines.values():
@@ -369,7 +367,7 @@ def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
             )
             ax.add_patch(rect)
 
-        step = max(1, n // 10)
+        step      = max(1, n // 10)
         positions = list(range(0, n, step))
         if (n - 1) not in positions:
             positions.append(n - 1)
@@ -380,11 +378,11 @@ def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
 
         price_min = hist["Low"].min()
         price_max = hist["High"].max()
-        pad = (price_max - price_min) * 0.05
+        pad       = (price_max - price_min) * 0.05
         ax.set_ylim(price_min - pad, price_max + pad)
 
         last_date = hist.index[-1]
-        date_str = last_date.strftime("%d %b %Y") if hasattr(last_date, "strftime") else str(last_date)[:10]
+        date_str  = last_date.strftime("%d %b %Y") if hasattr(last_date, "strftime") else str(last_date)[:10]
 
         ax.set_title(
             f"{clean}  ·  NSE Daily  ·  {date_str}",
@@ -405,23 +403,195 @@ def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
         st.error(f"❌ Error fetching chart: {str(e)}")
         traceback.print_exc()
         return None
-  
+
+
+# ══════════════════════════════════════════════════════════
+# 3b. STOOQ DATA + LIGHTWEIGHT CHARTS (display only, no yfinance)
+# ══════════════════════════════════════════════════════════
+
+def fetch_stooq_ohlc(ticker: str, limit: int = 90) -> list:
+    """Fetch daily OHLC from Stooq.com via requests. No yfinance needed."""
+    if not HAS_REQUESTS:
+        return []
+
+    clean   = ticker.upper().strip()
+    sym_map = {
+        "NIFTY50":   "^nsei",
+        "NIFTY":     "^nsei",
+        "BANKNIFTY": "^nsebank",
+        "SENSEX":    "^bsesn",
+    }
+    if clean in sym_map:
+        sym = sym_map[clean]
+    elif clean.startswith("^"):
+        sym = clean.lower()
+    elif clean.endswith(".NS"):
+        sym = clean.lower()
+    else:
+        sym = f"{clean.lower()}.ns"
+
+    try:
+        url  = f"https://stooq.com/q/d/l/?s={sym}&i=d"
+        resp = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+
+        text = resp.text.strip()
+        if len(text) < 50 or text.lower().startswith("no data"):
+            st.error(f"❌ No Stooq data found for {ticker}. Check ticker spelling.")
+            return []
+
+        reader = _csv.DictReader(io.StringIO(text))
+        data   = []
+        for row in reader:
+            try:
+                data.append({
+                    "time":   row["Date"],
+                    "open":   float(row["Open"]),
+                    "high":   float(row["High"]),
+                    "low":    float(row["Low"]),
+                    "close":  float(row["Close"]),
+                    "volume": float(row.get("Volume") or 0),
+                })
+            except Exception:
+                continue
+
+        data.sort(key=lambda x: x["time"])   # ensure ascending order
+        return data[-limit:]
+
+    except Exception as e:
+        st.error(f"❌ Stooq fetch error: {e}")
+        return []
+
+
+def render_lw_chart(ticker: str):
+    """
+    Render an interactive TradingView Lightweight Charts candlestick.
+    Uses Stooq for data — no TradingView embed restrictions, no yfinance.
+    """
+    with st.spinner(f"Loading chart for {ticker.upper()}..."):
+        data = fetch_stooq_ohlc(ticker)
+
+    if not data:
+        st.error(f"❌ Chart unavailable for {ticker}. Try a different ticker spelling.")
+        return
+
+    last      = data[-1]
+    prev      = data[-2] if len(data) > 1 else last
+    chg       = last["close"] - prev["close"]
+    chg_pct   = (chg / prev["close"]) * 100 if prev["close"] else 0
+    chg_color = "#00B37A" if chg >= 0 else "#E84545"
+    chg_sign  = "+" if chg >= 0 else ""
+    json_data = json.dumps(data)
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  * {{ margin:0; padding:0; box-sizing:border-box; }}
+  body {{ background:#04080F; font-family:'JetBrains Mono',monospace; overflow:hidden; }}
+  #hdr {{
+    padding: 10px 16px 6px;
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+  }}
+  .tk {{ font-size:15px; font-weight:800; color:#C8A96A; letter-spacing:3px; }}
+  .pr {{ font-size:22px; font-weight:700; color:#F7EBE0; }}
+  .ch {{ font-size:13px; font-weight:600; color:{chg_color}; }}
+  #chart {{ width:100%; }}
+</style>
+</head>
+<body>
+<div id="hdr">
+  <span class="tk">{ticker.upper()} &middot; NSE &middot; Daily</span>
+  <span class="pr">&#8377;{last["close"]:,.2f}</span>
+  <span class="ch">{chg_sign}{chg:.2f} ({chg_sign}{chg_pct:.2f}%)</span>
+</div>
+<div id="chart"></div>
+
+<script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+<script>
+const rawData  = {json_data};
+const H        = 420;
+
+const chart = LightweightCharts.createChart(document.getElementById('chart'), {{
+  width:  document.documentElement.clientWidth,
+  height: H,
+  layout: {{
+    background: {{ type: 'solid', color: '#04080F' }},
+    textColor:  '#8A9AB5',
+    fontSize:   11,
+  }},
+  grid: {{
+    vertLines: {{ color: '#0F2040', style: 1 }},
+    horzLines: {{ color: '#0F2040', style: 1 }},
+  }},
+  crosshair: {{
+    mode: LightweightCharts.CrosshairMode.Normal,
+    vertLine: {{ color: '#C8A96A55', labelBackgroundColor: '#0A1D4B' }},
+    horzLine: {{ color: '#C8A96A55', labelBackgroundColor: '#0A1D4B' }},
+  }},
+  rightPriceScale: {{ borderColor: '#0F2040' }},
+  timeScale: {{
+    borderColor:  '#0F2040',
+    timeVisible:  true,
+    fixLeftEdge:  true,
+    fixRightEdge: true,
+  }},
+  handleScroll: true,
+  handleScale:  true,
+}});
+
+// Volume histogram (background layer)
+const volSeries = chart.addHistogramSeries({{
+  priceScaleId: 'vol',
+  scaleMargins: {{ top: 0.82, bottom: 0 }},
+}});
+volSeries.priceScale().applyOptions({{ scaleMargins: {{ top: 0.82, bottom: 0 }} }});
+volSeries.setData(rawData.map(d => ({{
+  time:  d.time,
+  value: d.volume,
+  color: d.close >= d.open ? '#00B37A2A' : '#E845452A',
+}})));
+
+// Candlestick series
+const candleSeries = chart.addCandlestickSeries({{
+  upColor:         '#00B37A',
+  downColor:       '#E84545',
+  borderUpColor:   '#00B37A',
+  borderDownColor: '#E84545',
+  wickUpColor:     '#00B37A',
+  wickDownColor:   '#E84545',
+}});
+candleSeries.setData(rawData);
+chart.timeScale().fitContent();
+
+// Auto-resize on window change
+new ResizeObserver(() => {{
+  chart.resize(document.documentElement.clientWidth, H);
+}}).observe(document.body);
+</script>
+</body>
+</html>"""
+
+    st.components.v1.html(html, height=490, scrolling=False)
+
+
 # ══════════════════════════════════════════════════════════
 # 4. CHART ANALYSIS ENGINE
 # ══════════════════════════════════════════════════════════
- 
+
 def image_to_base64(img: Image.Image) -> str:
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode()
-  
-  
+
+
 def draw_annotations(img: Image.Image, analysis: dict) -> Image.Image:
     """Draw bounding boxes and arrows from AI response onto chart image."""
     draw   = ImageDraw.Draw(img, "RGBA")
     width  = img.width
     height = img.height
-  
+
     for box in analysis.get("draw_boxes", []):
         try:
             x, y  = int(box["x"]), int(box["y"])
@@ -434,7 +604,7 @@ def draw_annotations(img: Image.Image, analysis: dict) -> Image.Image:
             if label:
                 draw.text((x+3, y-14), label, fill=(r,g,b,255))
         except: pass
-  
+
     for arrow in analysis.get("draw_arrows", []):
         try:
             x1,y1 = int(arrow["x1"]), int(arrow["y1"])
@@ -443,30 +613,23 @@ def draw_annotations(img: Image.Image, analysis: dict) -> Image.Image:
             label  = arrow.get("label", "")
             r,g,b  = int(color[1:3],16), int(color[3:5],16), int(color[5:7],16)
             draw.line([x1,y1,x2,y2], fill=(r,g,b,255), width=2)
-            draw.polygon([x2,y2, x2-8,y2-5, x2-8,y2+5],
-                         fill=(r,g,b,200))
+            draw.polygon([x2,y2, x2-8,y2-5, x2-8,y2+5], fill=(r,g,b,200))
             if label:
                 draw.text((x2+4, y2-10), label, fill=(r,g,b,255))
         except: pass
-  
+
     return img
-  
-  
+
+
 def analyze_chart(img: Image.Image, click_x: int = None,
                   click_y: int = None, user_note: str = "", ticker: str = "") -> dict:
-    """
-    Send chart image + click coordinates + rules context to Gemini.
-    Returns parsed analysis dict.
-    """
+    """Send chart image + click coordinates + rules context to Gemini."""
     model = get_gemini()
-  
-    # Build context from memory
+
     rules_ctx = build_rules_context(user_note or f"trading entry setup validation for {ticker}")
-  
-    # Build prompt
+
     click_info = ""
     if click_x is not None and click_y is not None:
-        # Normalize coords to percentage of image
         pct_x = round((click_x / img.width)  * 100, 1)
         pct_y = round((click_y / img.height) * 100, 1)
         click_info = (
@@ -474,23 +637,21 @@ def analyze_chart(img: Image.Image, click_x: int = None,
             f"= {pct_x}% from left, {pct_y}% from top.\n"
             f"Focus your primary analysis on the candlestick/area at this exact location."
         )
-  
+
     prompt = f"""{rules_ctx}
 {click_info}
 TASK: Analyze this trading chart for {ticker}. {'Focus on the clicked area.' if click_x else 'Provide overall structure analysis.'}
 {f'USER NOTE: {user_note}' if user_note else ''}
- 
+
 Return ONLY a valid JSON object matching the specified format. No markdown, no preamble.
 Coordinates in draw_boxes/draw_arrows must be valid pixel positions matching the chart image size ({img.width}x{img.height}).
 """
-  
+
     try:
-        time.sleep(1)  # Rate limit protection
-        img_data = {"mime_type": "image/png",
-                    "data": image_to_base64(img)}
+        time.sleep(1)
+        img_data = {"mime_type": "image/png", "data": image_to_base64(img)}
         response = model.generate_content([prompt, img_data])
         raw = response.text.strip()
-        # Strip markdown code fences if present
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
@@ -498,25 +659,25 @@ Coordinates in draw_boxes/draw_arrows must be valid pixel positions matching the
         return json.loads(raw.strip())
     except json.JSONDecodeError:
         return {
-            "verdict":          "FLAGGED",
-            "score":            5,
-            "voice_summary":    "Analysis complete. Check detailed section.",
+            "verdict":           "FLAGGED",
+            "score":             5,
+            "voice_summary":     "Analysis complete. Check detailed section.",
             "detailed_analysis": response.text if 'response' in dir() else "Error parsing response.",
-            "rules_matched":    [],
-            "rules_violated":   [],
-            "draw_boxes":       [],
-            "draw_arrows":      []
+            "rules_matched":     [],
+            "rules_violated":    [],
+            "draw_boxes":        [],
+            "draw_arrows":       []
         }
     except Exception as e:
         return {"verdict":"ERROR","score":0,"voice_summary":str(e),
                 "detailed_analysis":str(e),"rules_matched":[],
                 "rules_violated":[],"draw_boxes":[],"draw_arrows":[]}
-  
-  
+
+
 # ══════════════════════════════════════════════════════════
 # 5. PDF PARSER
 # ══════════════════════════════════════════════════════════
- 
+
 def extract_pdf_rules(pdf_file) -> list[str]:
     """Extract text chunks from uploaded PDF."""
     try:
@@ -525,7 +686,6 @@ def extract_pdf_rules(pdf_file) -> list[str]:
             for page in pdf.pages:
                 text = page.extract_text()
                 if text:
-                    # Split into chunks of ~500 chars
                     for i in range(0, len(text), 500):
                         chunk = text[i:i+500].strip()
                         if len(chunk) > 50:
@@ -534,12 +694,12 @@ def extract_pdf_rules(pdf_file) -> list[str]:
     except Exception as e:
         st.error(f"PDF error: {e}")
         return []
-  
-  
+
+
 # ══════════════════════════════════════════════════════════
 # 6. VOICE OUTPUT (Web Speech API)
 # ══════════════════════════════════════════════════════════
- 
+
 def speak(text: str, rate: float = 0.95, pitch: float = 1.0):
     """Inject browser-side TTS via Web Speech API."""
     clean = text.replace('"', "'").replace('\n', ' ').replace('\\', '')
@@ -560,15 +720,15 @@ def speak(text: str, rate: float = 0.95, pitch: float = 1.0):
     }})();
     </script>
     """, unsafe_allow_html=True)
-  
-  
+
+
 # ══════════════════════════════════════════════════════════
 # 7. VERDICT BADGE HTML
 # ══════════════════════════════════════════════════════════
- 
+
 def verdict_badge(verdict: str, score: int) -> str:
     colors = {"VALID":"#00B37A","INVALID":"#E84545","FLAGGED":"#F5C518","ERROR":"#8A9AB5"}
-    c = colors.get(verdict, "#8A9AB5")
+    c     = colors.get(verdict, "#8A9AB5")
     bar_w = int((score / 10) * 100)
     return f"""
 <div style="background:#060D1A;border:1px solid {c};border-radius:14px;padding:20px;margin-bottom:16px;">
@@ -584,12 +744,12 @@ def verdict_badge(verdict: str, score: int) -> str:
              transition:width .5s;"></div>
     </div>
 </div>"""
-  
-  
+
+
 # ══════════════════════════════════════════════════════════
 # 8. MAIN UI — MODE 1: AUTO CHART FETCHING & ANALYSIS
 # ══════════════════════════════════════════════════════════
- 
+
 def render_mode1():
     st.markdown(f"""
     <div style="background:#060D1A;border:1px solid {GOLD}44;border-radius:16px;
@@ -601,7 +761,7 @@ def render_mode1():
         </div>
     </div>
     """, unsafe_allow_html=True)
-  
+
     # Initialize session state
     if "m1_ticker" not in st.session_state:
         st.session_state.m1_ticker = ""
@@ -613,7 +773,7 @@ def render_mode1():
 
     # Input row
     col_input, col_btn = st.columns([4, 1])
-    
+
     with col_input:
         ticker_input = st.text_input(
             "Stock / Index",
@@ -623,10 +783,10 @@ def render_mode1():
             label_visibility="collapsed"
         )
         st.session_state.m1_ticker = ticker_input
-    
+
     with col_btn:
         fetch_btn = st.button("FETCH & ANALYZE", type="primary",
-                             use_container_width=True, key="m1_fetch")
+                              use_container_width=True, key="m1_fetch")
 
     # Quick picks
     st.markdown(
@@ -634,7 +794,7 @@ def render_mode1():
         f'Quick picks:</div>',
         unsafe_allow_html=True
     )
-    qp_cols = st.columns(8)
+    qp_cols     = st.columns(8)
     quick_picks = ["NIFTY50", "BANKNIFTY", "RELIANCE", "TCS", "HDFCBANK",
                    "INFY", "ICICIBANK", "TATASTEEL"]
     for i, qp in enumerate(quick_picks):
@@ -664,75 +824,30 @@ def render_mode1():
         )
         return
 
-    # Fetch chart (for Gemini AI analysis only — display uses TradingView widget)
+    # Fetch yfinance chart image for Gemini AI analysis (backend only)
     if not st.session_state.m1_chart_fetched:
         with st.spinner(f"📊 Preparing AI analysis data for {load_ticker}..."):
             chart_img = get_chart_screenshot(load_ticker, period="3mo")
         if chart_img:
             st.session_state.m1_chart_img = chart_img
-            st.session_state.m1_chart_fetched = True
-        else:
-            # Still proceed — TradingView widget works independently
-            st.session_state.m1_chart_fetched = True
-            st.session_state.m1_chart_img = None
-
-    # img may be None if yfinance failed — Analyze button handles this gracefully
+        st.session_state.m1_chart_fetched = True
 
     img = st.session_state.m1_chart_img
 
     # Display chart and analysis side by side
     col_chart, col_panel = st.columns([5, 2])
 
+    # ── LEFT: Lightweight Charts (Stooq data — no TradingView embed restrictions)
     with col_chart:
-        st.markdown(f"<div style='font-size:12px;color:{T2};margin-bottom:6px;'>Live TradingView Chart</div>",
-                    unsafe_allow_html=True)
-
-        tv_symbol = load_ticker.upper().replace(".NS", "").replace("^", "")
-        if tv_symbol == "NSEI":
-            tv_symbol = "NSE:NIFTY50"
-        elif tv_symbol == "NSEBANK":
-            tv_symbol = "NSE:BANKNIFTY"
-        elif tv_symbol == "BSESN":
-            tv_symbol = "BSE:SENSEX"
-        else:
-            tv_symbol = f"NSE:{tv_symbol}"
-
-        st.components.v1.html(f"""
-        <div style="border:1px solid #0F2040;border-radius:12px;overflow:hidden;">
-        <div class="tradingview-widget-container" style="height:500px;width:100%;">
-            <div class="tradingview-widget-container__widget" style="height:100%;width:100%;"></div>
-            <script type="text/javascript"
-                src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js"
-                async>
-            {{
-                "autosize": true,
-                "symbol": "{tv_symbol}",
-                "interval": "D",
-                "timezone": "Asia/Kolkata",
-                "theme": "dark",
-                "style": "1",
-                "locale": "en",
-                "backgroundColor": "rgba(4,8,15,1)",
-                "gridColor": "rgba(15,32,64,1)",
-                "hide_top_toolbar": false,
-                "hide_legend": false,
-                "save_image": false,
-                "allow_symbol_change": true,
-                "calendar": false,
-                "hide_volume": false
-            }}
-            </script>
-        </div>
-        </div>
-        """, height=520)
-
+        render_lw_chart(load_ticker)
         click_x = None
         click_y = None
 
+    # ── RIGHT: Analysis panel
     with col_panel:
-        user_note = st.text_area("Add context (optional)",
-                                 placeholder="e.g. 'Is this a valid breakout?'",
-                                 height=80, key="m1_note")
+        user_note  = st.text_area("Add context (optional)",
+                                  placeholder="e.g. 'Is this a valid breakout?'",
+                                  height=80, key="m1_note")
         auto_voice = st.toggle("Auto-speak analysis", value=True, key="m1_voice")
 
         if st.button("Analyze Chart", type="primary", use_container_width=True, key="m1_analyze"):
@@ -743,49 +858,51 @@ def render_mode1():
                 with st.spinner("🤖 Gemini is analyzing..."):
                     result = analyze_chart(img, click_x, click_y, user_note, load_ticker)
 
-            # Verdict badge
-            st.markdown(verdict_badge(result.get("verdict","FLAGGED"),
-                                      result.get("score", 5)),
+                # Verdict badge
+                st.markdown(verdict_badge(result.get("verdict", "FLAGGED"),
+                                          result.get("score", 5)),
+                            unsafe_allow_html=True)
+
+                # Voice
+                if auto_voice:
+                    speak(result.get("voice_summary", "Analysis complete."))
+
+                # Draw annotations on chart
+                if result.get("draw_boxes") or result.get("draw_arrows"):
+                    annotated = draw_annotations(img.copy(), result)
+                    with col_chart:
+                        st.image(annotated, caption="AI Annotated Chart", use_container_width=True)
+
+                # Rules matched/violated
+                if result.get("rules_matched"):
+                    st.markdown(
+                        f"<div style='color:{GREEN};font-size:13px;font-weight:700;margin-top:8px;'>✅ Rules Matched</div>",
                         unsafe_allow_html=True)
+                    for r in result["rules_matched"]:
+                        st.markdown(f"<div style='color:{GREEN};font-size:12px;margin-left:8px;'>· {r}</div>",
+                                    unsafe_allow_html=True)
 
-            # Voice
-            if auto_voice:
-                speak(result.get("voice_summary","Analysis complete."))
+                if result.get("rules_violated"):
+                    st.markdown(
+                        f"<div style='color:{RED};font-size:13px;font-weight:700;margin-top:8px;'>❌ Rules Violated</div>",
+                        unsafe_allow_html=True)
+                    for r in result["rules_violated"]:
+                        st.markdown(f"<div style='color:{RED};font-size:12px;margin-left:8px;'>· {r}</div>",
+                                    unsafe_allow_html=True)
 
-            # Draw annotations on chart
-            if result.get("draw_boxes") or result.get("draw_arrows"):
-                annotated = draw_annotations(img.copy(), result)
-                with col_chart:
-                    st.image(annotated, caption="AI Annotated Chart", use_container_width=True)
-
-            # Rules matched/violated
-            if result.get("rules_matched"):
-                st.markdown(f"<div style='color:{GREEN};font-size:13px;font-weight:700;margin-top:8px;'>✅ Rules Matched</div>",
-                            unsafe_allow_html=True)
-                for r in result["rules_matched"]:
-                    st.markdown(f"<div style='color:{GREEN};font-size:12px;margin-left:8px;'>· {r}</div>",
-                                unsafe_allow_html=True)
-
-            if result.get("rules_violated"):
-                st.markdown(f"<div style='color:{RED};font-size:13px;font-weight:700;margin-top:8px;'>❌ Rules Violated</div>",
-                            unsafe_allow_html=True)
-                for r in result["rules_violated"]:
-                    st.markdown(f"<div style='color:{RED};font-size:12px;margin-left:8px;'>· {r}</div>",
-                                unsafe_allow_html=True)
-
-            # Detailed analysis
-            with st.expander("Full Analysis", expanded=True):
-                st.markdown(f"""
-                <div style="background:{DARK3};border-radius:10px;padding:16px;
-                     font-size:13px;color:{IVORY};line-height:1.9;">
-                {result.get('detailed_analysis','').replace(chr(10),'<br>')}
-                </div>""", unsafe_allow_html=True)
+                # Detailed analysis
+                with st.expander("Full Analysis", expanded=True):
+                    st.markdown(f"""
+                    <div style="background:{DARK3};border-radius:10px;padding:16px;
+                         font-size:13px;color:{IVORY};line-height:1.9;">
+                    {result.get('detailed_analysis','').replace(chr(10),'<br>')}
+                    </div>""", unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════
 # 9. MAIN UI — MODE 2: TRAINING MODE
 # ══════════════════════════════════════════════════════════
- 
+
 def render_mode2():
     st.markdown(f"""
     <div style="background:#060D1A;border:1px solid {GREEN}44;border-radius:16px;
@@ -797,11 +914,11 @@ def render_mode2():
         </div>
     </div>
     """, unsafe_allow_html=True)
-  
+
     tab_manual, tab_chart, tab_pdf, tab_memory = st.tabs([
         "✍️ Add Rule", "📊 Annotate Chart", "📄 Upload PDF", "🧠 View Memory"
     ])
-  
+
     # ── TAB 1: Manual Rule Entry ───────────────────────────
     with tab_manual:
         st.markdown(
@@ -809,11 +926,10 @@ def render_mode2():
             f"Add individual trading rules to AI memory</div>",
             unsafe_allow_html=True
         )
-  
-        # Use session state keys for auto-clear
+
         if "m2_rule_name" not in st.session_state: st.session_state.m2_rule_name = ""
         if "m2_rule_text" not in st.session_state: st.session_state.m2_rule_text = ""
-  
+
         rule_name = st.text_input(
             "Rule Name",
             placeholder="e.g. PDH Breakout Confirmation",
@@ -825,14 +941,13 @@ def render_mode2():
             height=130,
             key="m2_rule_text"
         )
-  
+
         if st.button("SAVE TO MEMORY", use_container_width=True,
                      type="primary", key="m2_save_btn"):
             if rule_name.strip() and rule_text.strip():
                 with st.spinner("Saving to Pinecone..."):
                     ok = save_rule_to_memory("", rule_name.strip(), rule_text.strip(), [])
                 if ok:
-                    # Auto-clear fields
                     st.session_state.m2_rule_name = ""
                     st.session_state.m2_rule_text = ""
                     st.success(f"Learned: **{rule_name}** — Applied in every future analysis.")
@@ -842,7 +957,7 @@ def render_mode2():
                     st.error("Save failed. Check Pinecone connection in Streamlit Secrets.")
             else:
                 st.warning("Fill in both Rule Name and Conditions.")
-  
+
     # ── TAB 2: Chart Annotation ────────────────────────────
     with tab_chart:
         st.markdown(
@@ -850,27 +965,25 @@ def render_mode2():
             f"Upload a setup chart. Click on the key candle. AI learns the visual pattern.</div>",
             unsafe_allow_html=True
         )
-  
+
         train_img_file = st.file_uploader(
             "Upload example setup chart",
             type=["png","jpg","jpeg"],
             key="train_chart"
         )
-  
+
         tx, ty = None, None
-  
+
         if train_img_file:
-            raw_img    = Image.open(train_img_file).convert("RGB")
+            raw_img        = Image.open(train_img_file).convert("RGB")
             orig_w, orig_h = raw_img.size
-  
-            # ── Render image at natural aspect ratio — no squishing
+
             if HAS_IMG_COORDS:
                 st.markdown(
                     f"<div style='font-size:11px;color:{GOLD};margin-bottom:6px;'>"
                     f"Click on a key candle or zone to target it</div>",
                     unsafe_allow_html=True
                 )
-                # Pass the PIL image directly — no resizing, no height cap
                 train_coords = streamlit_image_coordinates(
                     raw_img,
                     key="train_click",
@@ -889,11 +1002,10 @@ def render_mode2():
             else:
                 st.image(raw_img, use_container_width=True)
                 st.caption("Tip: install streamlit-image-coordinates for click targeting")
-  
-        # Input fields — outside image block so they always show
+
         if "m2_setup_name" not in st.session_state: st.session_state.m2_setup_name = ""
         if "m2_setup_rules" not in st.session_state: st.session_state.m2_setup_rules = ""
-  
+
         setup_name  = st.text_input(
             "Setup Name",
             placeholder="e.g. Low Volume Handle — Cup and Handle",
@@ -905,7 +1017,7 @@ def render_mode2():
             height=100,
             key="m2_setup_rules"
         )
-  
+
         if st.button("TEACH THIS SETUP", type="primary",
                      use_container_width=True, key="m2_teach_btn"):
             if setup_name.strip() and setup_rules.strip():
@@ -918,7 +1030,6 @@ def render_mode2():
                 with st.spinner("Teaching Arka AI..."):
                     ok = save_rule_to_memory("", setup_name.strip(), full_rule, ["chart-trained"])
                 if ok:
-                    # Auto-clear
                     st.session_state.m2_setup_name  = ""
                     st.session_state.m2_setup_rules = ""
                     st.success(f"Taught: {setup_name}")
@@ -928,7 +1039,7 @@ def render_mode2():
                     st.error("Save failed. Check Pinecone connection.")
             else:
                 st.warning("Enter setup name and description.")
-  
+
     # ── TAB 3: PDF Upload ──────────────────────────────────
     with tab_pdf:
         st.markdown(
@@ -937,7 +1048,7 @@ def render_mode2():
             unsafe_allow_html=True
         )
         pdf_file = st.file_uploader("Upload PDF", type=["pdf"], key="pdf_upload")
-  
+
         if pdf_file and st.button("Extract & Learn from PDF", type="primary",
                                   use_container_width=True, key="pdf_learn_btn"):
             with st.spinner("Reading PDF..."):
@@ -947,9 +1058,8 @@ def render_mode2():
             else:
                 st.info(f"Found {len(chunks)} rule segments. Saving to memory...")
                 progress = st.progress(0)
-                saved = 0
+                saved    = 0
                 for i, chunk in enumerate(chunks):
-                    # Add delay between chunks to avoid rate limiting
                     time.sleep(2)
                     ok = save_rule_to_memory(
                         "",
@@ -961,7 +1071,7 @@ def render_mode2():
                     progress.progress((i+1)/len(chunks))
                 st.success(f"Learned {saved}/{len(chunks)} rule segments from {pdf_file.name}")
                 speak(f"PDF processed. I have learned {saved} trading rules.")
-  
+
     # ── TAB 4: Memory Viewer ───────────────────────────────
     with tab_memory:
         st.markdown(
@@ -993,7 +1103,6 @@ def render_mode2():
                             {r['rule_text'][:300]}...</div>
                     </div>""", unsafe_allow_html=True)
         else:
-            # Show all recent rules when no search query
             with st.spinner("Loading memory..."):
                 all_rules = search_memory("trading setup rule entry exit", top_k=20)
             if all_rules:
@@ -1010,35 +1119,35 @@ def render_mode2():
                             {r['rule_text'][:250]}...</div>
                     </div>""", unsafe_allow_html=True)
             else:
-                st.markdown(f"<div style='color:{T2};font-size:13px;text-align:center;"
-                            f"padding:40px;'>No rules stored yet. Use Add Rule or Annotate Chart to teach Arka AI.</div>",
-                            unsafe_allow_html=True)
+                st.markdown(
+                    f"<div style='color:{T2};font-size:13px;text-align:center;padding:40px;'>"
+                    f"No rules stored yet. Use Add Rule or Annotate Chart to teach Arka AI.</div>",
+                    unsafe_allow_html=True)
 
- 
+
 # ══════════════════════════════════════════════════════════
 # 10. MAIN ENTRY POINT
 # ══════════════════════════════════════════════════════════
-  
+
 def render_arka_ai():
     """Main Arka AI page — call from app.py page router."""
-  
-    # DEBUG: Show API key status
+
     with st.expander("🔧 API Status (Click to expand)", expanded=False):
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("GEMINI_KEY", "✅ SET" if GEMINI_KEY else "❌ NOT SET")
+            st.metric("GEMINI_KEY",   "✅ SET" if GEMINI_KEY   else "❌ NOT SET")
         with col2:
             st.metric("PINECONE_KEY", "✅ SET" if PINECONE_KEY else "❌ NOT SET")
         with col3:
-            st.metric("HAS_GEMINI", "✅ YES" if HAS_GEMINI else "❌ NO")
+            st.metric("HAS_GEMINI",   "✅ YES" if HAS_GEMINI   else "❌ NO")
         with col4:
             st.metric("HAS_PINECONE", "✅ YES" if HAS_PINECONE else "❌ NO")
-        
+
         if not GEMINI_KEY:
             st.error("⚠️ GEMINI_KEY is not set in Streamlit secrets!")
         if not PINECONE_KEY:
             st.error("⚠️ PINECONE_KEY is not set in Streamlit secrets!")
-  
+
     st.markdown(f"""
     <div style="text-align:center;margin-bottom:24px;">
         <div style="font-family:'Bebas Neue',sans-serif;font-size:36px;
@@ -1048,13 +1157,13 @@ def render_arka_ai():
              Zero-Emotion Chart Companion · Powered by Gemini 2.5 Flash</div>
     </div>
     """, unsafe_allow_html=True)
-  
+
     mode = st.radio("Select Mode", ["Mode 1 — Auto Analysis", "Mode 2 — Train AI"],
                     horizontal=True, key="ai_mode")
-  
+
     st.markdown(f"<div style='height:1px;background:{BORDER};margin:16px 0;'></div>",
                 unsafe_allow_html=True)
-  
+
     if mode == "Mode 1 — Auto Analysis":
         render_mode1()
     else:
