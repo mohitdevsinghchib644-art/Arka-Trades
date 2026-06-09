@@ -298,65 +298,47 @@ def build_rules_context(query: str = "trading setup entry exit rules") -> str:
 # ══════════════════════════════════════════════════════════
 # 3. FETCH CHART FROM TRADINGVIEW / YFINANCE
 # ══════════════════════════════════════════════════════════
-
 def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        import matplotlib.patches as mpatches
-        from datetime import datetime, timedelta
-    except ImportError:
-        st.error("❌ matplotlib not installed")
-        return None
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    from datetime import datetime, timedelta
 
     try:
-        # ── Normalize ticker ──────────────────────────────
-        exchange = "NSE"
-        clean    = ticker.upper().strip()
-
+        clean = ticker.upper().strip()
         if clean in ["NIFTY50", "^NSEI"]:
-            clean    = "NIFTY"
-            exchange = "NSE"
+            clean = "NIFTY"
+            yf_ticker = "^NSEI"
         elif clean in ["BANKNIFTY", "^NSEBANK"]:
-            clean    = "BANKNIFTY"
-            exchange = "NSE"
+            clean = "BANKNIFTY"
+            yf_ticker = "^NSEBANK"
         elif clean.endswith(".NS"):
+            yf_ticker = clean
             clean = clean.replace(".NS", "")
         elif clean.startswith("^"):
+            yf_ticker = clean
             clean = clean[1:]
+        else:
+            yf_ticker = clean + ".NS"
 
-        # ── Fetch from TvDatafeed ─────────────────────────
-        hist = None
-        end   = datetime.today()
+        end = datetime.today()
         start = end - timedelta(days=120)
-        yf_ticker = f"{clean}.NS" if exchange == "NSE" else clean
         hist = yf.Ticker(yf_ticker).history(
             start=start.strftime("%Y-%m-%d"),
             end=(end + timedelta(days=1)).strftime("%Y-%m-%d"),
             interval="1d",
             auto_adjust=True
         )
-            end   = datetime.today()
-            start = end - timedelta(days=120)
-            yf_ticker = f"{clean}.NS" if exchange == "NSE" else clean
-            hist = yf.Ticker(yf_ticker).history(
-                start=start.strftime("%Y-%m-%d"),
-                end=(end + timedelta(days=1)).strftime("%Y-%m-%d"),
-                interval="1d",
-                auto_adjust=True
-            )
 
         if hist is None or hist.empty:
             st.error(f"❌ No data for {ticker}")
             return None
 
-        # Keep last 90 bars only
         hist = hist.tail(90)
-
-        n        = len(hist)
-        fig_w    = max(16, n * 0.22)
-        fig, ax  = plt.subplots(figsize=(fig_w, 6), facecolor="#04080F")
+        n = len(hist)
+        fig_w = max(16, n * 0.22)
+        fig, ax = plt.subplots(figsize=(fig_w, 6), facecolor="#04080F")
         ax.set_facecolor("#04080F")
 
         for spine in ax.spines.values():
@@ -364,16 +346,13 @@ def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
         ax.tick_params(colors="#8A9AB5", labelsize=8)
 
         candle_w = 0.6
-
         for i, (idx, row) in enumerate(hist.iterrows()):
             o, h, l, c = row["Open"], row["High"], row["Low"], row["Close"]
             color = "#00B37A" if c >= o else "#E84545"
-
             ax.plot([i, i], [l, h], color=color, linewidth=0.9, zorder=1)
-
             body_y = min(o, c)
             body_h = max(abs(c - o), (h - l) * 0.01)
-            rect   = mpatches.Rectangle(
+            rect = mpatches.Rectangle(
                 (i - candle_w / 2, body_y),
                 candle_w, body_h,
                 facecolor=color, edgecolor=color,
@@ -381,24 +360,20 @@ def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
             )
             ax.add_patch(rect)
 
-        step      = max(1, n // 12)
+        step = max(1, n // 12)
         positions = list(range(0, n, step))
-        labels    = [hist.index[i].strftime("%d %b") for i in positions]
+        labels = [hist.index[i].strftime("%d %b") for i in positions]
         ax.set_xticks(positions)
         ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
-
         ax.set_xlim(-1, n)
 
         price_min = hist["Low"].min()
         price_max = hist["High"].max()
-        pad       = (price_max - price_min) * 0.05
+        pad = (price_max - price_min) * 0.05
         ax.set_ylim(price_min - pad, price_max + pad)
 
         last_date = hist.index[-1]
-        if hasattr(last_date, 'strftime'):
-            date_str = last_date.strftime("%d %b %Y")
-        else:
-            date_str = str(last_date)[:10]
+        date_str = last_date.strftime("%d %b %Y") if hasattr(last_date, "strftime") else str(last_date)[:10]
 
         ax.set_title(
             f"{clean}  ·  NSE Daily  ·  {date_str}",
@@ -407,15 +382,12 @@ def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
         )
         ax.grid(axis="y", color="#0F2040", linewidth=0.5, linestyle="--", alpha=0.8)
         ax.grid(axis="x", color="#0F2040", linewidth=0.3, linestyle="--", alpha=0.4)
-
         plt.tight_layout(pad=1.2)
 
         buf = BytesIO()
-        fig.savefig(buf, format="png", dpi=150,
-                    facecolor="#04080F", bbox_inches="tight")
+        fig.savefig(buf, format="png", dpi=150, facecolor="#04080F", bbox_inches="tight")
         plt.close(fig)
         buf.seek(0)
-
         return Image.open(buf).convert("RGB")
 
     except Exception as e:
