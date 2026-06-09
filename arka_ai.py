@@ -50,11 +50,7 @@ try:
    HAS_YFINANCE = True
    HAS_PLOTLY = True
 
-try:
-    from tvdatafeed import TvDatafeed, Interval
-    HAS_TV = True
-except ImportError:
-    HAS_TV = False
+
 except ImportError:
     HAS_YFINANCE = False
     HAS_PLOTLY = False
