@@ -664,17 +664,17 @@ def render_mode1():
         )
         return
 
-    # Fetch chart
+    # Fetch chart (for Gemini AI analysis only — display uses TradingView widget)
     if not st.session_state.m1_chart_fetched:
-        with st.spinner(f"📊 Fetching {load_ticker} chart..."):
+        with st.spinner(f"📊 Preparing AI analysis data for {load_ticker}..."):
             chart_img = get_chart_screenshot(load_ticker, period="3mo")
-        
         if chart_img:
             st.session_state.m1_chart_img = chart_img
             st.session_state.m1_chart_fetched = True
         else:
-            st.error(f"❌ Could not fetch chart for {load_ticker}")
-            return
+            # Still proceed — TradingView widget works independently
+            st.session_state.m1_chart_fetched = True
+            st.session_state.m1_chart_img = None
 
     if not st.session_state.m1_chart_img:
         return
