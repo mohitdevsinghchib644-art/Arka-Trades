@@ -46,6 +46,7 @@ except ImportError:
 try:
     import yfinance as yf
     import plotly.graph_objects as go
+    import pandas as pd
     HAS_YFINANCE = True
     HAS_PLOTLY = True
 except ImportError:
