@@ -737,8 +737,12 @@ def render_mode1():
         auto_voice = st.toggle("Auto-speak analysis", value=True, key="m1_voice")
 
         if st.button("Analyze Chart", type="primary", use_container_width=True, key="m1_analyze"):
-            with st.spinner("🤖 Gemini is analyzing..."):
-                result = analyze_chart(img, click_x, click_y, user_note, load_ticker)
+            img = st.session_state.get("m1_chart_img")
+            if img is None:
+                st.error("❌ Chart image not available for AI analysis. Try clicking Fetch & Analyze again.")
+            else:
+                with st.spinner("🤖 Gemini is analyzing..."):
+                    result = analyze_chart(img, click_x, click_y, user_note, load_ticker)
 
             # Verdict badge
             st.markdown(verdict_badge(result.get("verdict","FLAGGED"),
