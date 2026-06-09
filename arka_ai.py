@@ -322,8 +322,11 @@ def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
         start = end - timedelta(days=90)
         hist  = yf.Ticker(ticker).history(
             start=start.strftime("%Y-%m-%d"),
-            end=end.strftime("%Y-%m-%d"),
-            interval="1d"
+            end=(end + timedelta(days=1)).strftime("%Y-%m-%d"),
+            interval="1d",
+            auto_adjust=True
+        )
+        hist = hist[hist.index <= pd.Timestamp.now(tz=hist.index.tz)]
         )
 
         if hist.empty:
