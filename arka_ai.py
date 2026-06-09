@@ -319,7 +319,12 @@ def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
                 ticker = f"{ticker.upper()}.NS"
 
         print(f"📊 Fetching {ticker} data...")
-        hist = yf.Ticker(ticker).history(period=period, interval="1d")
+        from datetime import datetime, timedelta
+        end = datetime.today()
+        start = end - timedelta(days=90)
+        hist = yf.Ticker(ticker).history(start=start.strftime("%Y-%m-%d"), 
+                                          end=end.strftime("%Y-%m-%d"), 
+                                          interval="1d")
 
         if hist.empty:
             st.error(f"❌ No data for {ticker}")
