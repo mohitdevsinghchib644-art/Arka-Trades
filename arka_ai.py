@@ -325,7 +325,7 @@ def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
             st.error(f"❌ No data for {ticker}")
             return None
 
-        fig, ax = plt.subplots(figsize=(14, 6), facecolor="#04080F")
+        fig, ax = plt.subplots(figsize=(20, 8), facecolor="#04080F")
         ax.set_facecolor("#04080F")
         for spine in ax.spines.values():
             spine.set_color("#0F2040")
