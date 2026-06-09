@@ -335,7 +335,8 @@ def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
             st.error(f"❌ No data for {ticker}")
             return None
 
-        hist = hist.tail(90)
+        hist = hist.tail(90).copy()
+        hist = hist[hist.index.notnull()]
         n = len(hist)
         fig_w = max(16, n * 0.22)
         fig, ax = plt.subplots(figsize=(fig_w, 6), facecolor="#04080F")
@@ -360,12 +361,14 @@ def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
             )
             ax.add_patch(rect)
 
-        step = max(1, n // 12)
+        step = max(1, n // 10)
         positions = list(range(0, n, step))
+        if (n - 1) not in positions:
+            positions.append(n - 1)
         labels = [hist.index[i].strftime("%d %b") for i in positions]
         ax.set_xticks(positions)
         ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
-        ax.set_xlim(-1, n)
+        ax.set_xlim(-1, n + 1)
 
         price_min = hist["Low"].min()
         price_max = hist["High"].max()
