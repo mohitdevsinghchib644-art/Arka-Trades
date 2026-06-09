@@ -1,3 +1,4 @@
+"""
 arka_ai.py  —  Arka AI Trading Companion
 ==========================================
 Brain     : Gemini 2.5 Flash  (vision + text)
