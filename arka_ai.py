@@ -699,29 +699,28 @@ def render_mode1():
 
         st.components.v1.html(f"""
         <div style="border:1px solid #0F2040;border-radius:12px;overflow:hidden;">
-        <div class="tradingview-widget-container">
-            <div id="tradingview_chart"></div>
-            <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
-            <script type="text/javascript">
-            new TradingView.widget({{
-                "width": "100%",
-                "height": 500,
+        <div class="tradingview-widget-container" style="height:500px;width:100%;">
+            <div class="tradingview-widget-container__widget" style="height:100%;width:100%;"></div>
+            <script type="text/javascript"
+                src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js"
+                async>
+            {{
+                "autosize": true,
                 "symbol": "{tv_symbol}",
                 "interval": "D",
                 "timezone": "Asia/Kolkata",
                 "theme": "dark",
                 "style": "1",
                 "locale": "en",
-                "toolbar_bg": "#04080F",
-                "enable_publishing": false,
+                "backgroundColor": "rgba(4,8,15,1)",
+                "gridColor": "rgba(15,32,64,1)",
                 "hide_top_toolbar": false,
                 "hide_legend": false,
                 "save_image": false,
-                "container_id": "tradingview_chart",
-                "backgroundColor": "#04080F",
-                "gridColor": "#0F2040",
+                "allow_symbol_change": true,
+                "calendar": false,
                 "hide_volume": false
-            }});
+            }}
             </script>
         </div>
         </div>
