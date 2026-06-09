@@ -339,7 +339,7 @@ def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
         hist = hist[hist.index.notnull()]
         n = len(hist)
         fig_w = max(16, n * 0.22)
-        fig, ax = plt.subplots(figsize=(fig_w, 6), facecolor="#04080F")
+        fig, ax = plt.subplots(figsize=(fig_w, 4), facecolor="#04080F")
         ax.set_facecolor("#04080F")
 
         for spine in ax.spines.values():
