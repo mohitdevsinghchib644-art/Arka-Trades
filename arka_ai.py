@@ -684,7 +684,7 @@ def render_mode1():
     # Display chart and analysis side by side
     col_chart, col_panel = st.columns([5, 2])
 
-   with col_chart:
+    with col_chart:
         st.markdown(f"<div style='font-size:12px;color:{T2};margin-bottom:6px;'>Live TradingView Chart</div>",
                     unsafe_allow_html=True)
 
