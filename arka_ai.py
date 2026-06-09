@@ -683,23 +683,50 @@ def render_mode1():
     # Display chart and analysis side by side
     col_chart, col_panel = st.columns([5, 2])
 
-    with col_chart:
-        st.markdown(f"<div style='font-size:12px;color:{T2};margin-bottom:6px;'>Click on any candle to analyze that specific area</div>",
+   with col_chart:
+        st.markdown(f"<div style='font-size:12px;color:{T2};margin-bottom:6px;'>Live TradingView Chart</div>",
                     unsafe_allow_html=True)
 
-        # Clickable image
-        coords = streamlit_image_coordinates(img, key="chart_click")
-        click_x = coords["x"] if coords else None
-        click_y = coords["y"] if coords else None
+        tv_symbol = load_ticker.upper()
+        if tv_symbol in ["NIFTY50", "NIFTY"]:
+            tv_symbol = "NSE:NIFTY"
+        elif tv_symbol in ["BANKNIFTY"]:
+            tv_symbol = "NSE:BANKNIFTY"
+        else:
+            tv_symbol = f"NSE:{tv_symbol}"
 
-        if click_x:
-            st.markdown(f"""
-            <div style="background:{DARK3};border:1px solid {GOLD}44;border-radius:8px;
-                 padding:8px 14px;margin-top:8px;font-family:JetBrains Mono,monospace;
-                 font-size:12px;color:{GOLD};">
-                Clicked: ({click_x}, {click_y}) px &nbsp;|&nbsp;
-                {round((click_x/img.width)*100,1)}% X · {round((click_y/img.height)*100,1)}% Y
-            </div>""", unsafe_allow_html=True)
+        st.components.v1.html(f"""
+        <div style="border:1px solid #0F2040;border-radius:12px;overflow:hidden;">
+        <div class="tradingview-widget-container">
+            <div id="tradingview_chart"></div>
+            <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+            <script type="text/javascript">
+            new TradingView.widget({{
+                "width": "100%",
+                "height": 500,
+                "symbol": "{tv_symbol}",
+                "interval": "D",
+                "timezone": "Asia/Kolkata",
+                "theme": "dark",
+                "style": "1",
+                "locale": "en",
+                "toolbar_bg": "#04080F",
+                "enable_publishing": false,
+                "hide_top_toolbar": false,
+                "hide_legend": false,
+                "save_image": false,
+                "container_id": "tradingview_chart",
+                "backgroundColor": "#04080F",
+                "gridColor": "#0F2040",
+                "hide_volume": false
+            }});
+            </script>
+        </div>
+        </div>
+        """, height=520)
+
+        click_x = None
+        click_y = None
 
     with col_panel:
         user_note = st.text_area("Add context (optional)",
