@@ -297,12 +297,12 @@ def build_rules_context(query: str = "trading setup entry exit rules") -> str:
 # ══════════════════════════════════════════════════════════
 
 def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
-    """Fetch historical data and create a candlestick chart image using matplotlib."""
     try:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         import matplotlib.patches as mpatches
+        from datetime import datetime, timedelta
     except ImportError:
         st.error("❌ matplotlib not installed")
         return None
@@ -318,58 +318,76 @@ def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
             else:
                 ticker = f"{ticker.upper()}.NS"
 
-        print(f"📊 Fetching {ticker} data...")
-        from datetime import datetime, timedelta
-        end = datetime.today()
+        end   = datetime.today()
         start = end - timedelta(days=90)
-        hist = yf.Ticker(ticker).history(start=start.strftime("%Y-%m-%d"), 
-                                          end=end.strftime("%Y-%m-%d"), 
-                                          interval="1d")
+        hist  = yf.Ticker(ticker).history(
+            start=start.strftime("%Y-%m-%d"),
+            end=end.strftime("%Y-%m-%d"),
+            interval="1d"
+        )
 
         if hist.empty:
             st.error(f"❌ No data for {ticker}")
             return None
 
-        fig, ax = plt.subplots(figsize=(20, 8), facecolor="#04080F")
+        n = len(hist)
+
+        fig_w = max(16, n * 0.22)
+        fig, ax = plt.subplots(figsize=(fig_w, 6), facecolor="#04080F")
         ax.set_facecolor("#04080F")
+
         for spine in ax.spines.values():
             spine.set_color("#0F2040")
-        ax.tick_params(colors="#8A9AB5", labelsize=9)
+        ax.tick_params(colors="#8A9AB5", labelsize=8)
+
+        candle_w = 0.6
 
         for i, (idx, row) in enumerate(hist.iterrows()):
             o, h, l, c = row["Open"], row["High"], row["Low"], row["Close"]
             color = "#00B37A" if c >= o else "#E84545"
-            ax.plot([i, i], [l, h], color=color, linewidth=0.8, zorder=1)
-            body_bottom = min(o, c)
-            body_height = abs(c - o) if abs(c - o) > 0 else 0.01
-            rect = mpatches.FancyBboxPatch(
-                (i - 0.3, body_bottom), 0.6, body_height,
-                boxstyle="square,pad=0",
+
+            ax.plot([i, i], [l, h], color=color, linewidth=0.9, zorder=1)
+
+            body_y = min(o, c)
+            body_h = max(abs(c - o), (h - l) * 0.01)
+            rect = mpatches.Rectangle(
+                (i - candle_w / 2, body_y),
+                candle_w, body_h,
                 facecolor=color, edgecolor=color,
-                linewidth=0.5, zorder=2
+                linewidth=0, zorder=2
             )
             ax.add_patch(rect)
 
-        step = max(1, len(hist) // 10)
-        tick_positions = list(range(0, len(hist), step))
-        tick_labels = [hist.index[i].strftime("%d %b") for i in tick_positions]
-        ax.set_xticks(tick_positions)
-        ax.set_xticklabels(tick_labels, rotation=45, ha="right")
-        ax.set_xlim(-1, len(hist))
-        ax.set_title(f"{ticker} — {period.upper()} Daily Chart",
-                     color="#C8A96A", fontsize=13, fontweight="bold", pad=12)
-        ax.grid(axis="y", color="#0F2040", linewidth=0.5, linestyle="--", alpha=0.7)
+        step = max(1, n // 12)
+        positions = list(range(0, n, step))
+        labels    = [hist.index[i].strftime("%d %b") for i in positions]
+        ax.set_xticks(positions)
+        ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+
+        ax.set_xlim(-1, n)
+
+        price_min = hist["Low"].min()
+        price_max = hist["High"].max()
+        pad = (price_max - price_min) * 0.05
+        ax.set_ylim(price_min - pad, price_max + pad)
+
+        ax.set_title(
+            f"{ticker}  ·  3M Daily  ·  {hist.index[-1].strftime('%d %b %Y')}",
+            color="#C8A96A", fontsize=12, fontweight="bold",
+            fontfamily="monospace", pad=10
+        )
+        ax.grid(axis="y", color="#0F2040", linewidth=0.5, linestyle="--", alpha=0.8)
         ax.grid(axis="x", color="#0F2040", linewidth=0.3, linestyle="--", alpha=0.4)
-        plt.tight_layout(pad=1.5)
+
+        plt.tight_layout(pad=1.2)
 
         buf = BytesIO()
-        fig.savefig(buf, format="png", dpi=200, facecolor="#04080F", bbox_inches="tight")
+        fig.savefig(buf, format="png", dpi=150,
+                    facecolor="#04080F", bbox_inches="tight")
         plt.close(fig)
         buf.seek(0)
 
-        img = Image.open(buf).convert("RGB")
-        print(f"✅ Chart screenshot created: {img.size}")
-        return img
+        return Image.open(buf).convert("RGB")
 
     except Exception as e:
         st.error(f"❌ Error fetching chart: {str(e)}")
