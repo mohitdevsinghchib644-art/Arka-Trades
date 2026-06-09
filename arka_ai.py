@@ -297,64 +297,79 @@ def build_rules_context(query: str = "trading setup entry exit rules") -> str:
 # ══════════════════════════════════════════════════════════
 
 def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
-    """Fetch historical data and create a candlestick chart image."""
-    if not HAS_YFINANCE or not HAS_PLOTLY:
-        st.error("❌ yfinance or plotly not installed")
-        return None
-    
+    """Fetch historical data and create a candlestick chart image using matplotlib."""
     try:
-        # Normalize ticker
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+    except ImportError:
+        st.error("❌ matplotlib not installed")
+        return None
+
+    if not HAS_YFINANCE:
+        st.error("❌ yfinance not installed")
+        return None
+
+    try:
         if "." not in ticker:
             if ticker.upper() in ["NIFTY50", "BANKNIFTY"]:
                 ticker = f"^{ticker.upper()}"
             else:
                 ticker = f"{ticker.upper()}.NS"
-        
+
         print(f"📊 Fetching {ticker} data...")
-        ticker_obj = yf.Ticker(ticker)
-        hist = ticker_obj.history(period=period, interval="1d")
-        
+        hist = yf.Ticker(ticker).history(period=period, interval="1d")
+
         if hist.empty:
             st.error(f"❌ No data for {ticker}")
             return None
-        
-        # Create Plotly chart
-        fig = go.Figure(data=[go.Candlestick(
-            x=hist.index,
-            open=hist['Open'],
-            high=hist['High'],
-            low=hist['Low'],
-            close=hist['Close'],
-            name="Price"
-        )])
-        
-        fig.update_layout(
-            title=f"{ticker} — {period.upper()} Daily Chart",
-            template="plotly_dark",
-            xaxis_rangeslider_visible=False,
-            height=600,
-            width=1200,
-            hovermode="x unified",
-            margin=dict(l=50, r=50, t=50, b=50),
-            paper_bgcolor="#04080F",
-            plot_bgcolor="#04080F",
-            font=dict(color="#F7EBE0", family="Arial"),
-        )
-        
-        # Convert to image
-        print("🖼️  Converting chart to image...")
-        img_bytes = fig.to_image(format="png", scale=2)
-        img = Image.open(BytesIO(img_bytes))
-        
+
+        fig, ax = plt.subplots(figsize=(14, 6), facecolor="#04080F")
+        ax.set_facecolor("#04080F")
+        for spine in ax.spines.values():
+            spine.set_color("#0F2040")
+        ax.tick_params(colors="#8A9AB5", labelsize=9)
+
+        for i, (idx, row) in enumerate(hist.iterrows()):
+            o, h, l, c = row["Open"], row["High"], row["Low"], row["Close"]
+            color = "#00B37A" if c >= o else "#E84545"
+            ax.plot([i, i], [l, h], color=color, linewidth=0.8, zorder=1)
+            body_bottom = min(o, c)
+            body_height = abs(c - o) if abs(c - o) > 0 else 0.01
+            rect = mpatches.FancyBboxPatch(
+                (i - 0.3, body_bottom), 0.6, body_height,
+                boxstyle="square,pad=0",
+                facecolor=color, edgecolor=color,
+                linewidth=0.5, zorder=2
+            )
+            ax.add_patch(rect)
+
+        step = max(1, len(hist) // 10)
+        tick_positions = list(range(0, len(hist), step))
+        tick_labels = [hist.index[i].strftime("%d %b") for i in tick_positions]
+        ax.set_xticks(tick_positions)
+        ax.set_xticklabels(tick_labels, rotation=45, ha="right")
+        ax.set_xlim(-1, len(hist))
+        ax.set_title(f"{ticker} — {period.upper()} Daily Chart",
+                     color="#C8A96A", fontsize=13, fontweight="bold", pad=12)
+        ax.grid(axis="y", color="#0F2040", linewidth=0.5, linestyle="--", alpha=0.7)
+        ax.grid(axis="x", color="#0F2040", linewidth=0.3, linestyle="--", alpha=0.4)
+        plt.tight_layout(pad=1.5)
+
+        buf = BytesIO()
+        fig.savefig(buf, format="png", dpi=150, facecolor="#04080F", bbox_inches="tight")
+        plt.close(fig)
+        buf.seek(0)
+
+        img = Image.open(buf).convert("RGB")
         print(f"✅ Chart screenshot created: {img.size}")
         return img
-        
+
     except Exception as e:
         st.error(f"❌ Error fetching chart: {str(e)}")
-        print(f"Error: {str(e)}")
         traceback.print_exc()
         return None
-
   
 # ══════════════════════════════════════════════════════════
 # 4. CHART ANALYSIS ENGINE
