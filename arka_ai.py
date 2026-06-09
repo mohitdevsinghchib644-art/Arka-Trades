@@ -329,31 +329,9 @@ def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
         # ── Fetch from TvDatafeed ─────────────────────────
         hist = None
 
-        if HAS_TV:
-            try:
-                tv   = TvDatafeed()
-                hist = tv.get_hist(
-                    symbol=clean,
-                    exchange=exchange,
-                    interval=Interval.in_daily,
-                    n_bars=90
-                )
-                if hist is not None and not hist.empty:
-                    hist = hist.rename(columns={
-                        "open":   "Open",
-                        "high":   "High",
-                        "low":    "Low",
-                        "close":  "Close",
-                        "volume": "Volume"
-                    })
-                    print(f"✅ TvDatafeed: got {len(hist)} bars, last: {hist.index[-1]}")
-            except Exception as e:
-                print(f"⚠️ TvDatafeed failed: {e}, falling back to yfinance")
-                hist = None
-
-        # ── Fallback to yfinance ──────────────────────────
-        if hist is None or hist.empty:
-            print("📊 Using yfinance fallback...")
+       print("📊 Fetching via yfinance...")
+        hist = None
+        if True:
             end   = datetime.today()
             start = end - timedelta(days=120)
             yf_ticker = f"{clean}.NS" if exchange == "NSE" else clean
