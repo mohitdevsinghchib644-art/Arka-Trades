@@ -328,7 +328,6 @@ def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
             auto_adjust=True
         )
         hist = hist[hist.index <= pd.Timestamp.now(tz=hist.index.tz)]
-        )
 
         if hist.empty:
             st.error(f"❌ No data for {ticker}")
