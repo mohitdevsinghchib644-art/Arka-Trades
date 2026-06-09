@@ -676,8 +676,7 @@ def render_mode1():
             st.session_state.m1_chart_fetched = True
             st.session_state.m1_chart_img = None
 
-    if not st.session_state.m1_chart_img:
-        return
+    # img may be None if yfinance failed — Analyze button handles this gracefully
 
     img = st.session_state.m1_chart_img
 
