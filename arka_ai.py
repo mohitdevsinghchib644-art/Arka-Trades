@@ -599,7 +599,8 @@ def render_mode1():
     if "m1_chart_img" not in st.session_state:
         st.session_state.m1_chart_img = None
     if "m1_chart_fetched" not in st.session_state:
-        st.session_state.m1_chart_fetched = False
+    st.session_state.m1_chart_fetched = False
+    st.session_state.m1_chart_img = None
 
     # Input row
     col_input, col_btn = st.columns([4, 1])
