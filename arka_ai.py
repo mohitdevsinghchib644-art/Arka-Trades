@@ -363,7 +363,7 @@ def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
         plt.tight_layout(pad=1.5)
 
         buf = BytesIO()
-        fig.savefig(buf, format="png", dpi=150, facecolor="#04080F", bbox_inches="tight")
+        fig.savefig(buf, format="png", dpi=200, facecolor="#04080F", bbox_inches="tight")
         plt.close(fig)
         buf.seek(0)
 
