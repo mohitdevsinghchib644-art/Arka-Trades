@@ -674,7 +674,7 @@ def render_mode1():
     img = st.session_state.m1_chart_img
 
     # Display chart and analysis side by side
-    col_chart, col_panel = st.columns([3, 2])
+    col_chart, col_panel = st.columns([5, 2])
 
     with col_chart:
         st.markdown(f"<div style='font-size:12px;color:{T2};margin-bottom:6px;'>Click on any candle to analyze that specific area</div>",
