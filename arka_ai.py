@@ -324,12 +324,19 @@ def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
 
         end = datetime.today()
         start = end - timedelta(days=120)
-        hist = yf.Ticker(yf_ticker).history(
+        import requests_cache
+        requests_cache.disabled()
+
+        tk = yf.Ticker(yf_ticker)
+        tk._history = None
+        hist = tk.history(
             start=start.strftime("%Y-%m-%d"),
             end=(end + timedelta(days=1)).strftime("%Y-%m-%d"),
             interval="1d",
-            auto_adjust=True
+            auto_adjust=True,
+            raise_errors=False
         )
+        print(f"Last date in hist: {hist.index[-1] if not hist.empty else 'EMPTY'}")
 
         if hist is None or hist.empty:
             st.error(f"❌ No data for {ticker}")
