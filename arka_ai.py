@@ -855,53 +855,41 @@ def render_mode1():
                                   height=80, key="m1_note")
         auto_voice = st.toggle("Auto-speak analysis", value=True, key="m1_voice")
 
-        if st.button("Analyze Chart", type="primary", use_container_width=True, key="m1_analyze"):
+       if st.button("Analyze Chart", type="primary", use_container_width=True, key="m1_analyze"):
             img = st.session_state.get("m1_chart_img")
             if img is None:
-                st.error("❌ Chart image not available for AI analysis. Try clicking Fetch & Analyze again.")
+                st.error("❌ Chart image not available. Click Fetch & Analyze again.")
             else:
                 with st.spinner("🤖 Gemini is analyzing..."):
                     result = analyze_chart(img, click_x, click_y, user_note, load_ticker)
-
-                # Verdict badge
-                st.markdown(verdict_badge(result.get("verdict", "FLAGGED"),
-                                          result.get("score", 5)),
-                            unsafe_allow_html=True)
-
-                # Voice
+                st.session_state["m1_last_result"] = result
                 if auto_voice:
                     speak(result.get("voice_summary", "Analysis complete."))
 
-                # Draw annotations on chart
-                if result.get("draw_boxes") or result.get("draw_arrows"):
-                    annotated = draw_annotations(img.copy(), result)
-                    with col_chart:
-                        st.image(annotated, caption="AI Annotated Chart", use_container_width=True)
-
-                # Rules matched/violated
-                if result.get("rules_matched"):
-                    st.markdown(
-                        f"<div style='color:{GREEN};font-size:13px;font-weight:700;margin-top:8px;'>✅ Rules Matched</div>",
+    # ── Show last result if exists (persists across reruns)
+    if st.session_state.get("m1_last_result"):
+        result = st.session_state["m1_last_result"]
+        st.markdown(verdict_badge(result.get("verdict", "FLAGGED"),
+                                  result.get("score", 5)),
+                    unsafe_allow_html=True)
+        if result.get("rules_matched"):
+            st.markdown(f"<div style='color:{GREEN};font-size:13px;font-weight:700;margin-top:8px;'>✅ Rules Matched</div>",
                         unsafe_allow_html=True)
-                    for r in result["rules_matched"]:
-                        st.markdown(f"<div style='color:{GREEN};font-size:12px;margin-left:8px;'>· {r}</div>",
-                                    unsafe_allow_html=True)
-
-                if result.get("rules_violated"):
-                    st.markdown(
-                        f"<div style='color:{RED};font-size:13px;font-weight:700;margin-top:8px;'>❌ Rules Violated</div>",
+            for r in result["rules_matched"]:
+                st.markdown(f"<div style='color:{GREEN};font-size:12px;margin-left:8px;'>· {r}</div>",
+                            unsafe_allow_html=True)
+        if result.get("rules_violated"):
+            st.markdown(f"<div style='color:{RED};font-size:13px;font-weight:700;margin-top:8px;'>❌ Rules Violated</div>",
                         unsafe_allow_html=True)
-                    for r in result["rules_violated"]:
-                        st.markdown(f"<div style='color:{RED};font-size:12px;margin-left:8px;'>· {r}</div>",
-                                    unsafe_allow_html=True)
-
-                # Detailed analysis
-                with st.expander("Full Analysis", expanded=True):
-                    st.markdown(f"""
-                    <div style="background:{DARK3};border-radius:10px;padding:16px;
-                         font-size:13px;color:{IVORY};line-height:1.9;">
-                    {result.get('detailed_analysis','').replace(chr(10),'<br>')}
-                    </div>""", unsafe_allow_html=True)
+            for r in result["rules_violated"]:
+                st.markdown(f"<div style='color:{RED};font-size:12px;margin-left:8px;'>· {r}</div>",
+                            unsafe_allow_html=True)
+        with st.expander("Full Analysis", expanded=True):
+            st.markdown(f"""
+            <div style="background:{DARK3};border-radius:10px;padding:16px;
+                 font-size:13px;color:{IVORY};line-height:1.9;">
+            {result.get('detailed_analysis','').replace(chr(10),'<br>')}
+            </div>""", unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════
