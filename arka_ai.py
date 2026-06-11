@@ -409,58 +409,62 @@ def get_chart_screenshot(ticker: str, period: str = "3mo") -> Image.Image:
 # ══════════════════════════════════════════════════════════
 # 3b. STOOQ DATA + LIGHTWEIGHT CHARTS (display only, no yfinance)
 # ══════════════════════════════════════════════════════════
-
 def fetch_stooq_ohlc(ticker: str, limit: int = 90) -> list:
-    """Fetch daily OHLC from Stooq.com via requests. No yfinance needed."""
-    if not HAS_REQUESTS:
-        return []
+    """Fetch daily OHLC via yfinance for Lightweight Charts display."""
+    from datetime import datetime, timedelta
 
     clean   = ticker.upper().strip()
     sym_map = {
-        "NIFTY50":   "^nsei",
-        "NIFTY":     "^nsei",
-        "BANKNIFTY": "^nsebank",
-        "SENSEX":    "^bsesn",
+        "NIFTY50":   "^NSEI",
+        "NIFTY":     "^NSEI",
+        "BANKNIFTY": "^NSEBANK",
+        "SENSEX":    "^BSESN",
     }
+
     if clean in sym_map:
-        sym = sym_map[clean]
+        yf_sym = sym_map[clean]
     elif clean.startswith("^"):
-        sym = clean.lower()
+        yf_sym = clean
     elif clean.endswith(".NS"):
-        sym = clean.lower()
+        yf_sym = clean
     else:
-        sym = f"{clean.lower()}.ns"
+        yf_sym = clean + ".NS"
 
     try:
-        url  = f"https://stooq.com/q/d/l/?s={sym}&i=d"
-        resp = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
-        resp.raise_for_status()
+        end   = datetime.today()
+        start = end - timedelta(days=150)
 
-        text = resp.text.strip()
-        if len(text) < 50 or text.lower().startswith("no data"):
-            st.error(f"❌ No Stooq data found for {ticker}. Check ticker spelling.")
+        hist = yf.Ticker(yf_sym).history(
+            start=start.strftime("%Y-%m-%d"),
+            end=(end + timedelta(days=1)).strftime("%Y-%m-%d"),
+            interval="1d",
+            auto_adjust=True
+        )
+
+        if hist is None or hist.empty:
+            st.error(f"❌ No data found for {ticker}. Check ticker spelling.")
             return []
 
-        reader = _csv.DictReader(io.StringIO(text))
-        data   = []
-        for row in reader:
+        data = []
+        for ts, row in hist.iterrows():
             try:
+                date_str = ts.strftime("%Y-%m-%d")
                 data.append({
-                    "time":   row["Date"],
-                    "open":   float(row["Open"]),
-                    "high":   float(row["High"]),
-                    "low":    float(row["Low"]),
-                    "close":  float(row["Close"]),
-                    "volume": float(row.get("Volume") or 0),
+                    "time":   date_str,
+                    "open":   round(float(row["Open"]),  2),
+                    "high":   round(float(row["High"]),  2),
+                    "low":    round(float(row["Low"]),   2),
+                    "close":  round(float(row["Close"]), 2),
+                    "volume": round(float(row.get("Volume") or 0), 0),
                 })
             except Exception:
                 continue
 
-        data.sort(key=lambda x: x["time"])   # ensure ascending order
+        data.sort(key=lambda x: x["time"])
         return data[-limit:]
 
     except Exception as e:
-        st.error(f"❌ Stooq fetch error: {e}")
+        st.error(f"❌ Chart fetch error: {e}")
         return []
 
 
