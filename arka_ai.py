@@ -855,7 +855,7 @@ def render_mode1():
                                   height=80, key="m1_note")
         auto_voice = st.toggle("Auto-speak analysis", value=True, key="m1_voice")
 
-       if st.button("Analyze Chart", type="primary", use_container_width=True, key="m1_analyze"):
+        if st.button("Analyze Chart", type="primary", use_container_width=True, key="m1_analyze"):
             img = st.session_state.get("m1_chart_img")
             if img is None:
                 st.error("❌ Chart image not available. Click Fetch & Analyze again.")
