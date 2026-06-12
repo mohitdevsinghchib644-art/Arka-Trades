@@ -932,6 +932,10 @@ with right:
     elif pg in ["analysis","heatmap","autoalert"]:
         if pg == "analysis":
             render_arka_ai()
+
+    elif pg == "smart_scan":
+        from smart_scan_page import render_smart_scanner
+        render_smart_scanner(supabase)
         else:
             section("COMING SOON")
             labels = {"heatmap":"Market Heatmap","autoalert":"Auto Smart Alerts"}
