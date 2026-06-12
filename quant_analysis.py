@@ -1,402 +1,459 @@
 """
-quant_analysis.py  —  Arka Trades Quant Analysis Module
-=========================================================
-Upload any chart image. Gemini Vision runs a deep quantitative-style
-breakdown: rating 1-100, upside/downside, risk-reward, pros/cons,
-scenario probabilities and key levels — rendered as a pro dashboard.
+stat_arb_meta.py — Statistical Arbitrage Pairs Trading with Meta-Labeling
+==========================================================================
+Methodology:
+  - Ernest Chan, "Quantitative Trading": cointegration-based pairs trading,
+    half-life of mean reversion, z-score entries, stop-loss, transaction costs.
+  - Marcos López de Prado, "Advances in Financial Machine Learning":
+    fractional differentiation, triple-barrier labeling, meta-labeling,
+    purged k-fold CV with embargo, MDA feature importance.
+
+Pipeline:
+  Data -> Pair Selection -> Primary Signal (z-score) -> Features ->
+  Triple-Barrier Meta-Labels -> Purged CV Model -> Filtered/Sized Signals ->
+  Backtest with costs & stops.
+
+Dependencies: pandas, numpy, scikit-learn, statsmodels, yfinance
 """
 
-import streamlit as st
-import base64, io, json, traceback
+import numpy as np
+import pandas as pd
+import yfinance as yf
+from itertools import combinations
+from dataclasses import dataclass
 
-try:
-    import google.generativeai as genai
-    HAS_GEMINI = True
-except ImportError:
-    HAS_GEMINI = False
-
-try:
-    from PIL import Image
-    HAS_PIL = True
-except ImportError:
-    HAS_PIL = False
-
-GEMINI_KEY = st.secrets.get("GEMINI_KEY", "")
-MODEL_NAME = "gemini-2.5-flash"
-
-# ── Theme ────────────────────────────────────────────────────
-IVORY  = "#E2E8F0"
-BLUE   = "#4F8DFD"
-GREEN  = "#10B981"
-RED    = "#EF4444"
-PURPLE = "#8B5CF6"
-AMBER  = "#F5C518"
-DARK   = "#0B0F17"
-DARK2  = "#0F1522"
-DARK3  = "#151D2E"
-BORDER = "#1E293B"
-T2     = "#94A3B8"
-FONT   = "'Plus Jakarta Sans','Inter',sans-serif"
-MONO   = "'JetBrains Mono',monospace"
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import f1_score, log_loss
+from sklearn.model_selection._split import _BaseKFold
+from statsmodels.tsa.stattools import coint, adfuller
+import statsmodels.api as sm
 
 
-# ══════════════════════════════════════════════════════════════
-# AI ENGINE
-# ══════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════
+# 1. DATA INGESTION
+# ════════════════════════════════════════════════════════════
 
-_QUANT_PROMPT = """You are an elite quantitative analyst. Analyze this chart image
-using a full quant framework: trend regime, momentum, mean reversion, volatility
-structure, volume profile, support/resistance, risk-reward asymmetry.
-
-Read every visible element: candles, trend, consolidations, breakout points,
-volume bars, indicators, price axis values, timeframe. If the user provided
-context, incorporate it.
-
-{user_context}
-
-Be brutally objective. No hype. Estimate numeric values from the visible price
-axis. If price values are not readable, use percentage estimates instead.
-
-Return ONLY valid JSON in exactly this structure (no markdown, no preamble):
-{{
-  "asset_name": "name/ticker if visible, else 'Unknown'",
-  "timeframe": "e.g. Daily / 1H / Weekly, if visible",
-  "overall_score": 72,
-  "verdict": "BULLISH | BEARISH | NEUTRAL",
-  "conviction": "HIGH | MEDIUM | LOW",
-  "summary": "3-4 sentence executive summary of the quant read",
-  "upside": {{"target": "price or %", "potential_pct": 12.5, "reasoning": "1-2 sentences"}},
-  "downside": {{"stop": "price or %", "risk_pct": 5.0, "reasoning": "1-2 sentences"}},
-  "risk_reward": 2.5,
-  "trend": {{"direction": "UP | DOWN | SIDEWAYS", "strength": 78, "note": "1 sentence"}},
-  "momentum": {{"state": "ACCELERATING | STEADY | FADING | OVERSOLD | OVERBOUGHT", "score": 65, "note": "1 sentence"}},
-  "volatility": {{"state": "EXPANDING | CONTRACTING | STABLE", "note": "1 sentence"}},
-  "volume_read": "1-2 sentences on what volume shows",
-  "key_levels": [
-    {{"type": "RESISTANCE", "level": "price/zone", "importance": "HIGH"}},
-    {{"type": "SUPPORT", "level": "price/zone", "importance": "HIGH"}}
-  ],
-  "pros": [
-    {{"point": "specific positive factor visible on chart", "weight": 85}},
-    {{"point": "another", "weight": 70}}
-  ],
-  "cons": [
-    {{"point": "specific risk factor visible on chart", "weight": 80}},
-    {{"point": "another", "weight": 55}}
-  ],
-  "scenarios": {{
-    "bull": {{"probability": 45, "path": "1 sentence"}},
-    "base": {{"probability": 35, "path": "1 sentence"}},
-    "bear": {{"probability": 20, "path": "1 sentence"}}
-  }},
-  "detailed_analysis": "Full quant breakdown, 6-10 sentences, referencing exact visible structures and levels"
-}}"""
+def get_data(tickers: list, start: str = "2018-01-01", end: str = None) -> pd.DataFrame:
+    """Download adjusted close prices, aligned and cleaned."""
+    px = yf.download(tickers, start=start, end=end, auto_adjust=True,
+                     progress=False)["Close"]
+    if isinstance(px, pd.Series):
+        px = px.to_frame(tickers[0])
+    px = px.dropna(how="all").ffill().dropna()
+    return px
 
 
-def _img_b64(img) -> str:
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode()
+# ════════════════════════════════════════════════════════════
+# 2. PAIR SELECTION  (Chan: cointegration + half-life)
+# ════════════════════════════════════════════════════════════
+
+@dataclass
+class Pair:
+    y: str            # dependent leg
+    x: str            # hedge leg
+    pvalue: float     # Engle-Granger cointegration p-value
+    hedge: float      # OLS hedge ratio
+    half_life: float  # mean-reversion half-life (days)
 
 
-def run_quant_analysis(img, user_context: str = "") -> dict:
-    if not HAS_GEMINI or not GEMINI_KEY:
-        return {"error": "Gemini not configured. Check GEMINI_KEY in Streamlit secrets."}
-    try:
-        genai.configure(api_key=GEMINI_KEY)
-        model = genai.GenerativeModel(MODEL_NAME)
-        ctx = f"USER CONTEXT: {user_context.strip()}" if user_context.strip() else ""
-        prompt = _QUANT_PROMPT.format(user_context=ctx)
-        response = model.generate_content(
-            [prompt, {"mime_type": "image/png", "data": _img_b64(img)}])
-        raw = response.text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        return json.loads(raw.strip())
-    except json.JSONDecodeError:
-        return {"error": "Could not parse AI response. Try again.",
-                "raw": response.text if 'response' in dir() else ""}
-    except Exception as e:
-        traceback.print_exc()
-        return {"error": str(e)}
+def half_life_of_mean_reversion(spread: pd.Series) -> float:
+    """Chan: fit OU process dS = lambda*(S - mu)dt; HL = -ln(2)/lambda."""
+    s = spread.dropna()
+    lag = s.shift(1).dropna()
+    ret = s.diff().dropna()
+    lag, ret = lag.align(ret, join="inner")
+    beta = sm.OLS(ret, sm.add_constant(lag)).fit().params.iloc[1]
+    if beta >= 0:
+        return np.inf
+    return -np.log(2) / beta
 
 
-# ══════════════════════════════════════════════════════════════
-# UI COMPONENTS
-# ══════════════════════════════════════════════════════════════
+class PairSelector:
+    """Engle-Granger test across all pairs; keep cointegrated, tradeable ones."""
 
-def _score_color(score: float) -> str:
-    if score >= 70: return GREEN
-    if score >= 45: return AMBER
-    return RED
+    def __init__(self, pval_threshold=0.05, hl_range=(2, 60)):
+        self.pval_threshold = pval_threshold
+        self.hl_range = hl_range
 
-
-def _gauge(score: float) -> str:
-    c = _score_color(score)
-    return f"""
-    <div style="background:{DARK2};border:1px solid {BORDER};border-radius:16px;
-         padding:28px 24px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,.3);">
-        <div style="font-size:11px;font-weight:700;letter-spacing:2px;color:{T2};
-             text-transform:uppercase;margin-bottom:14px;">Quant Score</div>
-        <div style="position:relative;width:150px;height:150px;margin:0 auto;">
-            <svg width="150" height="150" viewBox="0 0 150 150">
-                <circle cx="75" cy="75" r="64" fill="none" stroke="{DARK3}" stroke-width="11"/>
-                <circle cx="75" cy="75" r="64" fill="none" stroke="{c}" stroke-width="11"
-                        stroke-linecap="round"
-                        stroke-dasharray="{score/100*402:.0f} 402"
-                        transform="rotate(-90 75 75)"/>
-            </svg>
-            <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);">
-                <div style="font-family:{MONO};font-size:38px;font-weight:800;color:{c};
-                     line-height:1;">{score:.0f}</div>
-                <div style="font-size:11px;color:{T2};">/ 100</div>
-            </div>
-        </div>
-    </div>"""
+    def fit(self, prices: pd.DataFrame) -> list:
+        pairs = []
+        logp = np.log(prices)
+        for a, b in combinations(prices.columns, 2):
+            score, pval, _ = coint(logp[a], logp[b])
+            if pval > self.pval_threshold:
+                continue
+            hedge = sm.OLS(logp[a], sm.add_constant(logp[b])).fit().params.iloc[1]
+            spread = logp[a] - hedge * logp[b]
+            # confirm stationarity of the spread itself
+            if adfuller(spread.dropna())[1] > self.pval_threshold:
+                continue
+            hl = half_life_of_mean_reversion(spread)
+            if not (self.hl_range[0] <= hl <= self.hl_range[1]):
+                continue
+            pairs.append(Pair(a, b, pval, hedge, hl))
+        return sorted(pairs, key=lambda p: p.pvalue)
 
 
-def _stat_card(title, value, sub, color):
-    return f"""
-    <div style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {color};
-         border-radius:14px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,.3);min-height:120px;">
-        <div style="font-size:11px;font-weight:700;letter-spacing:1.5px;color:{T2};
-             text-transform:uppercase;margin-bottom:10px;">{title}</div>
-        <div style="font-family:{MONO};font-size:24px;font-weight:800;color:{color};
-             line-height:1.1;margin-bottom:6px;">{value}</div>
-        <div style="font-size:12px;color:{T2};line-height:1.6;">{sub}</div>
-    </div>"""
+# ════════════════════════════════════════════════════════════
+# 3. PRIMARY STRATEGY  (Chan: z-score mean reversion)
+# ════════════════════════════════════════════════════════════
+
+class PrimaryStrategy:
+    """
+    Side generation only (meta-labeling separates side from size, AFML 3.6):
+      z = (spread - rolling_mean) / rolling_std,  lookback = ~half-life
+      Long spread  (long y, short hedge*x) when z < -entry_z
+      Short spread (short y, long hedge*x) when z > +entry_z
+    """
+
+    def __init__(self, pair: Pair, entry_z=2.0):
+        self.pair = pair
+        self.entry_z = entry_z
+        self.lookback = max(int(round(pair.half_life)), 5)
+
+    def compute(self, prices: pd.DataFrame) -> pd.DataFrame:
+        lp = np.log(prices)
+        spread = lp[self.pair.y] - self.pair.hedge * lp[self.pair.x]
+        mu = spread.rolling(self.lookback).mean()
+        sd = spread.rolling(self.lookback).std()
+        z = (spread - mu) / sd
+        side = pd.Series(0, index=z.index)
+        side[z < -self.entry_z] = 1     # long the spread
+        side[z > self.entry_z] = -1     # short the spread
+        return pd.DataFrame({"spread": spread, "z": z, "side": side})
 
 
-def _weight_bar(point: str, weight: float, color: str) -> str:
-    return f"""
-    <div style="margin-bottom:12px;">
-        <div style="display:flex;justify-content:space-between;margin-bottom:5px;">
-            <span style="font-size:13px;color:{IVORY};line-height:1.5;flex:1;
-                 padding-right:10px;">{point}</span>
-            <span style="font-family:{MONO};font-size:12px;font-weight:700;
-                 color:{color};white-space:nowrap;">{weight:.0f}/100</span>
-        </div>
-        <div style="background:{DARK3};border-radius:4px;height:5px;">
-            <div style="background:{color};width:{min(weight,100):.0f}%;height:5px;
-                 border-radius:4px;"></div>
-        </div>
-    </div>"""
+# ════════════════════════════════════════════════════════════
+# 4. FEATURES  (AFML Ch.5: fractional differentiation + regime feats)
+# ════════════════════════════════════════════════════════════
+
+def get_ffd_weights(d: float, threshold: float = 1e-4) -> np.ndarray:
+    """Fixed-width window fractional differentiation weights (AFML 5.4)."""
+    w, k = [1.0], 1
+    while abs(w[-1]) > threshold:
+        w.append(-w[-1] * (d - k + 1) / k)
+        k += 1
+    return np.array(w[::-1])
 
 
-def _scenario_row(name, prob, path, color):
-    return f"""
-    <div style="margin-bottom:14px;">
-        <div style="display:flex;justify-content:space-between;margin-bottom:5px;">
-            <span style="font-size:12px;font-weight:800;letter-spacing:1px;color:{color};">{name}</span>
-            <span style="font-family:{MONO};font-size:13px;font-weight:700;color:{color};">{prob:.0f}%</span>
-        </div>
-        <div style="background:{DARK3};border-radius:4px;height:7px;margin-bottom:5px;">
-            <div style="background:{color};width:{min(prob,100):.0f}%;height:7px;border-radius:4px;"></div>
-        </div>
-        <div style="font-size:12px;color:{T2};line-height:1.5;">{path}</div>
-    </div>"""
+def frac_diff_ffd(series: pd.Series, d: float = 0.4) -> pd.Series:
+    """Stationary yet memory-preserving transform of a price/spread series."""
+    w = get_ffd_weights(d)
+    width = len(w)
+    vals = series.ffill().values
+    out = np.full(len(vals), np.nan)
+    for i in range(width - 1, len(vals)):
+        out[i] = np.dot(w, vals[i - width + 1: i + 1])
+    return pd.Series(out, index=series.index)
 
 
-# ══════════════════════════════════════════════════════════════
-# MAIN PAGE
-# ══════════════════════════════════════════════════════════════
+def build_features(prices: pd.DataFrame, sig: pd.DataFrame, pair: Pair) -> pd.DataFrame:
+    """Features the meta-model sees when deciding to act on a primary signal."""
+    lp = np.log(prices)
+    spread, z = sig["spread"], sig["z"]
+    lb = max(int(round(pair.half_life)), 5)
 
-def render_quant_analysis():
-    st.markdown(f"""
-    <div style="background:{DARK2};border:1px solid {BORDER};border-left:3px solid {PURPLE};
-         border-radius:14px;padding:18px 24px;margin-bottom:20px;">
-        <div style="font-size:16px;font-weight:800;color:{IVORY};">Quant Analysis</div>
-        <div style="font-size:13px;color:{T2};margin-top:4px;line-height:1.7;">
-            Upload any chart image. The AI runs a full quantitative breakdown:
-            score 1-100, upside potential, downside risk, risk-reward, weighted
-            pros and cons, and probability-based scenarios.
-        </div>
-    </div>""", unsafe_allow_html=True)
+    feats = pd.DataFrame(index=spread.index)
+    feats["z"] = z
+    feats["z_abs"] = z.abs()
+    feats["z_chg_3"] = z.diff(3)
+    feats["ffd_spread"] = frac_diff_ffd(spread, d=0.4)
+    feats["spread_vol"] = spread.diff().rolling(lb).std()
+    feats["vol_regime"] = (feats["spread_vol"]
+                           / spread.diff().rolling(lb * 4).std())
+    feats["corr"] = (lp[pair.y].diff()
+                     .rolling(lb * 2).corr(lp[pair.x].diff()))
+    feats["mom_y"] = lp[pair.y].diff(lb)
+    feats["mom_x"] = lp[pair.x].diff(lb)
+    # rolling half-life drift: is the relationship decaying?
+    feats["hurst_proxy"] = (np.log(spread.rolling(lb * 2).std())
+                            - np.log(spread.rolling(lb).std()))
+    return feats
 
-    up_col, ctx_col = st.columns([1.4, 1])
-    with up_col:
-        uploaded = st.file_uploader("Upload chart image",
-                                    type=["png", "jpg", "jpeg", "webp"],
-                                    key="quant_upload")
-    with ctx_col:
-        user_ctx = st.text_area("Context (optional)",
-                                placeholder="e.g. RELIANCE daily chart. I am thinking of a swing entry here.",
-                                height=100, key="quant_ctx")
 
-    if uploaded is None:
-        st.markdown(f"""
-        <div style="background:{DARK3};border:1px dashed {BORDER};border-radius:14px;
-             padding:56px;text-align:center;margin-top:12px;">
-            <div style="font-size:16px;font-weight:800;color:{T2};margin-bottom:6px;">
-                Drop a chart screenshot above</div>
-            <div style="font-size:12px;color:{T2};opacity:.7;">
-                Any chart works: TradingView, broker app, or a screenshot from your downloads</div>
-        </div>""", unsafe_allow_html=True)
-        return
+# ════════════════════════════════════════════════════════════
+# 5. TRIPLE-BARRIER LABELING  (AFML Ch.3)
+# ════════════════════════════════════════════════════════════
 
-    img = Image.open(uploaded).convert("RGB")
-    st.image(img, use_container_width=True)
+def daily_vol(series: pd.Series, span: int = 50) -> pd.Series:
+    return series.diff().ewm(span=span).std()
 
-    if st.button("Run Quant Analysis", type="primary", use_container_width=True,
-                 key="quant_run"):
-        with st.spinner("Running quantitative analysis..."):
-            result = run_quant_analysis(img, user_ctx)
-        st.session_state["quant_result"] = result
 
-    result = st.session_state.get("quant_result")
-    if not result:
-        return
-    if result.get("error"):
-        st.error(result["error"])
-        return
+def triple_barrier_labels(spread: pd.Series, events: pd.DatetimeIndex,
+                          side: pd.Series, pt_mult=1.0, sl_mult=1.0,
+                          max_hold=20) -> pd.DataFrame:
+    """
+    For each primary-signal event, walk forward until:
+      profit-take barrier (pt_mult * vol), stop-loss barrier (sl_mult * vol),
+      or vertical barrier (max_hold days).
+    Meta-label bin: 1 if the primary signal made money, else 0.
+    """
+    vol = daily_vol(spread)
+    rows = []
+    for t0 in events:
+        if t0 not in spread.index:
+            continue
+        v = vol.loc[t0]
+        if pd.isna(v) or v <= 0:
+            continue
+        s = side.loc[t0]
+        path = spread.loc[t0:].iloc[1:max_hold + 1]
+        if path.empty:
+            continue
+        ret_path = (path - spread.loc[t0]) * s   # signed P&L path of spread
+        pt, sl = pt_mult * v, -sl_mult * v
+        hit_pt = ret_path[ret_path >= pt].index.min()
+        hit_sl = ret_path[ret_path <= sl].index.min()
+        t1 = min([x for x in [hit_pt, hit_sl, path.index[-1]] if x is not None])
+        ret = ret_path.loc[t1]
+        rows.append({"t0": t0, "t1": t1, "ret": ret,
+                     "bin": int(ret > 0), "side": s})
+    return pd.DataFrame(rows).set_index("t0") if rows else pd.DataFrame()
 
-    # ── Header: gauge + verdict + summary ──────────────────────
-    st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
-    score   = float(result.get("overall_score", 50))
-    verdict = result.get("verdict", "NEUTRAL")
-    conv    = result.get("conviction", "MEDIUM")
-    vcol    = GREEN if verdict == "BULLISH" else RED if verdict == "BEARISH" else AMBER
 
-    g1, g2 = st.columns([1, 2.2])
-    with g1:
-        st.markdown(_gauge(score), unsafe_allow_html=True)
-    with g2:
-        st.markdown(f"""
-        <div style="background:{DARK2};border:1px solid {BORDER};border-radius:16px;
-             padding:24px;box-shadow:0 1px 3px rgba(0,0,0,.3);min-height:206px;">
-            <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap;">
-                <span style="background:{vcol};color:{DARK};font-weight:800;font-size:13px;
-                     letter-spacing:2px;padding:5px 16px;border-radius:8px;">{verdict}</span>
-                <span style="border:1px solid {BORDER};color:{T2};font-weight:700;font-size:11px;
-                     letter-spacing:1px;padding:4px 12px;border-radius:20px;">CONVICTION: {conv}</span>
-                <span style="border:1px solid {BORDER};color:{T2};font-weight:600;font-size:11px;
-                     padding:4px 12px;border-radius:20px;">{result.get('asset_name','Unknown')} · {result.get('timeframe','')}</span>
-            </div>
-            <div style="font-size:14px;color:{IVORY};line-height:1.9;">{result.get('summary','')}</div>
-        </div>""", unsafe_allow_html=True)
+# ════════════════════════════════════════════════════════════
+# 6. PURGED K-FOLD WITH EMBARGO  (AFML Ch.7)
+# ════════════════════════════════════════════════════════════
 
-    # ── Upside / Downside / R:R ────────────────────────────────
-    st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
-    up  = result.get("upside", {}) or {}
-    dn  = result.get("downside", {}) or {}
-    rr  = result.get("risk_reward", 0)
-    s1, s2, s3 = st.columns(3)
-    with s1:
-        st.markdown(_stat_card("Upside Potential",
-            f"+{float(up.get('potential_pct',0)):.1f}%",
-            f"Target: {up.get('target','-')} — {up.get('reasoning','')}", GREEN),
-            unsafe_allow_html=True)
-    with s2:
-        st.markdown(_stat_card("Downside Risk",
-            f"-{float(dn.get('risk_pct',0)):.1f}%",
-            f"Stop: {dn.get('stop','-')} — {dn.get('reasoning','')}", RED),
-            unsafe_allow_html=True)
-    with s3:
-        rr_c = GREEN if float(rr or 0) >= 2 else AMBER if float(rr or 0) >= 1 else RED
-        st.markdown(_stat_card("Risk : Reward",
-            f"1 : {float(rr or 0):.1f}",
-            "Above 1:2 is favourable for a positive expectancy", rr_c),
-            unsafe_allow_html=True)
+class PurgedKFold(_BaseKFold):
+    """
+    K-Fold that purges training samples whose label intervals [t0, t1]
+    overlap the test fold, plus an embargo after the test set.
+    Prevents leakage from overlapping triple-barrier labels.
+    """
 
-    # ── Trend / Momentum / Volatility ──────────────────────────
-    st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
-    tr = result.get("trend", {}) or {}
-    mo = result.get("momentum", {}) or {}
-    vo = result.get("volatility", {}) or {}
-    q1, q2, q3 = st.columns(3)
-    with q1:
-        st.markdown(_stat_card("Trend",
-            f"{tr.get('direction','-')} · {float(tr.get('strength',0)):.0f}/100",
-            tr.get("note",""), BLUE), unsafe_allow_html=True)
-    with q2:
-        st.markdown(_stat_card("Momentum",
-            f"{mo.get('state','-')} · {float(mo.get('score',0)):.0f}/100",
-            mo.get("note",""), PURPLE), unsafe_allow_html=True)
-    with q3:
-        st.markdown(_stat_card("Volatility",
-            vo.get("state","-"), vo.get("note",""), AMBER), unsafe_allow_html=True)
+    def __init__(self, n_splits=5, t1: pd.Series = None, pct_embargo=0.02):
+        super().__init__(n_splits, shuffle=False, random_state=None)
+        self.t1 = t1
+        self.pct_embargo = pct_embargo
 
-    # ── Pros & Cons with weights ───────────────────────────────
-    st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
-    p1, p2 = st.columns(2)
-    with p1:
-        pros_html = "".join(_weight_bar(p.get("point",""), float(p.get("weight",50)), GREEN)
-                            for p in (result.get("pros") or []))
-        st.markdown(f"""
-        <div style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {GREEN};
-             border-radius:14px;padding:22px;box-shadow:0 1px 3px rgba(0,0,0,.3);">
-            <div style="font-size:13px;font-weight:800;color:{GREEN};letter-spacing:1px;
-                 margin-bottom:16px;">WHAT WORKS — PROS</div>
-            {pros_html or f'<div style="font-size:12px;color:{T2};">None identified</div>'}
-        </div>""", unsafe_allow_html=True)
-    with p2:
-        cons_html = "".join(_weight_bar(c.get("point",""), float(c.get("weight",50)), RED)
-                            for c in (result.get("cons") or []))
-        st.markdown(f"""
-        <div style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {RED};
-             border-radius:14px;padding:22px;box-shadow:0 1px 3px rgba(0,0,0,.3);">
-            <div style="font-size:13px;font-weight:800;color:{RED};letter-spacing:1px;
-                 margin-bottom:16px;">WHAT HURTS — CONS</div>
-            {cons_html or f'<div style="font-size:12px;color:{T2};">None identified</div>'}
-        </div>""", unsafe_allow_html=True)
+    def split(self, X, y=None, groups=None):
+        indices = np.arange(X.shape[0])
+        embargo = int(X.shape[0] * self.pct_embargo)
+        test_starts = [(i[0], i[-1] + 1) for i in
+                       np.array_split(indices, self.n_splits)]
+        for st, end in test_starts:
+            test_idx = indices[st:end]
+            t0_test = self.t1.index[st]
+            t1_test_max = self.t1.iloc[test_idx].max()
+            train_mask = (
+                (self.t1 < t0_test) |                     # labels end before test
+                (self.t1.index > t1_test_max)             # labels start after test
+            )
+            # embargo: drop training samples right after the test window
+            if embargo > 0 and end + embargo < len(indices):
+                emb_idx = self.t1.index[end:end + embargo]
+                train_mask.loc[emb_idx] = False
+            train_idx = indices[train_mask.values]
+            yield train_idx, test_idx
 
-    # ── Scenarios + Key Levels ─────────────────────────────────
-    st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
-    sc1, sc2 = st.columns(2)
-    sc = result.get("scenarios", {}) or {}
-    with sc1:
-        bull = sc.get("bull", {}) or {}
-        base = sc.get("base", {}) or {}
-        bear = sc.get("bear", {}) or {}
-        st.markdown(f"""
-        <div style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {BLUE};
-             border-radius:14px;padding:22px;box-shadow:0 1px 3px rgba(0,0,0,.3);">
-            <div style="font-size:13px;font-weight:800;color:{BLUE};letter-spacing:1px;
-                 margin-bottom:16px;">SCENARIO PROBABILITIES</div>
-            {_scenario_row("BULL CASE", float(bull.get("probability",0)), bull.get("path",""), GREEN)}
-            {_scenario_row("BASE CASE", float(base.get("probability",0)), base.get("path",""), AMBER)}
-            {_scenario_row("BEAR CASE", float(bear.get("probability",0)), bear.get("path",""), RED)}
-        </div>""", unsafe_allow_html=True)
-    with sc2:
-        levels = result.get("key_levels") or []
-        rows = "".join(
-            f'<tr><td style="padding:9px 12px;border-top:1px solid {BORDER};">'
-            f'<span style="color:{GREEN if l.get("type")=="SUPPORT" else RED};'
-            f'font-weight:700;font-size:11px;letter-spacing:1px;">{l.get("type","")}</span></td>'
-            f'<td style="padding:9px 12px;border-top:1px solid {BORDER};font-family:{MONO};'
-            f'font-size:13px;color:{IVORY};">{l.get("level","")}</td>'
-            f'<td style="padding:9px 12px;border-top:1px solid {BORDER};font-size:11px;'
-            f'color:{T2};">{l.get("importance","")}</td></tr>'
-            for l in levels)
-        st.markdown(f"""
-        <div style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {PURPLE};
-             border-radius:14px;padding:22px;box-shadow:0 1px 3px rgba(0,0,0,.3);">
-            <div style="font-size:13px;font-weight:800;color:{PURPLE};letter-spacing:1px;
-                 margin-bottom:12px;">KEY LEVELS</div>
-            <table style="width:100%;border-collapse:collapse;">
-                <tr style="font-size:10px;color:{T2};text-align:left;letter-spacing:1px;">
-                    <th style="padding:6px 12px;">TYPE</th>
-                    <th style="padding:6px 12px;">LEVEL</th>
-                    <th style="padding:6px 12px;">IMPORTANCE</th></tr>
-                {rows or ''}
-            </table>
-        </div>""", unsafe_allow_html=True)
 
-    # ── Volume read + full breakdown ───────────────────────────
-    st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
-    with st.expander("Full Quant Breakdown", expanded=True):
-        st.markdown(f"""
-        <div style="background:{DARK3};border-radius:10px;padding:18px;
-             font-size:13px;color:{IVORY};line-height:1.9;">
-            <div style="font-size:11px;font-weight:700;color:{BLUE};letter-spacing:1px;
-                 margin-bottom:6px;">VOLUME READ</div>
-            <div style="margin-bottom:14px;color:{T2};">{result.get('volume_read','')}</div>
-            <div style="font-size:11px;font-weight:700;color:{BLUE};letter-spacing:1px;
-                 margin-bottom:6px;">DETAILED ANALYSIS</div>
-            {result.get('detailed_analysis','').replace(chr(10),'<br>')}
-        </div>""", unsafe_allow_html=True)
+# ════════════════════════════════════════════════════════════
+# 7. META-LABELING MODEL + MDA FEATURE IMPORTANCE  (AFML Ch.3, 8)
+# ════════════════════════════════════════════════════════════
 
-    st.caption("Quant estimates are derived from the visible chart image only. "
-               "Not SEBI registered — educational analysis, not investment advice.")
+class MetaLabeler:
+    """Secondary model: P(primary signal is profitable). Filters + sizes bets."""
+
+    def __init__(self, n_splits=5, pct_embargo=0.02, prob_threshold=0.55):
+        self.n_splits = n_splits
+        self.pct_embargo = pct_embargo
+        self.prob_threshold = prob_threshold
+        self.model = RandomForestClassifier(
+            n_estimators=400, max_depth=4, min_samples_leaf=0.05,
+            max_features="sqrt", class_weight="balanced_subsample",
+            random_state=42, n_jobs=-1)
+        self.cv_scores_ = []
+
+    def fit(self, X: pd.DataFrame, labels: pd.DataFrame):
+        y = labels["bin"]
+        cv = PurgedKFold(self.n_splits, t1=labels["t1"], pct_embargo=self.pct_embargo)
+        for tr, te in cv.split(X):
+            if len(tr) < 30 or y.iloc[tr].nunique() < 2:
+                continue
+            self.model.fit(X.iloc[tr], y.iloc[tr])
+            p = self.model.predict_proba(X.iloc[te])[:, 1]
+            self.cv_scores_.append(f1_score(y.iloc[te], (p > 0.5).astype(int),
+                                            zero_division=0))
+        self.model.fit(X, y)   # final fit on full set
+        return self
+
+    def predict_size(self, X: pd.DataFrame) -> pd.Series:
+        """Bet sizing from predicted probability (AFML 10.2 simplified):
+        size = 0 below threshold, else scaled (p - 0.5) * 2."""
+        p = pd.Series(self.model.predict_proba(X)[:, 1], index=X.index)
+        size = ((p - 0.5) * 2).clip(0, 1)
+        size[p < self.prob_threshold] = 0.0
+        return size
+
+
+def feature_importance_mda(model, X: pd.DataFrame, labels: pd.DataFrame,
+                           n_splits=5, pct_embargo=0.02) -> pd.Series:
+    """Mean Decrease Accuracy: permute each feature out-of-sample,
+    measure log-loss degradation under purged CV (AFML 8.3)."""
+    y = labels["bin"]
+    cv = PurgedKFold(n_splits, t1=labels["t1"], pct_embargo=pct_embargo)
+    imp = pd.DataFrame(columns=X.columns, dtype=float)
+    base = pd.Series(dtype=float)
+    for i, (tr, te) in enumerate(cv.split(X)):
+        if len(tr) < 30 or y.iloc[tr].nunique() < 2:
+            continue
+        model.fit(X.iloc[tr], y.iloc[tr])
+        p = model.predict_proba(X.iloc[te])
+        base.loc[i] = -log_loss(y.iloc[te], p, labels=model.classes_)
+        for col in X.columns:
+            Xp = X.iloc[te].copy()
+            Xp[col] = np.random.permutation(Xp[col].values)
+            pp = model.predict_proba(Xp)
+            imp.loc[i, col] = -log_loss(y.iloc[te], pp, labels=model.classes_)
+    imp = (-imp).add(base, axis=0)             # degradation per feature
+    return imp.mean().sort_values(ascending=False)
+
+
+# ════════════════════════════════════════════════════════════
+# 8. BACKTESTER  (Chan: costs, stop-loss, dollar-neutral execution)
+# ════════════════════════════════════════════════════════════
+
+class Backtester:
+    """
+    Event-driven simulation of the pair:
+      - dollar-neutral legs scaled by meta-model bet size
+      - per-leg transaction costs in bps (commission + slippage)
+      - hard stop-loss in % of allocated capital (Chan's catastrophic stop)
+      - exit on z mean reversion (|z| < exit_z), stop, or max holding period
+    """
+
+    def __init__(self, cost_bps=5.0, stop_loss_pct=0.03,
+                 exit_z=0.25, max_hold=20, capital=100_000):
+        self.cost = cost_bps / 1e4
+        self.stop = stop_loss_pct
+        self.exit_z = exit_z
+        self.max_hold = max_hold
+        self.capital = capital
+
+    def run(self, prices: pd.DataFrame, sig: pd.DataFrame,
+            size: pd.Series, pair: Pair) -> dict:
+        y_px, x_px = prices[pair.y], prices[pair.x]
+        z, side = sig["z"], sig["side"]
+        equity = pd.Series(self.capital, index=prices.index, dtype=float)
+        pos = None
+        trades = []
+
+        for i, t in enumerate(prices.index[1:], start=1):
+            equity.iloc[i] = equity.iloc[i - 1]
+
+            # ── mark-to-market open position ──
+            if pos:
+                pnl = (pos["sy"] * (y_px.loc[t] - pos["py"]) * pos["qy"]
+                       + pos["sx"] * (x_px.loc[t] - pos["px"]) * pos["qx"])
+                pos["days"] += 1
+                unreal = pnl / pos["alloc"]
+                stop_hit = unreal <= -self.stop
+                reverted = abs(z.loc[t]) < self.exit_z
+                timed_out = pos["days"] >= self.max_hold
+                if stop_hit or reverted or timed_out:
+                    exit_cost = (abs(y_px.loc[t] * pos["qy"])
+                                 + abs(x_px.loc[t] * pos["qx"])) * self.cost
+                    equity.iloc[i] += pnl - exit_cost
+                    trades.append({"entry": pos["t"], "exit": t, "pnl": pnl - exit_cost,
+                                   "reason": "STOP" if stop_hit else
+                                             "REVERT" if reverted else "TIME"})
+                    pos = None
+
+            # ── new entry: primary side + meta-model approval ──
+            if pos is None and t in size.index and size.loc[t] > 0 and side.loc[t] != 0:
+                s = side.loc[t]
+                alloc = equity.iloc[i] * 0.5 * size.loc[t]   # bet-sized allocation
+                qy = alloc / y_px.loc[t]
+                qx = (alloc * pair.hedge) / x_px.loc[t]
+                entry_cost = (alloc + alloc * pair.hedge) * self.cost
+                equity.iloc[i] -= entry_cost
+                pos = {"t": t, "sy": s, "sx": -s, "qy": qy, "qx": qx,
+                       "py": y_px.loc[t], "px": x_px.loc[t],
+                       "alloc": alloc, "days": 0}
+
+        return self._metrics(equity, trades)
+
+    def _metrics(self, equity: pd.Series, trades: list) -> dict:
+        rets = equity.pct_change().dropna()
+        sharpe = (rets.mean() / rets.std() * np.sqrt(252)) if rets.std() > 0 else 0
+        dd = (equity / equity.cummax() - 1).min()
+        wins = [tr for tr in trades if tr["pnl"] > 0]
+        return {
+            "equity": equity,
+            "trades": pd.DataFrame(trades),
+            "total_return_pct": (equity.iloc[-1] / equity.iloc[0] - 1) * 100,
+            "sharpe": sharpe,
+            "max_drawdown_pct": dd * 100,
+            "n_trades": len(trades),
+            "win_rate": len(wins) / len(trades) * 100 if trades else 0,
+        }
+
+
+# ════════════════════════════════════════════════════════════
+# 9. FULL PIPELINE
+# ════════════════════════════════════════════════════════════
+
+def run_pipeline(tickers: list, start="2018-01-01", train_frac=0.7):
+    print(f"[1/6] Downloading {len(tickers)} tickers...")
+    prices = get_data(tickers, start=start)
+
+    print("[2/6] Selecting cointegrated pairs (Engle-Granger + ADF + half-life)...")
+    pairs = PairSelector().fit(prices.iloc[: int(len(prices) * train_frac)])
+    if not pairs:
+        print("No tradeable cointegrated pairs found."); return None
+    pair = pairs[0]
+    print(f"      Best pair: {pair.y}/{pair.x}  p={pair.pvalue:.4f}  "
+          f"hedge={pair.hedge:.3f}  HL={pair.half_life:.1f}d")
+
+    print("[3/6] Primary signals + features...")
+    sig = PrimaryStrategy(pair).compute(prices)
+    feats = build_features(prices, sig, pair)
+
+    print("[4/6] Triple-barrier meta-labels...")
+    events = sig.index[sig["side"] != 0]
+    labels = triple_barrier_labels(sig["spread"], events, sig["side"])
+    if labels.empty or len(labels) < 50:
+        print("Insufficient labeled events."); return None
+
+    X = feats.loc[labels.index].dropna()
+    labels = labels.loc[X.index]
+
+    split_t = X.index[int(len(X) * train_frac)]
+    X_tr, lab_tr = X[X.index < split_t], labels[labels.index < split_t]
+    X_te = X[X.index >= split_t]
+
+    print(f"[5/6] Meta-model: purged {5}-fold CV w/ embargo "
+          f"({len(X_tr)} train events)...")
+    meta = MetaLabeler().fit(X_tr, lab_tr)
+    print(f"      CV F1 scores: {[f'{s:.2f}' for s in meta.cv_scores_]}")
+
+    fi = feature_importance_mda(
+        RandomForestClassifier(n_estimators=200, max_depth=4,
+                               min_samples_leaf=0.05, random_state=42, n_jobs=-1),
+        X_tr, lab_tr)
+    print("      MDA feature importance:")
+    for f, v in fi.items():
+        print(f"        {f:<14s} {v:+.4f}")
+
+    print("[6/6] Out-of-sample backtest with costs + stop-loss...")
+    size = meta.predict_size(X_te)
+    oos_prices = prices[prices.index >= split_t]
+    oos_sig = sig[sig.index >= split_t]
+    results = Backtester(cost_bps=5, stop_loss_pct=0.03).run(
+        oos_prices, oos_sig, size, pair)
+
+    print("\n══════════ OUT-OF-SAMPLE RESULTS ══════════")
+    print(f"  Pair            : {pair.y} / {pair.x}")
+    print(f"  Total return    : {results['total_return_pct']:+.2f}%")
+    print(f"  Sharpe ratio    : {results['sharpe']:.2f}")
+    print(f"  Max drawdown    : {results['max_drawdown_pct']:.2f}%")
+    print(f"  Trades / WinRate: {results['n_trades']} / {results['win_rate']:.1f}%")
+    return results
+
+
+if __name__ == "__main__":
+    # Indian banking sector — classic cointegration hunting ground (use .NS for NSE)
+    UNIVERSE = ["HDFCBANK.NS", "ICICIBANK.NS", "KOTAKBANK.NS",
+                "AXISBANK.NS", "SBIN.NS", "INDUSINDBK.NS"]
+    run_pipeline(UNIVERSE)
