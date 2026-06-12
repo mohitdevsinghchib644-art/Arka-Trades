@@ -915,4 +915,52 @@ with right:
                 a,b=st.columns(2)
                 nn=a.text_input("Full Name", value=st.session_state.profile["name"])
                 np_=b.text_input("Contact Number", value=st.session_state.profile["phone"])
-                ne=st.text_input("Email Address", value=st.session_state.prof
+                                ne=st.text_input("Email Address", value=st.session_state.profile["email"])
+                ph=st.file_uploader("Upload Profile Photo",type=["jpg","jpeg","png"])
+                if st.form_submit_button("Save Profile",use_container_width=True,type="primary"):
+                    st.session_state.profile.update({"name":nn,"phone":np_,"email":ne})
+                    if ph: st.session_state["profile_photo"]=ph
+                    st.success(f"Saved! Welcome, {nn}!"); st.rerun()
+
+    elif pg == "settings":
+        st.markdown(f"<div style='font-size:15px;font-weight:800;color:{IVORY};margin:8px 0 10px;'>Appearance</div>", unsafe_allow_html=True)
+        t1,t2=st.columns(2)
+        with t1:
+            st.markdown(f"""<div style="background:{DARK2};border:2px solid {INDIGO};border-radius:14px;padding:20px;text-align:center;">
+                <div style="margin-bottom:10px;">{icon("shield", 24, INDIGO)}</div>
+                <div style="font-weight:800;font-size:14px;color:{INDIGO};">DARK MODE</div>
+                <div style="font-size:12px;color:{T2};margin-top:4px;">Currently active</div></div>""", unsafe_allow_html=True)
+        with t2:
+            st.markdown(f"""<div style="background:{DARK3};border:1px solid {BORDER};border-radius:14px;padding:20px;text-align:center;opacity:.6;">
+                <div style="margin-bottom:10px;">{icon("clock", 24, T2)}</div>
+                <div style="font-weight:800;font-size:14px;color:{T2};">LIGHT MODE</div>
+                <div style="font-size:12px;color:{T2};margin-top:4px;">Coming soon</div></div>""", unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown(f"<div style='font-size:15px;font-weight:800;color:{IVORY};margin-bottom:10px;'>Telegram Notifications</div>", unsafe_allow_html=True)
+        st.info(f"Bot connected · Chat ID: {CHAT_ID}")
+        if st.button("Send Test Notification",use_container_width=True):
+            send_telegram("<b>Arka Trades</b>\nTest notification successful.")
+            st.success("Test sent to Telegram.")
+        st.divider()
+        st.markdown(f"<div style='font-size:15px;font-weight:800;color:{IVORY};'>Broker API — Coming Soon</div>", unsafe_allow_html=True)
+
+    elif pg == "contact":
+        c1,c2=st.columns([1,1])
+        with c1:
+            st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-left:3px solid {CYAN};border-radius:14px;padding:28px;">
+                <div style="margin-bottom:12px;">{icon("mail", 24, CYAN)}</div>
+                <div style="font-weight:800;font-size:13px;letter-spacing:1px;color:{CYAN};text-transform:uppercase;margin-bottom:14px;">Get in Touch</div>
+                <div style="font-size:14px;color:{T2};line-height:2;margin-bottom:18px;">Questions, feedback or suggestions?<br>We would love to hear from you.</div>
+                <div style="font-family:{MONO};font-size:13px;color:{CYAN};font-weight:700;word-break:break-all;">Mohitdevsinghchib644@gmail.com</div>
+                <div style="font-size:12px;color:{T2};margin-top:10px;">Mention ARKA TRADES in subject line.<br>Reply within 24 hours.</div></div>""", unsafe_allow_html=True)
+        with c2:
+            with st.form("cf"):
+                n=st.text_input("Your Name")
+                e=st.text_input("Your Email")
+                m=st.text_area("Message",height=120)
+                if st.form_submit_button("Send Message",use_container_width=True,type="primary"):
+                    if n and m: st.success("Please email: Mohitdevsinghchib644@gmail.com")
+                    else: st.warning("Fill name and message.")
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
