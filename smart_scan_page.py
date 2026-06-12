@@ -1,17 +1,14 @@
 """
-smart_scan_page.py  —  Arka Trades Smart Screener (Spyder-X style)
+smart_scan_page.py  —  Arka Trades Smart Screener
 ====================================================================
 How it works:
   1. SAVE A SETUP   : upload a reference chart image + describe the setup in
-                      PLAIN ENGLISH ("similar to this image, price 100-1000,
-                      RSI above 55, volume spike..."). Gemini parses your text
-                      into math filters automatically — no sliders needed.
-  2. TAP & SCAN     : pick a setup card, hit Run Scan. Fast pandas engine
-                      filters the NSE universe with your parsed rules.
+                      plain English. AI parses your text into filters.
+  2. TAP & SCAN     : pick a setup, hit Run Scan.
+                      Stage 1 — price pre-filter across ALL NSE stocks.
+                      Stage 2 — deep indicator scan on survivors.
   3. AI VISION      : Gemini compares every shortlisted chart against your
                       reference image and ranks by pattern similarity.
-
-Supabase table 'scan_setups' — same columns as before, no migration needed.
 """
 
 import streamlit as st
@@ -43,7 +40,7 @@ try:
 except ImportError:
     HAS_REQUESTS = False
 
-# ── Theme (ChartX) ───────────────────────────────────────────────────────────
+# ── Theme ────────────────────────────────────────────────────────────────────
 NAVY   = "#101A33"
 IVORY  = "#E2E8F0"
 GOLD   = "#4F8DFD"
@@ -61,7 +58,7 @@ MONO   = "'JetBrains Mono',monospace"
 
 MODEL_NAME = "gemini-2.5-flash"
 
-# ── NSE Universe ─────────────────────────────────────────────────────────────
+# ── Liquid NSE Universe (fast fallback) ─────────────────────────────────────
 NSE_UNIVERSE = [
     "RELIANCE","TCS","HDFCBANK","INFY","ICICIBANK","HINDUNILVR","SBIN",
     "BHARTIARTL","KOTAKBANK","BAJFINANCE","LT","WIPRO","HCLTECH","ASIANPAINT",
@@ -97,7 +94,68 @@ NSE_UNIVERSE = list(dict.fromkeys(NSE_UNIVERSE))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# NATURAL LANGUAGE → FILTERS  (the Spyder-X magic)
+# FULL NSE UNIVERSE  (official list, ~2000 stocks, cached 24h)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_full_nse_universe() -> list:
+    """Download the official NSE equity list (all listed stocks, EQ series)."""
+    try:
+        import requests as _rq
+        url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        r = _rq.get(url, headers=headers, timeout=15)
+        r.raise_for_status()
+        df = pd.read_csv(io.StringIO(r.text))
+        df.columns = [c.strip() for c in df.columns]
+        if "SERIES" in df.columns:
+            df = df[df["SERIES"].astype(str).str.strip() == "EQ"]
+        syms = (df["SYMBOL"].astype(str).str.strip().str.upper()
+                .dropna().unique().tolist())
+        syms = [s for s in syms if s and s.isascii()]
+        return syms if len(syms) > 500 else NSE_UNIVERSE
+    except Exception:
+        return NSE_UNIVERSE   # fallback if NSE blocks the request
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def prefilter_by_price(symbols_tuple: tuple, price_min: float, price_max: float) -> list:
+    """
+    Stage 1: fast price check across the WHOLE universe using only 5 days
+    of data. Cuts ~2000 stocks down to only those inside your price range
+    before the heavy 60-day scan runs.
+    """
+    symbols = list(symbols_tuple)
+    ns_syms = [s + ".NS" for s in symbols]
+    keep    = []
+    BATCH   = 200
+    for start in range(0, len(ns_syms), BATCH):
+        batch_ns    = ns_syms[start:start + BATCH]
+        batch_plain = symbols[start:start + BATCH]
+        try:
+            raw = yf.download(batch_ns, period="5d", interval="1d",
+                              auto_adjust=True, progress=False, threads=True)
+            if raw.empty:
+                continue
+            closes = raw["Close"] if "Close" in raw else raw
+            if isinstance(closes, pd.Series):
+                closes = closes.to_frame(name=batch_ns[0])
+            last = closes.ffill().iloc[-1]
+            for sym, ns in zip(batch_plain, batch_ns):
+                try:
+                    px = float(last.get(ns, float("nan")))
+                    if px == px and price_min <= px <= price_max:
+                        keep.append(sym)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        time.sleep(0.4)
+    return keep
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# NATURAL LANGUAGE → FILTERS
 # ══════════════════════════════════════════════════════════════════════════════
 
 _PARSE_PROMPT = """You are a trading-rule parser. The user describes a stock setup
@@ -119,6 +177,7 @@ Use defaults when a condition is not mentioned. Return ONLY the JSON, no markdow
 
 Mapping hints:
 - "price between 100 and 1000" -> price_min 100, price_max 1000
+- "under 250" / "below 250" -> price_max 250
 - "RSI above 55" -> rsi_min 55 | "RSI below 40 / oversold" -> rsi_max 40
 - "volume spike / high volume / 2x volume" -> volume_multiplier 1.5 (or stated number)
 - "above 20 SMA / 50 SMA" -> require_above_sma20/50 true
@@ -590,7 +649,7 @@ def _verdict_colors(verdict: str):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SETUP MANAGER  (image + plain English — AI extracts the rules)
+# SETUP MANAGER
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _render_setup_form(supabase, gemini_key: str, existing: dict = None):
@@ -634,7 +693,7 @@ def _render_setup_form(supabase, gemini_key: str, existing: dict = None):
             height=150, key=f"vr_{prefix}",
             placeholder=("Example:\n"
                          "Find stocks that look like this image — a tight flag after a strong "
-                         "up move. Price should be between 100 and 1000. RSI above 55. "
+                         "up move. Price should be between 50 and 250. RSI above 55. "
                          "Volume at least 1.5x average. Stock must be above the 20 SMA "
                          "and breaking out above the previous day high."))
 
@@ -858,13 +917,18 @@ def _render_scan_page(supabase, gemini_key: str):
     with c1:
         universe_opt = st.selectbox(
             "Scan Universe",
-            ["Full NSE Universe", "Your Watchlist", "Arka Watchlist"],
+            ["ALL NSE Stocks (~2000, slower)", "Liquid NSE (~180, fast)",
+             "Your Watchlist", "Arka Watchlist"],
             key="scan_universe")
     with c2:
         max_ai = st.number_input("Max AI Comparisons", 3, 25, 12, 1, key="scan_max_ai",
                                  help="Top N candidates sent to Gemini Vision after the rules filter")
 
-    if universe_opt.startswith("Full"):
+    if universe_opt.startswith("ALL"):
+        with st.spinner("Loading full NSE stock list..."):
+            universe = get_full_nse_universe()
+        st.caption(f"{len(universe)} NSE stocks loaded · price pre-filter narrows this before the deep scan")
+    elif universe_opt.startswith("Liquid"):
         universe = NSE_UNIVERSE
     elif universe_opt == "Your Watchlist":
         universe = st.session_state.get("watchlist", [])
@@ -891,7 +955,23 @@ def _render_scan_page(supabase, gemini_key: str):
             prog.progress(min(float(pct), 1.0))
             stat.markdown(f"**{msg}**")
 
-        shortlist, failed = run_math_scan(universe, selected_setup, _prog)
+        # ── Stage 1: price pre-filter (only for big universes) ───────────
+        scan_universe = universe
+        pmin = float(selected_setup.get("price_min") or 0)
+        pmax = float(selected_setup.get("price_max") or 99999)
+        if len(universe) > 300:
+            _prog(0.05, f"Stage 1: price check on {len(universe)} NSE stocks "
+                        f"(keeping Rs {pmin:,.0f} - {pmax:,.0f})...")
+            scan_universe = prefilter_by_price(tuple(universe), pmin, pmax)
+            if not scan_universe:
+                prog.progress(1.0); stat.empty()
+                st.warning("No NSE stocks found inside your price range. Widen the range in the setup.")
+                st.stop()
+            _prog(0.15, f"Stage 1 done: {len(scan_universe)} stocks inside your price range. "
+                        f"Stage 2: deep indicator scan...")
+
+        # ── Stage 2: deep indicator scan ─────────────────────────────────
+        shortlist, failed = run_math_scan(scan_universe, selected_setup, _prog)
 
         if not shortlist:
             prog.progress(1.0); stat.empty()
@@ -902,8 +982,9 @@ def _render_scan_page(supabase, gemini_key: str):
             st.stop()
 
         st.session_state["scan_math_results"] = shortlist
-        stat.markdown(f"Rules filter: **{len(shortlist)} candidates** from {len(universe)} scanned")
+        stat.markdown(f"Rules filter: **{len(shortlist)} candidates** from {len(scan_universe)} scanned")
 
+        # ── Stage 3: AI vision comparison ────────────────────────────────
         if gemini_key:
             ai_prog = st.progress(0.0)
             ai_stat = st.empty()
@@ -930,7 +1011,7 @@ def _render_scan_page(supabase, gemini_key: str):
 
     _section("Scan Summary")
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Universe Scanned", len(universe))
+    m1.metric("Universe Selected", len(universe))
     m2.metric("Passed Your Rules", len(math_results))
     m3.metric("AI Compared", len(ai_results) if ai_results else "—")
     if ai_results:
