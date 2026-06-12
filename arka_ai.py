@@ -808,13 +808,20 @@ def render_mode1():
                 st.session_state.m1_ticker = qp
                 st.rerun()
 
-    # Determine what to load
+       # Determine what to load — keep showing chart across reruns
     load_ticker = None
     if fetch_btn and ticker_input.strip():
         load_ticker = ticker_input.strip()
         st.session_state.m1_chart_fetched = False
-    elif st.session_state.m1_ticker and not st.session_state.m1_chart_fetched:
+    elif st.session_state.m1_ticker:
         load_ticker = st.session_state.m1_ticker
+
+    # If ticker changed (e.g. quick pick), force a re-fetch
+    if load_ticker and st.session_state.get("m1_loaded_ticker") != load_ticker.upper():
+        st.session_state.m1_chart_fetched = False
+        st.session_state["m1_loaded_ticker"] = load_ticker.upper()
+        st.session_state.pop("m1_last_result", None)
+
 
     if not load_ticker:
         st.markdown(
