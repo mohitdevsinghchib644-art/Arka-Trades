@@ -444,7 +444,7 @@ Be direct. Base verdict ONLY on the chart.\
 def _audit_one(symbol: str, chart_bytes: bytes, visual_rules: str,
                ref_image_url: str, gemini_key: str) -> dict:
     genai.configure(api_key=gemini_key)
-    model  = genai.GenerativeModel("gemini-2.5-flash-preview-05-20")
+        model  = genai.GenerativeModel("gemini-2.5-flash")
     prompt = _PROMPT_TEMPLATE.format(
         symbol=symbol,
         visual_rules=visual_rules.strip() or "General technical analysis — identify best setups."
