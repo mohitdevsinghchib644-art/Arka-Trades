@@ -8,7 +8,7 @@ from supabase import create_client, Client
 from news_feed import news_panel, get_news_dot, _ensure_news_state
 from arka_ai import render_arka_ai
 
-# ── Supabase Config (uses secrets if available, falls back to defaults) ──
+# ── Supabase Config ──────────────────────────────────────────
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "https://vpxagxjgtonynblhddwh.supabase.co")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "sb_publishable_J709kk-CNgm4GVkd5jemEg_XZb5wPDA")
 
@@ -87,7 +87,7 @@ def db_load_admin_watchlist() -> list:
 
 st.set_page_config(page_title="Arka Trades", layout="wide", page_icon="📈", initial_sidebar_state="collapsed")
 
-# ── Telegram ───────────────────────────────────────────────
+# ── Telegram ─────────────────────────────────────────────────
 BOT_TOKEN = st.secrets.get("BOT_TOKEN", "8720913228:AAEJEpA30KiJ5H0XwIdqxfOA5YSjxW3cfK8")
 CHAT_ID   = st.secrets.get("CHAT_ID", "1987688902")
 
@@ -97,26 +97,59 @@ def send_telegram(msg):
             data={"chat_id":CHAT_ID,"text":msg,"parse_mode":"HTML"}, timeout=5)
     except: pass
 
-# ── ChartX Palette (same variable names — other files stay compatible) ──
-DARK   = "#0B0F17"   # page background (soft slate, not pitch black)
-DARK2  = "#0F1522"   # card background
-DARK3  = "#151D2E"   # input / nested background
-BORDER = "#1E293B"   # micro-borders
-IVORY  = "#E2E8F0"   # primary text
-T2     = "#94A3B8"   # secondary text
-NAVY   = "#101A33"   # deep panel
-GOLD   = "#4F8DFD"   # brand accent → electric blue
+# ── Palette ──────────────────────────────────────────────────
+DARK   = "#0B0F17"
+DARK2  = "#0F1522"
+DARK3  = "#151D2E"
+BORDER = "#1E293B"
+IVORY  = "#E2E8F0"
+T2     = "#94A3B8"
+NAVY   = "#101A33"
+GOLD   = "#4F8DFD"
 BLUE   = "#4F8DFD"
-GREEN  = "#10B981"   # emerald
-RED    = "#EF4444"   # crimson
+GREEN  = "#10B981"
+RED    = "#EF4444"
 PURPLE = "#8B5CF6"
 FONT   = "'Plus Jakarta Sans','Inter',sans-serif"
 MONO   = "'JetBrains Mono',monospace"
+
+# ── SVG Icon System (replaces emojis) ────────────────────────
+_ICON_PATHS = {
+    "chart":    '<path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
+    "bell":     '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+    "cpu":      '<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M20 9h2M20 15h2M2 9h2M2 15h2"/>',
+    "search":   '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+    "zap":      '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
+    "news":     '<path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-4 0V11"/><path d="M18 14h-8M15 18h-5M10 6h8v4h-8V6Z"/>',
+    "trend":    '<polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/>',
+    "target":   '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>',
+    "layers":   '<polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>',
+    "shield":   '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1 1 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/>',
+    "user":     '<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+    "settings": '<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>',
+    "mail":     '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>',
+    "brain":    '<path d="M12 2a4 4 0 0 0-4 4 4 4 0 0 0-3 6.5A4 4 0 0 0 7 20a4 4 0 0 0 5 1 4 4 0 0 0 5-1 4 4 0 0 0 2-7.5A4 4 0 0 0 16 6a4 4 0 0 0-4-4Z"/><path d="M12 2v19"/>',
+    "clock":    '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+    "check":    '<polyline points="20 6 9 17 4 12"/>',
+}
+
+def icon(name: str, size: int = 18, color: str = None) -> str:
+    c = color or BLUE
+    return (f'<svg width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" '
+            f'stroke="{c}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" '
+            f'style="vertical-align:middle;">{_ICON_PATHS.get(name,"")}</svg>')
+
+def icon_box(name: str, color: str = None, size: int = 38) -> str:
+    c = color or BLUE
+    return (f'<div style="width:{size}px;height:{size}px;border-radius:10px;'
+            f'background:{c}1A;border:1px solid {c}33;display:flex;align-items:center;'
+            f'justify-content:center;margin-bottom:12px;">{icon(name, 19, c)}</div>')
 
 # ── Session State ────────────────────────────────────────────
 for k, v in {
     "logged_in":       False,
     "disclaimer_done": False,
+    "show_login":      False,
     "page":            "home",
     "profile":         {"name":"Trader","email":"","phone":""},
     "profile_photo":   None,
@@ -143,16 +176,12 @@ name     = st.session_state.profile.get("name","Trader") or "Trader"
 initial  = name[0].upper()
 IS_ADMIN = st.session_state.get("is_admin", False)
 
-# ── Global CSS (ChartX design system) ───────────────────────
+# ── Global CSS ───────────────────────────────────────────────
 st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap');
 *,*::before,*::after{{box-sizing:border-box;margin:0;padding:0;}}
-html,body,.stApp{{
-    background:{DARK} !important;
-    color:{IVORY} !important;
-    font-family:{FONT} !important;
-}}
+html,body,.stApp{{background:{DARK} !important;color:{IVORY} !important;font-family:{FONT} !important;}}
 header[data-testid="stHeader"]{{display:none !important;}}
 [data-testid="stSidebarCollapsedControl"]{{display:none !important;}}
 section[data-testid="stSidebar"]{{display:none !important;}}
@@ -162,42 +191,29 @@ section[data-testid="stSidebar"]{{display:none !important;}}
     background:{DARK3} !important;color:{IVORY} !important;
     border:1px solid {BORDER} !important;border-radius:10px !important;
     font-family:{FONT} !important;font-size:14px !important;
-    transition:border-color .15s ease !important;
 }}
-.stTextInput input:focus{{
-    border-color:{BLUE} !important;
-    box-shadow:0 0 0 3px rgba(79,141,253,0.15) !important;
-}}
-.stTextInput label,.stTextArea label,.stNumberInput label{{
-    color:{T2} !important;font-size:12px !important;font-weight:600 !important;
-}}
-.stTextArea textarea{{
-    background:{DARK3} !important;color:{IVORY} !important;
-    border:1px solid {BORDER} !important;border-radius:10px !important;
-}}
+.stTextInput input:focus{{border-color:{BLUE} !important;box-shadow:0 0 0 3px rgba(79,141,253,0.15) !important;}}
+.stTextInput label,.stTextArea label,.stNumberInput label{{color:{T2} !important;font-size:12px !important;font-weight:600 !important;}}
+.stTextArea textarea{{background:{DARK3} !important;color:{IVORY} !important;
+    border:1px solid {BORDER} !important;border-radius:10px !important;}}
 [data-testid="stForm"]{{background:{DARK2} !important;border:1px solid {BORDER} !important;
     border-radius:16px !important;padding:24px !important;
     box-shadow:0 1px 3px rgba(0,0,0,.3) !important;}}
-[data-testid="metric-container"]{{
-    background:{DARK2} !important;border:1px solid {BORDER} !important;
+[data-testid="metric-container"]{{background:{DARK2} !important;border:1px solid {BORDER} !important;
     border-radius:12px !important;padding:16px !important;
-    box-shadow:0 1px 3px rgba(0,0,0,.3) !important;
-}}
+    box-shadow:0 1px 3px rgba(0,0,0,.3) !important;}}
 [data-testid="stMetricLabel"] p{{font-size:12px !important;font-weight:600 !important;color:{T2} !important;}}
 [data-testid="stMetricValue"]{{font-family:{MONO} !important;font-size:20px !important;color:{IVORY} !important;}}
 
-.stButton>button{{
-    background:{DARK3} !important;color:{IVORY} !important;
+.stButton>button{{background:{DARK3} !important;color:{IVORY} !important;
     border:1px solid {BORDER} !important;border-radius:10px !important;
     font-family:{FONT} !important;font-weight:600 !important;font-size:14px !important;
-    transition:all .15s ease !important;box-shadow:none !important;
-}}
+    transition:all .15s ease !important;box-shadow:none !important;}}
 .stButton>button:hover{{border-color:{BLUE} !important;color:{BLUE} !important;
     transform:translateY(-1px);box-shadow:0 4px 12px rgba(79,141,253,.15) !important;}}
 .stButton>button[kind="primary"],.stFormSubmitButton>button[kind="primary"]{{
     background:{BLUE} !important;color:#FFFFFF !important;border:none !important;
-    box-shadow:0 2px 8px rgba(79,141,253,.35) !important;
-}}
+    box-shadow:0 2px 8px rgba(79,141,253,.35) !important;}}
 .stButton>button[kind="primary"]:hover{{background:#3B7BF0 !important;color:#fff !important;}}
 
 .stTabs [data-baseweb="tab-list"]{{background:{DARK2};border:1px solid {BORDER};
@@ -210,19 +226,13 @@ section[data-testid="stSidebar"]{{display:none !important;}}
 hr{{border-color:{BORDER} !important;}}
 .stProgress>div>div{{background:{BLUE} !important;}}
 
-/* Nav buttons */
-.nav-btn .stButton>button{{
-    width:100% !important;text-align:left !important;
-    background:transparent !important;color:{T2} !important;
-    border:none !important;border-radius:10px !important;
-    font-size:14px !important;font-weight:600 !important;
-    padding:9px 14px !important;margin-bottom:2px !important;
-}}
+.nav-btn .stButton>button{{width:100% !important;text-align:left !important;
+    background:transparent !important;color:{T2} !important;border:none !important;
+    border-radius:10px !important;font-size:14px !important;font-weight:600 !important;
+    padding:9px 14px !important;margin-bottom:2px !important;}}
 .nav-btn .stButton>button:hover{{background:{DARK3} !important;color:{IVORY} !important;transform:none;box-shadow:none !important;}}
-.nav-btn-active .stButton>button{{
-    background:rgba(79,141,253,0.10) !important;color:{BLUE} !important;
-    border-left:3px solid {BLUE} !important;border-radius:0 10px 10px 0 !important;
-}}
+.nav-btn-active .stButton>button{{background:rgba(79,141,253,0.10) !important;color:{BLUE} !important;
+    border-left:3px solid {BLUE} !important;border-radius:0 10px 10px 0 !important;}}
 
 @keyframes pulse{{0%,100%{{box-shadow:0 0 0 0 rgba(16,185,129,.4);}}50%{{box-shadow:0 0 0 6px rgba(16,185,129,0);}}}}
 .pulse-dot{{width:8px;height:8px;border-radius:50%;background:{GREEN};display:inline-block;animation:pulse 2s infinite;}}
@@ -231,7 +241,7 @@ hr{{border-color:{BORDER} !important;}}
 </style>
 """, unsafe_allow_html=True)
 
-# ── Helpers ───────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────
 def parse_csv(file):
     try: df = pd.read_csv(file, header=None)
     except: return []
@@ -256,13 +266,9 @@ def get_static(sym):
         h = yf.Ticker(sym+".NS").history(period="30d", interval="1d")
         if len(h) < 16: return None
         prev = h.iloc[-2]
-        return {
-            "pdh":        float(prev["High"]),
-            "pdl":        float(prev["Low"]),
-            "prev_close": float(prev["Close"]),
-            "rsi":        calc_rsi(h["Close"]),
-            "spark":      [float(x) for x in h["Close"].tail(12).tolist()],
-        }
+        return {"pdh": float(prev["High"]), "pdl": float(prev["Low"]),
+                "prev_close": float(prev["Close"]), "rsi": calc_rsi(h["Close"]),
+                "spark": [float(x) for x in h["Close"].tail(12).tolist()]}
     except: return None
 
 @st.cache_data(ttl=10, show_spinner=False)
@@ -297,9 +303,9 @@ def check_alerts(results):
         if sym in st.session_state.alert_fired: continue
         cur=s["cur"]; ap=a["price"]; at=a["type"]
         fired=False; msg=""
-        if at=="pdh" and cur>=ap:   fired=True; msg=f"🔔 <b>{sym}</b> crossed PDH!\nPrice: Rs{cur:.2f} | PDH: Rs{ap:.2f}"
-        elif at=="pdl" and cur<=ap: fired=True; msg=f"🔔 <b>{sym}</b> broke PDL!\nPrice: Rs{cur:.2f} | PDL: Rs{ap:.2f}"
-        elif at=="custom" and cur>=ap: fired=True; msg=f"🔔 <b>{sym}</b> hit target!\nPrice: Rs{cur:.2f} | Target: Rs{ap:.2f}"
+        if at=="pdh" and cur>=ap:   fired=True; msg=f"<b>{sym}</b> crossed PDH!\nPrice: Rs{cur:.2f} | PDH: Rs{ap:.2f}"
+        elif at=="pdl" and cur<=ap: fired=True; msg=f"<b>{sym}</b> broke PDL!\nPrice: Rs{cur:.2f} | PDL: Rs{ap:.2f}"
+        elif at=="custom" and cur>=ap: fired=True; msg=f"<b>{sym}</b> hit target!\nPrice: Rs{cur:.2f} | Target: Rs{ap:.2f}"
         if fired:
             send_telegram(msg)
             st.session_state.alert_fired.add(sym)
@@ -330,77 +336,321 @@ def sparkline(values, color=None, w=110, h=30) -> str:
             f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="1.8" '
             f'stroke-linejoin="round" stroke-linecap="round"/></svg>')
 
-# ════════════════════════════════════════════════════════
-# LOGIN — ChartX-style landing hero
-# ════════════════════════════════════════════════════════
-if not st.session_state.logged_in:
-    st.markdown(f"""
-    <div class="fade-up" style="text-align:center;padding:80px 24px 48px;">
-        <div style="display:inline-flex;align-items:center;gap:8px;background:{DARK2};
-             border:1px solid {BORDER};border-radius:30px;padding:6px 16px;margin-bottom:28px;">
-            <span class="pulse-dot"></span>
-            <span style="font-size:12px;font-weight:600;color:{T2};">Live NSE market data · Automated scans · AI analysis</span>
-        </div>
-        <h1 style="font-family:{FONT};font-size:52px;font-weight:800;line-height:1.12;
-             color:{IVORY};max-width:860px;margin:0 auto 20px;letter-spacing:-1.5px;">
-            Next-Generation<br>
-            <span style="background:linear-gradient(90deg,{BLUE},{PURPLE});
-                 -webkit-background-clip:text;-webkit-text-fill-color:transparent;">
-                 Market Analytics Infrastructure</span>
-        </h1>
-        <p style="font-size:17px;color:{T2};max-width:580px;margin:0 auto 6px;line-height:1.7;">
-            Arka Trades automates breakout scanning, AI chart analysis and instant
-            Telegram alerts — built for traders who value clarity and control.
-        </p>
-        <p style="font-size:12px;color:{T2};opacity:.6;margin-bottom:10px;">
-            Not SEBI registered · Educational use only</p>
-    </div>""", unsafe_allow_html=True)
+def checkline(text):
+    return (f'<div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:12px;">'
+            f'<span style="flex-shrink:0;margin-top:2px;">{icon("check", 16, GREEN)}</span>'
+            f'<span style="font-size:14px;color:{IVORY};line-height:1.6;">{text}</span></div>')
 
-    f1, f2, f3 = st.columns(3)
-    for col, ic, t, d in [
-        (f1,"📋","Watchlist Scanner","Instant PDH/PDL breakout detection across your full watchlist."),
-        (f2,"🤖","Arka AI Vision","Gemini-powered chart analysis trained on your personal rules."),
-        (f3,"🔔","Telegram Alerts","Conditional price alerts pushed to your phone in real time."),
+# ════════════════════════════════════════════════════════════
+# LANDING PAGE (logged out)
+# ════════════════════════════════════════════════════════════
+if not st.session_state.logged_in:
+
+    # ── Top Navigation Bar ───────────────────────────────────
+    nav_l, nav_sp, nav_r = st.columns([2, 3, 1])
+    with nav_l:
+        st.markdown(f"""
+        <div style="display:flex;align-items:center;gap:10px;padding:18px 0 8px;">
+            <div style="width:34px;height:34px;border-radius:9px;
+                 background:linear-gradient(135deg,{BLUE},{PURPLE});
+                 display:flex;align-items:center;justify-content:center;">{icon("trend", 18, "#fff")}</div>
+            <div>
+                <div style="font-size:17px;font-weight:800;color:{IVORY};letter-spacing:0.5px;line-height:1;">ARKA TRADES</div>
+                <div style="font-size:9px;letter-spacing:2px;color:{T2};text-transform:uppercase;">Market Analytics Platform</div>
+            </div>
+        </div>""", unsafe_allow_html=True)
+    with nav_sp:
+        st.markdown(f"""
+        <div style="display:flex;align-items:center;justify-content:center;gap:32px;height:64px;">
+            <span style="font-size:13px;font-weight:600;color:{T2};">Product Suite</span>
+            <span style="font-size:13px;font-weight:600;color:{T2};">AI Scanner</span>
+            <span style="font-size:13px;font-weight:600;color:{T2};">Alerts</span>
+            <span style="font-size:13px;font-weight:600;color:{T2};">Arka AI</span>
+        </div>""", unsafe_allow_html=True)
+    with nav_r:
+        st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
+        if st.button("Login", use_container_width=True, type="primary", key="nav_login"):
+            st.session_state.show_login = not st.session_state.show_login
+            st.rerun()
+
+    st.markdown(f"<div style='height:1px;background:{BORDER};'></div>", unsafe_allow_html=True)
+
+    # ── Hero + (conditional) Login Panel on the right ────────
+    if st.session_state.show_login:
+        hero_col, login_col = st.columns([1.7, 1])
+    else:
+        hero_col = st.container()
+        login_col = None
+
+    with hero_col:
+        align = "left" if st.session_state.show_login else "center"
+        maxw  = "640px" if st.session_state.show_login else "860px"
+        st.markdown(f"""
+        <div class="fade-up" style="text-align:{align};padding:64px 8px 32px;">
+            <div style="display:inline-flex;align-items:center;gap:8px;background:{DARK2};
+                 border:1px solid {BORDER};border-radius:30px;padding:6px 16px;margin-bottom:26px;">
+                <span class="pulse-dot"></span>
+                <span style="font-size:12px;font-weight:600;color:{T2};">Live NSE data · AI-powered scanning · Instant alerts</span>
+            </div>
+            <h1 style="font-family:{FONT};font-size:48px;font-weight:800;line-height:1.12;
+                 color:{IVORY};max-width:{maxw};margin:0 {'auto' if align=='center' else '0'} 20px;letter-spacing:-1.5px;">
+                Next-Generation<br>
+                <span style="background:linear-gradient(90deg,{BLUE},{PURPLE});
+                     -webkit-background-clip:text;-webkit-text-fill-color:transparent;">
+                     Market Analytics Infrastructure</span>
+            </h1>
+            <p style="font-size:16px;color:{T2};max-width:560px;margin:0 {'auto' if align=='center' else '0'} 6px;line-height:1.7;">
+                Save your trading setups once. Arka's AI analyzes charts, scans the entire
+                NSE universe for matches, and alerts you the moment your conditions trigger.
+            </p>
+            <p style="font-size:12px;color:{T2};opacity:.6;">Not SEBI registered · Educational use only</p>
+        </div>""", unsafe_allow_html=True)
+
+        if not st.session_state.show_login:
+            _, b1, b2, _ = st.columns([2, 1, 1, 2])
+            with b1:
+                if st.button("Get Started", use_container_width=True, type="primary", key="cta_start"):
+                    st.session_state.show_login = True
+                    st.rerun()
+            with b2:
+                if st.button("Request Demo", use_container_width=True, key="cta_demo"):
+                    st.session_state.show_login = True
+                    st.rerun()
+
+    if login_col is not None:
+        with login_col:
+            st.markdown("<div style='height:64px;'></div>", unsafe_allow_html=True)
+            with st.form("lf"):
+                st.markdown(f"""
+                <div style="margin-bottom:14px;">
+                    <div style="font-size:18px;font-weight:800;color:{IVORY};">Member Login</div>
+                    <div style="font-size:12px;color:{T2};margin-top:4px;">Sign in to access your terminal</div>
+                </div>""", unsafe_allow_html=True)
+                u = st.text_input("Username", placeholder="Enter username")
+                p = st.text_input("Password", placeholder="Enter password", type="password")
+                ok = st.form_submit_button("Sign In", use_container_width=True, type="primary")
+                ph = st.empty()
+                if ok:
+                    if u.strip()=="ADMIN4477MAX" and p.strip()=="MOHIT1":
+                        ph.success("Welcome, Admin!")
+                        time.sleep(0.8)
+                        st.session_state.logged_in = True
+                        st.session_state.is_admin = True
+                        st.rerun()
+                    elif u.strip().lower()=="max trades" and p.strip().lower()=="max":
+                        ph.success("Login successful. Welcome to Arka Trades.")
+                        time.sleep(0.8)
+                        st.session_state.logged_in = True
+                        st.session_state.is_admin = False
+                        st.rerun()
+                    else:
+                        ph.error("Invalid username or password.")
+            st.markdown(f"<div style='text-align:center;font-size:11px;color:{T2};margin-top:10px;'>Educational platform · Access by invitation</div>", unsafe_allow_html=True)
+
+    # ── Stats Strip ──────────────────────────────────────────
+    s1, s2, s3, s4 = st.columns(4)
+    for col, num, label in [
+        (s1, "420+", "NSE stocks covered"),
+        (s2, "<90s", "Full universe scan time"),
+        (s3, "10s",  "Live price refresh"),
+        (s4, "24/7", "AI memory of your setups"),
     ]:
         with col:
             st.markdown(f"""
             <div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};
-                 border-radius:14px;padding:22px;margin-bottom:24px;
+                 border-radius:12px;padding:20px;text-align:center;
                  box-shadow:0 1px 3px rgba(0,0,0,.3);">
-                <div style="font-size:24px;margin-bottom:10px;">{ic}</div>
-                <div style="font-size:14px;font-weight:800;color:{IVORY};margin-bottom:6px;">{t}</div>
-                <div style="font-size:13px;color:{T2};line-height:1.7;">{d}</div>
+                <div style="font-family:{MONO};font-size:26px;font-weight:700;
+                     color:{BLUE};margin-bottom:4px;">{num}</div>
+                <div style="font-size:12px;color:{T2};font-weight:600;">{label}</div>
             </div>""", unsafe_allow_html=True)
 
-    _, col, _ = st.columns([1, 1.3, 1])
-    with col:
-        with st.form("lf"):
-            st.markdown(f"<div style='font-size:18px;font-weight:800;color:{IVORY};margin-bottom:12px;'>Sign in to your terminal</div>", unsafe_allow_html=True)
-            u = st.text_input("Username", placeholder="Enter username")
-            p = st.text_input("Password", placeholder="Enter password", type="password")
-            ok = st.form_submit_button("Get Started →", use_container_width=True, type="primary")
-            ph = st.empty()
-            if ok:
-                if u.strip()=="ADMIN4477MAX" and p.strip()=="MOHIT1":
-                    ph.success("Welcome, Admin!")
-                    time.sleep(1.0)
-                    st.session_state.logged_in = True
-                    st.session_state.is_admin = True
-                    st.rerun()
-                elif u.strip().lower()=="max trades" and p.strip().lower()=="max":
-                    ph.success("Login successful — welcome to Arka Trades!")
-                    time.sleep(1.0)
-                    st.session_state.logged_in = True
-                    st.session_state.is_admin = False
-                    st.rerun()
-                else:
-                    ph.error("Invalid username or password.")
-        st.markdown(f"<div style='text-align:center;font-size:11px;color:{T2};margin-top:12px;'>Not SEBI registered · Educational use only</div>", unsafe_allow_html=True)
+    # ── Feature 1: AI Chart Analysis (text left, preview right) ──
+    st.markdown("<div style='height:56px;'></div>", unsafe_allow_html=True)
+    fa1, fa2 = st.columns([1, 1])
+    with fa1:
+        st.markdown(f"""
+        <div class="fade-up" style="padding:24px 8px;">
+            {icon_box("brain", PURPLE)}
+            <div style="font-size:12px;font-weight:700;letter-spacing:2px;color:{PURPLE};
+                 text-transform:uppercase;margin-bottom:10px;">AI Chart Analysis</div>
+            <div style="font-size:28px;font-weight:800;color:{IVORY};letter-spacing:-0.5px;
+                 line-height:1.25;margin-bottom:16px;">Teach the AI your setups.<br>It never forgets.</div>
+            {checkline("Save your personal trading rules, entry conditions and reference charts once")}
+            {checkline("Gemini-powered vision analyzes any chart against <strong>your</strong> rules, not generic indicators")}
+            {checkline("Get a verdict, score and rule-by-rule breakdown in seconds")}
+            {checkline("Vector memory stores every setup permanently, improving with each addition")}
+        </div>""", unsafe_allow_html=True)
+    with fa2:
+        st.markdown(f"""
+        <div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};border-radius:16px;
+             padding:24px;margin-top:24px;box-shadow:0 1px 3px rgba(0,0,0,.3);">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+                <span style="font-size:13px;font-weight:700;color:{IVORY};">RELIANCE · Daily</span>
+                <span style="background:rgba(16,185,129,.12);color:{GREEN};font-size:11px;font-weight:700;
+                     padding:4px 12px;border-radius:20px;border:1px solid {GREEN}33;">VALID · 8/10</span>
+            </div>
+            <div style="background:{DARK3};border-radius:10px;padding:16px;font-family:{MONO};
+                 font-size:12px;color:{T2};line-height:2;">
+                <span style="color:{GREEN};">✓ Rule matched:</span> Close above PDH on breakout candle<br>
+                <span style="color:{GREEN};">✓ Rule matched:</span> Volume 1.8× vs 20-day average<br>
+                <span style="color:{GREEN};">✓ Rule matched:</span> RSI 61 — within momentum zone<br>
+                <span style="color:{RED};">✗ Flagged:</span> Overhead supply at 2,980 level
+            </div>
+            <div style="font-size:12px;color:{T2};margin-top:12px;line-height:1.7;">
+                "Structure is clean. Entry valid above 2,941 with stop at 2,896.
+                Watch the 2,980 supply zone before adding size."</div>
+        </div>""", unsafe_allow_html=True)
+
+    # ── Feature 2: AI Smart Scanner (preview left, text right) ──
+    st.markdown("<div style='height:48px;'></div>", unsafe_allow_html=True)
+    fb1, fb2 = st.columns([1, 1])
+    with fb1:
+        st.markdown(f"""
+        <div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};border-radius:16px;
+             padding:24px;margin-top:24px;box-shadow:0 1px 3px rgba(0,0,0,.3);">
+            <div style="font-size:13px;font-weight:700;color:{IVORY};margin-bottom:14px;">
+                Scan: "Bull Flag + Volume Surge" · 420 stocks</div>
+            <table style="width:100%;border-collapse:collapse;font-size:12px;">
+                <tr style="color:{T2};text-align:left;">
+                    <th style="padding:6px 8px;">Symbol</th><th style="padding:6px 8px;">Price</th>
+                    <th style="padding:6px 8px;">Signal</th><th style="padding:6px 8px;">AI Score</th></tr>
+                <tr><td style="padding:8px;color:{IVORY};font-weight:700;border-top:1px solid {BORDER};">TATAMOTORS</td>
+                    <td style="padding:8px;font-family:{MONO};color:{IVORY};border-top:1px solid {BORDER};">1,024.50</td>
+                    <td style="padding:8px;border-top:1px solid {BORDER};"><span style="color:{GREEN};font-weight:700;">STRONG BUY</span></td>
+                    <td style="padding:8px;font-family:{MONO};color:{GREEN};border-top:1px solid {BORDER};">9/10</td></tr>
+                <tr><td style="padding:8px;color:{IVORY};font-weight:700;border-top:1px solid {BORDER};">CHOLAFIN</td>
+                    <td style="padding:8px;font-family:{MONO};color:{IVORY};border-top:1px solid {BORDER};">1,388.20</td>
+                    <td style="padding:8px;border-top:1px solid {BORDER};"><span style="color:{GREEN};font-weight:700;">STRONG BUY</span></td>
+                    <td style="padding:8px;font-family:{MONO};color:{GREEN};border-top:1px solid {BORDER};">8/10</td></tr>
+                <tr><td style="padding:8px;color:{IVORY};font-weight:700;border-top:1px solid {BORDER};">PERSISTENT</td>
+                    <td style="padding:8px;font-family:{MONO};color:{IVORY};border-top:1px solid {BORDER};">4,832.00</td>
+                    <td style="padding:8px;border-top:1px solid {BORDER};"><span style="color:{BLUE};font-weight:700;">WATCH</span></td>
+                    <td style="padding:8px;font-family:{MONO};color:{BLUE};border-top:1px solid {BORDER};">7/10</td></tr>
+            </table>
+        </div>""", unsafe_allow_html=True)
+    with fb2:
+        st.markdown(f"""
+        <div class="fade-up" style="padding:24px 8px;">
+            {icon_box("search", BLUE)}
+            <div style="font-size:12px;font-weight:700;letter-spacing:2px;color:{BLUE};
+                 text-transform:uppercase;margin-bottom:10px;">AI Smart Scanner</div>
+            <div style="font-size:28px;font-weight:800;color:{IVORY};letter-spacing:-0.5px;
+                 line-height:1.25;margin-bottom:16px;">Your setups, scanned across<br>the entire market.</div>
+            {checkline("Define math filters: RSI bands, volume multipliers, SMA position, breakout conditions")}
+            {checkline("Fast pandas engine shortlists candidates from 420+ NSE stocks in seconds")}
+            {checkline("Gemini Vision then audits each shortlisted chart against your reference image")}
+            {checkline("Ranked verdicts: Strong Buy, Watch, or Reject — with entry and risk notes")}
+        </div>""", unsafe_allow_html=True)
+
+    # ── Feature 3: Built for every trading style ─────────────
+    st.markdown("<div style='height:56px;'></div>", unsafe_allow_html=True)
+    st.markdown(f"""
+    <div style="text-align:center;margin-bottom:28px;">
+        <div style="font-size:12px;font-weight:700;letter-spacing:2px;color:{BLUE};
+             text-transform:uppercase;margin-bottom:8px;">Built for your style</div>
+        <div style="font-size:28px;font-weight:800;color:{IVORY};letter-spacing:-0.5px;">
+            Momentum. Swing. Positional.</div>
+    </div>""", unsafe_allow_html=True)
+
+    t1, t2, t3 = st.columns(3)
+    for col, ic, ic_c, title, items in [
+        (t1, "zap", BLUE, "Momentum Traders", [
+            "PDH / PDL breakout detection in real time",
+            "10-second live price refresh during market hours",
+            "Volume spike flags vs 20-day average",
+            "Instant Telegram push the moment levels break"]),
+        (t2, "trend", GREEN, "Swing Traders", [
+            "Multi-day setup scanning: flags, bases, ranges",
+            "RSI and ROC filters across your full watchlist",
+            "AI pattern matching against your saved reference charts",
+            "Daily structure analysis with SMA 20/50 context"]),
+        (t3, "layers", PURPLE, "Positional Traders", [
+            "Curated Arka Watchlist maintained by the desk",
+            "Today-only news feed per stock, auto-refreshed",
+            "Trend and market breadth via live index dashboard",
+            "Cloud-synced watchlists — pick up on any device"]),
+    ]:
+        with col:
+            checks = "".join(checkline(i) for i in items)
+            st.markdown(f"""
+            <div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};
+                 border-top:2px solid {ic_c};border-radius:14px;padding:26px;
+                 min-height:300px;box-shadow:0 1px 3px rgba(0,0,0,.3);">
+                {icon_box(ic, ic_c)}
+                <div style="font-size:16px;font-weight:800;color:{IVORY};margin-bottom:16px;">{title}</div>
+                {checks}
+            </div>""", unsafe_allow_html=True)
+
+    # ── Workflow Timeline ────────────────────────────────────
+    st.markdown("<div style='height:56px;'></div>", unsafe_allow_html=True)
+    st.markdown(f"""
+    <div style="text-align:center;margin-bottom:28px;">
+        <div style="font-size:12px;font-weight:700;letter-spacing:2px;color:{BLUE};
+             text-transform:uppercase;margin-bottom:8px;">Onboarding roadmap</div>
+        <div style="font-size:28px;font-weight:800;color:{IVORY};letter-spacing:-0.5px;">
+            Live in two weeks.</div>
+    </div>""", unsafe_allow_html=True)
+    rm1, rm2, rm3 = st.columns(3)
+    for col,(day,title,desc,c) in zip([rm1,rm2,rm3],[
+        ("DAY 1","Connection & Import","Sign in and upload your TradingView watchlist. Cloud sync is instant.",BLUE),
+        ("DAY 7","AI Strategy Training","Teach Arka AI your setups, rules and reference charts. Stored permanently.",PURPLE),
+        ("DAY 14","Automated Scans Live","Full-universe scans and Telegram alerts running on your exact conditions.",GREEN),
+    ]):
+        with col:
+            st.markdown(f"""
+            <div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};
+                 border-top:2px solid {c};border-radius:14px;padding:24px;
+                 box-shadow:0 1px 3px rgba(0,0,0,.3);">
+                <div style="font-family:{MONO};font-size:11px;font-weight:700;
+                     color:{c};letter-spacing:2px;margin-bottom:10px;">{day}</div>
+                <div style="font-size:15px;font-weight:800;color:{IVORY};margin-bottom:8px;">{title}</div>
+                <div style="font-size:13px;color:{T2};line-height:1.7;">{desc}</div>
+            </div>""", unsafe_allow_html=True)
+
+    # ── Comparison ───────────────────────────────────────────
+    st.markdown("<div style='height:56px;'></div>", unsafe_allow_html=True)
+    _, cmp_col, _ = st.columns([1, 4, 1])
+    with cmp_col:
+        st.markdown(f"""
+        <div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};
+             border-top:2px solid {BLUE};border-radius:16px;padding:8px 12px 16px;
+             box-shadow:0 1px 3px rgba(0,0,0,.3);">
+            <table style="width:100%;border-collapse:collapse;">
+                <tr>
+                    <th style="text-align:left;padding:14px;font-size:12px;color:{T2};"></th>
+                    <th style="text-align:left;padding:14px;font-size:13px;color:{IVORY};">Manual Screening</th>
+                    <th style="text-align:left;padding:14px;font-size:13px;color:{BLUE};">Arka Trades Automation</th>
+                </tr>
+                <tr><td style="padding:11px 14px;color:{T2};font-size:13px;border-top:1px solid {BORDER};">Time per scan</td>
+                    <td style="padding:11px 14px;color:{RED};font-size:13px;border-top:1px solid {BORDER};">2–3 hours of charting</td>
+                    <td style="padding:11px 14px;color:{GREEN};font-size:13px;border-top:1px solid {BORDER};">Under 90 seconds</td></tr>
+                <tr><td style="padding:11px 14px;color:{T2};font-size:13px;border-top:1px solid {BORDER};">Coverage</td>
+                    <td style="padding:11px 14px;color:{RED};font-size:13px;border-top:1px solid {BORDER};">20–30 stocks max</td>
+                    <td style="padding:11px 14px;color:{GREEN};font-size:13px;border-top:1px solid {BORDER};">420+ NSE stocks</td></tr>
+                <tr><td style="padding:11px 14px;color:{T2};font-size:13px;border-top:1px solid {BORDER};">Pattern detection</td>
+                    <td style="padding:11px 14px;color:{RED};font-size:13px;border-top:1px solid {BORDER};">Inconsistent eye-balling</td>
+                    <td style="padding:11px 14px;color:{GREEN};font-size:13px;border-top:1px solid {BORDER};">AI vision on your rules</td></tr>
+                <tr><td style="padding:11px 14px;color:{T2};font-size:13px;border-top:1px solid {BORDER};">Missed breakouts</td>
+                    <td style="padding:11px 14px;color:{RED};font-size:13px;border-top:1px solid {BORDER};">Frequent</td>
+                    <td style="padding:11px 14px;color:{GREEN};font-size:13px;border-top:1px solid {BORDER};">Instant Telegram push</td></tr>
+            </table>
+        </div>""", unsafe_allow_html=True)
+
+    # ── Footer ───────────────────────────────────────────────
+    st.markdown(f"""
+    <div style="text-align:center;padding:56px 0 40px;">
+        <div style="font-size:13px;color:{T2};margin-bottom:6px;">
+            Arka Trades · Finance &amp; Market Education</div>
+        <div style="font-size:11px;color:{T2};opacity:.6;">
+            Not SEBI registered. All content is for educational purposes only.
+            Trading involves risk — decisions and outcomes are entirely your own.</div>
+    </div>""", unsafe_allow_html=True)
     st.stop()
 
-# ════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════
 # DISCLAIMER
-# ════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════
 if not st.session_state.disclaimer_done:
     _, col, _ = st.columns([1,3,1])
     with col:
@@ -412,8 +662,7 @@ if not st.session_state.disclaimer_done:
         </div>
         <div style="background:{DARK2};border:1px solid {BORDER};border-radius:16px;
              padding:28px;font-size:13px;color:{T2};line-height:2;
-             max-height:260px;overflow-y:auto;margin-bottom:20px;
-             box-shadow:0 1px 3px rgba(0,0,0,.3);">
+             max-height:260px;overflow-y:auto;margin-bottom:20px;">
             <strong style="color:{BLUE}">1. No Financial Advice</strong><br>
             Arka Trades does not provide financial or investment advice. Educational only.<br><br>
             <strong style="color:{BLUE}">2. Not SEBI Registered</strong><br>
@@ -437,95 +686,103 @@ if not st.session_state.disclaimer_done:
         with c2:
             if st.button("Accept and Enter", use_container_width=True, type="primary", disabled=not all_ok):
                 st.session_state.disclaimer_done = True
-                st.toast(f"Welcome back, {name}!", icon="👋"); st.rerun()
+                st.toast(f"Welcome back, {name}!"); st.rerun()
         if not all_ok:
             st.caption("Accept all 4 terms above to continue")
     st.stop()
 
-# ════════════════════════════════════════════════════════
-# MAIN LAYOUT
-# ════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════
+# MAIN APP LAYOUT
+# ════════════════════════════════════════════════════════════
 left, right = st.columns([1, 4])
 
-# ── LEFT NAV ────────────────────────────────────────────────
+# ── LEFT NAV ─────────────────────────────────────────────────
 with left:
     st.markdown(f"""
-    <div style="padding:20px 16px 14px;border-bottom:1px solid {BORDER};text-align:center;">
-        <div style="font-family:{FONT};font-size:20px;font-weight:800;
-             letter-spacing:1px;color:{IVORY};line-height:1.2;">ARKA<span style="color:{BLUE}">·</span>TRADES</div>
-        <div style="font-size:9px;letter-spacing:2px;color:{T2};
-             text-transform:uppercase;margin-top:4px;">Market Analytics Platform</div>
-    </div>
-    """, unsafe_allow_html=True)
+    <div style="display:flex;align-items:center;gap:10px;padding:20px 12px 14px;
+         border-bottom:1px solid {BORDER};">
+        <div style="width:32px;height:32px;border-radius:8px;
+             background:linear-gradient(135deg,{BLUE},{PURPLE});
+             display:flex;align-items:center;justify-content:center;">{icon("trend", 16, "#fff")}</div>
+        <div>
+            <div style="font-size:15px;font-weight:800;color:{IVORY};line-height:1;">ARKA TRADES</div>
+            <div style="font-size:8px;letter-spacing:2px;color:{T2};text-transform:uppercase;margin-top:3px;">Analytics Platform</div>
+        </div>
+    </div>""", unsafe_allow_html=True)
 
     photo = st.session_state.get("profile_photo")
     if photo:
         st.image(photo, width=70)
     else:
         st.markdown(f"""
-        <div style="text-align:center;padding:14px 0 8px;">
-            <div style="width:56px;height:56px;border-radius:14px;
+        <div style="display:flex;align-items:center;gap:10px;padding:14px 12px;">
+            <div style="width:40px;height:40px;border-radius:10px;
                  background:linear-gradient(135deg,{BLUE},{PURPLE});
                  display:flex;align-items:center;justify-content:center;
-                 font-weight:800;font-size:22px;color:#fff;margin:0 auto 8px;">{initial}</div>
-            <div style="font-size:12px;color:{T2};">Welcome back,</div>
-            <div style="font-weight:800;font-size:15px;color:{IVORY};">{name}</div>
+                 font-weight:800;font-size:16px;color:#fff;">{initial}</div>
+            <div>
+                <div style="font-size:11px;color:{T2};">Signed in as</div>
+                <div style="font-weight:800;font-size:14px;color:{IVORY};">{name}</div>
+            </div>
         </div>
-        <div style="height:1px;background:{BORDER};margin-bottom:4px;"></div>
+        <div style="height:1px;background:{BORDER};"></div>
         """, unsafe_allow_html=True)
 
-    st.markdown(f"<div style='padding:14px 12px 4px;font-size:11px;font-weight:700;letter-spacing:2px;color:{T2};text-transform:uppercase;'>Product Suite</div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='padding:14px 12px 4px;font-size:10px;font-weight:700;letter-spacing:2px;color:{T2};text-transform:uppercase;'>Product Suite</div>", unsafe_allow_html=True)
 
     pg = st.session_state.page
 
-    def nav_btn(label, key, icon=""):
+    def nav_btn(label, key):
         active = pg == key
         css_class = "nav-btn-active" if active else "nav-btn"
         st.markdown(f'<div class="{css_class}">', unsafe_allow_html=True)
-        if st.button(f"{icon}  {label}", key=f"nav_{key}", use_container_width=True):
+        if st.button(label, key=f"nav_{key}", use_container_width=True):
             st.session_state.page = key; st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
-    nav_btn("Home",      "home",       "🏠")
-    nav_btn("Scanner",   "scanner",    "📋")
-    nav_btn("Alerts",    "alerts",     "🔔")
-    nav_btn("News",      "news",       "📰")
-    nav_btn("Arka AI",   "analysis",   "🤖")
-    nav_btn("Screener",  "smart_scan", "🔍")
+    nav_btn("Dashboard",     "home")
+    nav_btn("Scanner",       "scanner")
+    nav_btn("Alerts",        "alerts")
+    nav_btn("News Terminal", "news")
+    nav_btn("Arka AI",       "analysis")
+    nav_btn("Smart Screener","smart_scan")
 
-    st.markdown(f"<div style='padding:14px 12px 4px;font-size:11px;font-weight:700;letter-spacing:2px;color:{T2};text-transform:uppercase;'>Coming Soon</div>", unsafe_allow_html=True)
-    nav_btn("Heatmap",      "heatmap",  "🗺️")
-    nav_btn("Auto Alerts",  "autoalert","⚡")
+    st.markdown(f"<div style='padding:14px 12px 4px;font-size:10px;font-weight:700;letter-spacing:2px;color:{T2};text-transform:uppercase;'>Coming Soon</div>", unsafe_allow_html=True)
+    nav_btn("Heatmap",     "heatmap")
+    nav_btn("Auto Alerts", "autoalert")
 
-    st.markdown(f"<div style='padding:14px 12px 4px;font-size:11px;font-weight:700;letter-spacing:2px;color:{T2};text-transform:uppercase;'>Account</div>", unsafe_allow_html=True)
-    nav_btn("Profile",    "profile",  "👤")
-    nav_btn("Settings",   "settings", "⚙️")
-    nav_btn("Contact Us", "contact",  "📬")
+    st.markdown(f"<div style='padding:14px 12px 4px;font-size:10px;font-weight:700;letter-spacing:2px;color:{T2};text-transform:uppercase;'>Account</div>", unsafe_allow_html=True)
+    nav_btn("Profile",  "profile")
+    nav_btn("Settings", "settings")
+    nav_btn("Contact",  "contact")
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.divider()
     st.markdown('<div class="nav-btn">', unsafe_allow_html=True)
-    if st.button("🚪  Logout", use_container_width=True):
-        for k in ["logged_in","disclaimer_done"]: st.session_state[k]=False
+    if st.button("Sign Out", use_container_width=True):
+        for k in ["logged_in","disclaimer_done","show_login"]: st.session_state[k]=False
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ── RIGHT CONTENT ────────────────────────────────────────────
 with right:
     pg = st.session_state.page
+    page_titles = {"home":"Dashboard","scanner":"Watchlist Scanner","alerts":"Alerts Manager",
+                   "news":"News Terminal","analysis":"Arka AI","smart_scan":"Smart Screener",
+                   "heatmap":"Heatmap","autoalert":"Auto Alerts","profile":"Profile",
+                   "settings":"Settings","contact":"Contact"}
 
-    # Top bar
     n1, n2 = st.columns([5,1])
     with n1:
         st.markdown(f"""
-        <div style="display:flex;align-items:center;gap:12px;padding:14px 0 10px;">
-            <div style="font-size:22px;font-weight:800;color:{IVORY};letter-spacing:-0.5px;">
-                Arka Trades <span style="color:{T2};font-weight:500;font-size:14px;">/ {pg.replace('_',' ').title()}</span>
-            </div>
+        <div style="padding:16px 0 10px;">
+            <div style="font-size:21px;font-weight:800;color:{IVORY};letter-spacing:-0.5px;">
+                {page_titles.get(pg, "Dashboard")}</div>
+            <div style="font-size:12px;color:{T2};margin-top:2px;">Arka Trades · Market Analytics Platform</div>
         </div>""", unsafe_allow_html=True)
     with n2:
         st.markdown(f"""
-        <div style="display:flex;align-items:center;justify-content:flex-end;height:56px;padding-right:8px;">
+        <div style="display:flex;align-items:center;justify-content:flex-end;height:60px;padding-right:8px;">
             <div style="display:inline-flex;align-items:center;gap:7px;font-weight:700;
                  font-size:11px;letter-spacing:1px;color:{GREEN};
                  border:1px solid rgba(16,185,129,0.35);padding:5px 12px;border-radius:20px;
@@ -534,12 +791,12 @@ with right:
 
     st.markdown(f"<div style='height:1px;background:{BORDER};margin-bottom:12px;'></div>", unsafe_allow_html=True)
 
-    # ── INDEX BAR ─────────────────────────────────────────────
-    def show_idx(col, label, sym, color):
+    # ── INDEX CARDS ──────────────────────────────────────────
+    def show_idx(col, label, sym):
         d = get_index(sym)
         with col:
             if d:
-                cc  = GREEN if d["chg"]>=0 else RED
+                cc = GREEN if d["chg"]>=0 else RED
                 spark = sparkline(d.get("spark", []), color=cc, w=120, h=26)
                 st.markdown(f"""
                 <div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};
@@ -564,83 +821,82 @@ with right:
 
     if pg == "home":
         r1a,r1b,r1c = st.columns(3)
-        show_idx(r1a,"NIFTY 50",   "^NSEI",    BLUE)
-        show_idx(r1b,"BANK NIFTY", "^NSEBANK", GREEN)
-        show_idx(r1c,"SENSEX",     "^BSESN",   PURPLE)
+        show_idx(r1a,"NIFTY 50",   "^NSEI")
+        show_idx(r1b,"BANK NIFTY", "^NSEBANK")
+        show_idx(r1c,"SENSEX",     "^BSESN")
         r2a,r2b = st.columns(2)
-        show_idx(r2a,"MIDCAP 100",   "NIFTY_MIDCAP_100.NS", "#A78BFA")
-        show_idx(r2b,"SMALLCAP 100", "^CNXSMALLCAP", "#7B9FFF")
+        show_idx(r2a,"MIDCAP 100",   "NIFTY_MIDCAP_100.NS")
+        show_idx(r2b,"SMALLCAP 100", "^CNXSMALLCAP")
         st.markdown(f"<div style='height:1px;background:{BORDER};margin:12px 0 16px;'></div>", unsafe_allow_html=True)
 
     st.markdown('<div style="padding:0 8px 80px;">', unsafe_allow_html=True)
 
-    # ── HOME ────────────────────────────────────────────────
+    # ── DASHBOARD (HOME) ─────────────────────────────────────
     if pg == "home":
-        h1,h2 = st.columns([1.2,1])
-        with h1:
-            st.markdown(f"""
-            <div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};
-                 border-radius:16px;padding:40px 36px;min-height:240px;
-                 box-shadow:0 1px 3px rgba(0,0,0,.3);">
-                <div style="font-size:34px;font-weight:800;color:{IVORY};
-                     line-height:1.2;letter-spacing:-1px;margin-bottom:14px;">
-                     Trade smarter with<br>
-                     <span style="background:linear-gradient(90deg,{BLUE},{PURPLE});
-                          -webkit-background-clip:text;-webkit-text-fill-color:transparent;">
-                          precision-based alerts.</span></div>
-                <div style="font-size:14px;color:{T2};line-height:1.8;">
-                    Real-time breakout insights and watchlist analysis —
-                    built for traders who value clarity and control.</div>
-            </div>""", unsafe_allow_html=True)
-        with h2:
-            st.markdown(f"""
-            <div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};
-                 border-top:2px solid {BLUE};border-radius:16px;padding:32px;
-                 min-height:240px;box-shadow:0 1px 3px rgba(0,0,0,.3);">
-                <div style="font-size:12px;font-weight:700;letter-spacing:2px;
-                     color:{BLUE};text-transform:uppercase;margin-bottom:18px;">Platform includes</div>
-                <div style="font-size:14px;color:{IVORY};line-height:2.4;">
-                    <span style="color:{GREEN};">✓</span> &nbsp;PDH / PDL breakout scanning<br>
-                    <span style="color:{GREEN};">✓</span> &nbsp;AI chart analysis with custom rules<br>
-                    <span style="color:{GREEN};">✓</span> &nbsp;Instant Telegram alerts<br>
-                    <span style="color:{GREEN};">✓</span> &nbsp;Live stock news feed
-                </div>
-            </div>""", unsafe_allow_html=True)
-
-        section("Today at a Glance")
         IST = timezone(timedelta(hours=5, minutes=30))
         now = datetime.now(IST)
         mkt = now.replace(hour=9,minute=15,second=0,microsecond=0) <= now <= now.replace(hour=15,minute=30,second=0,microsecond=0)
-        g1,g2,g3,g4 = st.columns(4)
-        g1.metric("Market Status", "OPEN" if mkt else "CLOSED")
-        g2.metric("Date", now.strftime("%d %b %Y"))
-        g3.metric("Time", now.strftime("%H:%M:%S"))
-        g4.metric("Refresh", "10 Seconds")
+        mkt_color = GREEN if mkt else RED
+        mkt_label = "MARKET OPEN" if mkt else "MARKET CLOSED"
 
-        section("What You Get")
+        g1,g2,g3 = st.columns([1.2, 1, 1])
+        with g1:
+            st.markdown(f"""
+            <div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};
+                 border-radius:14px;padding:24px;box-shadow:0 1px 3px rgba(0,0,0,.3);min-height:130px;">
+                <div style="display:inline-flex;align-items:center;gap:8px;
+                     background:{mkt_color}14;border:1px solid {mkt_color}33;
+                     border-radius:20px;padding:5px 14px;margin-bottom:14px;">
+                    <span style="width:7px;height:7px;border-radius:50%;background:{mkt_color};display:inline-block;"></span>
+                    <span style="font-size:11px;font-weight:700;letter-spacing:1px;color:{mkt_color};">{mkt_label}</span>
+                </div>
+                <div style="font-size:13px;color:{T2};">NSE trading hours · 09:15 to 15:30 IST</div>
+                <div style="font-family:{MONO};font-size:13px;color:{IVORY};margin-top:6px;">{now.strftime("%d %b %Y · %H:%M:%S IST")}</div>
+            </div>""", unsafe_allow_html=True)
+        with g2:
+            st.markdown(f"""
+            <div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};
+                 border-radius:14px;padding:24px;box-shadow:0 1px 3px rgba(0,0,0,.3);min-height:130px;">
+                {icon_box("layers", BLUE, 34)}
+                <div style="font-family:{MONO};font-size:22px;font-weight:700;color:{IVORY};">{len(st.session_state.watchlist)}</div>
+                <div style="font-size:12px;color:{T2};">Stocks in your watchlist</div>
+            </div>""", unsafe_allow_html=True)
+        with g3:
+            active_alerts = sum(1 for a in st.session_state.alerts.values() if a.get("active"))
+            st.markdown(f"""
+            <div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};
+                 border-radius:14px;padding:24px;box-shadow:0 1px 3px rgba(0,0,0,.3);min-height:130px;">
+                {icon_box("bell", GREEN, 34)}
+                <div style="font-family:{MONO};font-size:22px;font-weight:700;color:{IVORY};">{active_alerts}</div>
+                <div style="font-size:12px;color:{T2};">Active price alerts</div>
+            </div>""", unsafe_allow_html=True)
+
+        section("Platform Modules")
         w1,w2,w3 = st.columns(3)
-        for col,icon,title,color,desc in [
-            (w1,"📋","Watchlist Scanner",BLUE,"Upload your TradingView watchlist. Instantly see which stocks moved above or below yesterday's range."),
-            (w2,"🔔","Telegram Alerts",GREEN,"Set alerts for PDH, PDL or custom price. Get instant Telegram notifications when your stock hits the level."),
-            (w3,"📊","Analysis (Soon)",PURPLE,"Sector heatmaps, top movers, volume analysis and market breadth — coming soon."),
+        for col,ic,c,title,desc,target in [
+            (w1,"brain",PURPLE,"AI Chart Analysis","Save your setups once. Arka AI analyzes any chart against your personal rules and returns a scored verdict.","analysis"),
+            (w2,"search",BLUE,"Smart Screener","Scan 420+ NSE stocks with your math filters, then let AI vision audit the shortlist against your reference charts.","smart_scan"),
+            (w3,"bell",GREEN,"Breakout Alerts","PDH, PDL and custom price alerts delivered instantly to Telegram the moment your level triggers.","alerts"),
         ]:
             with col:
                 st.markdown(f"""
                 <div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};
-                     border-top:2px solid {color};border-radius:14px;
-                     padding:24px;min-height:170px;margin-bottom:8px;
+                     border-top:2px solid {c};border-radius:14px;
+                     padding:24px;min-height:185px;margin-bottom:8px;
                      box-shadow:0 1px 3px rgba(0,0,0,.3);">
-                    <div style="font-size:26px;margin-bottom:12px;">{icon}</div>
-                    <div style="font-size:13px;font-weight:800;color:{IVORY};margin-bottom:8px;">{title}</div>
+                    {icon_box(ic, c)}
+                    <div style="font-size:14px;font-weight:800;color:{IVORY};margin-bottom:8px;">{title}</div>
                     <div style="font-size:13px;color:{T2};line-height:1.8;">{desc}</div>
                 </div>""", unsafe_allow_html=True)
+                if st.button(f"Open {title.split()[0]} module", key=f"go_{target}", use_container_width=True):
+                    st.session_state.page = target; st.rerun()
 
-        section("Onboarding Roadmap")
+        section("Workflow")
         rm1, rm2, rm3 = st.columns(3)
-        for col,(day,title,desc,c) in zip([rm1,rm2,rm3],[
-            ("DAY 1","Connection & Import","Log in and upload your TradingView watchlist. Cloud sync via Supabase is instant.",BLUE),
-            ("DAY 7","Arka AI Training","Teach the AI your personal setups, rules and reference charts. It remembers forever.",PURPLE),
-            ("DAY 14","Live Scans & Alerts","Automated breakout scans and Telegram alerts go live across your full universe.",GREEN),
+        for col,(step,title,desc,c) in zip([rm1,rm2,rm3],[
+            ("STEP 1","Import Watchlist","Upload your TradingView CSV in the Scanner module. Synced to cloud instantly.",BLUE),
+            ("STEP 2","Train Arka AI","Add your trading rules and reference charts in the Arka AI module.",PURPLE),
+            ("STEP 3","Scan & Alert","Run scans and set alerts. The platform watches the market for you.",GREEN),
         ]):
             with col:
                 st.markdown(f"""
@@ -648,15 +904,13 @@ with right:
                      border-top:2px solid {c};border-radius:14px;padding:24px;
                      box-shadow:0 1px 3px rgba(0,0,0,.3);">
                     <div style="font-family:{MONO};font-size:11px;font-weight:700;
-                         color:{c};letter-spacing:2px;margin-bottom:10px;">{day}</div>
+                         color:{c};letter-spacing:2px;margin-bottom:10px;">{step}</div>
                     <div style="font-size:15px;font-weight:800;color:{IVORY};margin-bottom:8px;">{title}</div>
                     <div style="font-size:13px;color:{T2};line-height:1.7;">{desc}</div>
                 </div>""", unsafe_allow_html=True)
 
     # ── SCANNER ─────────────────────────────────────────────
     elif pg == "scanner":
-        section("Watchlist Scanner")
-
         if not st.session_state.admin_watchlist:
             awl = db_load_admin_watchlist()
             if awl: st.session_state.admin_watchlist = awl
@@ -669,7 +923,7 @@ with right:
             filt    = sc1.selectbox("Show",["All","Above PDH","Below PDL","In Range"], key=f"filt_{key_prefix}")
             l10     = sc2.checkbox("10s Live", key=f"l10_{key_prefix}")
             l60     = sc3.checkbox("60s Auto", key=f"l60_{key_prefix}")
-            scanbtn = sc4.button("SCAN NOW", use_container_width=True, type="primary", key=f"scan_{key_prefix}")
+            scanbtn = sc4.button("Run Scan", use_container_width=True, type="primary", key=f"scan_{key_prefix}")
 
             if scanbtn:
                 results,failed = [],[]
@@ -711,19 +965,16 @@ with right:
                 section("Results")
                 cols7 = st.columns(5)
                 for i, s in enumerate(filtered):
-                    if s["cls"] == "g":
-                        bd="rgba(16,185,129,0.4)"; top=GREEN
-                    elif s["cls"] == "r":
-                        bd="rgba(239,68,68,0.4)"; top=RED
-                    else:
-                        bd=BORDER; top=BORDER
+                    if s["cls"] == "g":   bd="rgba(16,185,129,0.4)"; top=GREEN
+                    elif s["cls"] == "r": bd="rgba(239,68,68,0.4)";  top=RED
+                    else:                 bd=BORDER; top=BORDER
 
                     cc  = GREEN if s["chg"] >= 0 else RED
                     rc  = GREEN if s["rsi"] < 35 else RED if s["rsi"] > 65 else T2
                     ha  = s["sym"] in st.session_state.alerts and st.session_state.alerts[s["sym"]].get("active")
                     nd  = get_news_dot(s["sym"])
-                    dot = '<span style="color:#F5C518;font-size:9px;margin:0 2px;">&#9679;</span>' if nd else ""
-                    bell = "🔔" if ha else ""
+                    dot = f'<span style="color:{BLUE};font-size:9px;margin:0 2px;">&#9679;</span>' if nd else ""
+                    bell = icon("bell", 12, BLUE) if ha else ""
                     spark = sparkline(s.get("spark", []), color=cc, w=95, h=24)
 
                     card = (
@@ -733,7 +984,7 @@ with right:
                         f'<div style="display:flex;align-items:center;justify-content:center;'
                         f'gap:4px;margin-bottom:4px;">'
                         f'<span style="font-weight:800;font-size:13px;color:{IVORY};white-space:nowrap;">{s["sym"]}</span>'
-                        f'{dot}<span style="font-size:11px;">{bell}</span></div>'
+                        f'{dot}{bell}</div>'
                         f'<div style="margin-bottom:5px;">{change_pill(s["chg"])}</div>'
                         f'<div style="font-family:{MONO};font-weight:700;font-size:14px;'
                         f'color:{IVORY};line-height:1;margin-bottom:5px;">&#8377;{s["cur"]:.2f}</div>'
@@ -750,16 +1001,16 @@ with right:
                 if l10: time.sleep(10); st.cache_data.clear(); st.rerun()
                 elif l60: time.sleep(60); st.cache_data.clear(); st.rerun()
 
-        tab1, tab2 = st.tabs(["👑 Arka Watchlist", "📋 Your Watchlist"])
+        tab1, tab2 = st.tabs(["Arka Watchlist", "Your Watchlist"])
 
         with tab1:
             admin_syms = st.session_state.admin_watchlist
             st.markdown(f"""
             <div style="background:{DARK2};border:1px solid {BORDER};border-left:3px solid {BLUE};
                  border-radius:12px;padding:16px 24px;margin:16px 0;">
-                <div style="font-size:15px;font-weight:800;color:{IVORY};margin-bottom:4px;">👑 Arka Watchlist</div>
+                <div style="font-size:15px;font-weight:800;color:{IVORY};margin-bottom:4px;">Arka Watchlist</div>
                 <div style="font-size:12px;color:{T2};">
-                    {f"{len(admin_syms)} stocks · Curated by Arka Trades" if admin_syms else "No admin watchlist yet"}
+                    {f"{len(admin_syms)} stocks · Curated by the Arka Trades desk" if admin_syms else "No curated watchlist published yet"}
                 </div>
             </div>""", unsafe_allow_html=True)
 
@@ -771,7 +1022,7 @@ with right:
                         st.error("No symbols found.")
                     else:
                         if db_save_admin_watchlist(syms):
-                            st.success(f"✅ Arka Watchlist updated — {len(syms)} stocks!")
+                            st.success(f"Arka Watchlist updated — {len(syms)} stocks.")
                             st.session_state.admin_watchlist = syms
                             st.rerun()
 
@@ -787,9 +1038,9 @@ with right:
             st.markdown(f"""
             <div style="background:{DARK2};border:1px solid {BORDER};border-left:3px solid {GREEN};
                  border-radius:12px;padding:16px 24px;margin:16px 0;">
-                <div style="font-size:15px;font-weight:800;color:{IVORY};margin-bottom:4px;">📋 Your Watchlist</div>
+                <div style="font-size:15px;font-weight:800;color:{IVORY};margin-bottom:4px;">Your Watchlist</div>
                 <div style="font-size:12px;color:{T2};">
-                    {f"{len(your_syms)} stocks saved in cloud" if your_syms else "No watchlist uploaded yet"}
+                    {f"{len(your_syms)} stocks · Synced to cloud" if your_syms else "No watchlist uploaded yet"}
                 </div>
             </div>""", unsafe_allow_html=True)
 
@@ -800,7 +1051,7 @@ with right:
                     st.error("No symbols found.")
                 else:
                     if db_save_watchlist(syms):
-                        st.success(f"✅ {len(syms)} stocks loaded and saved!")
+                        st.success(f"{len(syms)} stocks loaded and saved.")
                         st.session_state.watchlist = syms
             if not your_syms:
                 st.info("Upload your TradingView watchlist above to start scanning.")
@@ -811,15 +1062,14 @@ with right:
 
     # ── ALERTS ──────────────────────────────────────────────
     elif pg == "alerts":
-        section("Telegram Alerts")
-
         def render_alert_cards(watchlist, key_suffix=""):
             st.markdown(f"""
             <div style="background:{DARK2};border:1px solid {BORDER};border-left:3px solid {BLUE};
                  border-radius:12px;padding:16px 20px;margin-bottom:20px;">
                 <div style="font-size:13px;color:{T2};line-height:1.8;">
-                    Tap <strong style="color:{IVORY}">Set</strong> next to any stock.
-                    🔔 = alert ON. You get a Telegram notification when price hits the level.
+                    Tap <strong style="color:{IVORY}">Set</strong> next to any stock to create a
+                    conditional alert. A pulsing indicator means the alert is armed.
+                    You receive a Telegram notification when the price hits your level.
                 </div>
             </div>""", unsafe_allow_html=True)
             COLS=4
@@ -831,20 +1081,20 @@ with right:
                     alert_info=""
                     if has_alert:
                         a=st.session_state.alerts[sym]
-                        alert_info=f"{a['type'].upper()}<br>Rs {a['price']:.2f}"
+                        alert_info=f"{a['type'].upper()} &middot; Rs {a['price']:.2f}"
                     card_bd = "rgba(79,141,253,0.5)" if has_alert else BORDER
                     card_bg = "rgba(79,141,253,0.06)" if has_alert else DARK2
-                    bell_ic = "🔔" if has_alert else "🔕"
-                    pulse   = '<span class="pulse-dot" style="margin-right:5px;"></span>' if has_alert else ""
+                    bell_svg = icon("bell", 22, BLUE if has_alert else T2)
+                    pulse   = '<span class="pulse-dot" style="margin-right:6px;"></span>' if has_alert else ""
                     with cols[j]:
                         st.markdown(f"""
                         <div style="background:{card_bg};border:1px solid {card_bd};
                              border-radius:12px;padding:16px 12px;text-align:center;margin-bottom:8px;
                              box-shadow:0 1px 3px rgba(0,0,0,.3);">
                             <div style="font-weight:800;font-size:13px;color:{IVORY};margin-bottom:8px;">{pulse}{sym}</div>
-                            <div style="font-size:22px;margin-bottom:6px;">{bell_ic}</div>
+                            <div style="margin-bottom:8px;">{bell_svg}</div>
                             <div style="font-size:11px;color:{BLUE};line-height:1.5;">
-                                 {alert_info if alert_info else f"<span style='color:{T2}'>No alert</span>"}</div>
+                                 {alert_info if alert_info else f"<span style='color:{T2}'>No alert set</span>"}</div>
                         </div>""", unsafe_allow_html=True)
                         ba,bb = st.columns(2)
                         with ba:
@@ -884,15 +1134,13 @@ with right:
                                         st.success(f"Alert set for {sym}!")
                                         st.rerun()
 
-        alert_tab1, alert_tab2 = st.tabs(["👑 Arka Watchlist", "📋 Your Watchlist"])
-
+        alert_tab1, alert_tab2 = st.tabs(["Arka Watchlist", "Your Watchlist"])
         with alert_tab1:
             watchlist = st.session_state.get("admin_watchlist", [])
             if not watchlist:
                 st.warning("Arka Watchlist not available yet.")
             else:
                 render_alert_cards(watchlist, key_suffix="admin")
-
         with alert_tab2:
             watchlist = st.session_state.get("watchlist", [])
             if not watchlist:
@@ -902,7 +1150,6 @@ with right:
 
     # ── NEWS ────────────────────────────────────────────────
     elif pg == "news":
-        section("Stock News Terminal")
         watchlist = st.session_state.get("watchlist", [])
         if not watchlist:
             st.warning("Go to Scanner first and upload your watchlist.")
@@ -915,13 +1162,13 @@ with right:
         if pg == "analysis":
             render_arka_ai()
         else:
-            section("Coming Soon")
             labels = {"heatmap":"Market Heatmap","autoalert":"Auto Smart Alerts"}
             st.markdown(f"""
             <div style="background:{DARK2};border:1px dashed {BORDER};border-radius:16px;
                  padding:100px 20px;text-align:center;margin:20px 0;">
-                <div style="font-size:28px;font-weight:800;color:{T2};margin-bottom:12px;">{labels.get(pg,'Coming Soon')}</div>
-                <div style="font-size:14px;color:{T2};opacity:.6;">This feature is under development</div>
+                <div style="margin-bottom:16px;">{icon("clock", 32, T2)}</div>
+                <div style="font-size:26px;font-weight:800;color:{T2};margin-bottom:10px;">{labels.get(pg,'Coming Soon')}</div>
+                <div style="font-size:14px;color:{T2};opacity:.6;">This module is under development</div>
             </div>""", unsafe_allow_html=True)
 
     elif pg == "smart_scan":
@@ -930,7 +1177,6 @@ with right:
 
     # ── PROFILE ─────────────────────────────────────────────
     elif pg == "profile":
-        section("My Profile")
         p1,p2 = st.columns([1,2])
         with p1:
             photo=st.session_state.get("profile_photo")
@@ -960,43 +1206,42 @@ with right:
 
     # ── SETTINGS ────────────────────────────────────────────
     elif pg == "settings":
-        section("Settings")
-        st.markdown(f"<div style='font-size:15px;font-weight:800;color:{IVORY};margin-bottom:10px;'>🎨 Theme</div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='font-size:15px;font-weight:800;color:{IVORY};margin:8px 0 10px;'>Appearance</div>", unsafe_allow_html=True)
         t1,t2=st.columns(2)
         with t1:
             st.markdown(f"""
             <div style="background:{DARK2};border:2px solid {BLUE};border-radius:14px;
                  padding:20px;text-align:center;">
-                <div style="font-size:26px;margin-bottom:8px;">🌙</div>
+                <div style="margin-bottom:10px;">{icon("shield", 24, BLUE)}</div>
                 <div style="font-weight:800;font-size:14px;color:{BLUE};">DARK MODE</div>
-                <div style="font-size:12px;color:{T2};margin-top:4px;">Currently Active</div>
+                <div style="font-size:12px;color:{T2};margin-top:4px;">Currently active</div>
             </div>""", unsafe_allow_html=True)
         with t2:
             st.markdown(f"""
             <div style="background:{DARK3};border:1px solid {BORDER};border-radius:14px;
                  padding:20px;text-align:center;opacity:.6;">
-                <div style="font-size:26px;margin-bottom:8px;">☀️</div>
+                <div style="margin-bottom:10px;">{icon("clock", 24, T2)}</div>
                 <div style="font-weight:800;font-size:14px;color:{T2};">LIGHT MODE</div>
-                <div style="font-size:12px;color:{T2};margin-top:4px;">Coming Soon</div>
+                <div style="font-size:12px;color:{T2};margin-top:4px;">Coming soon</div>
             </div>""", unsafe_allow_html=True)
         st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown(f"<div style='font-size:15px;font-weight:800;color:{IVORY};margin-bottom:10px;'>🔔 Telegram</div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='font-size:15px;font-weight:800;color:{IVORY};margin-bottom:10px;'>Telegram Notifications</div>", unsafe_allow_html=True)
         st.info(f"Bot connected · Chat ID: {CHAT_ID}")
         if st.button("Send Test Notification",use_container_width=True):
-            send_telegram("✅ <b>Arka Trades</b>\nTest successful!")
-            st.success("Test sent to Telegram!")
+            send_telegram("<b>Arka Trades</b>\nTest notification successful.")
+            st.success("Test sent to Telegram.")
         st.divider()
-        st.markdown(f"<div style='font-size:15px;font-weight:800;color:{IVORY};'>📡 Broker API — Coming Soon</div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='font-size:15px;font-weight:800;color:{IVORY};'>Broker API — Coming Soon</div>", unsafe_allow_html=True)
 
     # ── CONTACT ─────────────────────────────────────────────
     elif pg == "contact":
-        section("Contact Us")
         c1,c2=st.columns([1,1])
         with c1:
             st.markdown(f"""
             <div style="background:{DARK2};border:1px solid {BORDER};
                  border-left:3px solid {BLUE};border-radius:14px;padding:28px;
                  box-shadow:0 1px 3px rgba(0,0,0,.3);">
+                <div style="margin-bottom:12px;">{icon("mail", 24, BLUE)}</div>
                 <div style="font-weight:800;font-size:13px;letter-spacing:1px;color:{BLUE};
                      text-transform:uppercase;margin-bottom:14px;">Get in Touch</div>
                 <div style="font-size:14px;color:{T2};line-height:2;margin-bottom:18px;">
