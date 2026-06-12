@@ -461,6 +461,7 @@ with left:
     nav_btn("Alerts",    "alerts",   "🔔")
     nav_btn("News",      "news",     "📰")
     nav_btn("Arka AI",   "analysis", "🤖")
+    nav_btn("Screener",  "smart_scan", "🔍")
  
     st.markdown(f"""
     <div style="padding:14px 12px 4px;font-family:'Bebas Neue',sans-serif;
