@@ -915,7 +915,7 @@ with right:
                 a,b=st.columns(2)
                 nn=a.text_input("Full Name", value=st.session_state.profile["name"])
                 np_=b.text_input("Contact Number", value=st.session_state.profile["phone"])
-                                ne=st.text_input("Email Address", value=st.session_state.profile["email"])
+                ne=st.text_input("Email Address", value=st.session_state.profile["email"])
                 ph=st.file_uploader("Upload Profile Photo",type=["jpg","jpeg","png"])
                 if st.form_submit_button("Save Profile",use_container_width=True,type="primary"):
                     st.session_state.profile.update({"name":nn,"phone":np_,"email":ne})
