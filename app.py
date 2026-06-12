@@ -1282,8 +1282,6 @@ with right:
                                 st.session_state[f"open_{sym}_{key_suffix}"] = False
                                 st.rerun()
                         with bc2:
-                            if st.button("Confirm", key=f"ok_{sym}_{key_suffix}", type="primary", use_container_width
-                        with bc2:
                             if st.button("Confirm", key=f"ok_{sym}_{key_suffix}", type="primary", use_container_width=True):
                                 price = None
                                 atype = None
