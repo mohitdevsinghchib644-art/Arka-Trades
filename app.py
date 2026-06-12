@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, timezone, timedelta
@@ -118,6 +119,10 @@ PINK   = "#EC4899"   # quant / analytics
 
 BLUE   = INDIGO      # compat alias
 GOLD   = INDIGO      # compat alias (other files import GOLD)
+
+# Hero (landing) palette
+HERO_BG  = "#070b0a"
+HERO_ACC = "#5ed29c"
 
 GRAD_BRAND = f"linear-gradient(135deg,{INDIGO},{CYAN})"
 GRAD_AI    = f"linear-gradient(135deg,{PURPLE},{PINK})"
@@ -359,81 +364,174 @@ def checkline(text, c=None):
             f'<span style="font-size:14px;color:{IVORY};line-height:1.6;">{text}</span></div>')
 
 # ════════════════════════════════════════════════════════════
-# LANDING PAGE (logged out)
+# LANDING PAGE (logged out) — DARK HERO w/ HLS VIDEO
 # ════════════════════════════════════════════════════════════
 if not st.session_state.logged_in:
 
-    nav_l, nav_sp, nav_r = st.columns([2, 3, 1])
-    with nav_l:
-        st.markdown(f"""
-        <div style="display:flex;align-items:center;gap:10px;padding:18px 0 8px;">
-            <div style="width:34px;height:34px;border-radius:9px;background:{GRAD_BRAND};
-                 display:flex;align-items:center;justify-content:center;">{icon("trend", 18, "#fff")}</div>
-            <div>
-                <div style="font-size:17px;font-weight:800;color:{IVORY};letter-spacing:0.5px;line-height:1;">ARKA TRADES</div>
-                <div style="font-size:9px;letter-spacing:2px;color:{T2};text-transform:uppercase;">Market Analytics Platform</div>
-            </div>
-        </div>""", unsafe_allow_html=True)
-    with nav_sp:
-        st.markdown(f"""
-        <div style="display:flex;align-items:center;justify-content:center;gap:32px;height:64px;">
-            <span style="font-size:13px;font-weight:600;color:{T2};">Product Suite</span>
-            <span style="font-size:13px;font-weight:600;color:{T2};">AI Scanner</span>
-            <span style="font-size:13px;font-weight:600;color:{T2};">Alerts</span>
-            <span style="font-size:13px;font-weight:600;color:{T2};">Arka AI</span>
-        </div>""", unsafe_allow_html=True)
-    with nav_r:
-        st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
-        if st.button("Login", use_container_width=True, type="primary", key="nav_login"):
-            st.session_state.show_login = not st.session_state.show_login
-            st.rerun()
+    # CTA inside the hero iframe reloads parent with ?login=1
+    if st.query_params.get("login") == "1":
+        st.session_state.show_login = True
+        st.query_params.clear()
 
-    st.markdown(f"<div style='height:1px;background:{BORDER};'></div>", unsafe_allow_html=True)
+    # Landing-only CSS: hero edge-to-edge at the top
+    st.markdown(f"""
+    <style>
+    .block-container{{padding-top:0 !important;}}
+    [data-testid="stVerticalBlock"]{{gap:0.4rem;}}
+    iframe{{display:block;border:none;}}
+    </style>""", unsafe_allow_html=True)
 
+    hero_html = """
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700;800&family=Plus+Jakarta+Sans:wght@700;800&family=Instrument+Serif:ital@1&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+body{background:#070b0a;font-family:'Inter',sans-serif;overflow:hidden;}
+.hero{position:relative;width:100%;height:100vh;min-height:680px;overflow:hidden;}
+
+/* 1. Background video + overlays */
+#bgvid{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0.6;}
+.ov-left{position:absolute;inset:0;background:linear-gradient(to right,#070b0a 0%,transparent 60%);}
+.ov-bottom{position:absolute;inset:0;background:linear-gradient(to top,#070b0a 0%,transparent 50%);}
+
+/* Grid lines at 25 / 50 / 75% */
+.gridline{position:absolute;top:0;bottom:0;width:1px;background:rgba(255,255,255,0.1);display:none;}
+@media(min-width:768px){.gridline{display:block;}}
+.g25{left:25%;}.g50{left:50%;}.g75{left:75%;}
+
+/* Central glow (25px gaussian blur) */
+.glow{position:absolute;top:6%;left:50%;transform:translateX(-50%);pointer-events:none;}
+
+/* 4. Global navigation */
+nav{position:absolute;top:0;left:0;right:0;z-index:50;display:flex;align-items:center;
+    justify-content:space-between;padding:24px 40px;}
+.logo{display:flex;align-items:center;gap:10px;color:#fff;font-weight:800;
+    font-family:'Plus Jakarta Sans';letter-spacing:1px;font-size:15px;}
+.logo svg{width:26px;height:26px;}
+.menu{display:none;gap:36px;}
+@media(min-width:768px){.menu{display:flex;}.burger{display:none;}}
+.menu a{color:#fff;text-decoration:none;font-size:16px;font-weight:600;transition:color .2s;}
+.menu a:hover{color:#5ed29c;}
+.burger{background:none;border:none;color:#fff;cursor:pointer;}
+.mobile-ov{position:fixed;inset:0;background:#070b0a;z-index:100;display:none;
+    flex-direction:column;align-items:center;justify-content:center;gap:32px;}
+.mobile-ov.open{display:flex;}
+.mobile-ov a{color:#fff;text-decoration:none;font-size:24px;font-weight:700;}
+.mobile-ov a:hover{color:#5ed29c;}
+.close-x{position:absolute;top:24px;right:32px;background:none;border:none;color:#fff;cursor:pointer;}
+
+/* 3. Hero content */
+.content{position:relative;z-index:10;height:100%;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;text-align:center;padding:0 20px;}
+
+/* 2. Liquid glass card — 200x200, shifted -50px */
+.glass{position:relative;width:200px;height:200px;border-radius:18px;
+    transform:translateY(-50px);
+    background:rgba(255,255,255,0.01);background-blend-mode:luminosity;
+    backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);
+    box-shadow:inset 0 1px 1px rgba(255,255,255,0.1);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:10px;padding:18px;}
+.glass::before{content:'';position:absolute;inset:0;border-radius:18px;padding:1.4px;
+    background:linear-gradient(180deg,rgba(255,255,255,0.5),rgba(255,255,255,0.05));
+    -webkit-mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);
+    -webkit-mask-composite:xor;mask-composite:exclude;pointer-events:none;}
+.glass .tag{font-size:14px;color:#5ed29c;font-family:'JetBrains Mono',monospace;letter-spacing:2px;}
+.glass h3{font-size:18px;color:#fff;font-weight:700;line-height:1.3;}
+.glass h3 em{font-family:'Instrument Serif',serif;font-style:italic;font-weight:400;}
+.glass p{font-size:11px;color:rgba(255,255,255,0.6);line-height:1.5;}
+
+.eyebrow{font-family:'Plus Jakarta Sans';font-weight:700;font-size:11px;
+    letter-spacing:3px;color:#5ed29c;text-transform:uppercase;margin-bottom:18px;}
+h1{font-family:'Inter';font-weight:800;text-transform:uppercase;letter-spacing:-0.02em;
+    color:#fff;font-size:40px;line-height:1.05;max-width:900px;}
+@media(min-width:768px){h1{font-size:72px;}}
+h1 .dot{color:#5ed29c;}
+.desc{font-size:14px;color:rgba(255,255,255,0.7);max-width:512px;line-height:1.7;margin:22px 0 30px;}
+.cta{display:inline-flex;align-items:center;gap:10px;background:#5ed29c;color:#070b0a;
+    border:none;border-radius:9999px;padding:15px 34px;font-family:'Inter';font-weight:700;
+    font-size:13px;letter-spacing:1.5px;text-transform:uppercase;cursor:pointer;
+    text-decoration:none;transition:filter .2s,transform .2s;}
+.cta:hover{filter:brightness(1.1);transform:translateY(-2px);}
+.sub-note{margin-top:16px;font-size:11px;color:rgba(255,255,255,0.4);}
+</style>
+</head>
+<body>
+<div class="hero">
+  <video id="bgvid" autoplay muted loop playsinline></video>
+  <div class="ov-left"></div><div class="ov-bottom"></div>
+  <div class="gridline g25"></div><div class="gridline g50"></div><div class="gridline g75"></div>
+
+  <svg class="glow" width="900" height="400" viewBox="0 0 900 400">
+    <defs><filter id="blur25" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="25"/></filter></defs>
+    <ellipse cx="450" cy="160" rx="380" ry="90" fill="#0e3b2e" opacity="0.85" filter="url(#blur25)"/>
+    <ellipse cx="450" cy="160" rx="220" ry="50" fill="#22d3a0" opacity="0.25" filter="url(#blur25)"/>
+  </svg>
+
+  <nav>
+    <div class="logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round">
+        <polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>
+      ARKA TRADES
+    </div>
+    <div class="menu">
+      <a href="#">SCANNER</a><a href="#">ALERTS</a><a href="#">ARKA AI</a><a href="#">CONTACT</a>
+    </div>
+    <button class="burger" onclick="document.getElementById('mov').classList.add('open')">
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2">
+        <line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>
+    </button>
+  </nav>
+
+  <div class="mobile-ov" id="mov">
+    <button class="close-x" onclick="document.getElementById('mov').classList.remove('open')">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2">
+        <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </button>
+    <a href="#">SCANNER</a><a href="#">ALERTS</a><a href="#">ARKA AI</a><a href="#">CONTACT</a>
+  </div>
+
+  <div class="content">
+    <div class="glass">
+      <div class="tag">[ 2025 ]</div>
+      <h3>Built for <em>Serious</em><br>Market Traders</h3>
+      <p>AI scanning, instant alerts and chart intelligence in one terminal.</p>
+    </div>
+    <div class="eyebrow">AI-Powered Market Analytics</div>
+    <h1>Launch Your Trading Edge<span class="dot">.</span></h1>
+    <p class="desc">Save your trading setups once. Arka's AI analyzes charts, scans the
+       entire NSE universe for matches, and alerts you the moment your conditions trigger.</p>
+    <a class="cta" href="?login=1" target="_parent">Get Started
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#070b0a" stroke-width="2.5" stroke-linecap="round">
+        <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+    </a>
+    <div class="sub-note">Not SEBI registered · Educational use only</div>
+  </div>
+</div>
+<script>
+const video = document.getElementById('bgvid');
+const src = 'https://stream.mux.com/tLkHO1qZoaaQOUeVWo8hEBeGQfySP02EPS02BmnNFyXys.m3u8';
+if (window.Hls && Hls.isSupported()) {
+  const hls = new Hls({enableWorker: false});
+  hls.loadSource(src); hls.attachMedia(video);
+} else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+  video.src = src;
+}
+</script>
+</body>
+</html>
+"""
+    components.html(hero_html, height=720, scrolling=False)
+
+    # ── Login panel (opens when hero CTA is clicked) ─────────
     if st.session_state.show_login:
-        hero_col, login_col = st.columns([1.7, 1])
-    else:
-        hero_col = st.container()
-        login_col = None
-
-    with hero_col:
-        align = "left" if st.session_state.show_login else "center"
-        maxw  = "640px" if st.session_state.show_login else "880px"
-        st.markdown(f"""
-        <div class="fade-up" style="text-align:{align};padding:64px 8px 32px;">
-            <div style="display:inline-flex;align-items:center;gap:8px;background:{DARK2};
-                 border:1px solid {BORDER};border-radius:30px;padding:6px 16px;margin-bottom:26px;">
-                <span class="pulse-dot"></span>
-                <span style="font-size:12px;font-weight:600;color:{T2};">Live NSE data · AI-powered scanning · Instant alerts</span>
-            </div>
-            <h1 style="font-family:{FONT};font-size:48px;font-weight:800;line-height:1.12;
-                 color:{IVORY};max-width:{maxw};margin:0 {'auto' if align=='center' else '0'} 20px;letter-spacing:-1.5px;">
-                Next-Generation<br>
-                <span style="background:{GRAD_TEXT};
-                     -webkit-background-clip:text;-webkit-text-fill-color:transparent;">
-                     Market Analytics Infrastructure</span>
-            </h1>
-            <p style="font-size:16px;color:{T2};max-width:560px;margin:0 {'auto' if align=='center' else '0'} 6px;line-height:1.7;">
-                Save your trading setups once. Arka's AI analyzes charts, scans the entire
-                NSE universe for matches, and alerts you the moment your conditions trigger.
-            </p>
-            <p style="font-size:12px;color:{T2};opacity:.6;">Not SEBI registered · Educational use only</p>
-        </div>""", unsafe_allow_html=True)
-
-        if not st.session_state.show_login:
-            _, b1, b2, _ = st.columns([2, 1, 1, 2])
-            with b1:
-                if st.button("Get Started", use_container_width=True, type="primary", key="cta_start"):
-                    st.session_state.show_login = True
-                    st.rerun()
-            with b2:
-                if st.button("Request Demo", use_container_width=True, key="cta_demo"):
-                    st.session_state.show_login = True
-                    st.rerun()
-
-    if login_col is not None:
+        _, login_col, _ = st.columns([1, 1.2, 1])
         with login_col:
-            st.markdown("<div style='height:64px;'></div>", unsafe_allow_html=True)
             with st.form("lf"):
                 st.markdown(f"""
                 <div style="margin-bottom:14px;">
@@ -462,6 +560,7 @@ if not st.session_state.logged_in:
             st.markdown(f"<div style='text-align:center;font-size:11px;color:{T2};margin-top:10px;'>Educational platform · Access by invitation</div>", unsafe_allow_html=True)
 
     # ── Stats Strip (each stat its own accent) ───────────────
+    st.markdown("<div style='height:32px;'></div>", unsafe_allow_html=True)
     s1, s2, s3, s4 = st.columns(4)
     for col, num, label, c in [
         (s1, "2000+", "NSE stocks covered", CYAN),
@@ -1251,79 +1350,4 @@ with right:
                 st.markdown(f"""
                 <div style="width:96px;height:96px;border-radius:16px;background:{GRAD_AI};
                      display:flex;align-items:center;justify-content:center;
-                     font-weight:800;font-size:36px;color:#fff;margin-bottom:12px;">{initial}</div>
-                <div style="font-size:20px;font-weight:800;color:{IVORY};">{name}</div>
-                <div style="font-size:11px;color:{T2};letter-spacing:1px;
-                     text-transform:uppercase;margin-top:4px;">Arka Trades Member</div>
-                """, unsafe_allow_html=True)
-        with p2:
-            with st.form("pf"):
-                a,b=st.columns(2)
-                nn=a.text_input("Full Name",      value=st.session_state.profile["name"])
-                np_=b.text_input("Contact Number", value=st.session_state.profile["phone"])
-                ne=st.text_input("Email Address", value=st.session_state.profile["email"])
-                ph=st.file_uploader("Upload Profile Photo",type=["jpg","jpeg","png"])
-                if st.form_submit_button("Save Profile",use_container_width=True,type="primary"):
-                    st.session_state.profile.update({"name":nn,"phone":np_,"email":ne})
-                    if ph: st.session_state["profile_photo"]=ph
-                    st.success(f"Saved! Welcome, {nn}!"); st.rerun()
-
-    # ── SETTINGS ────────────────────────────────────────────
-    elif pg == "settings":
-        st.markdown(f"<div style='font-size:15px;font-weight:800;color:{IVORY};margin:8px 0 10px;'>Appearance</div>", unsafe_allow_html=True)
-        t1,t2=st.columns(2)
-        with t1:
-            st.markdown(f"""
-            <div style="background:{DARK2};border:2px solid {INDIGO};border-radius:14px;
-                 padding:20px;text-align:center;">
-                <div style="margin-bottom:10px;">{icon("shield", 24, INDIGO)}</div>
-                <div style="font-weight:800;font-size:14px;color:{CYAN};">DARK MODE</div>
-                <div style="font-size:12px;color:{T2};margin-top:4px;">Currently active</div>
-            </div>""", unsafe_allow_html=True)
-        with t2:
-            st.markdown(f"""
-            <div style="background:{DARK3};border:1px solid {BORDER};border-radius:14px;
-                 padding:20px;text-align:center;opacity:.6;">
-                <div style="margin-bottom:10px;">{icon("clock", 24, T2)}</div>
-                <div style="font-weight:800;font-size:14px;color:{T2};">LIGHT MODE</div>
-                <div style="font-size:12px;color:{T2};margin-top:4px;">Coming soon</div>
-            </div>""", unsafe_allow_html=True)
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown(f"<div style='font-size:15px;font-weight:800;color:{IVORY};margin-bottom:10px;'>Telegram Notifications</div>", unsafe_allow_html=True)
-        st.info(f"Bot connected · Chat ID: {CHAT_ID}")
-        if st.button("Send Test Notification",use_container_width=True):
-            send_telegram("<b>Arka Trades</b>\nTest notification successful.")
-            st.success("Test sent to Telegram.")
-        st.divider()
-        st.markdown(f"<div style='font-size:15px;font-weight:800;color:{IVORY};'>Broker API — Coming Soon</div>", unsafe_allow_html=True)
-
-    # ── CONTACT ─────────────────────────────────────────────
-    elif pg == "contact":
-        c1,c2=st.columns([1,1])
-        with c1:
-            st.markdown(f"""
-            <div style="background:{DARK2};border:1px solid {BORDER};
-                 border-left:3px solid {CYAN};border-radius:14px;padding:28px;
-                 box-shadow:0 2px 8px rgba(0,0,0,.3);">
-                <div style="margin-bottom:12px;">{icon("mail", 24, CYAN)}</div>
-                <div style="font-weight:800;font-size:13px;letter-spacing:1px;color:{CYAN};
-                     text-transform:uppercase;margin-bottom:14px;">Get in Touch</div>
-                <div style="font-size:14px;color:{T2};line-height:2;margin-bottom:18px;">
-                    Questions, feedback or suggestions?<br>We would love to hear from you.
-                </div>
-                <div style="font-family:{MONO};font-size:13px;
-                     color:{CYAN};font-weight:700;word-break:break-all;">
-                    Mohitdevsinghchib644@gmail.com</div>
-                <div style="font-size:12px;color:{T2};margin-top:10px;">
-                    Mention ARKA TRADES in subject line.<br>Reply within 24 hours.</div>
-            </div>""", unsafe_allow_html=True)
-        with c2:
-            with st.form("cf"):
-                n=st.text_input("Your Name")
-                e=st.text_input("Your Email")
-                m=st.text_area("Message",height=120)
-                if st.form_submit_button("Send Message",use_container_width=True,type="primary"):
-                    if n and m: st.success("Please email: Mohitdevsinghchib644@gmail.com")
-                    else: st.warning("Fill name and message.")
-
-    st.markdown('</div>', unsafe_allow_html=True)
+                     font-weight:800;font-size:36px;color:#fff;margin-bottom:12px;">{initial}</div
