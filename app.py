@@ -101,28 +101,29 @@ def send_telegram(msg):
 # ════════════════════════════════════════════════════════════
 # DESIGN SYSTEM — green-black base (matches hero) + mint accents
 # ════════════════════════════════════════════════════════════
-DARK   = "#070b0a"   # page background
-DARK2  = "#0d1512"   # card surface
-DARK3  = "#13201b"   # nested surface / inputs
-BORDER = "#1d2f27"   # borders
-IVORY  = "#e9f5ef"   # primary text
-T2     = "#8aa79a"   # secondary text
-NAVY   = "#0b1411"   # deep panel
+DARK   = "#0B0F14"   # page background (charcoal slate)
+DARK2  = "#11161D"   # card surface
+DARK3  = "#1A212B"   # nested surface / inputs
+BORDER = "#242D3A"   # borders
+IVORY  = "#E8ECF2"   # primary text
+T2     = "#8C97A8"   # secondary text
+NAVY   = "#0E141C"   # deep panel
 
-INDIGO = "#5ed29c"   # primary brand (mint green)
-CYAN   = "#2dd4bf"   # data / scanner (teal)
-GREEN  = "#34d399"   # positive / success
-RED    = "#f43f5e"   # negative / danger
-AMBER  = "#fbbf24"   # alerts / warning
-PURPLE = "#7dd3c0"   # AI / intelligence
-PINK   = "#5eead4"   # quant / analytics
+INDIGO = "#3B82F6"   # primary brand (professional blue)
+CYAN   = "#06B6D4"   # data / scanner
+GREEN  = "#22C55E"   # positive / success
+RED    = "#EF4444"   # negative / danger
+AMBER  = "#F59E0B"   # alerts / warning
+PURPLE = "#8B5CF6"   # AI / intelligence
+PINK   = "#EC4899"   # quant / analytics
 
 BLUE   = INDIGO      # compat alias
 GOLD   = INDIGO      # compat alias (other files import GOLD)
 
 GRAD_BRAND = f"linear-gradient(135deg,{INDIGO},{CYAN})"
 GRAD_AI    = f"linear-gradient(135deg,{PURPLE},{INDIGO})"
-GRAD_TEXT  = f"linear-gradient(90deg,{INDIGO},{CYAN},{PURPLE})"
+GRAD_TEXT  = f"linear-gradient(90deg,{CYAN},{INDIGO},{PURPLE})"
+
 
 FONT   = "'Plus Jakarta Sans','Inter',sans-serif"
 MONO   = "'JetBrains Mono',monospace"
