@@ -1283,3 +1283,169 @@ with right:
                                 st.rerun()
                         with bc2:
                             if st.button("Confirm", key=f"ok_{sym}_{key_suffix}", type="primary", use_container_width
+                                                                 with bc2:
+                            if st.button("Confirm", key=f"ok_{sym}_{key_suffix}", type="primary", use_container_width=True):
+                                price = None
+                                atype = None
+                                if alert_type == "Custom":
+                                    if cp > 0:
+                                        price, atype = cp, "custom"
+                                    else:
+                                        st.error("Enter a trigger price above 0.")
+                                else:
+                                    st_data = get_static(sym)
+                                    if st_data:
+                                        if alert_type == "PDH":
+                                            price, atype = st_data["pdh"], "pdh"
+                                        else:
+                                            price, atype = st_data["pdl"], "pdl"
+                                    else:
+                                        st.error(f"Could not fetch PDH/PDL data for {sym}. Try again in a moment.")
+                                if price is not None:
+                                    st.session_state.alerts[sym] = {"type": atype, "price": price, "active": True}
+                                    db_save_alert(sym, atype, price)
+                                    if sym in st.session_state.alert_fired:
+                                        st.session_state.alert_fired.remove(sym)
+                                    send_telegram(f"Alert set!\n{sym} · {atype.upper()} · Rs{price:.2f}")
+                                    st.session_state[f"open_{sym}_{key_suffix}"] = False
+                                    st.success(f"Alert armed for {sym} at Rs{price:.2f}")
+                                    time.sleep(0.6)
+                                    st.rerun()
+
+        st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
+        alert_tab1, alert_tab2 = st.tabs(["Arka Watchlist", "Your Watchlist"])
+        with alert_tab1:
+            st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
+            watchlist = st.session_state.get("admin_watchlist", [])
+            if not watchlist:
+                st.warning("Arka Watchlist not available yet.")
+            else:
+                render_alert_rows(watchlist, key_suffix="admin")
+        with alert_tab2:
+            st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
+            watchlist = st.session_state.get("watchlist", [])
+            if not watchlist:
+                st.warning("Upload your watchlist in Scanner first.")
+            else:
+                render_alert_rows(watchlist, key_suffix="yours")
+
+    # ── NEWS ────────────────────────────────────────────────
+    elif pg == "news":
+        watchlist = st.session_state.get("watchlist", [])
+        if not watchlist:
+            st.warning("Go to Scanner first and upload your watchlist.")
+        else:
+            _ensure_news_state()
+            news_panel(watchlist)
+
+    # ── ARKA AI / COMING SOON ───────────────────────────────
+    elif pg in ["analysis","heatmap","autoalert"]:
+        if pg == "analysis":
+            render_arka_ai()
+        else:
+            labels = {"heatmap":"Market Heatmap","autoalert":"Auto Smart Alerts"}
+            st.markdown(f"""
+            <div style="background:{DARK2};border:1px dashed {BORDER};border-radius:16px;
+                 padding:100px 20px;text-align:center;margin:20px 0;">
+                <div style="margin-bottom:16px;">{icon("clock", 32, T2)}</div>
+                <div style="font-size:26px;font-weight:800;color:{T2};margin-bottom:10px;">{labels.get(pg,'Coming Soon')}</div>
+                <div style="font-size:14px;color:{T2};opacity:.6;">This module is under development</div>
+            </div>""", unsafe_allow_html=True)
+
+    elif pg == "smart_scan":
+        from smart_scan_page import render_smart_scanner
+        render_smart_scanner(supabase)
+
+    # ── QUANT ANALYSIS ──────────────────────────────────────
+    elif pg == "quant":
+        from quant_analysis import render_quant_analysis
+        render_quant_analysis()
+
+    # ── PROFILE ─────────────────────────────────────────────
+    elif pg == "profile":
+        p1,p2 = st.columns([1,2])
+        with p1:
+            photo=st.session_state.get("profile_photo")
+            if photo:
+                st.image(photo,width=120); st.caption(name)
+            else:
+                st.markdown(f"""
+                <div style="width:96px;height:96px;border-radius:16px;background:{GRAD_AI};
+                     display:flex;align-items:center;justify-content:center;
+                     font-weight:800;font-size:36px;color:#070b0a;margin-bottom:12px;">{initial}</div>
+                <div style="font-size:20px;font-weight:800;color:{IVORY};">{name}</div>
+                <div style="font-size:11px;color:{T2};letter-spacing:1px;
+                     text-transform:uppercase;margin-top:4px;">Arka Trades Member</div>
+                """, unsafe_allow_html=True)
+        with p2:
+            with st.form("pf"):
+                a,b=st.columns(2)
+                nn=a.text_input("Full Name",      value=st.session_state.profile["name"])
+                np_=b.text_input("Contact Number", value=st.session_state.profile["phone"])
+                ne=st.text_input("Email Address", value=st.session_state.profile["email"])
+                ph=st.file_uploader("Upload Profile Photo",type=["jpg","jpeg","png"])
+                if st.form_submit_button("Save Profile",use_container_width=True,type="primary"):
+                    st.session_state.profile.update({"name":nn,"phone":np_,"email":ne})
+                    if ph: st.session_state["profile_photo"]=ph
+                    st.success(f"Saved! Welcome, {nn}!"); st.rerun()
+
+    # ── SETTINGS ────────────────────────────────────────────
+    elif pg == "settings":
+        st.markdown(f"<div style='font-size:15px;font-weight:800;color:{IVORY};margin:8px 0 10px;'>Appearance</div>", unsafe_allow_html=True)
+        t1,t2=st.columns(2)
+        with t1:
+            st.markdown(f"""
+            <div style="background:{DARK2};border:2px solid {INDIGO};border-radius:14px;
+                 padding:20px;text-align:center;">
+                <div style="margin-bottom:10px;">{icon("shield", 24, INDIGO)}</div>
+                <div style="font-weight:800;font-size:14px;color:{INDIGO};">DARK MODE</div>
+                <div style="font-size:12px;color:{T2};margin-top:4px;">Currently active</div>
+            </div>""", unsafe_allow_html=True)
+        with t2:
+            st.markdown(f"""
+            <div style="background:{DARK3};border:1px solid {BORDER};border-radius:14px;
+                 padding:20px;text-align:center;opacity:.6;">
+                <div style="margin-bottom:10px;">{icon("clock", 24, T2)}</div>
+                <div style="font-weight:800;font-size:14px;color:{T2};">LIGHT MODE</div>
+                <div style="font-size:12px;color:{T2};margin-top:4px;">Coming soon</div>
+            </div>""", unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown(f"<div style='font-size:15px;font-weight:800;color:{IVORY};margin-bottom:10px;'>Telegram Notifications</div>", unsafe_allow_html=True)
+        st.info(f"Bot connected · Chat ID: {CHAT_ID}")
+        if st.button("Send Test Notification",use_container_width=True):
+            send_telegram("<b>Arka Trades</b>\nTest notification successful.")
+            st.success("Test sent to Telegram.")
+        st.divider()
+        st.markdown(f"<div style='font-size:15px;font-weight:800;color:{IVORY};'>Broker API — Coming Soon</div>", unsafe_allow_html=True)
+
+    # ── CONTACT ─────────────────────────────────────────────
+    elif pg == "contact":
+        c1,c2=st.columns([1,1])
+        with c1:
+            st.markdown(f"""
+            <div style="background:{DARK2};border:1px solid {BORDER};
+                 border-left:3px solid {CYAN};border-radius:14px;padding:28px;
+                 box-shadow:0 2px 8px rgba(0,0,0,.3);">
+                <div style="margin-bottom:12px;">{icon("mail", 24, CYAN)}</div>
+                <div style="font-weight:800;font-size:13px;letter-spacing:1px;color:{CYAN};
+                     text-transform:uppercase;margin-bottom:14px;">Get in Touch</div>
+                <div style="font-size:14px;color:{T2};line-height:2;margin-bottom:18px;">
+                    Questions, feedback or suggestions?<br>We would love to hear from you.
+                </div>
+                <div style="font-family:{MONO};font-size:13px;
+                     color:{CYAN};font-weight:700;word-break:break-all;">
+                    Mohitdevsinghchib644@gmail.com</div>
+                <div style="font-size:12px;color:{T2};margin-top:10px;">
+                    Mention ARKA TRADES in subject line.<br>Reply within 24 hours.</div>
+            </div>""", unsafe_allow_html=True)
+        with c2:
+            with st.form("cf"):
+                n=st.text_input("Your Name")
+                e=st.text_input("Your Email")
+                m=st.text_area("Message",height=120)
+                if st.form_submit_button("Send Message",use_container_width=True,type="primary"):
+                    if n and m: st.success("Please email: Mohitdevsinghchib644@gmail.com")
+                    else: st.warning("Fill name and message.")
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
