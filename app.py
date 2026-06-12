@@ -560,13 +560,7 @@ if (window.Hls && Hls.isSupported()) {
 """
     components.html(hero_html, height=800, scrolling=False)
 
-    # Fallback native login button (always works)
-    _, lb, _ = st.columns([2, 1, 2])
-    with lb:
-        if st.button("Member Login →", use_container_width=True, type="primary", key="hero_login_btn"):
-            st.session_state.show_login = True
-            st.rerun()
-
+    
     # ── Stats Strip ──────────────────────────────────────────
     st.markdown("<div style='height:32px;'></div>", unsafe_allow_html=True)
     s1, s2, s3, s4 = st.columns(4)
