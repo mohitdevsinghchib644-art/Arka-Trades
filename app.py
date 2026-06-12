@@ -897,8 +897,15 @@ with right:
         render_smart_scanner(supabase)
 
     elif pg == "quant":
+     try:
         from quant_analysis import render_quant_analysis
         render_quant_analysis()
+        except Exception as e:
+            import traceback
+            st.error(f"Quant module failed to load: {e}")
+            st.code(traceback.format_exc())
+
+        
 
     elif pg == "profile":
         p1,p2 = st.columns([1,2])
