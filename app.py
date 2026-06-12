@@ -1062,91 +1062,123 @@ with right:
 
     # ── ALERTS ──────────────────────────────────────────────
     elif pg == "alerts":
-        def render_alert_cards(watchlist, key_suffix=""):
+        active_alerts = {s: a for s, a in st.session_state.alerts.items() if a.get("active")}
+
+        a1, a2, a3 = st.columns(3)
+        a1.metric("Active Alerts", len(active_alerts))
+        a2.metric("Triggered Today", len(st.session_state.alert_fired))
+        a3.metric("Delivery Channel", "Telegram")
+
+        st.markdown(f"""
+        <div style="background:{DARK2};border:1px solid {BORDER};border-left:3px solid {BLUE};
+             border-radius:12px;padding:14px 20px;margin:16px 0 8px;">
+            <div style="font-size:13px;color:{T2};line-height:1.7;">
+                Create conditional alerts on any stock in your watchlists. When the price
+                crosses your level, a notification is pushed to Telegram instantly.
+            </div>
+        </div>""", unsafe_allow_html=True)
+
+        def render_alert_rows(watchlist, key_suffix=""):
+            # Header row
             st.markdown(f"""
-            <div style="background:{DARK2};border:1px solid {BORDER};border-left:3px solid {BLUE};
-                 border-radius:12px;padding:16px 20px;margin-bottom:20px;">
-                <div style="font-size:13px;color:{T2};line-height:1.8;">
-                    Tap <strong style="color:{IVORY}">Set</strong> next to any stock to create a
-                    conditional alert. A pulsing indicator means the alert is armed.
-                    You receive a Telegram notification when the price hits your level.
-                </div>
+            <div style="display:grid;grid-template-columns:2fr 1.2fr 1.5fr 1.2fr;gap:8px;
+                 padding:10px 16px;font-size:10px;font-weight:700;letter-spacing:1.5px;
+                 color:{T2};text-transform:uppercase;border-bottom:1px solid {BORDER};">
+                <span>Symbol</span><span>Status</span><span>Condition</span><span>Level</span>
             </div>""", unsafe_allow_html=True)
-            COLS=4
-            rows=[watchlist[i:i+COLS] for i in range(0,len(watchlist),COLS)]
-            for row in rows:
-                cols=st.columns(COLS)
-                for j,sym in enumerate(row):
-                    has_alert=sym in st.session_state.alerts and st.session_state.alerts[sym].get("active",False)
-                    alert_info=""
-                    if has_alert:
-                        a=st.session_state.alerts[sym]
-                        alert_info=f"{a['type'].upper()} &middot; Rs {a['price']:.2f}"
-                    card_bd = "rgba(79,141,253,0.5)" if has_alert else BORDER
-                    card_bg = "rgba(79,141,253,0.06)" if has_alert else DARK2
-                    bell_svg = icon("bell", 22, BLUE if has_alert else T2)
-                    pulse   = '<span class="pulse-dot" style="margin-right:6px;"></span>' if has_alert else ""
-                    with cols[j]:
+
+            for sym in watchlist:
+                has_alert = sym in st.session_state.alerts and st.session_state.alerts[sym].get("active", False)
+                a = st.session_state.alerts.get(sym, {})
+                cond  = a.get("type", "").upper() if has_alert else "—"
+                level = f"Rs {a['price']:,.2f}" if has_alert else "—"
+                if has_alert:
+                    status = (f'<span style="display:inline-flex;align-items:center;gap:6px;'
+                              f'background:rgba(16,185,129,.12);color:{GREEN};font-size:11px;'
+                              f'font-weight:700;padding:3px 10px;border-radius:20px;'
+                              f'border:1px solid {GREEN}33;"><span class="pulse-dot"></span>ARMED</span>')
+                else:
+                    status = (f'<span style="background:{DARK3};color:{T2};font-size:11px;'
+                              f'font-weight:700;padding:3px 10px;border-radius:20px;'
+                              f'border:1px solid {BORDER};">INACTIVE</span>')
+
+                rc1, rc2 = st.columns([4, 1.4])
+                with rc1:
+                    st.markdown(f"""
+                    <div style="display:grid;grid-template-columns:2fr 1.2fr 1.5fr 1.2fr;gap:8px;
+                         align-items:center;background:{DARK2};border:1px solid {BORDER};
+                         border-radius:10px;padding:12px 16px;margin-bottom:6px;">
+                        <span style="font-weight:800;font-size:13px;color:{IVORY};">{sym}</span>
+                        <span>{status}</span>
+                        <span style="font-family:{MONO};font-size:12px;color:{T2};">{cond}</span>
+                        <span style="font-family:{MONO};font-size:12px;color:{IVORY};">{level}</span>
+                    </div>""", unsafe_allow_html=True)
+                with rc2:
+                    bA, bB = st.columns(2)
+                    with bA:
+                        if st.button("Set", key=f"sa_{sym}_{key_suffix}", use_container_width=True):
+                            st.session_state[f"open_{sym}_{key_suffix}"] = True
+                    with bB:
+                        if has_alert:
+                            if st.button("Off", key=f"rm_{sym}_{key_suffix}", use_container_width=True):
+                                del st.session_state.alerts[sym]
+                                db_delete_alert(sym)
+                                if sym in st.session_state.alert_fired:
+                                    st.session_state.alert_fired.remove(sym)
+                                st.rerun()
+
+                if st.session_state.get(f"open_{sym}_{key_suffix}"):
+                    with st.container():
                         st.markdown(f"""
-                        <div style="background:{card_bg};border:1px solid {card_bd};
-                             border-radius:12px;padding:16px 12px;text-align:center;margin-bottom:8px;
-                             box-shadow:0 1px 3px rgba(0,0,0,.3);">
-                            <div style="font-weight:800;font-size:13px;color:{IVORY};margin-bottom:8px;">{pulse}{sym}</div>
-                            <div style="margin-bottom:8px;">{bell_svg}</div>
-                            <div style="font-size:11px;color:{BLUE};line-height:1.5;">
-                                 {alert_info if alert_info else f"<span style='color:{T2}'>No alert set</span>"}</div>
+                        <div style="background:{DARK3};border:1px solid {BORDER};
+                             border-radius:10px;padding:4px 16px;margin-bottom:8px;">
+                            <div style="font-size:12px;font-weight:700;color:{BLUE};
+                                 padding:8px 0 0;">Configure alert · {sym}</div>
                         </div>""", unsafe_allow_html=True)
-                        ba,bb = st.columns(2)
-                        with ba:
-                            if st.button("Set",key=f"sa_{sym}_{key_suffix}",use_container_width=True):
-                                st.session_state[f"open_{sym}_{key_suffix}"]=True
-                        with bb:
-                            if has_alert:
-                                if st.button("Off",key=f"rm_{sym}_{key_suffix}",use_container_width=True):
-                                    del st.session_state.alerts[sym]
-                                    db_delete_alert(sym)
+                        st_ = get_static(sym)
+                        alert_type = st.radio("Condition", ["PDH","PDL","Custom"],
+                                              key=f"at_{sym}_{key_suffix}", horizontal=True)
+                        cp = 0.0
+                        if alert_type == "Custom":
+                            cp = st.number_input("Trigger price", key=f"cp_{sym}_{key_suffix}",
+                                                 min_value=0.0, step=0.5)
+                        bc1, bc2, _ = st.columns([1,1,3])
+                        with bc1:
+                            if st.button("Cancel", key=f"can_{sym}_{key_suffix}", use_container_width=True):
+                                st.session_state[f"open_{sym}_{key_suffix}"] = False
+                                st.rerun()
+                        with bc2:
+                            if st.button("Confirm", key=f"ok_{sym}_{key_suffix}", type="primary", use_container_width=True):
+                                if st_:
+                                    if alert_type=="PDH":   price=st_["pdh"]; atype="pdh"
+                                    elif alert_type=="PDL": price=st_["pdl"]; atype="pdl"
+                                    else:                   price=cp; atype="custom"
+                                    st.session_state.alerts[sym]={"type":atype,"price":price,"active":True}
+                                    db_save_alert(sym, atype, price)
                                     if sym in st.session_state.alert_fired:
                                         st.session_state.alert_fired.remove(sym)
-                                    st.rerun()
-                        if st.session_state.get(f"open_{sym}_{key_suffix}"):
-                            st_=get_static(sym)
-                            alert_type=st.radio("Type",["PDH","PDL","Custom"],key=f"at_{sym}_{key_suffix}",horizontal=True)
-                            cp=0.0
-                            if alert_type=="Custom":
-                                cp=st.number_input("Price",key=f"cp_{sym}_{key_suffix}",min_value=0.0,step=0.5)
-                            bc1,bc2=st.columns(2)
-                            with bc1:
-                                if st.button("Cancel",key=f"can_{sym}_{key_suffix}"):
+                                    send_telegram(f"Alert set!\n{sym} · {atype.upper()} · Rs{price:.2f}")
                                     st.session_state[f"open_{sym}_{key_suffix}"]=False
+                                    st.success(f"Alert armed for {sym}.")
                                     st.rerun()
-                            with bc2:
-                                if st.button("OK",key=f"ok_{sym}_{key_suffix}",type="primary"):
-                                    if st_:
-                                        if alert_type=="PDH":   price=st_["pdh"]; atype="pdh"
-                                        elif alert_type=="PDL": price=st_["pdl"]; atype="pdl"
-                                        else:                   price=cp; atype="custom"
-                                        st.session_state.alerts[sym]={"type":atype,"price":price,"active":True}
-                                        db_save_alert(sym, atype, price)
-                                        if sym in st.session_state.alert_fired:
-                                            st.session_state.alert_fired.remove(sym)
-                                        send_telegram(f"Alert set!\n{sym} · {atype.upper()} · Rs{price:.2f}")
-                                        st.session_state[f"open_{sym}_{key_suffix}"]=False
-                                        st.success(f"Alert set for {sym}!")
-                                        st.rerun()
 
+        st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
         alert_tab1, alert_tab2 = st.tabs(["Arka Watchlist", "Your Watchlist"])
         with alert_tab1:
+            st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
             watchlist = st.session_state.get("admin_watchlist", [])
             if not watchlist:
                 st.warning("Arka Watchlist not available yet.")
             else:
-                render_alert_cards(watchlist, key_suffix="admin")
+                render_alert_rows(watchlist, key_suffix="admin")
         with alert_tab2:
+            st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
             watchlist = st.session_state.get("watchlist", [])
             if not watchlist:
                 st.warning("Upload your watchlist in Scanner first.")
             else:
-                render_alert_cards(watchlist, key_suffix="yours")
+                render_alert_rows(watchlist, key_suffix="yours")
+
 
     # ── NEWS ────────────────────────────────────────────────
     elif pg == "news":
