@@ -99,34 +99,30 @@ def send_telegram(msg):
     except: pass
 
 # ════════════════════════════════════════════════════════════
-# DESIGN SYSTEM — deep navy base + correlated accent spectrum
+# DESIGN SYSTEM — green-black base (matches hero) + mint accents
 # ════════════════════════════════════════════════════════════
-DARK   = "#0A0E1A"   # page background (deep navy-slate)
-DARK2  = "#111729"   # card surface
-DARK3  = "#1A2235"   # nested surface / inputs
-BORDER = "#232D45"   # borders
-IVORY  = "#E6EAF2"   # primary text
-T2     = "#8B96AD"   # secondary text
-NAVY   = "#141C33"   # deep panel
+DARK   = "#070b0a"   # page background
+DARK2  = "#0d1512"   # card surface
+DARK3  = "#13201b"   # nested surface / inputs
+BORDER = "#1d2f27"   # borders
+IVORY  = "#e9f5ef"   # primary text
+T2     = "#8aa79a"   # secondary text
+NAVY   = "#0b1411"   # deep panel
 
-INDIGO = "#6366F1"   # primary brand
-CYAN   = "#22D3EE"   # data / scanner
-GREEN  = "#10B981"   # positive / success
-RED    = "#F43F5E"   # negative / danger (rose)
-AMBER  = "#F59E0B"   # alerts / warning
-PURPLE = "#A78BFA"   # AI / intelligence
-PINK   = "#EC4899"   # quant / analytics
+INDIGO = "#5ed29c"   # primary brand (mint green)
+CYAN   = "#2dd4bf"   # data / scanner (teal)
+GREEN  = "#34d399"   # positive / success
+RED    = "#f43f5e"   # negative / danger
+AMBER  = "#fbbf24"   # alerts / warning
+PURPLE = "#7dd3c0"   # AI / intelligence
+PINK   = "#5eead4"   # quant / analytics
 
 BLUE   = INDIGO      # compat alias
 GOLD   = INDIGO      # compat alias (other files import GOLD)
 
-# Hero (landing) palette
-HERO_BG  = "#070b0a"
-HERO_ACC = "#5ed29c"
-
 GRAD_BRAND = f"linear-gradient(135deg,{INDIGO},{CYAN})"
-GRAD_AI    = f"linear-gradient(135deg,{PURPLE},{PINK})"
-GRAD_TEXT  = f"linear-gradient(90deg,{CYAN},{INDIGO},{PURPLE})"
+GRAD_AI    = f"linear-gradient(135deg,{PURPLE},{INDIGO})"
+GRAD_TEXT  = f"linear-gradient(90deg,{INDIGO},{CYAN},{PURPLE})"
 
 FONT   = "'Plus Jakarta Sans','Inter',sans-serif"
 MONO   = "'JetBrains Mono',monospace"
@@ -200,8 +196,8 @@ st.markdown(f"""
 *,*::before,*::after{{box-sizing:border-box;margin:0;padding:0;}}
 html,body,.stApp{{background:{DARK} !important;color:{IVORY} !important;font-family:{FONT} !important;}}
 .stApp{{background:
-    radial-gradient(ellipse 80% 50% at 20% -10%, rgba(99,102,241,0.10), transparent),
-    radial-gradient(ellipse 60% 40% at 90% 0%, rgba(34,211,238,0.06), transparent),
+    radial-gradient(ellipse 80% 50% at 20% -10%, rgba(94,210,156,0.08), transparent),
+    radial-gradient(ellipse 60% 40% at 90% 0%, rgba(45,212,191,0.05), transparent),
     {DARK} !important;}}
 header[data-testid="stHeader"]{{display:none !important;}}
 [data-testid="stSidebarCollapsedControl"]{{display:none !important;}}
@@ -212,7 +208,7 @@ section[data-testid="stSidebar"]{{display:none !important;}}
     background:{DARK3} !important;color:{IVORY} !important;
     border:1px solid {BORDER} !important;border-radius:10px !important;
     font-family:{FONT} !important;font-size:14px !important;}}
-.stTextInput input:focus{{border-color:{INDIGO} !important;box-shadow:0 0 0 3px rgba(99,102,241,0.18) !important;}}
+.stTextInput input:focus{{border-color:{INDIGO} !important;box-shadow:0 0 0 3px rgba(94,210,156,0.18) !important;}}
 .stTextInput label,.stTextArea label,.stNumberInput label{{color:{T2} !important;font-size:12px !important;font-weight:600 !important;}}
 .stTextArea textarea{{background:{DARK3} !important;color:{IVORY} !important;
     border:1px solid {BORDER} !important;border-radius:10px !important;}}
@@ -229,17 +225,17 @@ section[data-testid="stSidebar"]{{display:none !important;}}
     border:1px solid {BORDER} !important;border-radius:10px !important;
     font-family:{FONT} !important;font-weight:600 !important;font-size:14px !important;
     transition:all .15s ease !important;box-shadow:none !important;}}
-.stButton>button:hover{{border-color:{INDIGO} !important;color:{CYAN} !important;
-    transform:translateY(-1px);box-shadow:0 4px 14px rgba(99,102,241,.2) !important;}}
+.stButton>button:hover{{border-color:{INDIGO} !important;color:{INDIGO} !important;
+    transform:translateY(-1px);box-shadow:0 4px 14px rgba(94,210,156,.2) !important;}}
 .stButton>button[kind="primary"],.stFormSubmitButton>button[kind="primary"]{{
-    background:{GRAD_BRAND} !important;color:#fff !important;border:none !important;
-    box-shadow:0 2px 12px rgba(99,102,241,.4) !important;}}
-.stButton>button[kind="primary"]:hover{{filter:brightness(1.12);color:#fff !important;}}
+    background:{GRAD_BRAND} !important;color:#070b0a !important;border:none !important;
+    box-shadow:0 2px 12px rgba(94,210,156,.4) !important;}}
+.stButton>button[kind="primary"]:hover{{filter:brightness(1.12);color:#070b0a !important;}}
 
 .stTabs [data-baseweb="tab-list"]{{background:{DARK2};border:1px solid {BORDER};
     border-radius:12px;padding:4px;gap:4px;}}
 .stTabs [data-baseweb="tab"]{{color:{T2};font-weight:600;border-radius:8px;}}
-.stTabs [aria-selected="true"]{{background:{DARK3} !important;color:{CYAN} !important;}}
+.stTabs [aria-selected="true"]{{background:{DARK3} !important;color:{INDIGO} !important;}}
 
 .stCheckbox label,.stRadio label{{color:{IVORY} !important;}}
 [data-testid="stSelectbox"]>div>div{{background:{DARK3} !important;border:1px solid {BORDER} !important;color:{IVORY} !important;border-radius:10px !important;}}
@@ -251,10 +247,10 @@ hr{{border-color:{BORDER} !important;}}
     border-radius:10px !important;font-size:14px !important;font-weight:600 !important;
     padding:9px 14px !important;margin-bottom:2px !important;}}
 .nav-btn .stButton>button:hover{{background:{DARK3} !important;color:{IVORY} !important;transform:none;box-shadow:none !important;}}
-.nav-btn-active .stButton>button{{background:rgba(99,102,241,0.12) !important;color:{CYAN} !important;
+.nav-btn-active .stButton>button{{background:rgba(94,210,156,0.12) !important;color:{INDIGO} !important;
     border-left:3px solid {INDIGO} !important;border-radius:0 10px 10px 0 !important;}}
 
-@keyframes pulse{{0%,100%{{box-shadow:0 0 0 0 rgba(16,185,129,.4);}}50%{{box-shadow:0 0 0 6px rgba(16,185,129,0);}}}}
+@keyframes pulse{{0%,100%{{box-shadow:0 0 0 0 rgba(52,211,153,.4);}}50%{{box-shadow:0 0 0 6px rgba(52,211,153,0);}}}}
 .pulse-dot{{width:8px;height:8px;border-radius:50%;background:{GREEN};display:inline-block;animation:pulse 2s infinite;}}
 @keyframes fadeUp{{from{{opacity:0;transform:translateY(12px);}}to{{opacity:1;transform:none;}}}}
 .fade-up{{animation:fadeUp .5s ease both;}}
@@ -341,7 +337,7 @@ def section(title, accent=None):
     </div>""", unsafe_allow_html=True)
 
 def change_pill(chg: float) -> str:
-    c, bg = (GREEN, "rgba(16,185,129,.12)") if chg >= 0 else (RED, "rgba(244,63,94,.12)")
+    c, bg = (GREEN, "rgba(52,211,153,.12)") if chg >= 0 else (RED, "rgba(244,63,94,.12)")
     arrow = "▲" if chg >= 0 else "▼"
     return (f'<span style="background:{bg};color:{c};font-family:{MONO};'
             f'font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px;'
@@ -364,23 +360,69 @@ def checkline(text, c=None):
             f'<span style="font-size:14px;color:{IVORY};line-height:1.6;">{text}</span></div>')
 
 # ════════════════════════════════════════════════════════════
-# LANDING PAGE (logged out) — DARK HERO w/ HLS VIDEO
+# LANDING PAGE (logged out)
 # ════════════════════════════════════════════════════════════
 if not st.session_state.logged_in:
 
-    # CTA inside the hero iframe reloads parent with ?login=1
     if st.query_params.get("login") == "1":
         st.session_state.show_login = True
         st.query_params.clear()
 
-    # Landing-only CSS: hero edge-to-edge at the top
-    st.markdown(f"""
+    st.markdown("""
     <style>
-    .block-container{{padding-top:0 !important;}}
-    [data-testid="stVerticalBlock"]{{gap:0.4rem;}}
-    iframe{{display:block;border:none;}}
+    .block-container{padding-top:0 !important;}
+    [data-testid="stVerticalBlock"]{gap:0.4rem;}
+    iframe{display:block;border:none;}
     </style>""", unsafe_allow_html=True)
 
+    # ═════════════ LOGIN VIEW ════════════════════════════════
+    if st.session_state.show_login:
+        st.markdown(f"""
+        <div style="text-align:center;padding:70px 0 10px;">
+            <div style="display:inline-flex;align-items:center;gap:10px;">
+                <div style="width:38px;height:38px;border-radius:10px;background:{GRAD_BRAND};
+                     display:flex;align-items:center;justify-content:center;">{icon("trend", 19, "#070b0a")}</div>
+                <div style="text-align:left;">
+                    <div style="font-size:18px;font-weight:800;color:{IVORY};letter-spacing:1px;">ARKA TRADES</div>
+                    <div style="font-size:9px;letter-spacing:2px;color:{T2};text-transform:uppercase;">Market Analytics Platform</div>
+                </div>
+            </div>
+        </div>""", unsafe_allow_html=True)
+
+        _, login_col, _ = st.columns([1, 1.1, 1])
+        with login_col:
+            with st.form("lf"):
+                st.markdown(f"""
+                <div style="margin-bottom:14px;text-align:center;">
+                    <div style="font-size:20px;font-weight:800;color:{IVORY};">Member Login</div>
+                    <div style="font-size:12px;color:{T2};margin-top:4px;">Sign in to access your terminal</div>
+                </div>""", unsafe_allow_html=True)
+                u = st.text_input("Username", placeholder="Enter username")
+                p = st.text_input("Password", placeholder="Enter password", type="password")
+                ok = st.form_submit_button("Sign In", use_container_width=True, type="primary")
+                ph = st.empty()
+                if ok:
+                    if u.strip()=="ADMIN4477MAX" and p.strip()=="MOHIT1":
+                        ph.success("Welcome, Admin!")
+                        time.sleep(0.8)
+                        st.session_state.logged_in = True
+                        st.session_state.is_admin = True
+                        st.rerun()
+                    elif u.strip().lower()=="max trades" and p.strip().lower()=="max":
+                        ph.success("Login successful. Welcome to Arka Trades.")
+                        time.sleep(0.8)
+                        st.session_state.logged_in = True
+                        st.session_state.is_admin = False
+                        st.rerun()
+                    else:
+                        ph.error("Invalid username or password.")
+            if st.button("← Back to home", use_container_width=True, key="back_home"):
+                st.session_state.show_login = False
+                st.rerun()
+            st.markdown(f"<div style='text-align:center;font-size:11px;color:{T2};margin-top:10px;'>Educational platform · Access by invitation</div>", unsafe_allow_html=True)
+        st.stop()
+
+    # ═════════════ HERO ══════════════════════════════════════
     hero_html = """
 <!DOCTYPE html>
 <html>
@@ -390,32 +432,28 @@ if not st.session_state.logged_in:
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700;800&family=Plus+Jakarta+Sans:wght@700;800&family=Instrument+Serif:ital@1&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <style>
 *{margin:0;padding:0;box-sizing:border-box;}
+html,body{height:100%;}
 body{background:#070b0a;font-family:'Inter',sans-serif;overflow:hidden;}
-.hero{position:relative;width:100%;height:100vh;min-height:680px;overflow:hidden;}
-
-/* 1. Background video + overlays */
+.hero{position:relative;width:100%;height:100%;min-height:780px;overflow:hidden;}
 #bgvid{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0.6;}
 .ov-left{position:absolute;inset:0;background:linear-gradient(to right,#070b0a 0%,transparent 60%);}
 .ov-bottom{position:absolute;inset:0;background:linear-gradient(to top,#070b0a 0%,transparent 50%);}
-
-/* Grid lines at 25 / 50 / 75% */
 .gridline{position:absolute;top:0;bottom:0;width:1px;background:rgba(255,255,255,0.1);display:none;}
 @media(min-width:768px){.gridline{display:block;}}
 .g25{left:25%;}.g50{left:50%;}.g75{left:75%;}
-
-/* Central glow (25px gaussian blur) */
-.glow{position:absolute;top:6%;left:50%;transform:translateX(-50%);pointer-events:none;}
-
-/* 4. Global navigation */
+.glow{position:absolute;top:4%;left:50%;transform:translateX(-50%);pointer-events:none;}
 nav{position:absolute;top:0;left:0;right:0;z-index:50;display:flex;align-items:center;
     justify-content:space-between;padding:24px 40px;}
 .logo{display:flex;align-items:center;gap:10px;color:#fff;font-weight:800;
     font-family:'Plus Jakarta Sans';letter-spacing:1px;font-size:15px;}
 .logo svg{width:26px;height:26px;}
-.menu{display:none;gap:36px;}
+.menu{display:none;gap:36px;align-items:center;}
 @media(min-width:768px){.menu{display:flex;}.burger{display:none;}}
 .menu a{color:#fff;text-decoration:none;font-size:16px;font-weight:600;transition:color .2s;}
 .menu a:hover{color:#5ed29c;}
+.login-link{border:1px solid rgba(94,210,156,0.5);border-radius:9999px;padding:8px 22px;
+    color:#5ed29c !important;font-size:13px !important;letter-spacing:1px;}
+.login-link:hover{background:#5ed29c;color:#070b0a !important;}
 .burger{background:none;border:none;color:#fff;cursor:pointer;}
 .mobile-ov{position:fixed;inset:0;background:#070b0a;z-index:100;display:none;
     flex-direction:column;align-items:center;justify-content:center;gap:32px;}
@@ -423,37 +461,32 @@ nav{position:absolute;top:0;left:0;right:0;z-index:50;display:flex;align-items:c
 .mobile-ov a{color:#fff;text-decoration:none;font-size:24px;font-weight:700;}
 .mobile-ov a:hover{color:#5ed29c;}
 .close-x{position:absolute;top:24px;right:32px;background:none;border:none;color:#fff;cursor:pointer;}
-
-/* 3. Hero content */
 .content{position:relative;z-index:10;height:100%;display:flex;flex-direction:column;
-    align-items:center;justify-content:center;text-align:center;padding:0 20px;}
-
-/* 2. Liquid glass card — 200x200, shifted -50px */
-.glass{position:relative;width:200px;height:200px;border-radius:18px;
-    transform:translateY(-50px);
+    align-items:center;justify-content:center;text-align:center;padding:80px 20px 0;}
+.glass{position:relative;width:300px;height:230px;border-radius:22px;
+    transform:translateY(-30px);
     background:rgba(255,255,255,0.01);background-blend-mode:luminosity;
     backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);
     box-shadow:inset 0 1px 1px rgba(255,255,255,0.1);
     display:flex;flex-direction:column;align-items:center;justify-content:center;
-    gap:10px;padding:18px;}
-.glass::before{content:'';position:absolute;inset:0;border-radius:18px;padding:1.4px;
+    gap:12px;padding:24px;}
+.glass::before{content:'';position:absolute;inset:0;border-radius:22px;padding:1.4px;
     background:linear-gradient(180deg,rgba(255,255,255,0.5),rgba(255,255,255,0.05));
     -webkit-mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);
     -webkit-mask-composite:xor;mask-composite:exclude;pointer-events:none;}
-.glass .tag{font-size:14px;color:#5ed29c;font-family:'JetBrains Mono',monospace;letter-spacing:2px;}
-.glass h3{font-size:18px;color:#fff;font-weight:700;line-height:1.3;}
+.glass .tag{font-size:17px;color:#5ed29c;font-family:'JetBrains Mono',monospace;letter-spacing:3px;}
+.glass h3{font-size:24px;color:#fff;font-weight:700;line-height:1.3;}
 .glass h3 em{font-family:'Instrument Serif',serif;font-style:italic;font-weight:400;}
-.glass p{font-size:11px;color:rgba(255,255,255,0.6);line-height:1.5;}
-
+.glass p{font-size:13px;color:rgba(255,255,255,0.65);line-height:1.6;max-width:240px;}
 .eyebrow{font-family:'Plus Jakarta Sans';font-weight:700;font-size:11px;
     letter-spacing:3px;color:#5ed29c;text-transform:uppercase;margin-bottom:18px;}
 h1{font-family:'Inter';font-weight:800;text-transform:uppercase;letter-spacing:-0.02em;
-    color:#fff;font-size:40px;line-height:1.05;max-width:900px;}
-@media(min-width:768px){h1{font-size:72px;}}
+    color:#fff;font-size:38px;line-height:1.05;max-width:900px;}
+@media(min-width:768px){h1{font-size:68px;}}
 h1 .dot{color:#5ed29c;}
 .desc{font-size:14px;color:rgba(255,255,255,0.7);max-width:512px;line-height:1.7;margin:22px 0 30px;}
 .cta{display:inline-flex;align-items:center;gap:10px;background:#5ed29c;color:#070b0a;
-    border:none;border-radius:9999px;padding:15px 34px;font-family:'Inter';font-weight:700;
+    border:none;border-radius:9999px;padding:16px 38px;font-family:'Inter';font-weight:700;
     font-size:13px;letter-spacing:1.5px;text-transform:uppercase;cursor:pointer;
     text-decoration:none;transition:filter .2s,transform .2s;}
 .cta:hover{filter:brightness(1.1);transform:translateY(-2px);}
@@ -465,14 +498,12 @@ h1 .dot{color:#5ed29c;}
   <video id="bgvid" autoplay muted loop playsinline></video>
   <div class="ov-left"></div><div class="ov-bottom"></div>
   <div class="gridline g25"></div><div class="gridline g50"></div><div class="gridline g75"></div>
-
   <svg class="glow" width="900" height="400" viewBox="0 0 900 400">
     <defs><filter id="blur25" x="-50%" y="-50%" width="200%" height="200%">
       <feGaussianBlur stdDeviation="25"/></filter></defs>
     <ellipse cx="450" cy="160" rx="380" ry="90" fill="#0e3b2e" opacity="0.85" filter="url(#blur25)"/>
     <ellipse cx="450" cy="160" rx="220" ry="50" fill="#22d3a0" opacity="0.25" filter="url(#blur25)"/>
   </svg>
-
   <nav>
     <div class="logo">
       <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round">
@@ -480,25 +511,25 @@ h1 .dot{color:#5ed29c;}
       ARKA TRADES
     </div>
     <div class="menu">
-      <a href="#">SCANNER</a><a href="#">ALERTS</a><a href="#">ARKA AI</a><a href="#">CONTACT</a>
+      <a href="#">SCANNER</a><a href="#">ALERTS</a><a href="#">ARKA AI</a>
+      <a class="login-link" href="?login=1" target="_parent">LOGIN</a>
     </div>
     <button class="burger" onclick="document.getElementById('mov').classList.add('open')">
       <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2">
         <line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>
     </button>
   </nav>
-
   <div class="mobile-ov" id="mov">
     <button class="close-x" onclick="document.getElementById('mov').classList.remove('open')">
       <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2">
         <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
     </button>
-    <a href="#">SCANNER</a><a href="#">ALERTS</a><a href="#">ARKA AI</a><a href="#">CONTACT</a>
+    <a href="#">SCANNER</a><a href="#">ALERTS</a><a href="#">ARKA AI</a>
+    <a href="?login=1" target="_parent" style="color:#5ed29c;">LOGIN</a>
   </div>
-
   <div class="content">
     <div class="glass">
-      <div class="tag">[ 2025 ]</div>
+      <div class="tag">[ 2026 ]</div>
       <h3>Built for <em>Serious</em><br>Market Traders</h3>
       <p>AI scanning, instant alerts and chart intelligence in one terminal.</p>
     </div>
@@ -526,40 +557,16 @@ if (window.Hls && Hls.isSupported()) {
 </body>
 </html>
 """
-    components.html(hero_html, height=720, scrolling=False)
+    components.html(hero_html, height=800, scrolling=False)
 
-    # ── Login panel (opens when hero CTA is clicked) ─────────
-    if st.session_state.show_login:
-        _, login_col, _ = st.columns([1, 1.2, 1])
-        with login_col:
-            with st.form("lf"):
-                st.markdown(f"""
-                <div style="margin-bottom:14px;">
-                    <div style="font-size:18px;font-weight:800;color:{IVORY};">Member Login</div>
-                    <div style="font-size:12px;color:{T2};margin-top:4px;">Sign in to access your terminal</div>
-                </div>""", unsafe_allow_html=True)
-                u = st.text_input("Username", placeholder="Enter username")
-                p = st.text_input("Password", placeholder="Enter password", type="password")
-                ok = st.form_submit_button("Sign In", use_container_width=True, type="primary")
-                ph = st.empty()
-                if ok:
-                    if u.strip()=="ADMIN4477MAX" and p.strip()=="MOHIT1":
-                        ph.success("Welcome, Admin!")
-                        time.sleep(0.8)
-                        st.session_state.logged_in = True
-                        st.session_state.is_admin = True
-                        st.rerun()
-                    elif u.strip().lower()=="max trades" and p.strip().lower()=="max":
-                        ph.success("Login successful. Welcome to Arka Trades.")
-                        time.sleep(0.8)
-                        st.session_state.logged_in = True
-                        st.session_state.is_admin = False
-                        st.rerun()
-                    else:
-                        ph.error("Invalid username or password.")
-            st.markdown(f"<div style='text-align:center;font-size:11px;color:{T2};margin-top:10px;'>Educational platform · Access by invitation</div>", unsafe_allow_html=True)
+    # Fallback native login button (always works)
+    _, lb, _ = st.columns([2, 1, 2])
+    with lb:
+        if st.button("Member Login →", use_container_width=True, type="primary", key="hero_login_btn"):
+            st.session_state.show_login = True
+            st.rerun()
 
-    # ── Stats Strip (each stat its own accent) ───────────────
+    # ── Stats Strip ──────────────────────────────────────────
     st.markdown("<div style='height:32px;'></div>", unsafe_allow_html=True)
     s1, s2, s3, s4 = st.columns(4)
     for col, num, label, c in [
@@ -601,7 +608,7 @@ if (window.Hls && Hls.isSupported()) {
              padding:24px;margin-top:24px;box-shadow:0 4px 16px rgba(0,0,0,.35);">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
                 <span style="font-size:13px;font-weight:700;color:{IVORY};">RELIANCE · Daily</span>
-                <span style="background:rgba(16,185,129,.12);color:{GREEN};font-size:11px;font-weight:700;
+                <span style="background:rgba(52,211,153,.12);color:{GREEN};font-size:11px;font-weight:700;
                      padding:4px 12px;border-radius:20px;border:1px solid {GREEN}33;">VALID · 8/10</span>
             </div>
             <div style="background:{DARK3};border-radius:10px;padding:16px;font-family:{MONO};
@@ -658,7 +665,7 @@ if (window.Hls && Hls.isSupported()) {
             {checkline("Ranked similarity verdicts with entry and risk notes")}
         </div>""", unsafe_allow_html=True)
 
-    # ── Feature 3: Built for every trading style ─────────────
+    # ── Feature 3: Trading styles ────────────────────────────
     st.markdown("<div style='height:56px;'></div>", unsafe_allow_html=True)
     st.markdown(f"""
     <div style="text-align:center;margin-bottom:28px;">
@@ -735,7 +742,7 @@ if (window.Hls && Hls.isSupported()) {
                 <tr>
                     <th style="text-align:left;padding:14px;font-size:12px;color:{T2};"></th>
                     <th style="text-align:left;padding:14px;font-size:13px;color:{IVORY};">Manual Screening</th>
-                    <th style="text-align:left;padding:14px;font-size:13px;color:{CYAN};">Arka Trades Automation</th>
+                    <th style="text-align:left;padding:14px;font-size:13px;color:{INDIGO};">Arka Trades Automation</th>
                 </tr>
                 <tr><td style="padding:11px 14px;color:{T2};font-size:13px;border-top:1px solid {BORDER};">Time per scan</td>
                     <td style="padding:11px 14px;color:{RED};font-size:13px;border-top:1px solid {BORDER};">2-3 hours of charting</td>
@@ -777,15 +784,15 @@ if not st.session_state.disclaimer_done:
         <div style="background:{DARK2};border:1px solid {BORDER};border-radius:16px;
              padding:28px;font-size:13px;color:{T2};line-height:2;
              max-height:260px;overflow-y:auto;margin-bottom:20px;">
-            <strong style="color:{CYAN}">1. No Financial Advice</strong><br>
+            <strong style="color:{INDIGO}">1. No Financial Advice</strong><br>
             Arka Trades does not provide financial or investment advice. Educational only.<br><br>
-            <strong style="color:{CYAN}">2. Not SEBI Registered</strong><br>
+            <strong style="color:{INDIGO}">2. Not SEBI Registered</strong><br>
             We are not registered with SEBI as investment advisor or research analyst.<br><br>
-            <strong style="color:{CYAN}">3. Personal Responsibility</strong><br>
+            <strong style="color:{INDIGO}">3. Personal Responsibility</strong><br>
             All trading decisions are yours. You bear full responsibility for profits or losses.<br><br>
-            <strong style="color:{CYAN}">4. Data Accuracy</strong><br>
+            <strong style="color:{INDIGO}">4. Data Accuracy</strong><br>
             Market data may be delayed. We do not guarantee accuracy of any data shown.<br><br>
-            <strong style="color:{CYAN}">5. Personal Use Only</strong><br>
+            <strong style="color:{INDIGO}">5. Personal Use Only</strong><br>
             For personal educational use only. Not for commercial distribution.
         </div>""", unsafe_allow_html=True)
         t1 = st.checkbox("I understand this platform is for educational use only")
@@ -810,7 +817,6 @@ if not st.session_state.disclaimer_done:
 # ════════════════════════════════════════════════════════════
 left, right = st.columns([1, 4])
 
-# Module accent map — every page gets its own identity color
 PAGE_ACCENTS = {
     "home": INDIGO, "scanner": CYAN, "alerts": AMBER, "news": RED,
     "analysis": PURPLE, "smart_scan": GREEN, "quant": PINK,
@@ -824,7 +830,7 @@ with left:
     <div style="display:flex;align-items:center;gap:10px;padding:20px 12px 14px;
          border-bottom:1px solid {BORDER};">
         <div style="width:32px;height:32px;border-radius:8px;background:{GRAD_BRAND};
-             display:flex;align-items:center;justify-content:center;">{icon("trend", 16, "#fff")}</div>
+             display:flex;align-items:center;justify-content:center;">{icon("trend", 16, "#070b0a")}</div>
         <div>
             <div style="font-size:15px;font-weight:800;color:{IVORY};line-height:1;">ARKA TRADES</div>
             <div style="font-size:8px;letter-spacing:2px;color:{T2};text-transform:uppercase;margin-top:3px;">Analytics Platform</div>
@@ -839,7 +845,7 @@ with left:
         <div style="display:flex;align-items:center;gap:10px;padding:14px 12px;">
             <div style="width:40px;height:40px;border-radius:10px;background:{GRAD_AI};
                  display:flex;align-items:center;justify-content:center;
-                 font-weight:800;font-size:16px;color:#fff;">{initial}</div>
+                 font-weight:800;font-size:16px;color:#070b0a;">{initial}</div>
             <div>
                 <div style="font-size:11px;color:{T2};">Signed in as</div>
                 <div style="font-weight:800;font-size:14px;color:{IVORY};">{name}</div>
@@ -848,7 +854,7 @@ with left:
         <div style="height:1px;background:{BORDER};"></div>
         """, unsafe_allow_html=True)
 
-    st.markdown(f"<div style='padding:14px 12px 4px;font-size:10px;font-weight:700;letter-spacing:2px;color:{CYAN};text-transform:uppercase;'>Product Suite</div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='padding:14px 12px 4px;font-size:10px;font-weight:700;letter-spacing:2px;color:{INDIGO};text-transform:uppercase;'>Product Suite</div>", unsafe_allow_html=True)
 
     pg = st.session_state.page
 
@@ -910,13 +916,13 @@ with right:
         <div style="display:flex;align-items:center;justify-content:flex-end;height:60px;padding-right:8px;">
             <div style="display:inline-flex;align-items:center;gap:7px;font-weight:700;
                  font-size:11px;letter-spacing:1px;color:{GREEN};
-                 border:1px solid rgba(16,185,129,0.35);padding:5px 12px;border-radius:20px;
-                 background:rgba(16,185,129,0.08);"><span class="pulse-dot"></span>LIVE</div>
+                 border:1px solid rgba(52,211,153,0.35);padding:5px 12px;border-radius:20px;
+                 background:rgba(52,211,153,0.08);"><span class="pulse-dot"></span>LIVE</div>
         </div>""", unsafe_allow_html=True)
 
     st.markdown(f"<div style='height:1px;background:{BORDER};margin-bottom:12px;'></div>", unsafe_allow_html=True)
 
-    # ── INDEX CARDS (each index its own accent) ──────────────
+    # ── INDEX CARDS ──────────────────────────────────────────
     def show_idx(col, label, sym, c):
         d = get_index(sym)
         with col:
@@ -1091,7 +1097,7 @@ with right:
                 section("Results", CYAN)
                 cols7 = st.columns(5)
                 for i, s in enumerate(filtered):
-                    if s["cls"] == "g":   bd="rgba(16,185,129,0.4)"; top=GREEN
+                    if s["cls"] == "g":   bd="rgba(52,211,153,0.4)"; top=GREEN
                     elif s["cls"] == "r": bd="rgba(244,63,94,0.4)";  top=RED
                     else:                 bd=BORDER; top=BORDER
 
@@ -1189,7 +1195,7 @@ with right:
                 _ensure_news_state()
                 news_panel(your_syms)
 
-    # ── ALERTS ──────────────────────────────────────────────
+    # ── ALERTS (FIXED) ──────────────────────────────────────
     elif pg == "alerts":
         active_alerts = {s: a for s, a in st.session_state.alerts.items() if a.get("active")}
 
@@ -1222,7 +1228,7 @@ with right:
                 level = f"Rs {a['price']:,.2f}" if has_alert else "—"
                 if has_alert:
                     status = (f'<span style="display:inline-flex;align-items:center;gap:6px;'
-                              f'background:rgba(245,158,11,.12);color:{AMBER};font-size:11px;'
+                              f'background:rgba(251,191,36,.12);color:{AMBER};font-size:11px;'
                               f'font-weight:700;padding:3px 10px;border-radius:20px;'
                               f'border:1px solid {AMBER}33;"><span class="pulse-dot" style="background:{AMBER};"></span>ARMED</span>')
                 else:
@@ -1246,6 +1252,7 @@ with right:
                     with bA:
                         if st.button("Set", key=f"sa_{sym}_{key_suffix}", use_container_width=True):
                             st.session_state[f"open_{sym}_{key_suffix}"] = True
+                            st.rerun()
                     with bB:
                         if has_alert:
                             if st.button("Off", key=f"rm_{sym}_{key_suffix}", use_container_width=True):
@@ -1263,7 +1270,6 @@ with right:
                             <div style="font-size:12px;font-weight:700;color:{AMBER};
                                  padding:8px 0 0;">Configure alert · {sym}</div>
                         </div>""", unsafe_allow_html=True)
-                        st_ = get_static(sym)
                         alert_type = st.radio("Condition", ["PDH","PDL","Custom"],
                                               key=f"at_{sym}_{key_suffix}", horizontal=True)
                         cp = 0.0
@@ -1276,155 +1282,4 @@ with right:
                                 st.session_state[f"open_{sym}_{key_suffix}"] = False
                                 st.rerun()
                         with bc2:
-                            if st.button("Confirm", key=f"ok_{sym}_{key_suffix}", type="primary", use_container_width=True):
-                                if st_:
-                                    if alert_type=="PDH":   price=st_["pdh"]; atype="pdh"
-                                    elif alert_type=="PDL": price=st_["pdl"]; atype="pdl"
-                                    else:                   price=cp; atype="custom"
-                                    st.session_state.alerts[sym]={"type":atype,"price":price,"active":True}
-                                    db_save_alert(sym, atype, price)
-                                    if sym in st.session_state.alert_fired:
-                                        st.session_state.alert_fired.remove(sym)
-                                    send_telegram(f"Alert set!\n{sym} · {atype.upper()} · Rs{price:.2f}")
-                                    st.session_state[f"open_{sym}_{key_suffix}"]=False
-                                    st.success(f"Alert armed for {sym}.")
-                                    st.rerun()
-
-        st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
-        alert_tab1, alert_tab2 = st.tabs(["Arka Watchlist", "Your Watchlist"])
-        with alert_tab1:
-            st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
-            watchlist = st.session_state.get("admin_watchlist", [])
-            if not watchlist:
-                st.warning("Arka Watchlist not available yet.")
-            else:
-                render_alert_rows(watchlist, key_suffix="admin")
-        with alert_tab2:
-            st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
-            watchlist = st.session_state.get("watchlist", [])
-            if not watchlist:
-                st.warning("Upload your watchlist in Scanner first.")
-            else:
-                render_alert_rows(watchlist, key_suffix="yours")
-
-    # ── NEWS ────────────────────────────────────────────────
-    elif pg == "news":
-        watchlist = st.session_state.get("watchlist", [])
-        if not watchlist:
-            st.warning("Go to Scanner first and upload your watchlist.")
-        else:
-            _ensure_news_state()
-            news_panel(watchlist)
-
-    # ── ARKA AI / COMING SOON ───────────────────────────────
-    elif pg in ["analysis","heatmap","autoalert"]:
-        if pg == "analysis":
-            render_arka_ai()
-        else:
-            labels = {"heatmap":"Market Heatmap","autoalert":"Auto Smart Alerts"}
-            st.markdown(f"""
-            <div style="background:{DARK2};border:1px dashed {BORDER};border-radius:16px;
-                 padding:100px 20px;text-align:center;margin:20px 0;">
-                <div style="margin-bottom:16px;">{icon("clock", 32, T2)}</div>
-                <div style="font-size:26px;font-weight:800;color:{T2};margin-bottom:10px;">{labels.get(pg,'Coming Soon')}</div>
-                <div style="font-size:14px;color:{T2};opacity:.6;">This module is under development</div>
-            </div>""", unsafe_allow_html=True)
-
-    elif pg == "smart_scan":
-        from smart_scan_page import render_smart_scanner
-        render_smart_scanner(supabase)
-
-    # ── QUANT ANALYSIS ──────────────────────────────────────
-    elif pg == "quant":
-        from quant_analysis import render_quant_analysis
-        render_quant_analysis()
-
-    # ── PROFILE ─────────────────────────────────────────────
-       # ── PROFILE ─────────────────────────────────────────────
-    elif pg == "profile":
-        p1,p2 = st.columns([1,2])
-        with p1:
-            photo=st.session_state.get("profile_photo")
-            if photo:
-                st.image(photo,width=120); st.caption(name)
-            else:
-                st.markdown(f"""
-                <div style="width:96px;height:96px;border-radius:16px;background:{GRAD_AI};
-                     display:flex;align-items:center;justify-content:center;
-                     font-weight:800;font-size:36px;color:#fff;margin-bottom:12px;">{initial}</div>
-                <div style="font-size:20px;font-weight:800;color:{IVORY};">{name}</div>
-                <div style="font-size:11px;color:{T2};letter-spacing:1px;
-                     text-transform:uppercase;margin-top:4px;">Arka Trades Member</div>
-                """, unsafe_allow_html=True)
-        with p2:
-            with st.form("pf"):
-                a,b=st.columns(2)
-                nn=a.text_input("Full Name",      value=st.session_state.profile["name"])
-                np_=b.text_input("Contact Number", value=st.session_state.profile["phone"])
-                ne=st.text_input("Email Address", value=st.session_state.profile["email"])
-                ph=st.file_uploader("Upload Profile Photo",type=["jpg","jpeg","png"])
-                if st.form_submit_button("Save Profile",use_container_width=True,type="primary"):
-                    st.session_state.profile.update({"name":nn,"phone":np_,"email":ne})
-                    if ph: st.session_state["profile_photo"]=ph
-                    st.success(f"Saved! Welcome, {nn}!"); st.rerun()
-
-    # ── SETTINGS ────────────────────────────────────────────
-    elif pg == "settings":
-        st.markdown(f"<div style='font-size:15px;font-weight:800;color:{IVORY};margin:8px 0 10px;'>Appearance</div>", unsafe_allow_html=True)
-        t1,t2=st.columns(2)
-        with t1:
-            st.markdown(f"""
-            <div style="background:{DARK2};border:2px solid {INDIGO};border-radius:14px;
-                 padding:20px;text-align:center;">
-                <div style="margin-bottom:10px;">{icon("shield", 24, INDIGO)}</div>
-                <div style="font-weight:800;font-size:14px;color:{CYAN};">DARK MODE</div>
-                <div style="font-size:12px;color:{T2};margin-top:4px;">Currently active</div>
-            </div>""", unsafe_allow_html=True)
-        with t2:
-            st.markdown(f"""
-            <div style="background:{DARK3};border:1px solid {BORDER};border-radius:14px;
-                 padding:20px;text-align:center;opacity:.6;">
-                <div style="margin-bottom:10px;">{icon("clock", 24, T2)}</div>
-                <div style="font-weight:800;font-size:14px;color:{T2};">LIGHT MODE</div>
-                <div style="font-size:12px;color:{T2};margin-top:4px;">Coming soon</div>
-            </div>""", unsafe_allow_html=True)
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown(f"<div style='font-size:15px;font-weight:800;color:{IVORY};margin-bottom:10px;'>Telegram Notifications</div>", unsafe_allow_html=True)
-        st.info(f"Bot connected · Chat ID: {CHAT_ID}")
-        if st.button("Send Test Notification",use_container_width=True):
-            send_telegram("<b>Arka Trades</b>\nTest notification successful.")
-            st.success("Test sent to Telegram.")
-        st.divider()
-        st.markdown(f"<div style='font-size:15px;font-weight:800;color:{IVORY};'>Broker API — Coming Soon</div>", unsafe_allow_html=True)
-
-    # ── CONTACT ─────────────────────────────────────────────
-    elif pg == "contact":
-        c1,c2=st.columns([1,1])
-        with c1:
-            st.markdown(f"""
-            <div style="background:{DARK2};border:1px solid {BORDER};
-                 border-left:3px solid {CYAN};border-radius:14px;padding:28px;
-                 box-shadow:0 2px 8px rgba(0,0,0,.3);">
-                <div style="margin-bottom:12px;">{icon("mail", 24, CYAN)}</div>
-                <div style="font-weight:800;font-size:13px;letter-spacing:1px;color:{CYAN};
-                     text-transform:uppercase;margin-bottom:14px;">Get in Touch</div>
-                <div style="font-size:14px;color:{T2};line-height:2;margin-bottom:18px;">
-                    Questions, feedback or suggestions?<br>We would love to hear from you.
-                </div>
-                <div style="font-family:{MONO};font-size:13px;
-                     color:{CYAN};font-weight:700;word-break:break-all;">
-                    Mohitdevsinghchib644@gmail.com</div>
-                <div style="font-size:12px;color:{T2};margin-top:10px;">
-                    Mention ARKA TRADES in subject line.<br>Reply within 24 hours.</div>
-            </div>""", unsafe_allow_html=True)
-        with c2:
-            with st.form("cf"):
-                n=st.text_input("Your Name")
-                e=st.text_input("Your Email")
-                m=st.text_area("Message",height=120)
-                if st.form_submit_button("Send Message",use_container_width=True,type="primary"):
-                    if n and m: st.success("Please email: Mohitdevsinghchib644@gmail.com")
-                    else: st.warning("Fill name and message.")
-
-    st.markdown('</div>', unsafe_allow_html=True)
-
+                            if st.button("Confirm", key=f"ok_{sym}_{key_suffix}", type="primary", use_container_width
