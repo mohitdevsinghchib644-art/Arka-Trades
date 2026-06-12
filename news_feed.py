@@ -5,7 +5,8 @@ Drop this file next to app.py and import it.
 Features:
   - Google News RSS via feedparser
   - 10-second auto-refresh using @st.fragment
-  - Yellow dot 🟡 on stocks with news today
+  - Shows ONLY stocks that have news today
+  - Clean empty state when no watchlist stock is in the news
   - Auto-clears all news at midnight
   - Time shown on right side of each card
   - No full-page flicker
@@ -17,17 +18,17 @@ import time
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 
-# ── Constants ─────────────────────────────────────────────────
+# ── Constants (ChartX theme) ──────────────────────────────────
 IST         = timezone(timedelta(hours=5, minutes=30))
-GOLD        = "#C8A96A"
-GREEN       = "#00B37A"
-RED         = "#E84545"
-DARK        = "#04080F"
-DARK2       = "#060D1A"
-DARK3       = "#091525"
-BORDER      = "#0F2040"
-T2          = "#8A9AB5"
-IVORY       = "#F7EBE0"
+GOLD        = "#4F8DFD"   # accent (electric blue)
+GREEN       = "#10B981"
+RED         = "#EF4444"
+DARK        = "#0B0F17"
+DARK2       = "#0F1522"
+DARK3       = "#151D2E"
+BORDER      = "#1E293B"
+T2          = "#94A3B8"
+IVORY       = "#E2E8F0"
 NEWS_EXPIRE = 20   # minutes between fetches per stock
 
 
@@ -141,8 +142,8 @@ def refresh_news(watchlist: list[str]):
 
 
 def get_news_dot(sym: str) -> str:
-    """Return '🟡' if stock has news today, else ''."""
-    return "🟡" if st.session_state.get("_news_cache", {}).get(sym) else ""
+    """Return truthy marker if stock has news today, else '' (no emoji)."""
+    return "1" if st.session_state.get("_news_cache", {}).get(sym) else ""
 
 
 # ── Main Fragment ─────────────────────────────────────────────
@@ -150,92 +151,84 @@ def get_news_dot(sym: str) -> str:
 @st.fragment(run_every=10)
 def news_panel(watchlist: list[str]):
     """
-    Full news panel — reruns every 10 seconds independently.
-    Paste   news_panel(st.session_state.watchlist)
-    wherever you want the news section to appear.
+    News panel — reruns every 10 seconds independently.
+    Shows ONLY the stocks that have news today.
     """
     _ensure_news_state()
     refresh_news(watchlist)
 
     # ── Header
     st.markdown(f"""
-    <div style="display:flex;align-items:center;gap:16px;margin:32px 0 18px;">
+    <div style="display:flex;align-items:center;gap:14px;margin:32px 0 6px;">
+        <div style="font-family:'Plus Jakarta Sans','Inter',sans-serif;font-size:17px;
+             font-weight:800;color:{IVORY};white-space:nowrap;">Today's News</div>
         <div style="flex:1;height:1px;background:{BORDER};"></div>
-        <div style="font-family:'Bebas Neue',sans-serif;font-size:17px;
-             letter-spacing:5px;color:{GOLD};white-space:nowrap;">
-             TODAY'S NEWS &nbsp;🟡 = new today</div>
-        <div style="flex:1;height:1px;background:{BORDER};"></div>
-    </div>
-    <div style="font-size:11px;color:{T2};margin-bottom:16px;text-align:right;">
-        ⚡ Auto-refreshes every 10 sec · Resets at midnight IST
+        <div style="font-size:11px;color:{T2};white-space:nowrap;">
+            Auto-refreshes every 10s · Resets at midnight IST</div>
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Stock selector
-    cache = st.session_state.get("_news_cache", {})
-
-    # Stocks WITH news first, then rest
-    with_news    = [s for s in watchlist if cache.get(s)]
-    without_news = [s for s in watchlist if not cache.get(s)]
-    ordered      = with_news + without_news
-
-    if not ordered:
+    if not watchlist:
         st.info("Upload your watchlist to see news.")
         return
 
-    # ── Tabs: one per stock (max 10 shown)
-    display = ordered[:15]
-    tabs    = st.tabs([
-        f"{sym} {'🟡' if cache.get(sym) else ''}"
-        for sym in display
-    ])
+    cache     = st.session_state.get("_news_cache", {})
+    with_news = [s for s in watchlist if cache.get(s)]
+
+    # ── Empty state: no watchlist stock is in the news
+    if not with_news:
+        st.markdown(f"""
+        <div style="background:{DARK2};border:1px solid {BORDER};border-radius:12px;
+             padding:36px 24px;text-align:center;margin-top:12px;">
+            <div style="font-size:14px;font-weight:700;color:{IVORY};margin-bottom:6px;">
+                No stock news right now</div>
+            <div style="font-size:12px;color:{T2};line-height:1.7;">
+                None of the {len(watchlist)} stocks in this watchlist have news today.<br>
+                Checking again every {NEWS_EXPIRE} minutes.</div>
+        </div>""", unsafe_allow_html=True)
+        return
+
+    # ── Tabs: ONLY stocks with news (max 15 shown)
+    display = with_news[:15]
+    tabs    = st.tabs([f"{sym} ({len(cache.get(sym, []))})" for sym in display])
 
     for tab, sym in zip(tabs, display):
         with tab:
             articles = cache.get(sym, [])
-            if not articles:
-                st.markdown(f"""
-                <div style="background:{DARK2};border:1px solid {BORDER};
-                     border-radius:12px;padding:24px;text-align:center;
-                     color:{T2};font-size:14px;margin-top:8px;">
-                    No news found for <strong>{sym}</strong> today.<br>
-                    <span style="font-size:12px;opacity:.6;">
-                        Checking every {NEWS_EXPIRE} minutes.</span>
-                </div>""", unsafe_allow_html=True)
-            else:
-                st.markdown(f"""
-                <div style="font-size:12px;color:{GREEN};
-                     margin-bottom:12px;font-weight:700;">
-                     {len(articles)} article{'s' if len(articles)>1 else ''} today
-                </div>""", unsafe_allow_html=True)
 
-                for art in articles:
-                    # Left: title+source | Right: time
-                    col_left, col_right = st.columns([5, 1])
+            st.markdown(f"""
+            <div style="font-size:12px;color:{GREEN};
+                 margin:10px 0 12px;font-weight:700;">
+                 {len(articles)} article{'s' if len(articles)>1 else ''} today
+            </div>""", unsafe_allow_html=True)
 
-                    with col_right:
-                        st.markdown(f"""
-                        <div style="text-align:right;padding-top:14px;">
-                            <div style="font-family:'JetBrains Mono',monospace;
-                                 font-size:11px;color:{T2};white-space:nowrap;">
-                                 {art['time_str']}</div>
-                        </div>""", unsafe_allow_html=True)
+            for art in articles:
+                # Left: title+source | Right: time
+                col_left, col_right = st.columns([5, 1])
 
-                    with col_left:
-                        st.markdown(f"""
-                        <div style="background:{DARK2};border:1px solid {BORDER};
-                             border-left:3px solid {GOLD};border-radius:10px;
-                             padding:14px 16px;margin-bottom:8px;
-                             transition:border-color .2s;">
-                            <a href="{art['link']}" target="_blank"
-                               style="font-family:'Inter',sans-serif;
-                                      font-weight:700;font-size:14px;
-                                      color:{IVORY};text-decoration:none;
-                                      line-height:1.5;">
-                               {art['title']}
-                            </a>
-                            <div style="font-size:11px;color:{T2};margin-top:6px;
-                                 font-weight:600;letter-spacing:1px;">
-                                 📰 {art['source']}
-                            </div>
-                        </div>""", unsafe_allow_html=True)
+                with col_right:
+                    st.markdown(f"""
+                    <div style="text-align:right;padding-top:14px;">
+                        <div style="font-family:'JetBrains Mono',monospace;
+                             font-size:11px;color:{T2};white-space:nowrap;">
+                             {art['time_str']}</div>
+                    </div>""", unsafe_allow_html=True)
+
+                with col_left:
+                    st.markdown(f"""
+                    <div style="background:{DARK2};border:1px solid {BORDER};
+                         border-left:3px solid {GOLD};border-radius:10px;
+                         padding:14px 16px;margin-bottom:8px;
+                         box-shadow:0 1px 3px rgba(0,0,0,.3);">
+                        <a href="{art['link']}" target="_blank"
+                           style="font-family:'Plus Jakarta Sans','Inter',sans-serif;
+                                  font-weight:700;font-size:14px;
+                                  color:{IVORY};text-decoration:none;
+                                  line-height:1.5;">
+                           {art['title']}
+                        </a>
+                        <div style="font-size:11px;color:{T2};margin-top:6px;
+                             font-weight:600;letter-spacing:1px;">
+                             {art['source']}
+                        </div>
+                    </div>""", unsafe_allow_html=True)
