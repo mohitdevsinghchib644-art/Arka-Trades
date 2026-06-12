@@ -932,10 +932,6 @@ with right:
     elif pg in ["analysis","heatmap","autoalert"]:
         if pg == "analysis":
             render_arka_ai()
-
-    elif pg == "smart_scan":
-        from smart_scan_page import render_smart_scanner
-        render_smart_scanner(supabase)
         else:
             section("COMING SOON")
             labels = {"heatmap":"Market Heatmap","autoalert":"Auto Smart Alerts"}
@@ -946,6 +942,10 @@ with right:
                      letter-spacing:5px;color:{T2};margin-bottom:12px;">{labels.get(pg,'Coming Soon')}</div>
                 <div style="font-size:15px;color:{T2};opacity:.6;">This feature is under development</div>
             </div>""", unsafe_allow_html=True)
+
+    elif pg == "smart_scan":
+        from smart_scan_page import render_smart_scanner
+        render_smart_scanner(supabase)
  
     # ── PROFILE ─────────────────────────────────────────────
     elif pg == "profile":
