@@ -1,5 +1,5 @@
 """
-stat_arb_meta.py — Statistical Arbitrage Pairs Trading with Meta-Labeling
+quant_analysis.py — Statistical Arbitrage Pairs Trading with Meta-Labeling
 ==========================================================================
 Methodology:
   - Ernest Chan, "Quantitative Trading": cointegration-based pairs trading,
@@ -13,7 +13,7 @@ Pipeline:
   Triple-Barrier Meta-Labels -> Purged CV Model -> Filtered/Sized Signals ->
   Backtest with costs & stops.
 
-Dependencies: pandas, numpy, scikit-learn, statsmodels, yfinance
+Dependencies: pandas, numpy, scikit-learn, statsmodels, yfinance, streamlit
 """
 
 import numpy as np
@@ -391,30 +391,42 @@ class Backtester:
 
 
 # ════════════════════════════════════════════════════════════
-# 9. FULL PIPELINE
+# 9. FULL PIPELINE  (returns structured results; logs via callback)
 # ════════════════════════════════════════════════════════════
 
-def run_pipeline(tickers: list, start="2018-01-01", train_frac=0.7):
-    print(f"[1/6] Downloading {len(tickers)} tickers...")
+def run_pipeline(tickers: list, start="2018-01-01", train_frac=0.7, log=print):
+    """
+    Run the full stat-arb meta-labeling pipeline.
+    `log` is a callback(str) so the UI can stream progress. Returns a dict:
+      {"status": "ok"|"error", "message": str, "pair": Pair, "results": dict,
+       "cv_scores": list, "feature_importance": pd.Series}
+    """
+    log(f"[1/6] Downloading {len(tickers)} tickers...")
     prices = get_data(tickers, start=start)
+    if prices.shape[1] < 2:
+        return {"status": "error",
+                "message": "Need at least 2 tickers with overlapping price history."}
 
-    print("[2/6] Selecting cointegrated pairs (Engle-Granger + ADF + half-life)...")
+    log("[2/6] Selecting cointegrated pairs (Engle-Granger + ADF + half-life)...")
     pairs = PairSelector().fit(prices.iloc[: int(len(prices) * train_frac)])
     if not pairs:
-        print("No tradeable cointegrated pairs found."); return None
+        return {"status": "error",
+                "message": "No tradeable cointegrated pairs found."}
     pair = pairs[0]
-    print(f"      Best pair: {pair.y}/{pair.x}  p={pair.pvalue:.4f}  "
-          f"hedge={pair.hedge:.3f}  HL={pair.half_life:.1f}d")
+    log(f"      Best pair: {pair.y}/{pair.x}  p={pair.pvalue:.4f}  "
+        f"hedge={pair.hedge:.3f}  HL={pair.half_life:.1f}d")
 
-    print("[3/6] Primary signals + features...")
+    log("[3/6] Primary signals + features...")
     sig = PrimaryStrategy(pair).compute(prices)
     feats = build_features(prices, sig, pair)
 
-    print("[4/6] Triple-barrier meta-labels...")
+    log("[4/6] Triple-barrier meta-labels...")
     events = sig.index[sig["side"] != 0]
     labels = triple_barrier_labels(sig["spread"], events, sig["side"])
     if labels.empty or len(labels) < 50:
-        print("Insufficient labeled events."); return None
+        return {"status": "error",
+                "message": f"Insufficient labeled events ({0 if labels.empty else len(labels)}). "
+                           f"Need at least 50."}
 
     X = feats.loc[labels.index].dropna()
     labels = labels.loc[X.index]
@@ -423,42 +435,141 @@ def run_pipeline(tickers: list, start="2018-01-01", train_frac=0.7):
     X_tr, lab_tr = X[X.index < split_t], labels[labels.index < split_t]
     X_te = X[X.index >= split_t]
 
-    print(f"[5/6] Meta-model: purged {5}-fold CV w/ embargo "
-          f"({len(X_tr)} train events)...")
+    log(f"[5/6] Meta-model: purged 5-fold CV w/ embargo ({len(X_tr)} train events)...")
     meta = MetaLabeler().fit(X_tr, lab_tr)
-    print(f"      CV F1 scores: {[f'{s:.2f}' for s in meta.cv_scores_]}")
+    log(f"      CV F1 scores: {[f'{s:.2f}' for s in meta.cv_scores_]}")
 
     fi = feature_importance_mda(
         RandomForestClassifier(n_estimators=200, max_depth=4,
                                min_samples_leaf=0.05, random_state=42, n_jobs=-1),
         X_tr, lab_tr)
-    print("      MDA feature importance:")
-    for f, v in fi.items():
-        print(f"        {f:<14s} {v:+.4f}")
 
-    print("[6/6] Out-of-sample backtest with costs + stop-loss...")
+    log("[6/6] Out-of-sample backtest with costs + stop-loss...")
     size = meta.predict_size(X_te)
     oos_prices = prices[prices.index >= split_t]
     oos_sig = sig[sig.index >= split_t]
     results = Backtester(cost_bps=5, stop_loss_pct=0.03).run(
         oos_prices, oos_sig, size, pair)
 
-    print("\n══════════ OUT-OF-SAMPLE RESULTS ══════════")
-    print(f"  Pair            : {pair.y} / {pair.x}")
-    print(f"  Total return    : {results['total_return_pct']:+.2f}%")
-    print(f"  Sharpe ratio    : {results['sharpe']:.2f}")
-    print(f"  Max drawdown    : {results['max_drawdown_pct']:.2f}%")
-    print(f"  Trades / WinRate: {results['n_trades']} / {results['win_rate']:.1f}%")
-    return results
+    return {"status": "ok", "message": "Pipeline complete.",
+            "pair": pair, "results": results,
+            "cv_scores": meta.cv_scores_, "feature_importance": fi}
 
+
+# ════════════════════════════════════════════════════════════
+# 10. STREAMLIT UI
+# ════════════════════════════════════════════════════════════
+
+DEFAULT_UNIVERSE = ("HDFCBANK.NS, ICICIBANK.NS, KOTAKBANK.NS, "
+                    "AXISBANK.NS, SBIN.NS, INDUSINDBK.NS")
+
+
+def render_quant_analysis():
+    import streamlit as st
+
+    st.markdown("### Statistical Arbitrage — Pairs Trading with Meta-Labeling")
+    st.caption("Cointegration pair selection (Chan) + triple-barrier meta-labeling "
+               "and purged CV (López de Prado). Out-of-sample backtest with costs "
+               "and stop-loss.")
+
+    with st.form("quant_form"):
+        c1, c2, c3 = st.columns([3, 1, 1])
+        tickers_raw = c1.text_input(
+            "Tickers (comma separated, use .NS for NSE)",
+            value=DEFAULT_UNIVERSE,
+            help="Provide at least 2 tickers. The model hunts for the best "
+                 "cointegrated pair among them.")
+        start = c2.text_input("Start date", value="2018-01-01")
+        train_frac = c3.slider("Train fraction", 0.5, 0.9, 0.7, 0.05)
+        run = st.form_submit_button("Run Analysis", type="primary",
+                                    use_container_width=True)
+
+    if not run:
+        st.info("Enter tickers and click **Run Analysis** to start. "
+                "Indian banking names are pre-filled as a classic cointegration set.")
+        return
+
+    tickers = [t.strip().upper() for t in tickers_raw.split(",") if t.strip()]
+    if len(tickers) < 2:
+        st.error("Please enter at least 2 tickers.")
+        return
+
+    log_box = st.empty()
+    logs = []
+
+    def log(msg):
+        logs.append(msg)
+        log_box.code("\n".join(logs))
+
+    with st.spinner("Running pipeline... this can take a minute on first run."):
+        try:
+            out = run_pipeline(tickers, start=start, train_frac=train_frac, log=log)
+        except Exception as e:
+            import traceback
+            st.error(f"Pipeline crashed: {e}")
+            st.code(traceback.format_exc())
+            return
+
+    if out["status"] != "ok":
+        st.warning(out["message"])
+        return
+
+    pair = out["pair"]
+    res = out["results"]
+
+    st.success(out["message"])
+
+    # ── Selected pair ──
+    st.markdown("#### Selected Pair")
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric("Pair", f"{pair.y} / {pair.x}")
+    p2.metric("Coint p-value", f"{pair.pvalue:.4f}")
+    p3.metric("Hedge ratio", f"{pair.hedge:.3f}")
+    p4.metric("Half-life (days)", f"{pair.half_life:.1f}")
+
+    # ── Out-of-sample performance ──
+    st.markdown("#### Out-of-Sample Performance")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total Return", f"{res['total_return_pct']:+.2f}%")
+    m2.metric("Sharpe Ratio", f"{res['sharpe']:.2f}")
+    m3.metric("Max Drawdown", f"{res['max_drawdown_pct']:.2f}%")
+    m4.metric("Trades / Win%", f"{res['n_trades']} / {res['win_rate']:.0f}%")
+
+    # ── Equity curve ──
+    st.markdown("#### Equity Curve (OOS)")
+    equity = res["equity"]
+    st.line_chart(equity.rename("Equity"))
+
+    # ── CV scores ──
+    if out["cv_scores"]:
+        st.markdown("#### Meta-Model CV F1 Scores")
+        cv_df = pd.DataFrame({
+            "Fold": [f"Fold {i+1}" for i in range(len(out["cv_scores"]))],
+            "F1": [round(s, 3) for s in out["cv_scores"]],
+        }).set_index("Fold")
+        st.bar_chart(cv_df)
+
+    # ── Feature importance ──
+    fi = out.get("feature_importance")
+    if fi is not None and len(fi):
+        st.markdown("#### Feature Importance (MDA)")
+        st.bar_chart(fi.rename("Importance"))
+
+    # ── Trades ──
+    st.markdown("#### Trade Log")
+    trades = res["trades"]
+    if isinstance(trades, pd.DataFrame) and not trades.empty:
+        st.dataframe(trades, use_container_width=True)
+    else:
+        st.caption("No trades were generated in the out-of-sample window.")
+
+
+# ════════════════════════════════════════════════════════════
+# 11. CLI ENTRY POINT
+# ════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     # Indian banking sector — classic cointegration hunting ground (use .NS for NSE)
     UNIVERSE = ["HDFCBANK.NS", "ICICIBANK.NS", "KOTAKBANK.NS",
                 "AXISBANK.NS", "SBIN.NS", "INDUSINDBK.NS"]
     run_pipeline(UNIVERSE)
-
-
-def render_quant_analysis():
-    import streamlit as st
-    st.info("Quant Analysis module is loading. Check back shortly.")
