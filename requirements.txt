@@ -14,3 +14,5 @@ Pillow>=10.0.0
 matplotlib>=3.8.0
 scikit-learn
 statsmodels
+scipy>=1.11.0
+arch>=6.3.0
