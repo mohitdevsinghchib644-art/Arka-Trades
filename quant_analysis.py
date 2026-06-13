@@ -1,47 +1,39 @@
 """
 quant_analysis.py — Institutional Quant Terminal (5-day swing horizon)
 ======================================================================
-Engine combines:
-  - López de Prado (AFML): fractional differentiation + memory conservation
-    (Ch.5), path-dependent triple-barrier labeling (Ch.3).
-  - Ernest Chan: volatility-scaled barriers, bps transaction-cost model,
-    statistical expectancy / Sharpe-equivalent.
-  - Institutional factor battery: beta/alpha vs NIFTY, Sharpe, Sortino,
-    max drawdown, VaR/CVaR (95%), Hurst exponent, skew/kurtosis,
-    annualized drift & vol, return autocorrelation.
-  - Fundamentals: P/E, P/B, ROE, margins, market cap, 52w range (yfinance).
-  - EWMA conditional-variance volatility regime + Volume-Profile S/R.
-  - Gemini-written institutional research note (no image upload).
+Methodology grounded in:
+  - López de Prado (AFML): fractional differentiation (Ch.5),
+    triple-barrier labeling (Ch.3), purged walk-forward CV (Ch.7),
+    Probabilistic & Deflated Sharpe (Ch.8).
+  - Ernest Chan: vol-scaled barriers, bps cost model, Kelly sizing.
+  - Standard desk factor battery: beta/alpha vs NIFTY, Sharpe, Sortino,
+    max drawdown, VaR/CVaR (95%), Hurst, skew/kurtosis, drift & vol.
+  - EWMA conditional variance regime + Volume-Profile S/R.
 
 UI entry point: render_quant_analysis()
-Dependencies: pandas, numpy, scikit-learn, statsmodels, yfinance,
-              google-generativeai, streamlit
+Deps: pandas, numpy, scipy, statsmodels, yfinance, google-generativeai, streamlit
 """
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
+from scipy import stats as scistats
 from statsmodels.tsa.stattools import adfuller
 
-# ── Terminal palette (Bloomberg-style) ──
-BG     = "#0A0E14"
-PANEL  = "#0F141C"
-PANEL2 = "#141B26"
-BORDER = "#1F2A38"
-AMBER  = "#FFA600"
-IVORY  = "#E6EDF3"
-MUTE   = "#7D8DA0"
-GREEN  = "#26D07C"
-RED    = "#FF4D4D"
-BLUE   = "#3DA5FF"
-MONO   = "'JetBrains Mono','SF Mono',monospace"
+# ── Terminal palette ──
+BG, PANEL, PANEL2, BORDER = "#0A0E14", "#0F141C", "#141B26", "#1F2A38"
+AMBER, IVORY, MUTE = "#FFA600", "#E6EDF3", "#7D8DA0"
+GREEN, RED, BLUE = "#26D07C", "#FF4D4D", "#3DA5FF"
+MONO = "'JetBrains Mono','SF Mono',monospace"
+TRADING_DAYS = 252
+HORIZON = 5  # business-day swing horizon
 
 
 # ════════════════════════════════════════════════════════════
-# DATA
+# DATA  (cached to avoid rate limits)
 # ════════════════════════════════════════════════════════════
 
-def fetch_history(symbol: str, period: str = "3y", interval: str = "1d"):
+def fetch_history(symbol: str, period: str = "5y", interval: str = "1d"):
     sym = symbol.strip().upper()
     if not sym.endswith(".NS"):
         sym += ".NS"
@@ -51,22 +43,21 @@ def fetch_history(symbol: str, period: str = "3y", interval: str = "1d"):
         return df, sym, {}
     df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
     try:
-        info = tk.info
+        info = tk.info or {}
     except Exception:
         info = {}
     return df, sym, info
 
 
-def fetch_benchmark(period: str = "3y"):
+def fetch_benchmark(period: str = "5y"):
     try:
-        b = yf.Ticker("^NSEI").history(period=period, interval="1d")["Close"].dropna()
-        return b
+        return yf.Ticker("^NSEI").history(period=period, interval="1d")["Close"].dropna()
     except Exception:
         return pd.Series(dtype=float)
 
 
 # ════════════════════════════════════════════════════════════
-# 1. FRACTIONAL DIFFERENTIATION & MEMORY  (AFML Ch.5)
+# 1. FRACTIONAL DIFFERENTIATION  (AFML Ch.5)
 # ════════════════════════════════════════════════════════════
 
 def _ffd_weights(d, threshold=1e-4):
@@ -114,18 +105,20 @@ def stationarity_analysis(close, ds=np.round(np.arange(0, 1.01, 0.05), 2), targe
 # ════════════════════════════════════════════════════════════
 
 def ewma_vol(close, lam=0.94):
+    """Causal EWMA daily vol: each value uses only past returns (no look-ahead)."""
     r = np.log(close / close.shift(1)).dropna()
-    var = np.zeros(len(r)); var[0] = r.var()
+    var = np.zeros(len(r))
+    var[0] = r.var()
     for t in range(1, len(r)):
         var[t] = lam * var[t - 1] + (1 - lam) * r.iloc[t - 1] ** 2
     return pd.Series(np.sqrt(var), index=r.index)
 
 
 def volatility_regime(sigma):
-    cur = float(sigma.iloc[-1]); hist = sigma.tail(252)
+    cur = float(sigma.iloc[-1]); hist = sigma.tail(TRADING_DAYS)
     pct = float((hist < cur).mean() * 100)
     regime = "HIGH / STRESSED" if pct >= 80 else "LOW / COMPRESSED" if pct <= 20 else "NORMAL"
-    return {"sigma_daily": cur, "sigma_annual": cur * np.sqrt(252),
+    return {"sigma_daily": cur, "sigma_annual": cur * np.sqrt(TRADING_DAYS),
             "percentile": pct, "regime": regime}
 
 
@@ -148,7 +141,7 @@ def volume_profile_levels(df, lookback=120, bins=30):
 
 
 # ════════════════════════════════════════════════════════════
-# 3. INSTITUTIONAL FACTOR BATTERY
+# 3. FACTOR BATTERY
 # ════════════════════════════════════════════════════════════
 
 def hurst_exponent(ts, max_lag=40):
@@ -161,17 +154,17 @@ def hurst_exponent(ts, max_lag=40):
 
 def factor_battery(close, bench):
     r = np.log(close / close.shift(1)).dropna()
-    ann_ret = float(r.mean() * 252)
-    ann_vol = float(r.std() * np.sqrt(252))
-    sharpe = ann_ret / ann_vol if ann_vol > 0 else 0
-    downside = r[r < 0].std() * np.sqrt(252)
-    sortino = ann_ret / downside if downside > 0 else 0
+    ann_ret = float(r.mean() * TRADING_DAYS)
+    ann_vol = float(r.std() * np.sqrt(TRADING_DAYS))
+    sharpe = ann_ret / ann_vol if ann_vol > 0 else 0.0
+    downside = r[r < 0].std() * np.sqrt(TRADING_DAYS)
+    sortino = ann_ret / downside if downside > 0 else 0.0
     eq = (1 + r).cumprod()
     mdd = float((eq / eq.cummax() - 1).min() * 100)
     var95 = float(np.percentile(r, 5) * 100)
     cvar95 = float(r[r <= np.percentile(r, 5)].mean() * 100)
     skew = float(r.skew()); kurt = float(r.kurtosis())
-    ac1 = float(r.autocorr(1)) if len(r) > 2 else 0
+    ac1 = float(r.autocorr(1)) if len(r) > 2 else 0.0
     hurst = hurst_exponent(np.log(close.dropna().values))
 
     beta = alpha = np.nan
@@ -181,11 +174,12 @@ def factor_battery(close, bench):
         j.columns = ["a", "b"]
         if len(j) > 30 and j["b"].var() > 0:
             beta = float(np.cov(j["a"], j["b"])[0, 1] / j["b"].var())
-            alpha = float((j["a"].mean() - beta * j["b"].mean()) * 252)
+            alpha = float((j["a"].mean() - beta * j["b"].mean()) * TRADING_DAYS)
     return {"ann_ret": ann_ret * 100, "ann_vol": ann_vol * 100, "sharpe": sharpe,
             "sortino": sortino, "max_dd": mdd, "var95": var95, "cvar95": cvar95,
             "skew": skew, "kurt": kurt, "autocorr1": ac1, "hurst": hurst,
-            "beta": beta, "alpha": (alpha * 100) if np.isfinite(alpha) else np.nan}
+            "beta": beta, "alpha": (alpha * 100) if np.isfinite(alpha) else np.nan,
+            "daily_ret_mean": float(r.mean()), "daily_ret_std": float(r.std())}
 
 
 def fundamentals(info):
@@ -197,7 +191,7 @@ def fundamentals(info):
         "name": info.get("longName") or info.get("shortName") or "—",
         "sector": info.get("sector") or "—",
         "industry": info.get("industry") or "—",
-        "mcap_cr": (mc / 1e7) if mc else None,  # INR crore
+        "mcap_cr": (mc / 1e7) if mc else None,
         "pe": g("trailingPE"), "fwd_pe": g("forwardPE"), "pb": g("priceToBook"),
         "roe": (g("returnOnEquity") or 0) * 100 if g("returnOnEquity") is not None else None,
         "profit_margin": (g("profitMargins") or 0) * 100 if g("profitMargins") is not None else None,
@@ -208,39 +202,115 @@ def fundamentals(info):
 
 
 # ════════════════════════════════════════════════════════════
-# 4. PATH-DEPENDENT TRIPLE-BARRIER (AFML Ch.3 + Chan costs)
+# 4. STATISTICS OF SKILL  (AFML Ch.8)
 # ════════════════════════════════════════════════════════════
 
-def triple_barrier_backtest(close, sigma, side=1, pt=2.0, sl=1.5, vbar=5, cost_bps=10.0):
+def probabilistic_sharpe_ratio(returns, sr_benchmark=0.0):
+    """PSR: probability the observed (per-period) Sharpe exceeds a benchmark,
+    correcting for skew/kurtosis and sample size. Returns prob in [0,1]."""
+    r = np.asarray(returns, dtype=float)
+    n = len(r)
+    if n < 8 or r.std(ddof=1) == 0:
+        return 0.5, 0.0
+    sr = r.mean() / r.std(ddof=1)
+    g3 = scistats.skew(r); g4 = scistats.kurtosis(r, fisher=True) + 3.0
+    denom = np.sqrt(1 - g3 * sr + ((g4 - 1) / 4) * sr ** 2)
+    if denom <= 0:
+        return 0.5, float(sr)
+    psr = scistats.norm.cdf((sr - sr_benchmark) * np.sqrt(n - 1) / denom)
+    return float(psr), float(sr)
+
+
+def deflated_sharpe(returns, n_trials=2):
+    """Deflate PSR for multiple testing (e.g., long vs short = 2 trials).
+    Benchmark SR rises with the number of independent trials."""
+    r = np.asarray(returns, dtype=float)
+    n = len(r)
+    if n < 8 or r.std(ddof=1) == 0 or n_trials < 1:
+        return 0.5
+    # expected max Sharpe of N trials under the null (variance of trial SRs ~ 1/n)
+    sr_var = 1.0 / n
+    emc = 0.5772156649
+    e_max = np.sqrt(sr_var) * ((1 - emc) * scistats.norm.ppf(1 - 1.0 / n_trials)
+                               + emc * scistats.norm.ppf(1 - 1.0 / (n_trials * np.e)))
+    dsr, _ = probabilistic_sharpe_ratio(r, sr_benchmark=e_max)
+    return float(dsr)
+
+
+# ════════════════════════════════════════════════════════════
+# 5. TRIPLE-BARRIER  (look-ahead-free, non-overlapping, purged WF)
+# ════════════════════════════════════════════════════════════
+
+def _barrier_outcome(px, i, sig_i, side, pt, sl, vbar, cost):
+    """Outcome of one trade opened at bar i. sig_i must be known at time i."""
+    p0 = px.iloc[i]
+    up = p0 * (1 + side * pt * sig_i)
+    dn = p0 * (1 + side * -sl * sig_i)
+    path = px.iloc[i + 1: i + 1 + vbar]
+    for p in path:
+        if side == 1:
+            if p >= up: return pt * sig_i - cost
+            if p <= dn: return -sl * sig_i - cost
+        else:
+            if p <= up: return pt * sig_i - cost
+            if p >= dn: return -sl * sig_i - cost
+    return side * (path.iloc[-1] / p0 - 1) - cost
+
+
+def triple_barrier_nonoverlap(close, sigma, side=1, pt=2.0, sl=1.5,
+                              vbar=HORIZON, cost_bps=10.0):
+    """Non-overlapping samples: after each trade we jump forward vbar bars.
+    sigma is causal, so sig at bar i uses only data up to i (no leak)."""
     px = close.reindex(sigma.index).dropna()
     sig = sigma.reindex(px.index)
     cost = cost_bps / 1e4
-    rets, labels = [], []
-    for i in range(len(px) - vbar):
+    rets = []
+    i = 0
+    while i < len(px) - vbar:
         s = float(sig.iloc[i])
         if not np.isfinite(s) or s <= 0:
-            continue
-        p0 = px.iloc[i]
-        up = p0 * (1 + side * pt * s); dn = p0 * (1 + side * -sl * s)
-        path = px.iloc[i + 1: i + 1 + vbar]
-        out = None
-        for p in path:
-            if side == 1:
-                if p >= up: out = pt * s; break
-                if p <= dn: out = -sl * s; break
-            else:
-                if p <= up: out = pt * s; break
-                if p >= dn: out = -sl * s; break
-        if out is None:
-            out = side * (path.iloc[-1] / p0 - 1)
-        out -= cost
-        rets.append(out); labels.append(1 if out > 0 else 0)
+            i += 1; continue
+        rets.append(_barrier_outcome(px, i, s, side, pt, sl, vbar, cost))
+        i += vbar  # non-overlapping -> independent observations
     rets = np.array(rets)
     if len(rets) == 0:
-        return {"expectancy": 0, "sharpe": 0, "win_rate": 0, "n": 0}
-    m, sd = rets.mean(), rets.std()
-    return {"expectancy": float(m), "sharpe": float(m / sd * np.sqrt(50)) if sd > 0 else 0,
-            "win_rate": float(np.mean(labels) * 100), "n": int(len(rets))}
+        return {"expectancy": 0.0, "psr": 0.5, "dsr": 0.5, "sr_period": 0.0,
+                "win_rate": 0.0, "n": 0, "rets": rets}
+    psr, sr = probabilistic_sharpe_ratio(rets, 0.0)
+    dsr = deflated_sharpe(rets, n_trials=2)  # long & short both tested
+    return {"expectancy": float(rets.mean()), "psr": psr, "dsr": dsr,
+            "sr_period": sr, "win_rate": float((rets > 0).mean() * 100),
+            "n": int(len(rets)), "rets": rets}
+
+
+def purged_walk_forward(close, sigma, side, pt, sl, vbar=HORIZON,
+                        cost_bps=10.0, folds=5):
+    """Walk-forward out-of-sample expectancy with purging of the embargo
+    window between train/test so overlapping labels can't leak (AFML Ch.7)."""
+    px = close.reindex(sigma.index).dropna()
+    sig = sigma.reindex(px.index)
+    cost = cost_bps / 1e4
+    n = len(px)
+    if n < (folds + 1) * (vbar + 20):
+        return {"oos_expectancy": np.nan, "oos_win_rate": np.nan, "oos_n": 0}
+    fold_size = n // (folds + 1)
+    oos = []
+    for f in range(1, folds + 1):
+        test_start = f * fold_size
+        test_end = min((f + 1) * fold_size, n - vbar)
+        i = test_start + vbar  # purge: skip first vbar bars to avoid overlap leak
+        while i < test_end:
+            s = float(sig.iloc[i])
+            if np.isfinite(s) and s > 0:
+                oos.append(_barrier_outcome(px, i, s, side, pt, sl, vbar, cost))
+                i += vbar
+            else:
+                i += 1
+    oos = np.array(oos)
+    if len(oos) == 0:
+        return {"oos_expectancy": np.nan, "oos_win_rate": np.nan, "oos_n": 0}
+    return {"oos_expectancy": float(oos.mean()),
+            "oos_win_rate": float((oos > 0).mean() * 100), "oos_n": int(len(oos))}
 
 
 def execution_matrix(price, sig_d, side, pt=2.0, sl=1.5, cost_bps=10.0):
@@ -250,54 +320,84 @@ def execution_matrix(price, sig_d, side, pt=2.0, sl=1.5, cost_bps=10.0):
     else:
         entry, tgt, stp = price, price * (1 - pt * sig_d) + cost, price * (1 + sl * sig_d) + cost
     rr = abs(tgt - entry) / abs(entry - stp) if (entry - stp) != 0 else 0
-    return {"entry": round(entry, 2), "target": round(tgt, 2), "stop": round(stp, 2), "rr": round(rr, 2)}
+    return {"entry": round(entry, 2), "target": round(tgt, 2),
+            "stop": round(stp, 2), "rr": round(rr, 2)}
 
 
 # ════════════════════════════════════════════════════════════
-# 5. COMPOSITE ALPHA
+# 6. POSITION SIZING  (vol-target + fractional Kelly)
+# ════════════════════════════════════════════════════════════
+
+def position_sizing(setup, sigma_annual, target_vol=0.15, kelly_fraction=0.5, max_w=1.0):
+    """Vol-target weight scaled by a half-Kelly edge estimate.
+    Kelly uses the setup's per-trade expectancy & variance (non-overlapping)."""
+    rets = setup.get("rets", np.array([]))
+    vol_target_w = min(max_w, target_vol / sigma_annual) if sigma_annual > 0 else 0.0
+    kelly = 0.0
+    if len(rets) > 8 and rets.var() > 0:
+        kelly = float(rets.mean() / rets.var())  # f* = mu / var
+    kelly = max(0.0, min(max_w, kelly * kelly_fraction))
+    # final weight: blend, gated by statistical confidence (DSR)
+    confidence = setup.get("dsr", 0.5)
+    weight = vol_target_w * kelly * (confidence)  # all in [0, max_w]
+    return {"vol_target_w": round(vol_target_w, 3), "kelly_half": round(kelly, 3),
+            "confidence": round(confidence, 3), "weight": round(min(max_w, weight), 3)}
+
+
+# ════════════════════════════════════════════════════════════
+# 7. COMPOSITE SCORE  (driven by DSR, not arbitrary weights)
 # ════════════════════════════════════════════════════════════
 
 def composite_alpha(fac, vol, bt_long, bt_short):
-    edge = bt_long["expectancy"] - bt_short["expectancy"]
-    score, drivers = 50.0, []
-    if edge >= 0:
-        score += min(20, edge * 4000); drivers.append(
-            f"Long triple-barrier expectancy beats short by {edge*100:.2f}% net of costs")
+    """Score is anchored on Deflated Sharpe (probability of genuine skill),
+    then nudged by regime & asset quality. Range 0-100 = P(edge is real)-led."""
+    long_dsr, short_dsr = bt_long["dsr"], bt_short["dsr"]
+    if long_dsr >= short_dsr:
+        dom, side_lbl, conf = bt_long, 1, long_dsr
     else:
-        score += max(-20, edge * 4000); drivers.append(
-            f"Short triple-barrier expectancy beats long by {abs(edge)*100:.2f}% net of costs")
-    dom = bt_long if edge >= 0 else bt_short
-    score += np.clip(dom["sharpe"] * 6, -12, 12)
-    drivers.append(f"Setup Sharpe-equivalent {dom['sharpe']:.2f}, win-rate {dom['win_rate']:.0f}% (n={dom['n']})")
-    score += np.clip(fac["sharpe"] * 5, -8, 8)
-    drivers.append(f"Asset Sharpe {fac['sharpe']:.2f}, Sortino {fac['sortino']:.2f}")
-    if fac["hurst"] > 0.55:
-        score += 4; drivers.append(f"Hurst {fac['hurst']:.2f} → trending (momentum-friendly)")
-    elif fac["hurst"] < 0.45:
-        drivers.append(f"Hurst {fac['hurst']:.2f} → mean-reverting regime")
+        dom, side_lbl, conf = bt_short, -1, short_dsr
+
+    score = 100.0 * conf  # DSR is already a probability of skill
+    drivers = [f"Dominant side DSR={conf:.2f} (prob. edge is real after multiple-testing),"
+               f" PSR={dom['psr']:.2f}, win-rate {dom['win_rate']:.0f}% on n={dom['n']} "
+               f"non-overlapping trades"]
+
+    # regime & asset-quality nudges (small, capped)
     if vol["regime"].startswith("HIGH"):
-        score -= 6; drivers.append(f"Vol regime {vol['regime']} — conviction trimmed")
+        score -= 8; drivers.append(f"Vol regime {vol['regime']} — confidence trimmed")
     elif vol["regime"].startswith("LOW"):
-        score += 3; drivers.append(f"Vol regime {vol['regime']} — favorable compression")
+        score += 4; drivers.append(f"Vol regime {vol['regime']} — favorable compression")
+    if fac["hurst"] > 0.55:
+        score += 4; drivers.append(f"Hurst {fac['hurst']:.2f} → trending")
+    elif fac["hurst"] < 0.45:
+        score -= 2; drivers.append(f"Hurst {fac['hurst']:.2f} → mean-reverting")
+    drivers.append(f"Asset Sharpe {fac['sharpe']:.2f}, Sortino {fac['sortino']:.2f}, "
+                   f"MaxDD {fac['max_dd']:.1f}%")
+
     score = float(max(0, min(100, score)))
-    side = 1 if score >= 55 else (-1 if score <= 45 else 0)
-    return round(score, 1), side, drivers
+    # decision needs BOTH a directional lean AND statistical confidence
+    if conf >= 0.60 and score >= 55:
+        side = side_lbl
+    else:
+        side = 0
+    return round(score, 1), side, drivers, dom
 
 
 # ════════════════════════════════════════════════════════════
-# 6. GEMINI RESEARCH NOTE (text only, no image)
+# 8. GEMINI RESEARCH NOTE
 # ════════════════════════════════════════════════════════════
 
-def gemini_research_note(sym, fund, fac, vol, stat, ex, dom, score, verdict, api_key):
+def gemini_research_note(sym, fund, fac, vol, stat, ex, dom, wf, size, score, verdict, api_key):
     import google.generativeai as genai
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(
         model_name="gemini-2.5-flash",
         system_instruction=(
             "You are a sell-side equity research analyst at an investment bank. "
-            "Write crisp, institutional desk notes grounded strictly in the supplied "
-            "quantitative evidence. No retail TA fluff, no emotional language. "
-            "You are NOT SEBI registered — educational analysis only."
+            "Write crisp institutional desk notes grounded strictly in the supplied "
+            "quantitative evidence. Emphasize statistical confidence (Deflated Sharpe) and "
+            "out-of-sample evidence. No retail TA fluff. You are NOT SEBI registered — "
+            "educational analysis only."
         ),
     )
 
@@ -307,40 +407,40 @@ def gemini_research_note(sym, fund, fac, vol, stat, ex, dom, score, verdict, api
         except Exception:
             return "n/a"
 
-    prompt = f"""Write a concise institutional research note for a 1-week (5 business day)
-swing trade on {sym} ({fund['name']}, {fund['sector']} / {fund['industry']}).
-Use ONLY the metrics below. Reference the actual statistics.
+    prompt = f"""Concise institutional research note for a {HORIZON}-business-day swing on
+{sym} ({fund['name']}, {fund['sector']} / {fund['industry']}). Use ONLY these metrics.
 
-COMPUTED METRICS
-- Composite Alpha Score: {score}/100 | Model verdict: {verdict}
-- Fractional differentiation d={fmt(stat['d'])} (ADF p={fmt(stat['adf_pvalue'],4)}), memory retained {fmt(stat['memory_retained'],3)} vs first-diff {fmt(stat['memory_first_diff'],3)}
-- Annualized return {fmt(fac['ann_ret'],1)}%, vol {fmt(fac['ann_vol'],1)}%, Sharpe {fmt(fac['sharpe'])}, Sortino {fmt(fac['sortino'])}
-- Beta {fmt(fac['beta'])}, Alpha {fmt(fac['alpha'],1)}% (vs NIFTY), Max DD {fmt(fac['max_dd'],1)}%
+EVIDENCE
+- Composite (DSR-led) score {score}/100 | Model verdict: {verdict}
+- Triple-barrier (non-overlapping): expectancy {fmt(dom['expectancy']*100)}%/trade,
+  PSR {fmt(dom['psr'])}, Deflated Sharpe {fmt(dom['dsr'])}, win-rate {fmt(dom['win_rate'],0)}%, n={dom['n']}
+- Purged walk-forward OOS: expectancy {fmt((wf['oos_expectancy'] or 0)*100)}%/trade,
+  win-rate {fmt(wf['oos_win_rate'],0)}%, n={wf['oos_n']}
+- Sizing: vol-target w {size['vol_target_w']}, half-Kelly {size['kelly_half']}, final weight {size['weight']}
+- Frac-diff d={fmt(stat['d'])} (ADF p={fmt(stat['adf_pvalue'],4)}), memory {fmt(stat['memory_retained'],3)}
+- Ann ret {fmt(fac['ann_ret'],1)}%, vol {fmt(fac['ann_vol'],1)}%, Sharpe {fmt(fac['sharpe'])}, Sortino {fmt(fac['sortino'])}
+- Beta {fmt(fac['beta'])}, Alpha {fmt(fac['alpha'],1)}%, MaxDD {fmt(fac['max_dd'],1)}%
 - VaR95 {fmt(fac['var95'])}%, CVaR95 {fmt(fac['cvar95'])}%, Skew {fmt(fac['skew'])}, Kurt {fmt(fac['kurt'])}, Hurst {fmt(fac['hurst'])}
-- EWMA vol regime: {vol['regime']} ({fmt(vol['percentile'],0)}th pct), annualized {fmt(vol['sigma_annual']*100,1)}%
-- Triple-barrier setup: expectancy {fmt(dom['expectancy']*100)}%/trade, Sharpe-eq {fmt(dom['sharpe'])}, win-rate {fmt(dom['win_rate'],0)}%
+- EWMA vol regime {vol['regime']} ({fmt(vol['percentile'],0)}th pct), ann {fmt(vol['sigma_annual']*100,1)}%
 - Execution: entry {ex['entry']}, target {ex['target']}, stop {ex['stop']}, R:R {ex['rr']}
 - Fundamentals: P/E {fund['pe']}, Fwd P/E {fund['fwd_pe']}, P/B {fund['pb']}, ROE {fund['roe']}%, Margin {fund['profit_margin']}%, MCap Rs {fund['mcap_cr']} cr
 
-STRUCTURE (use these exact short headers, bold them):
-**Thesis** — 2-3 sentences on the directional edge and statistical basis.
-**Risk Profile** — tail risk (VaR/CVaR), drawdown, beta, vol regime.
-**Valuation Context** — fundamentals relative to the setup (1-2 sentences).
-**Catalysts & Path Dependency** — what the triple-barrier evidence implies over t+5.
-**Recommendation** — verdict with the execution levels restated.
+STRUCTURE (bold these headers):
+**Thesis** — directional edge + statistical basis (cite DSR & OOS explicitly).
+**Statistical Confidence** — what PSR/DSR and walk-forward imply; flag if edge is weak.
+**Risk Profile** — VaR/CVaR, drawdown, beta, vol regime, suggested position weight.
+**Valuation Context** — fundamentals vs the setup (1-2 sentences).
+**Recommendation** — verdict with execution levels restated. If DSR<0.6, recommend NO TRADE.
 
-Keep total under 280 words."""
-
+Under 300 words."""
     return model.generate_content(prompt).text
 
 
-
 # ════════════════════════════════════════════════════════════
-# 7. UI HELPERS (Bloomberg terminal styling)
+# 9. UI HELPERS
 # ════════════════════════════════════════════════════════════
 
 def _stat_row(cells):
-    """cells = list of (label, value, color)."""
     html = (f"<div style='display:grid;grid-template-columns:repeat({len(cells)},1fr);"
             f"gap:1px;background:{BORDER};border:1px solid {BORDER};border-radius:8px;overflow:hidden;'>")
     for label, value, color in cells:
@@ -357,18 +457,22 @@ def _fmt(v, suffix="", dp=2, dash="—"):
 
 
 # ════════════════════════════════════════════════════════════
-# 8. STREAMLIT UI
+# 10. STREAMLIT UI
 # ════════════════════════════════════════════════════════════
 
 def render_quant_analysis():
     import streamlit as st
 
+    # cache wrappers (avoid yfinance rate limits)
+    _hist = st.cache_data(ttl=900, show_spinner=False)(fetch_history)
+    _bench = st.cache_data(ttl=900, show_spinner=False)(fetch_benchmark)
+
     st.markdown(f"""
     <div style='background:{PANEL};border:1px solid {BORDER};border-left:4px solid {AMBER};
     border-radius:10px;padding:16px 20px;margin-bottom:14px;'>
     <div style='font-family:{MONO};font-size:11px;letter-spacing:3px;color:{AMBER};'>ARKA QUANT TERMINAL</div>
-    <div style='font-size:20px;font-weight:800;color:{IVORY};margin-top:2px;'>Institutional Single-Asset Analytics · 5-Day Horizon</div>
-    <div style='font-size:12px;color:{MUTE};margin-top:4px;'>Fractional differentiation · EWMA conditional variance · path-dependent triple-barrier · factor battery · AI research note</div>
+    <div style='font-size:20px;font-weight:800;color:{IVORY};margin-top:2px;'>Institutional Single-Asset Analytics · {HORIZON}-Day Horizon</div>
+    <div style='font-size:12px;color:{MUTE};margin-top:4px;'>Frac-diff · EWMA variance · non-overlapping triple-barrier · purged walk-forward · Deflated Sharpe · Kelly sizing</div>
     </div>""", unsafe_allow_html=True)
 
     with st.form("qt"):
@@ -387,10 +491,10 @@ def render_quant_analysis():
     pt, sl = [float(x) for x in ptsl.split("/")]
 
     with st.spinner("Running institutional quant pipeline..."):
-        df, sym, info = fetch_history(symbol)
-        if df.empty or len(df) < 260:
-            st.error(f"Insufficient data for {sym} (need ~1y+)."); return
-        bench = fetch_benchmark()
+        df, sym, info = _hist(symbol)
+        if df.empty or len(df) < 400:
+            st.error(f"Insufficient data for {sym} (need ~2y+ for walk-forward)."); return
+        bench = _bench()
         close = df["Close"]; price = float(close.iloc[-1])
 
         stat = stationarity_analysis(close)
@@ -399,17 +503,18 @@ def render_quant_analysis():
         vp = volume_profile_levels(df)
         fac = factor_battery(close, bench)
         fund = fundamentals(info)
-        bt_long = triple_barrier_backtest(close, sigma, 1, pt, sl, 5, cost_bps)
-        bt_short = triple_barrier_backtest(close, sigma, -1, pt, sl, 5, cost_bps)
-        score, side, drivers = composite_alpha(fac, vol, bt_long, bt_short)
-        verdict = "BUY" if side == 1 else "SELL" if side == -1 else "HOLD"
+        bt_long = triple_barrier_nonoverlap(close, sigma, 1, pt, sl, HORIZON, cost_bps)
+        bt_short = triple_barrier_nonoverlap(close, sigma, -1, pt, sl, HORIZON, cost_bps)
+        score, side, drivers, dom = composite_alpha(fac, vol, bt_long, bt_short)
+        verdict = "BUY" if side == 1 else "SELL" if side == -1 else "NO TRADE"
         ex_side = side if side != 0 else 1
         ex = execution_matrix(price, vol["sigma_daily"], ex_side, pt, sl, cost_bps)
-        dom = bt_long if ex_side == 1 else bt_short
+        wf = purged_walk_forward(close, sigma, ex_side, pt, sl, HORIZON, cost_bps)
+        size = position_sizing(dom, vol["sigma_annual"])
 
-    vcolor = {"BUY": GREEN, "SELL": RED, "HOLD": AMBER}[verdict]
+    vcolor = {"BUY": GREEN, "SELL": RED, "NO TRADE": AMBER}[verdict]
 
-    # ── Header banner ──
+    # Header
     st.markdown(f"""
     <div style='background:linear-gradient(135deg,{PANEL2},{PANEL});border:1px solid {BORDER};
     border-left:5px solid {vcolor};border-radius:12px;padding:20px 24px;margin:6px 0 16px;
@@ -420,14 +525,14 @@ def render_quant_analysis():
         <div style='font-family:{MONO};font-size:26px;font-weight:800;color:{IVORY};margin-top:6px;'>Rs {price:,.2f}</div>
       </div>
       <div style='text-align:right;'>
-        <div style='font-size:11px;color:{MUTE};letter-spacing:1px;'>ALPHA VERDICT</div>
+        <div style='font-size:11px;color:{MUTE};letter-spacing:1px;'>MODEL VERDICT</div>
         <div style='font-size:34px;font-weight:800;color:{vcolor};line-height:1.1;'>{verdict}</div>
-        <div style='font-family:{MONO};font-size:14px;color:{IVORY};'>Score {score}/100</div>
+        <div style='font-family:{MONO};font-size:14px;color:{IVORY};'>Confidence {score}/100</div>
       </div>
     </div>""", unsafe_allow_html=True)
 
-    # ── Execution matrix ──
-    st.markdown(f"<div style='font-size:13px;font-weight:700;color:{AMBER};letter-spacing:1px;margin:8px 0;'>STRUCTURAL EXECUTION MATRIX · t+5</div>", unsafe_allow_html=True)
+    # Execution
+    st.markdown(f"<div style='font-size:13px;font-weight:700;color:{AMBER};letter-spacing:1px;margin:8px 0;'>STRUCTURAL EXECUTION MATRIX · t+{HORIZON}</div>", unsafe_allow_html=True)
     st.markdown(_stat_row([
         ("Entry", f"Rs {ex['entry']:,.2f}", IVORY),
         ("Target", f"Rs {ex['target']:,.2f}", GREEN),
@@ -436,13 +541,30 @@ def render_quant_analysis():
     ]), unsafe_allow_html=True)
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
     st.markdown(_stat_row([
-        ("Expectancy/trade", f"{dom['expectancy']*100:+.2f}%", GREEN if dom['expectancy'] > 0 else RED),
-        ("Sharpe-equivalent", f"{dom['sharpe']:.2f}", IVORY),
-        ("Hist Win-Rate", f"{dom['win_rate']:.0f}%", IVORY),
-        ("Sample (n)", f"{dom['n']}", MUTE),
+        ("Suggested Weight", f"{size['weight']*100:.1f}%", AMBER),
+        ("Vol-Target W", f"{size['vol_target_w']*100:.1f}%", IVORY),
+        ("Half-Kelly", f"{size['kelly_half']*100:.1f}%", IVORY),
+        ("Stat. Confidence", f"{size['confidence']:.2f}", BLUE),
     ]), unsafe_allow_html=True)
 
-    # ── Quant factor battery ──
+    # Skill statistics (the heart of the upgrade)
+    st.markdown(f"<div style='font-size:13px;font-weight:700;color:{AMBER};letter-spacing:1px;margin:18px 0 8px;'>SKILL STATISTICS · IN-SAMPLE vs OUT-OF-SAMPLE</div>", unsafe_allow_html=True)
+    st.markdown(_stat_row([
+        ("Expectancy/trade", f"{dom['expectancy']*100:+.2f}%", GREEN if dom['expectancy'] > 0 else RED),
+        ("Prob. Sharpe (PSR)", f"{dom['psr']:.2f}", IVORY),
+        ("Deflated Sharpe", f"{dom['dsr']:.2f}", GREEN if dom['dsr'] >= 0.6 else RED),
+        ("Win-Rate / n", f"{dom['win_rate']:.0f}% / {dom['n']}", IVORY),
+    ]), unsafe_allow_html=True)
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+    st.markdown(_stat_row([
+        ("OOS Expectancy", _fmt((wf['oos_expectancy'] or 0) * 100, "%", 2) if wf['oos_n'] else "—",
+         GREEN if (wf['oos_expectancy'] or 0) > 0 else RED),
+        ("OOS Win-Rate", _fmt(wf['oos_win_rate'], "%", 0) if wf['oos_n'] else "—", IVORY),
+        ("OOS Sample (n)", f"{wf['oos_n']}", MUTE),
+        ("Trials Deflated", "2 (L/S)", MUTE),
+    ]), unsafe_allow_html=True)
+
+    # Factor battery
     st.markdown(f"<div style='font-size:13px;font-weight:700;color:{AMBER};letter-spacing:1px;margin:18px 0 8px;'>QUANTITATIVE FACTOR BATTERY</div>", unsafe_allow_html=True)
     st.markdown(_stat_row([
         ("Ann. Return", _fmt(fac['ann_ret'], "%", 1), GREEN if fac['ann_ret'] > 0 else RED),
@@ -468,7 +590,7 @@ def render_quant_analysis():
         ("Vol Regime", vol['regime'], AMBER),
     ]), unsafe_allow_html=True)
 
-    # ── Fundamentals ──
+    # Fundamentals
     st.markdown(f"<div style='font-size:13px;font-weight:700;color:{AMBER};letter-spacing:1px;margin:18px 0 8px;'>RELATIVE VALUATION & FUNDAMENTALS</div>", unsafe_allow_html=True)
     st.markdown(_stat_row([
         ("Market Cap", f"Rs {fund['mcap_cr']:,.0f} cr" if fund['mcap_cr'] else "—", IVORY),
@@ -486,7 +608,7 @@ def render_quant_analysis():
         ("Info Beta", _fmt(fund['beta_info'], "", 2), IVORY),
     ]), unsafe_allow_html=True)
 
-    # ── Stationarity + liquidity ──
+    # Stationarity + liquidity
     st.markdown(f"<div style='font-size:13px;font-weight:700;color:{AMBER};letter-spacing:1px;margin:18px 0 8px;'>STATIONARITY · LIQUIDITY POOLS</div>", unsafe_allow_html=True)
     st.markdown(_stat_row([
         ("Optimal d", _fmt(stat['d'], "", 2), BLUE),
@@ -502,7 +624,7 @@ def render_quant_analysis():
         ("EWMA σ daily", _fmt(vol['sigma_daily']*100, "%", 2), IVORY),
     ]), unsafe_allow_html=True)
 
-    # ── AI research note ──
+    # AI note
     st.markdown(f"<div style='font-size:13px;font-weight:700;color:{AMBER};letter-spacing:1px;margin:18px 0 8px;'>INSTITUTIONAL RESEARCH NOTE</div>", unsafe_allow_html=True)
     api_key = st.secrets.get("GEMINI_KEY", "")
     if not api_key:
@@ -510,20 +632,18 @@ def render_quant_analysis():
     else:
         with st.spinner("Generating research note..."):
             try:
-                note = gemini_research_note(sym, fund, fac, vol, stat, ex, dom, score, verdict, api_key)
+                note = gemini_research_note(sym, fund, fac, vol, stat, ex, dom, wf, size, score, verdict, api_key)
                 st.markdown(f"<div style='background:{PANEL};border:1px solid {BORDER};border-radius:10px;"
                             f"padding:18px 22px;color:{IVORY};line-height:1.7;font-size:14px;'>{note}</div>",
                             unsafe_allow_html=True)
             except Exception as e:
                 st.error(f"Research note failed: {e}")
 
-    # ── Model drivers ──
-    with st.expander("Composite Alpha — model drivers"):
+    with st.expander("Composite score — model drivers"):
         for d in drivers:
             st.markdown(f"- {d}")
 
-    # ── Charts ──
     st.markdown(f"<div style='font-size:13px;font-weight:700;color:{AMBER};letter-spacing:1px;margin:18px 0 8px;'>EWMA CONDITIONAL VOLATILITY PATH</div>", unsafe_allow_html=True)
-    st.line_chart((sigma.tail(250) * np.sqrt(252) * 100).rename("Annualized σ %"))
+    st.line_chart((sigma.tail(250) * np.sqrt(TRADING_DAYS) * 100).rename("Annualized σ %"))
 
-    st.caption("Educational use only. Not investment advice. Trading involves risk.")
+    st.caption("Educational use only. Not investment advice. Past statistical edge does not guarantee future returns. Trading involves risk of capital loss.")
