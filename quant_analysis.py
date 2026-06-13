@@ -471,7 +471,9 @@ def information_coefficient(close, sigma, horizons=None, n_lags=10):
             results[h] = {"ic_mean": np.nan, "ic_std": np.nan, "icir": np.nan, "n": 0}
             continue
         # Rolling IC (60-day window)
-        ic_series = df["signal"].rolling(60).corr(df["fwd"], method="spearman")
+        ic_series = df["signal"].rolling(60).apply(
+            lambda w: scistats.spearmanr(w, df["fwd"].loc[w.index])[0], raw=False
+        )
         ic_vals = ic_series.dropna().values
         ic_mean = float(np.nanmean(ic_vals))
         ic_std = float(np.nanstd(ic_vals))
