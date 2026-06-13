@@ -457,3 +457,6 @@ if __name__ == "__main__":
     UNIVERSE = ["HDFCBANK.NS", "ICICIBANK.NS", "KOTAKBANK.NS",
                 "AXISBANK.NS", "SBIN.NS", "INDUSINDBK.NS"]
     run_pipeline(UNIVERSE)
+  def render_quant_analysis():
+    import streamlit as st
+    st.info("Quant Analysis module is loading. Check back shortly.")
