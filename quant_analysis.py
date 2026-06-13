@@ -1,21 +1,17 @@
 """
-quant_analysis.py — Institutional Single-Asset Quant Terminal (PART 1 of 2)
-===========================================================================
+quant_analysis.py — Institutional Quant Terminal (PART 1 of 2)
+==============================================================
 Paste Part 1 then Part 2 into the SAME file, in order.
 For backtesting / validating discretionary strategies. Educational; not advice.
 
-Methods (institutional only):
-  - AFML (López de Prado): fractional differentiation (Ch.5),
-    non-overlapping triple-barrier (Ch.3), purged walk-forward (Ch.7),
-    Probabilistic & Deflated Sharpe (Ch.8).
-  - GARCH(1,1)-t conditional vol (arch; EWMA fallback).
-  - Factor attribution with Newey-West (HAC) standard errors.
-  - Monte-Carlo (Student-t) & historical VaR / Expected Shortfall, stress.
-  - Multi-horizon alpha-decay scan (best OOS Deflated Sharpe).
-  - Stationary-block bootstrap CIs; turnover / break-even cost.
-  - Vol-target + fractional-Kelly sizing.
+Methods: AFML frac-diff (Ch.5), non-overlapping triple-barrier (Ch.3),
+purged walk-forward (Ch.7), Probabilistic & Deflated Sharpe (Ch.8),
+GARCH(1,1)-t vol, factor attribution w/ Newey-West SEs, MC & historical
+VaR/ES, stress tests, multi-horizon alpha-decay scan, bootstrap CIs,
+turnover/break-even cost, vol-target + fractional-Kelly sizing.
 
-Deps: pandas numpy scipy statsmodels yfinance streamlit ; optional: arch, google-generativeai
+Deps: pandas numpy scipy statsmodels yfinance plotly streamlit
+      optional: arch, google-generativeai
 """
 
 import warnings
@@ -27,22 +23,18 @@ from statsmodels.tsa.stattools import adfuller
 
 warnings.filterwarnings("ignore")
 
-# ── Professional terminal palette ──
+# ── Palette ──
 BG, PANEL, PANEL2, BORDER = "#0B0E13", "#11151D", "#161C26", "#222B38"
 ACCENT, IVORY, MUTE = "#C9A227", "#E8EDF2", "#8593A3"
 GREEN, RED, BLUE = "#1FB97A", "#E8554E", "#4C8DD6"
 MONO = "'IBM Plex Mono','JetBrains Mono','SF Mono',monospace"
 TRADING_DAYS = 252
-HORIZONS = [5, 10, 21, 63]   # multi-horizon alpha-decay scan
+HORIZONS = [5, 10, 21, 63]
 DEFAULT_HORIZON = 5
-
 FACTOR_PROXIES = {"MKT": "^NSEI", "LARGE": "^CNX100", "MID": "^CNXMIDCAP"}
 
 
-# ════════════════════════════════════════════════════════════
-# DATA
-# ════════════════════════════════════════════════════════════
-
+# ════════════════════════ DATA ════════════════════════
 def fetch_history(symbol: str, period: str = "5y", interval: str = "1d"):
     sym = symbol.strip().upper()
     if not sym.endswith(".NS"):
@@ -74,10 +66,7 @@ def _rets(s):
     return np.log(s / s.shift(1)).dropna()
 
 
-# ════════════════════════════════════════════════════════════
-# 1. FRACTIONAL DIFFERENTIATION (AFML Ch.5)
-# ════════════════════════════════════════════════════════════
-
+# ════════════════════════ 1. FRAC-DIFF (AFML Ch.5) ════════════════════════
 def _ffd_weights(d, threshold=1e-4):
     w, k = [1.0], 1
     while abs(w[-1]) > threshold:
@@ -116,10 +105,7 @@ def stationarity_analysis(close, ds=np.round(np.arange(0, 1.01, 0.05), 2), targe
             "memory_first_diff": float(base_mem), "memory_gain": float(mem - base_mem)}
 
 
-# ════════════════════════════════════════════════════════════
-# 2. GARCH CONDITIONAL VOL (+ EWMA fallback)
-# ════════════════════════════════════════════════════════════
-
+# ════════════════════════ 2. GARCH VOL ════════════════════════
 def ewma_vol(close, lam=0.94):
     r = _rets(close); var = np.zeros(len(r)); var[0] = r.var()
     for t in range(1, len(r)):
@@ -149,12 +135,8 @@ def volatility_regime(sigma):
             "percentile": pct, "regime": regime}
 
 
-# ════════════════════════════════════════════════════════════
-# 3. FACTOR ATTRIBUTION with NEWEY-WEST (HAC) SEs
-# ════════════════════════════════════════════════════════════
-
+# ════════════════════════ 3. FACTOR ATTRIBUTION (Newey-West) ════════════════════════
 def _newey_west_se(X, resid, lags):
-    n, k = X.shape
     XtX_inv = np.linalg.pinv(X.T @ X)
     S = (X * resid[:, None]).T @ (X * resid[:, None])
     for l in range(1, lags + 1):
@@ -179,8 +161,7 @@ def factor_attribution(close, proxies):
     if len(data) < 60:
         return {"betas": {}, "tstats": {}, "alpha_ann": np.nan, "r2": np.nan, "n": len(data)}
     Y = data["y"].values
-    Xraw = data.drop(columns=["y"]).values
-    X = np.column_stack([np.ones(len(Xraw)), Xraw])
+    X = np.column_stack([np.ones(len(data)), data.drop(columns=["y"]).values])
     coef, *_ = np.linalg.lstsq(X, Y, rcond=None)
     resid = Y - X @ coef
     se = _newey_west_se(X, resid, lags=5)
@@ -191,14 +172,10 @@ def factor_attribution(close, proxies):
     betas = {n: float(c) for n, c in zip(names, coef)}
     tstats = {n: float(t) for n, t in zip(names, tstat)}
     alpha_ann = betas.pop("ALPHA") * TRADING_DAYS * 100
-    return {"betas": betas, "tstats": tstats, "alpha_ann": alpha_ann,
-            "r2": float(r2), "n": int(len(data))}
+    return {"betas": betas, "tstats": tstats, "alpha_ann": alpha_ann, "r2": float(r2), "n": int(len(data))}
 
 
-# ════════════════════════════════════════════════════════════
-# 4. FACTOR BATTERY
-# ════════════════════════════════════════════════════════════
-
+# ════════════════════════ 4. FACTOR BATTERY ════════════════════════
 def factor_battery(close, bench):
     r = _rets(close)
     ann_ret = float(r.mean() * TRADING_DAYS); ann_vol = float(r.std() * np.sqrt(TRADING_DAYS))
@@ -216,7 +193,8 @@ def factor_battery(close, bench):
             alpha = float((j["a"].mean() - beta * j["b"].mean()) * TRADING_DAYS)
     return {"ann_ret": ann_ret * 100, "ann_vol": ann_vol * 100, "sharpe": sharpe, "sortino": sortino,
             "max_dd": mdd, "var95": var95, "cvar95": cvar95, "skew": skew, "kurt": kurt,
-            "autocorr1": ac1, "beta": beta, "alpha": (alpha * 100) if np.isfinite(alpha) else np.nan}
+            "autocorr1": ac1, "beta": beta, "alpha": (alpha * 100) if np.isfinite(alpha) else np.nan,
+            "ret_series": r}
 
 
 def fundamentals(info):
@@ -229,14 +207,10 @@ def fundamentals(info):
             "mcap_cr": (mc / 1e7) if mc else None, "pe": g("trailingPE"),
             "fwd_pe": g("forwardPE"), "pb": g("priceToBook"),
             "roe": (g("returnOnEquity") or 0) * 100 if g("returnOnEquity") is not None else None,
-            "profit_margin": (g("profitMargins") or 0) * 100 if g("profitMargins") is not None else None,
             "wk52_high": g("fiftyTwoWeekHigh"), "wk52_low": g("fiftyTwoWeekLow"), "beta_info": g("beta")}
 
 
-# ════════════════════════════════════════════════════════════
-# 5. RISK: MC + HISTORICAL VaR/ES + STRESS
-# ════════════════════════════════════════════════════════════
-
+# ════════════════════════ 5. RISK ════════════════════════
 def historical_var_es(close, horizon=DEFAULT_HORIZON, alpha=0.05):
     r = _rets(close); hz = r.rolling(horizon).sum().dropna()
     var = float(np.percentile(hz, alpha * 100) * 100)
@@ -263,10 +237,7 @@ def stress_scenarios(price, beta):
     return {n: {"pct": beta * m * 100, "price": price * (1 + beta * m)} for n, m in shocks.items()}
 
 
-# ════════════════════════════════════════════════════════════
-# 6. SKILL STATISTICS (AFML Ch.8) + BOOTSTRAP
-# ════════════════════════════════════════════════════════════
-
+# ════════════════════════ 6. SKILL STATS + BOOTSTRAP ════════════════════════
 def probabilistic_sharpe_ratio(returns, sr_benchmark=0.0):
     r = np.asarray(returns, float); n = len(r)
     if n < 8 or r.std(ddof=1) == 0:
@@ -290,7 +261,6 @@ def deflated_sharpe(returns, n_trials=2):
 
 
 def bootstrap_ci(rets, fn, n_boot=2000, ci=0.95, block=5, seed=11):
-    """Stationary block bootstrap CI (handles serial dependence)."""
     rets = np.asarray(rets, float); n = len(rets)
     if n < 10:
         return (np.nan, np.nan)
@@ -301,15 +271,11 @@ def bootstrap_ci(rets, fn, n_boot=2000, ci=0.95, block=5, seed=11):
             start = rng.integers(0, n); ln = rng.geometric(1.0 / block)
             out.extend(rets[start:start + ln])
         stats.append(fn(np.array(out[:n])))
-    lo = float(np.percentile(stats, (1 - ci) / 2 * 100))
-    hi = float(np.percentile(stats, (1 + ci) / 2 * 100))
-    return (lo, hi)
+    return (float(np.percentile(stats, (1 - ci) / 2 * 100)),
+            float(np.percentile(stats, (1 + ci) / 2 * 100)))
 
 
-# ════════════════════════════════════════════════════════════
-# 7. TRIPLE-BARRIER + PURGED WF + MULTI-HORIZON SCAN + TURNOVER
-# ════════════════════════════════════════════════════════════
-
+# ════════════════════════ 7. TRIPLE-BARRIER + WF + SCAN ════════════════════════
 def _barrier_outcome(px, i, sig_i, side, pt, sl, vbar, cost):
     p0 = px.iloc[i]; up = p0 * (1 + side * pt * sig_i); dn = p0 * (1 + side * -sl * sig_i)
     path = px.iloc[i + 1: i + 1 + vbar]
@@ -325,26 +291,28 @@ def _barrier_outcome(px, i, sig_i, side, pt, sl, vbar, cost):
 
 def triple_barrier_nonoverlap(close, sigma, side=1, pt=2.0, sl=1.5, vbar=DEFAULT_HORIZON, cost_bps=10.0):
     px = close.reindex(sigma.index).dropna(); sig = sigma.reindex(px.index)
-    cost = cost_bps / 1e4; rets = []; i = 0
+    cost = cost_bps / 1e4; rets = []; dates = []; i = 0
     while i < len(px) - vbar:
         s = float(sig.iloc[i])
         if not np.isfinite(s) or s <= 0:
             i += 1; continue
-        rets.append(_barrier_outcome(px, i, s, side, pt, sl, vbar, cost)); i += vbar
+        rets.append(_barrier_outcome(px, i, s, side, pt, sl, vbar, cost))
+        dates.append(px.index[i]); i += vbar
     rets = np.array(rets)
     if len(rets) == 0:
-        return {"expectancy": 0.0, "psr": 0.5, "dsr": 0.5, "win_rate": 0.0, "n": 0,
-                "rets": rets, "exp_ci": (np.nan, np.nan), "turnover": 0.0, "breakeven_bps": 0.0}
+        return {"expectancy": 0.0, "psr": 0.5, "dsr": 0.5, "win_rate": 0.0, "n": 0, "rets": rets,
+                "dates": [], "equity": pd.Series(dtype=float), "exp_ci": (np.nan, np.nan),
+                "turnover": 0.0, "breakeven_bps": 0.0}
     psr, _ = probabilistic_sharpe_ratio(rets, 0.0)
     dsr = deflated_sharpe(rets, n_trials=2)
     exp_ci = bootstrap_ci(rets, lambda x: x.mean())
-    turnover = TRADING_DAYS / vbar  # round-trips per year (non-overlapping)
-    gross_edge = rets.mean() + cost   # add back the modeled cost to get gross
-    breakeven_bps = max(0.0, gross_edge * 1e4)  # bps per trade the edge can absorb
+    equity = pd.Series(np.cumprod(1 + rets), index=pd.to_datetime(dates))
+    turnover = TRADING_DAYS / vbar
+    breakeven_bps = max(0.0, (rets.mean() + cost) * 1e4)
     return {"expectancy": float(rets.mean()), "psr": psr, "dsr": dsr,
-            "win_rate": float((rets > 0).mean() * 100), "n": int(len(rets)),
-            "rets": rets, "exp_ci": exp_ci, "turnover": float(turnover),
-            "breakeven_bps": float(breakeven_bps)}
+            "win_rate": float((rets > 0).mean() * 100), "n": int(len(rets)), "rets": rets,
+            "dates": dates, "equity": equity, "exp_ci": exp_ci,
+            "turnover": float(turnover), "breakeven_bps": float(breakeven_bps)}
 
 
 def purged_walk_forward(close, sigma, side, pt, sl, vbar=DEFAULT_HORIZON, cost_bps=10.0, folds=5):
@@ -369,7 +337,6 @@ def purged_walk_forward(close, sigma, side, pt, sl, vbar=DEFAULT_HORIZON, cost_b
 
 
 def horizon_scan(close, pt, sl, cost_bps, horizons=HORIZONS):
-    """Alpha-decay scan: pick horizon with best OUT-OF-SAMPLE Deflated Sharpe."""
     rows = []
     for h in horizons:
         sig, _, _ = garch_vol(close, h)
@@ -404,7 +371,6 @@ def position_sizing(setup, sigma_annual, target_vol=0.15, kelly_fraction=0.5, ma
 
 
 def disposition(bt_long, bt_short):
-    """Verdict gated PURELY on Deflated Sharpe (no magic score)."""
     dom = bt_long if bt_long["dsr"] >= bt_short["dsr"] else bt_short
     side = 1 if dom is bt_long else -1
     verdict = ("LONG" if side == 1 else "SHORT") if (dom["dsr"] >= 0.60 and dom["expectancy"] > 0) else "NO EDGE"
@@ -412,31 +378,32 @@ def disposition(bt_long, bt_short):
 
 # ── END PART 1 ──
 # ════════════════════════════════════════════════════════════
-# PART 2 of 2 — UI + AI EXPLAINER  (paste below Part 1)
+# PART 2 of 2 — UI + PLOTLY CHARTS + AI EXPLAINER
 # ════════════════════════════════════════════════════════════
 
-# ── Metric glossary: what it is + how quants / banks / IB use it ──
 GLOSSARY = {
-    "Deflated Sharpe": "Probability the strategy's Sharpe is REAL after correcting for how many strategies you tested (luck-adjusted). Quant funds (AQR, Two Sigma) use it as the go/no-go gate. Read: ≥0.60 = credible edge; <0.60 = likely noise, do not trade.",
-    "Prob Sharpe": "Probability the Sharpe ratio is above zero given skew, fat tails and sample size. Banks use it to judge if a track record is statistically meaningful vs short-sample luck. Read: closer to 1.0 = more reliable.",
-    "OOS Deflated Sharpe": "Deflated Sharpe measured on data the model never saw (purged walk-forward). This is the number that actually matters — in-sample always looks good. Read: trust this over in-sample.",
-    "Expectancy/trade": "Average net profit per trade after costs, in %. Discretionary + systematic traders use it to size and compare setups. Read: must be positive AND its confidence interval should not straddle zero.",
-    "Expectancy CI": "Bootstrap 95% confidence band for expectancy. If it includes 0, the edge is not statistically distinguishable from random. Quant desks reject setups whose CI crosses zero.",
-    "Win Rate": "% of trades that closed positive. Useful but secondary — a 40% win rate with big winners can beat 60% with small ones. Read alongside expectancy, never alone.",
-    "Turnover": "Round-trip trades per year implied by the horizon. Banks care because turnover drives transaction costs and capacity. Read: higher turnover needs a bigger gross edge to survive.",
-    "Break-even bps": "How many basis points of cost per trade the gross edge can absorb before it dies. If your real broker/slippage cost exceeds this, the edge is fictional. This is THE reality check.",
-    "Beta": "Sensitivity to the market (NIFTY). 1.0 = moves with market, >1 amplifies, <1 dampens. Used everywhere for hedging and risk budgeting.",
-    "Factor Alpha": "Annual return left over AFTER stripping out market/size/momentum exposure. This is 'true' skill vs just riding factors. AQR/Barra-style attribution is built on this.",
-    "t-stat": "How many standard errors a beta/alpha is from zero (Newey-West, robust to overlap). Read: |t|>2 ≈ statistically significant; below that, ignore the number.",
-    "R²": "Fraction of the stock's moves explained by the factors. High R² = it's mostly factor-driven (little idiosyncratic edge); low R² = more stock-specific behavior.",
-    "VaR 95%": "Worst loss NOT exceeded 95% of the time over the horizon. Regulatory + risk-desk standard at every bank. Read: a -8% VaR means 1-in-20 periods lose more than 8%.",
-    "Expected Shortfall": "Average loss in the worst 5% of cases (the tail beyond VaR). Banks prefer it to VaR post-2008 because it captures tail severity. Read: always worse than VaR.",
-    "Monte Carlo VaR": "VaR from simulating thousands of fat-tailed (Student-t) return paths instead of just history. Used when history is short or you want forward-looking tails.",
-    "Stress Scenario": "What the position loses if a historical crash (2008/COVID) repeats, propagated through beta. Mandatory at banks for capital planning. Read: can you survive these?",
-    "GARCH σ": "Volatility forecast that reacts to recent shocks and clusters (vol begets vol). The desk standard for vol forecasting; EWMA is the simpler fallback.",
-    "Vol Regime": "Whether current vol is COMPRESSED / NORMAL / STRESSED vs its own 1yr history. Drives position sizing and conviction. Read: trim size in STRESSED.",
-    "Frac-diff d": "Minimum differencing that makes price stationary while keeping memory (López de Prado). Lets ML/stat models work without throwing away predictive info. Read: lower d achieving ADF<0.05 = more memory kept.",
-    "Suggested Weight": "Position size from vol-targeting × half-Kelly × statistical confidence. NOT advice — a disciplined upper bound. Read: scales down automatically when edge is weak.",
+    "Deflated Sharpe": "Probability the Sharpe is REAL after adjusting for how many strategies you tested. The go/no-go gate at quant funds. ≥0.60 = credible edge; <0.60 = likely noise.",
+    "Prob Sharpe": "Probability the Sharpe is above zero given skew, fat tails, sample size. Closer to 1.0 = more reliable track record.",
+    "OOS Deflated Sharpe": "Deflated Sharpe on data the model never saw (purged walk-forward). The number that actually matters — trust it over in-sample.",
+    "Expectancy/trade": "Average net profit per trade after costs (%). Must be positive AND its confidence interval should not cross zero.",
+    "Expectancy CI": "Bootstrap 95% band for expectancy. If it includes 0, the edge is statistically indistinguishable from random.",
+    "Win Rate": "% of trades closing positive. Secondary to expectancy — high payoff can beat high win rate.",
+    "Turnover": "Round-trip trades per year. Higher turnover needs a bigger gross edge to survive costs.",
+    "Break-even bps": "Cost per trade (bps) the gross edge can absorb before dying. If your real cost exceeds this, the edge is fictional. The key reality check.",
+    "Beta": "Sensitivity to NIFTY. 1.0 = moves with market, >1 amplifies. Used for hedging and risk budgeting.",
+    "CAPM Alpha": "Annual return above what beta-to-market explains. Crude 'skill' proxy.",
+    "Factor Alpha": "Annual return left after stripping market/size/momentum exposure. 'True' skill vs riding factors.",
+    "R²": "Fraction of moves explained by factors. High = factor-driven; low = stock-specific behavior.",
+    "VaR 95%": "Worst loss not exceeded 95% of the time over the horizon. Risk-desk standard.",
+    "Expected Shortfall": "Average loss in the worst 5% of cases (tail beyond VaR). Banks prefer it post-2008.",
+    "Monte Carlo VaR": "VaR from simulating thousands of fat-tailed (Student-t) paths, not just history.",
+    "GARCH σ": "Volatility forecast that reacts to recent shocks and clusters. Desk standard for vol.",
+    "Vol Regime": "Current vol vs its own 1yr history: COMPRESSED / NORMAL / STRESSED. Trim size in STRESSED.",
+    "Frac-diff d": "Minimum differencing that makes price stationary while keeping memory (AFML). Lower d at ADF<0.05 = more memory kept.",
+    "Suggested Weight": "Vol-target × half-Kelly × statistical confidence. A disciplined upper bound, not advice.",
+    "Max DD": "Largest peak-to-trough equity loss. Can you stomach it?",
+    "Sharpe": "Annual return per unit of total volatility.",
+    "Sortino": "Like Sharpe but penalizes only downside volatility.",
 }
 
 
@@ -448,12 +415,11 @@ def gemini_research_note(sym, fund, fac, vol, stat, ex, dom, wf, size, factor,
         model_name="gemini-2.5-flash",
         system_instruction=(
             "You are a buy-side quant strategist writing for a profitable discretionary trader "
-            "who is backtesting/validating his own strategy. Summarize ONLY the supplied computed "
-            "statistics. For EACH metric you cite, briefly state what it is and how quant funds, "
-            "investment banks and systematic traders use it, in plain language. Do NOT invent numbers, "
-            "no chart-pattern talk, no advice. Lead with Deflated Sharpe and out-of-sample evidence. "
-            "If OOS Deflated Sharpe < 0.60, state plainly there is no statistically reliable edge. "
-            "Educational only; not SEBI registered."
+            "backtesting his own strategy. Summarize ONLY the supplied numbers. For each metric you "
+            "cite, briefly state what it is and how quant funds, investment banks and systematic traders "
+            "use it, in plain language. No invented numbers, no chart-pattern talk, no advice. Lead with "
+            "Deflated Sharpe and out-of-sample evidence. If OOS Deflated Sharpe < 0.60, say plainly there "
+            "is no statistically reliable edge. Educational only; not SEBI registered."
         ),
     )
 
@@ -470,54 +436,38 @@ def gemini_research_note(sym, fund, fac, vol, stat, ex, dom, wf, size, factor,
     prompt = f"""Quant validation note — {sym} ({fund['name']}, {fund['sector']}). Summarize ONLY these.
 
 DECISION
-- Verdict {verdict} (gated purely on Deflated Sharpe ≥ 0.60)
+- Verdict {verdict} (gated on Deflated Sharpe ≥ 0.60)
 - In-sample: expectancy {f(dom['expectancy']*100)}%/trade [95% CI {f(dom['exp_ci'][0]*100)}..{f(dom['exp_ci'][1]*100)}%], PSR {f(dom['psr'])}, DSR {f(dom['dsr'])}, win {f(dom['win_rate'],0)}%, n={dom['n']}
 - Out-of-sample (purged WF): expectancy {f((wf['oos_expectancy'] or 0)*100)}%/trade, OOS-DSR {f(wf['oos_dsr'])}, win {f(wf['oos_win_rate'],0)}%, n={wf['oos_n']}
 - Best horizon by OOS-DSR: {sb.get('horizon','?')}d {sb.get('side','?')} (OOS-DSR {f(sb.get('oos_dsr'))})
-- Costs: turnover {f(dom['turnover'],0)} trades/yr, break-even {f(dom['breakeven_bps'],0)} bps/trade
+- Costs: turnover {f(dom['turnover'],0)}/yr, break-even {f(dom['breakeven_bps'],0)} bps/trade
 - Sizing: weight {size['weight']} (vol-target {size['vol_target_w']} × half-Kelly {size['kelly_half']} × conf {size['confidence']})
 
-FACTOR ATTRIBUTION (proxy-based, Newey-West t-stats)
-- Betas: {betas} | Factor alpha {f(factor.get('alpha_ann'),1)}%/yr | R² {f(factor.get('r2'))}
-
-RISK
-- Hist VaR {f(hist['var'])}% / ES {f(hist['es'])}% | MC VaR {f(mc['var'])}% / ES {f(mc['es'])}% (t df {f(mc['t_df'],1)})
-- MaxDD {f(fac['max_dd'],1)}% | Beta {f(fac['beta'])} | Stress {stress_txt}
-- Vol regime {vol['regime']} ({f(vol['percentile'],0)}th pct), ann {f(vol['sigma_annual']*100,1)}%
-- Frac-diff d={f(stat['d'])} (ADF p={f(stat['adf_pvalue'],4)}); Sharpe {f(fac['sharpe'])}, Sortino {f(fac['sortino'])}
+FACTOR (proxy, Newey-West t): {betas} | alpha {f(factor.get('alpha_ann'),1)}%/yr | R² {f(factor.get('r2'))}
+RISK: Hist VaR {f(hist['var'])}%/ES {f(hist['es'])}% | MC VaR {f(mc['var'])}%/ES {f(mc['es'])}% | MaxDD {f(fac['max_dd'],1)}% | Beta {f(fac['beta'])} | Stress {stress_txt} | Vol {vol['regime']}
+QUALITY: frac-diff d={f(stat['d'])} (ADF {f(stat['adf_pvalue'],4)}); Sharpe {f(fac['sharpe'])}, Sortino {f(fac['sortino'])}
 
 STRUCTURE (bold headers, <320 words):
 **Verdict & Why** — DSR/OOS reasoning; if OOS-DSR<0.60 say NO RELIABLE EDGE.
-**Cost Reality** — does break-even bps clear realistic Indian costs (~10-20 bps)? explain turnover.
+**Cost Reality** — does break-even bps clear realistic Indian costs (~15-20 bps)? explain turnover.
 **Factor Exposure** — what betas/t-stats/alpha mean and how desks use them.
 **Risk** — VaR/ES/stress/regime + suggested weight, plain language.
-**For Your Strategy** — how to use these stats to validate his discretionary setup."""
+**For Your Strategy** — how to use these stats to validate your discretionary setup."""
     return model.generate_content(prompt).text
 
 
-# ── UI primitives ──
-def _label(text):
-    g = GLOSSARY.get(text)
-    return f"{text} ⓘ" if g else text
-
-
-def _grid(cells, cols=None):
-    cols = cols or len(cells)
-    html = (f"<div style='display:grid;grid-template-columns:repeat({cols},1fr);gap:1px;"
-            f"background:{BORDER};border:1px solid {BORDER};border-radius:6px;overflow:hidden;'>")
-    for label, value, color in cells:
-        tip = GLOSSARY.get(label, "")
-        mark = " <span style='color:%s;font-size:9px;'>ⓘ</span>" % MUTE if tip else ""
-        title = f" title=\"{tip}\"" if tip else ""
-        html += (f"<div style='background:{PANEL};padding:10px 12px;'{title}>"
-                 f"<div style='font-size:9.5px;letter-spacing:.8px;color:{MUTE};text-transform:uppercase;'>{label}{mark}</div>"
-                 f"<div style='font-family:{MONO};font-size:16px;font-weight:600;color:{color};margin-top:3px;'>{value}</div></div>")
-    return html + "</div>"
+# ── helpers ──
+def _metric_row(cells):
+    """cells = list of (label, value). Native st.metric ⓘ tooltips from GLOSSARY."""
+    import streamlit as st
+    cols = st.columns(len(cells))
+    for col, (label, value) in zip(cols, cells):
+        col.metric(label, value, help=GLOSSARY.get(label.strip()))
 
 
 def _sec(title):
     return (f"<div style='font-family:{MONO};font-size:11px;font-weight:600;color:{ACCENT};"
-            f"letter-spacing:1.5px;margin:16px 0 8px;border-bottom:1px solid {BORDER};padding-bottom:5px;'>{title}</div>")
+            f"letter-spacing:1.5px;margin:14px 0 6px;border-bottom:1px solid {BORDER};padding-bottom:5px;'>{title}</div>")
 
 
 def _fmt(v, suffix="", dp=2, dash="—"):
@@ -526,6 +476,89 @@ def _fmt(v, suffix="", dp=2, dash="—"):
     return f"{v:,.{dp}f}{suffix}"
 
 
+def _plot_layout(fig, title, height=320):
+    fig.update_layout(template="plotly_dark", title=dict(text=title, font=dict(size=13, color=ACCENT)),
+                      paper_bgcolor=PANEL, plot_bgcolor=PANEL, height=height,
+                      margin=dict(l=10, r=10, t=40, b=10), font=dict(family="monospace", size=11, color=IVORY),
+                      xaxis=dict(gridcolor=BORDER), yaxis=dict(gridcolor=BORDER), showlegend=False)
+    return fig
+
+
+# ── CHARTS (Plotly, each captioned) ──
+def chart_price_setup(df, ex, verdict):
+    import plotly.graph_objects as go
+    d = df.tail(180)
+    fig = go.Figure(go.Candlestick(x=d.index, open=d["Open"], high=d["High"], low=d["Low"], close=d["Close"],
+                                   increasing_line_color=GREEN, decreasing_line_color=RED, name="Price"))
+    for y, c, lbl in [(ex["entry"], BLUE, "Entry"), (ex["target"], GREEN, "Target"), (ex["stop"], RED, "Stop")]:
+        fig.add_hline(y=y, line_color=c, line_dash="dot", line_width=1,
+                      annotation_text=f"{lbl} {y:,.0f}", annotation_font_color=c, annotation_position="right")
+    return _plot_layout(fig, f"PRICE & SETUP LEVELS · {verdict}", 380)
+
+
+def chart_equity(dom):
+    import plotly.graph_objects as go
+    eq = dom.get("equity", pd.Series(dtype=float))
+    fig = go.Figure()
+    if len(eq):
+        fig.add_trace(go.Scatter(x=eq.index, y=eq.values, line=dict(color=ACCENT, width=2), fill="tozeroy",
+                                 fillcolor="rgba(201,162,39,0.08)"))
+        fig.add_hline(y=1.0, line_color=MUTE, line_dash="dash", line_width=1)
+    return _plot_layout(fig, "BACKTEST EQUITY CURVE (1.0 = start)")
+
+
+def chart_drawdown(dom):
+    import plotly.graph_objects as go
+    eq = dom.get("equity", pd.Series(dtype=float))
+    fig = go.Figure()
+    if len(eq):
+        dd = (eq / eq.cummax() - 1) * 100
+        fig.add_trace(go.Scatter(x=dd.index, y=dd.values, line=dict(color=RED, width=1.5), fill="tozeroy",
+                                 fillcolor="rgba(232,85,78,0.15)"))
+    return _plot_layout(fig, "STRATEGY DRAWDOWN (%)")
+
+
+def chart_trade_hist(dom, hist_var):
+    import plotly.graph_objects as go
+    r = dom.get("rets", np.array([])) * 100
+    fig = go.Figure()
+    if len(r):
+        fig.add_trace(go.Histogram(x=r, nbinsx=40, marker_color=BLUE, opacity=0.8))
+        fig.add_vline(x=float(np.mean(r)), line_color=GREEN, line_width=2,
+                      annotation_text=f"Expectancy {np.mean(r):+.2f}%", annotation_font_color=GREEN)
+        fig.add_vline(x=hist_var, line_color=RED, line_dash="dot", line_width=2,
+                      annotation_text=f"VaR95 {hist_var:.2f}%", annotation_font_color=RED)
+    return _plot_layout(fig, "DISTRIBUTION OF TRADE RETURNS (%)")
+
+
+def chart_horizon_scan(scan_rows):
+    import plotly.graph_objects as go
+    sdf = pd.DataFrame(scan_rows)
+    fig = go.Figure()
+    if not sdf.empty:
+        for side, color in [("LONG", GREEN), ("SHORT", RED)]:
+            s = sdf[sdf["side"] == side]
+            fig.add_trace(go.Bar(x=[f"{h}d" for h in s["horizon"]], y=s["oos_dsr"], name=side,
+                                 marker_color=color, opacity=0.85))
+        fig.add_hline(y=0.60, line_color=ACCENT, line_dash="dash", line_width=1.5,
+                      annotation_text="0.60 edge gate", annotation_font_color=ACCENT)
+        fig.update_layout(showlegend=True, barmode="group")
+    return _plot_layout(fig, "ALPHA-DECAY · OOS DEFLATED SHARPE BY HORIZON")
+
+
+def chart_garch(sigma, vol_model):
+    import plotly.graph_objects as go
+    s = (sigma.tail(250) * np.sqrt(TRADING_DAYS) * 100)
+    fig = go.Figure(go.Scatter(x=s.index, y=s.values, line=dict(color=BLUE, width=1.5)))
+    return _plot_layout(fig, f"CONDITIONAL VOLATILITY · {vol_model} (annualized %)")
+
+
+def _cap(text):
+    import streamlit as st
+    st.caption(text)
+
+
+# ════════════════════════ ENTRY POINT ════════════════════════
 def render_quant_analysis():
     import streamlit as st
     from datetime import datetime, timezone
@@ -533,13 +566,10 @@ def render_quant_analysis():
     _hist = st.cache_data(ttl=900, show_spinner=False)(fetch_history)
     _proxy = st.cache_data(ttl=900, show_spinner=False)(fetch_factor_proxies)
 
-    # Spaced-out tab labels + terminal styling
     st.markdown(f"""
     <style>
       .stTabs [data-baseweb="tab-list"] {{ gap: 34px; border-bottom:1px solid {BORDER}; }}
-      .stTabs [data-baseweb="tab"] {{
-        font-family:{MONO}; font-size:12px; letter-spacing:2px; color:{MUTE};
-        padding:8px 4px; }}
+      .stTabs [data-baseweb="tab"] {{ font-family:{MONO}; font-size:12px; letter-spacing:2px; color:{MUTE}; padding:8px 4px; }}
       .stTabs [aria-selected="true"] {{ color:{ACCENT}; }}
       .block-container {{ padding-top:1.2rem; }}
     </style>""", unsafe_allow_html=True)
@@ -562,7 +592,7 @@ def render_quant_analysis():
         run = st.form_submit_button("RUN", type="primary", use_container_width=True)
 
     if not run:
-        st.info("Enter an NSE symbol and press RUN. Hover any ⓘ to learn what a metric means.")
+        st.info("Enter an NSE symbol and press RUN. Hover the ⓘ on any metric for a plain-English definition.")
         return
     if not symbol.strip():
         st.error("Enter a symbol."); return
@@ -574,7 +604,6 @@ def render_quant_analysis():
             st.error(f"Insufficient data for {sym} (need ~2y+)."); return
         close = df["Close"]; price = float(close.iloc[-1])
         proxies = _proxy(); bench = proxies.get("MKT", pd.Series(dtype=float))
-
         stat = stationarity_analysis(close)
         sigma, vol_model, fwd = garch_vol(close, horizon)
         vol = volatility_regime(sigma)
@@ -603,93 +632,102 @@ def render_quant_analysis():
         <div style='font-family:{MONO};font-size:24px;font-weight:700;color:{IVORY};margin-top:5px;'>Rs {price:,.2f}</div>
       </div>
       <div style='text-align:right;'>
-        <div style='font-family:{MONO};font-size:10px;color:{MUTE};letter-spacing:1px;'>DISPOSITION · DEFLATED SHARPE GATED</div>
+        <div style='font-family:{MONO};font-size:10px;color:{MUTE};letter-spacing:1px;'>DISPOSITION · DEFLATED-SHARPE GATED</div>
         <div style='font-family:{MONO};font-size:30px;font-weight:700;color:{vcolor};line-height:1.1;'>{verdict}</div>
         <div style='font-family:{MONO};font-size:13px;color:{IVORY};'>DSR {dom['dsr']:.2f} · OOS-DSR {_fmt(wf['oos_dsr'],"",2)}</div>
       </div>
     </div>""", unsafe_allow_html=True)
 
-    tabs = st.tabs(["OVERVIEW", "FACTOR ATTRIBUTION", "RISK", "BACKTEST / SKILL", "STATIONARITY", "RESEARCH"])
+    tabs = st.tabs(["OVERVIEW", "CHARTS", "FACTOR ATTRIBUTION", "RISK", "BACKTEST / SKILL", "STATIONARITY", "RESEARCH"])
 
+    # OVERVIEW
     with tabs[0]:
         st.markdown(_sec("EXECUTION MATRIX"), unsafe_allow_html=True)
-        st.markdown(_grid([("Entry", f"{ex['entry']:,.2f}", IVORY), ("Target", f"{ex['target']:,.2f}", GREEN),
-                           ("Stop", f"{ex['stop']:,.2f}", RED), ("R:R", f"{ex['rr']} : 1", BLUE)]), unsafe_allow_html=True)
-        st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
-        st.markdown(_grid([("Suggested Weight", f"{size['weight']*100:.1f}%", ACCENT),
-                           ("Turnover", f"{dom['turnover']:.0f}/yr", IVORY),
-                           ("Break-even bps", f"{dom['breakeven_bps']:.0f}", GREEN if dom['breakeven_bps'] > cost_bps else RED),
-                           ("Vol Regime", vol['regime'], ACCENT)]), unsafe_allow_html=True)
+        _metric_row([("Entry", f"{ex['entry']:,.2f}"), ("Target", f"{ex['target']:,.2f}"),
+                     ("Stop", f"{ex['stop']:,.2f}"), ("R:R", f"{ex['rr']} : 1")])
+        st.markdown(_sec("EDGE & COST REALITY"), unsafe_allow_html=True)
+        _metric_row([("Suggested Weight", f"{size['weight']*100:.1f}%"), ("Turnover", f"{dom['turnover']:.0f}/yr"),
+                     ("Break-even bps", f"{dom['breakeven_bps']:.0f}"), ("Vol Regime", vol['regime'])])
+        _cap("Break-even bps must exceed your real round-trip cost (Indian equities ≈ 15-20 bps) or the edge is fictional.")
         st.markdown(_sec("RETURN / RISK BATTERY"), unsafe_allow_html=True)
-        st.markdown(_grid([("Ann Return", _fmt(fac['ann_ret'], "%", 1), GREEN if fac['ann_ret'] > 0 else RED),
-                           ("Ann Vol", _fmt(fac['ann_vol'], "%", 1), IVORY), ("Sharpe", _fmt(fac['sharpe'], "", 2), IVORY),
-                           ("Sortino", _fmt(fac['sortino'], "", 2), IVORY), ("Max DD", _fmt(fac['max_dd'], "%", 1), RED)]), unsafe_allow_html=True)
-        st.caption("Hover any ⓘ for a plain-English definition and how desks use it.")
+        _metric_row([("Sharpe", _fmt(fac['sharpe'], "", 2)), ("Sortino", _fmt(fac['sortino'], "", 2)),
+                     ("Max DD", _fmt(fac['max_dd'], "%", 1)), ("Beta", _fmt(fac['beta'], "", 2))])
 
+    # CHARTS
     with tabs[1]:
+        st.plotly_chart(chart_price_setup(df, ex, verdict), use_container_width=True)
+        _cap("Candlesticks (last 180 days) with your entry/target/stop levels. Shows where the setup sits vs recent price.")
+        st.plotly_chart(chart_equity(dom), use_container_width=True)
+        _cap("Cumulative P&L of the backtested setup. Smooth upward slope = stable edge; one big jump = lucky outlier, not skill.")
+        st.plotly_chart(chart_drawdown(dom), use_container_width=True)
+        _cap("Peak-to-trough loss of the strategy over time. The deepest point is the pain you must survive to trade it.")
+        st.plotly_chart(chart_trade_hist(dom, hist['var']), use_container_width=True)
+        _cap("Every trade's return. Green line = average (expectancy); red dotted = 95% VaR. Fat left tail = ruin risk.")
+        st.plotly_chart(chart_horizon_scan(scan_rows), use_container_width=True)
+        _cap("Out-of-sample Deflated Sharpe at each holding period. Bars above the gold 0.60 line = a credible edge at that horizon.")
+        st.plotly_chart(chart_garch(sigma, vol_model), use_container_width=True)
+        _cap("Forecasted volatility over time. Rising = risk expanding (size down); falling = calmer regime.")
+
+    # FACTOR
+    with tabs[2]:
         st.markdown(_sec("FACTOR REGRESSION · NEWEY-WEST t-STATS · PROXY-BASED"), unsafe_allow_html=True)
-        st.caption("India factor proxies from Yahoo indices (MKT=^NSEI, SIZE=MID−LARGE, MOM=market momentum). "
-                   "Proxies, not licensed Barra/Fama-French data.")
+        _cap("India factor proxies from Yahoo indices (MKT=^NSEI, SIZE=MID−LARGE, MOM=market momentum). Proxies, not licensed Barra data. |t|>2 ≈ significant.")
         betas = factor.get("betas", {}); ts_ = factor.get("tstats", {})
         if betas:
-            cells = [(k, f"{_fmt(v,'',2)} (t={_fmt(ts_.get(k),'',1)})", BLUE if v >= 0 else RED) for k, v in betas.items()]
-            cells += [("Factor Alpha", _fmt(factor['alpha_ann'], "%/yr", 1), GREEN if (factor['alpha_ann'] or 0) > 0 else RED),
-                      ("R²", _fmt(factor['r2'], "", 2), IVORY)]
-            st.markdown(_grid(cells), unsafe_allow_html=True)
+            cells = [(k, f"{_fmt(v,'',2)} (t={_fmt(ts_.get(k),'',1)})") for k, v in betas.items()]
+            cells += [("Factor Alpha", _fmt(factor['alpha_ann'], "%/yr", 1)), ("R²", _fmt(factor['r2'], "", 2))]
+            _metric_row(cells)
         else:
             st.warning("Insufficient overlapping data for factor regression.")
-        st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
-        st.markdown(_grid([("Beta", _fmt(fac['beta'], "", 2), IVORY), ("CAPM Alpha", _fmt(fac['alpha'], "%/yr", 1), GREEN if (fac['alpha'] or 0) > 0 else RED),
-                           ("Skew", _fmt(fac['skew'], "", 2), IVORY), ("Kurtosis", _fmt(fac['kurt'], "", 2), IVORY)]), unsafe_allow_html=True)
+        st.markdown(_sec("MARKET-RELATIVE"), unsafe_allow_html=True)
+        _metric_row([("Beta", _fmt(fac['beta'], "", 2)), ("CAPM Alpha", _fmt(fac['alpha'], "%/yr", 1)),
+                     ("Skew", _fmt(fac['skew'], "", 2)), ("Kurtosis", _fmt(fac['kurt'], "", 2))])
 
-    with tabs[2]:
-        st.markdown(_sec(f"VaR / EXPECTED SHORTFALL · {horizon}D · 95%"), unsafe_allow_html=True)
-        st.markdown(_grid([("VaR 95%", _fmt(hist['var'], "%", 2), RED), ("Expected Shortfall", _fmt(hist['es'], "%", 2), RED),
-                           ("Monte Carlo VaR", _fmt(mc['var'], "%", 2), RED), ("Expected Shortfall ", _fmt(mc['es'], "%", 2), RED),
-                           ("t df", _fmt(mc['t_df'], "", 1), MUTE)]), unsafe_allow_html=True)
-        st.markdown(_sec("STRESS SCENARIOS · BETA-PROPAGATED"), unsafe_allow_html=True)
-        st.markdown(_grid([(n, f"{v['pct']:+.1f}% → {v['price']:,.0f}", RED if v['pct'] < 0 else GREEN) for n, v in stress.items()], cols=2), unsafe_allow_html=True)
-        st.markdown(_sec(f"CONDITIONAL VOLATILITY · {vol_model}"), unsafe_allow_html=True)
-        st.markdown(_grid([("GARCH σ", _fmt(vol['sigma_daily']*100, "% d", 2), IVORY), ("σ annual", _fmt(vol['sigma_annual']*100, "%", 1), IVORY),
-                           (f"σ {horizon}d fwd", _fmt(fwd*100, "%", 2), ACCENT), ("Percentile", _fmt(vol['percentile'], "th", 0), BLUE)]), unsafe_allow_html=True)
-        st.line_chart((sigma.tail(250) * np.sqrt(TRADING_DAYS) * 100).rename("Annualized σ %"))
-
+    # RISK
     with tabs[3]:
+        st.markdown(_sec(f"VaR / EXPECTED SHORTFALL · {horizon}D · 95%"), unsafe_allow_html=True)
+        _metric_row([("VaR 95%", _fmt(hist['var'], "%", 2)), ("Expected Shortfall", _fmt(hist['es'], "%", 2)),
+                     ("Monte Carlo VaR", _fmt(mc['var'], "%", 2)), ("t df", _fmt(mc['t_df'], "", 1))])
+        st.markdown(_sec("STRESS SCENARIOS · BETA-PROPAGATED"), unsafe_allow_html=True)
+        _metric_row([(n.split(" (")[0], f"{v['pct']:+.1f}%") for n, v in stress.items()])
+        _cap("What the position loses if each historical crash repeats, scaled by beta. Banks run these for capital planning.")
+        st.markdown(_sec(f"CONDITIONAL VOLATILITY · {vol_model}"), unsafe_allow_html=True)
+        _metric_row([("GARCH σ", _fmt(vol['sigma_daily']*100, "%", 2)), ("σ annual", _fmt(vol['sigma_annual']*100, "%", 1)),
+                     (f"σ {horizon}d fwd", _fmt(fwd*100, "%", 2)), ("Vol Regime", vol['regime'])])
+
+    # BACKTEST / SKILL
+    with tabs[4]:
         st.markdown(_sec("IN-SAMPLE SKILL"), unsafe_allow_html=True)
         lo, hi = dom['exp_ci']
-        st.markdown(_grid([("Expectancy/trade", f"{dom['expectancy']*100:+.2f}%", GREEN if dom['expectancy'] > 0 else RED),
-                           ("Expectancy CI", f"{lo*100:+.2f}..{hi*100:+.2f}%", IVORY),
-                           ("Prob Sharpe", _fmt(dom['psr'], "", 2), IVORY),
-                           ("Deflated Sharpe", _fmt(dom['dsr'], "", 2), GREEN if dom['dsr'] >= 0.6 else RED),
-                           ("Win Rate", f"{dom['win_rate']:.0f}% (n={dom['n']})", IVORY)]), unsafe_allow_html=True)
+        _metric_row([("Expectancy/trade", f"{dom['expectancy']*100:+.2f}%"),
+                     ("Expectancy CI", f"{lo*100:+.2f}..{hi*100:+.2f}%"),
+                     ("Prob Sharpe", _fmt(dom['psr'], "", 2)), ("Deflated Sharpe", _fmt(dom['dsr'], "", 2)),
+                     ("Win Rate", f"{dom['win_rate']:.0f}% (n={dom['n']})")])
         st.markdown(_sec("OUT-OF-SAMPLE · PURGED WALK-FORWARD"), unsafe_allow_html=True)
-        st.markdown(_grid([("OOS Deflated Sharpe", _fmt(wf['oos_dsr'], "", 2) if wf['oos_n'] else "—", GREEN if (wf['oos_dsr'] or 0) >= 0.6 else RED),
-                           ("OOS Expectancy", _fmt((wf['oos_expectancy'] or 0)*100, "%", 2) if wf['oos_n'] else "—", GREEN if (wf['oos_expectancy'] or 0) > 0 else RED),
-                           ("OOS Win", _fmt(wf['oos_win_rate'], "%", 0) if wf['oos_n'] else "—", IVORY),
-                           ("OOS n", f"{wf['oos_n']}", MUTE)]), unsafe_allow_html=True)
+        _metric_row([("OOS Deflated Sharpe", _fmt(wf['oos_dsr'], "", 2) if wf['oos_n'] else "—"),
+                     ("OOS Expectancy", _fmt((wf['oos_expectancy'] or 0)*100, "%", 2) if wf['oos_n'] else "—"),
+                     ("OOS Win", _fmt(wf['oos_win_rate'], "%", 0) if wf['oos_n'] else "—"),
+                     ("OOS n", f"{wf['oos_n']}")])
         st.markdown(_sec("ALPHA-DECAY · MULTI-HORIZON OOS SCAN"), unsafe_allow_html=True)
         sdf = pd.DataFrame(scan_rows)
         if not sdf.empty:
-            sdf = sdf.assign(oos_dsr=sdf["oos_dsr"].round(2),
-                             oos_exp=(sdf["oos_exp"].astype(float) * 100).round(2))
+            sdf = sdf.assign(oos_dsr=sdf["oos_dsr"].round(2), oos_exp=(sdf["oos_exp"].astype(float) * 100).round(2))
             sdf.columns = ["Horizon(d)", "Side", "OOS-DSR", "OOS-Exp %", "OOS n"]
             st.dataframe(sdf, use_container_width=True, hide_index=True)
         if scan_best:
-            st.success(f"Best horizon by OOS Deflated Sharpe: **{scan_best['horizon']}d {scan_best['side']}** "
-                       f"(OOS-DSR {scan_best['oos_dsr']:.2f}).")
+            st.success(f"Best horizon by OOS Deflated Sharpe: {scan_best['horizon']}d {scan_best['side']} (OOS-DSR {scan_best['oos_dsr']:.2f}).")
         if dom['dsr'] < 0.60:
             st.warning("Deflated Sharpe < 0.60 → no statistically reliable edge after multiple-testing.")
 
-    with tabs[4]:
-        st.markdown(_sec("FRACTIONAL DIFFERENTIATION · AFML CH.5"), unsafe_allow_html=True)
-        st.markdown(_grid([("Frac-diff d", _fmt(stat['d'], "", 2), BLUE),
-                           ("ADF p-value", _fmt(stat['adf_pvalue'], "", 4), GREEN if (stat['adf_pvalue'] or 1) < 0.05 else RED),
-                           ("Memory Retained", _fmt(stat['memory_retained'], "", 3), GREEN),
-                           ("Memory Gain", _fmt(stat['memory_gain'], "", 3), BLUE)]), unsafe_allow_html=True)
-        st.caption("Lowest d achieving ADF p<0.05 keeps the most memory while making the series stationary — "
-                   "so ML/stat models work without discarding predictive structure.")
-
+    # STATIONARITY
     with tabs[5]:
+        st.markdown(_sec("FRACTIONAL DIFFERENTIATION · AFML CH.5"), unsafe_allow_html=True)
+        _metric_row([("Frac-diff d", _fmt(stat['d'], "", 2)), ("ADF p-value", _fmt(stat['adf_pvalue'], "", 4)),
+                     ("Memory Retained", _fmt(stat['memory_retained'], "", 3)), ("Memory Gain", _fmt(stat['memory_gain'], "", 3))])
+        _cap("Lowest d achieving ADF p<0.05 keeps the most memory while making the series stationary — so models work without discarding predictive structure.")
+
+    # RESEARCH
+    with tabs[6]:
         st.markdown(_sec("QUANT STRATEGIST NOTE · EXPLAINS EACH METRIC"), unsafe_allow_html=True)
         try:
             api_key = st.secrets.get("GEMINI_KEY", "")
@@ -710,7 +748,7 @@ def render_quant_analysis():
         with st.expander("Metric glossary — what each term means & how desks use it"):
             for k, v in GLOSSARY.items():
                 st.markdown(f"**{k}** — {v}")
-        st.caption("AI summarizes computed numbers only; it adds no independent analysis or advice.")
+        _cap("AI summarizes computed numbers only; it adds no independent analysis or advice.")
 
     st.markdown(f"<div style='font-family:{MONO};font-size:10px;color:{MUTE};margin-top:14px;'>"
                 "Backtesting / educational tool · Not investment advice · Statistical edge does not "
