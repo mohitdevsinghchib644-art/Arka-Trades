@@ -1,21 +1,12 @@
-"""
-quant_analysis.py — Institutional Quant Terminal (FULL FILE)
-=============================================================
+quant_analysis.py — Institutional Quant Terminal v2.0
+======================================================
 Methods: AFML frac-diff (Ch.5), non-overlapping triple-barrier (Ch.3),
 purged walk-forward (Ch.7), Probabilistic & Deflated Sharpe (Ch.8),
 GARCH(1,1)-t vol, factor attribution w/ Newey-West SEs, MC & historical
 VaR/ES, stress tests, multi-horizon alpha-decay scan, bootstrap CIs,
-turnover/break-even cost, vol-target + fractional-Kelly sizing.
-
-NEW in this version:
-  - Transaction Cost Modeling  (realistic round-trip decomposition)
-  - Information Coefficient    (IC, ICIR, rank-IC)
-  - Factor Decay Analysis      (IC decay at multiple lags)
-  - Hidden Markov Models       (2-state HMM via Baum-Welch on returns)
-  - Meta-Labeling              (secondary classifier confidence overlay)
-  - Adaptive history           (falls back from 5y if IPO is recent)
-  - Enhanced price chart       (volume, entry markers, shaded zones)
-  - Date range shown on every backtest panel
+turnover/break-even cost, vol-target + fractional-Kelly sizing,
+Transaction Cost Modeling, IC/ICIR, Factor Decay, HMM, Meta-Labeling,
+AI Score (Gemini), AI Tab Summaries, BUY/SELL/AVOID verdict.
 
 Deps: pandas numpy scipy statsmodels yfinance plotly streamlit
       optional: arch, google-generativeai
@@ -34,19 +25,18 @@ warnings.filterwarnings("ignore")
 BG, PANEL, PANEL2, BORDER = "#0B0E13", "#11151D", "#161C26", "#222B38"
 ACCENT, IVORY, MUTE = "#C9A227", "#E8EDF2", "#8593A3"
 GREEN, RED, BLUE = "#1FB97A", "#E8554E", "#4C8DD6"
-PURPLE = "#9B59B6"
+PURPLE, ORANGE = "#9B59B6", "#E67E22"
 MONO = "'IBM Plex Mono','JetBrains Mono','SF Mono',monospace"
 TRADING_DAYS = 252
 HORIZONS = [5, 10, 21, 63]
 DEFAULT_HORIZON = 5
 FACTOR_PROXIES = {"MKT": "^NSEI", "LARGE": "^CNX100", "MID": "^CNXMIDCAP"}
 PERIODS_TO_TRY = ["5y", "3y", "2y", "1y"]
-MIN_BARS = 252  # at least 1 year
+MIN_BARS = 252
 
 
 # ════════════════════════ DATA ════════════════════════
 def fetch_history(symbol: str, interval: str = "1d"):
-    """Try periods from 5y downward; return first with enough bars."""
     sym = symbol.strip().upper()
     if not sym.endswith(".NS"):
         sym += ".NS"
@@ -60,7 +50,6 @@ def fetch_history(symbol: str, interval: str = "1d"):
             except Exception:
                 info = {}
             return df, sym, info, period
-    # if nothing meets MIN_BARS, return whatever we have
     df_last = tk.history(period="max", interval=interval)
     if not df_last.empty:
         df_last = df_last[["Open", "High", "Low", "Close", "Volume"]].dropna()
@@ -86,7 +75,7 @@ def _rets(s):
     return np.log(s / s.shift(1)).dropna()
 
 
-# ════════════════════════ 1. FRAC-DIFF (AFML Ch.5) ════════════════════════
+# ════════════════════════ 1. FRAC-DIFF ════════════════════════
 def _ffd_weights(d, threshold=1e-4):
     w, k = [1.0], 1
     while abs(w[-1]) > threshold:
@@ -155,7 +144,7 @@ def volatility_regime(sigma):
             "percentile": pct, "regime": regime}
 
 
-# ════════════════════════ 3. FACTOR ATTRIBUTION (Newey-West) ════════════════════════
+# ════════════════════════ 3. FACTOR ATTRIBUTION ════════════════════════
 def _newey_west_se(X, resid, lags):
     XtX_inv = np.linalg.pinv(X.T @ X)
     S = (X * resid[:, None]).T @ (X * resid[:, None])
@@ -311,19 +300,22 @@ def _barrier_outcome(px, i, sig_i, side, pt, sl, vbar, cost):
 
 def triple_barrier_nonoverlap(close, sigma, side=1, pt=2.0, sl=1.5, vbar=DEFAULT_HORIZON, cost_bps=10.0):
     px = close.reindex(sigma.index).dropna(); sig = sigma.reindex(px.index)
-    cost = cost_bps / 1e4; rets = []; dates = []; i = 0
+    cost = cost_bps / 1e4; rets = []; dates = []; outcomes = []; i = 0
     while i < len(px) - vbar:
         s = float(sig.iloc[i])
         if not np.isfinite(s) or s <= 0:
             i += 1; continue
-        rets.append(_barrier_outcome(px, i, s, side, pt, sl, vbar, cost))
-        dates.append(px.index[i]); i += vbar
+        r = _barrier_outcome(px, i, s, side, pt, sl, vbar, cost)
+        rets.append(r); dates.append(px.index[i])
+        outcomes.append("WIN" if r > 0 else "LOSS")
+        i += vbar
     rets = np.array(rets)
     if len(rets) == 0:
-        return {"expectancy": 0.0, "psr": 0.5, "dsr": 0.5, "win_rate": 0.0, "n": 0, "rets": rets,
-                "dates": [], "equity": pd.Series(dtype=float), "exp_ci": (np.nan, np.nan),
-                "turnover": 0.0, "breakeven_bps": 0.0,
-                "date_range": "—"}
+        return {"expectancy": 0.0, "psr": 0.5, "dsr": 0.5, "win_rate": 0.0, "n": 0,
+                "rets": rets, "dates": [], "outcomes": [], "equity": pd.Series(dtype=float),
+                "exp_ci": (np.nan, np.nan), "turnover": 0.0, "breakeven_bps": 0.0,
+                "date_range": "—", "avg_win": 0.0, "avg_loss": 0.0, "profit_factor": 0.0,
+                "max_consec_loss": 0, "avg_hold": vbar}
     psr, _ = probabilistic_sharpe_ratio(rets, 0.0)
     dsr = deflated_sharpe(rets, n_trials=2)
     exp_ci = bootstrap_ci(rets, lambda x: x.mean())
@@ -331,11 +323,21 @@ def triple_barrier_nonoverlap(close, sigma, side=1, pt=2.0, sl=1.5, vbar=DEFAULT
     turnover = TRADING_DAYS / vbar
     breakeven_bps = max(0.0, (rets.mean() + cost) * 1e4)
     date_range = f"{pd.to_datetime(dates[0]).strftime('%Y-%m-%d')} → {pd.to_datetime(dates[-1]).strftime('%Y-%m-%d')}"
+    wins = rets[rets > 0]; losses = rets[rets < 0]
+    avg_win = float(wins.mean() * 100) if len(wins) else 0.0
+    avg_loss = float(losses.mean() * 100) if len(losses) else 0.0
+    profit_factor = abs(wins.sum() / losses.sum()) if len(losses) and losses.sum() != 0 else 0.0
+    # max consecutive losses
+    max_cl = cl = 0
+    for o in outcomes:
+        if o == "LOSS": cl += 1; max_cl = max(max_cl, cl)
+        else: cl = 0
     return {"expectancy": float(rets.mean()), "psr": psr, "dsr": dsr,
             "win_rate": float((rets > 0).mean() * 100), "n": int(len(rets)), "rets": rets,
-            "dates": dates, "equity": equity, "exp_ci": exp_ci,
+            "dates": dates, "outcomes": outcomes, "equity": equity, "exp_ci": exp_ci,
             "turnover": float(turnover), "breakeven_bps": float(breakeven_bps),
-            "date_range": date_range}
+            "date_range": date_range, "avg_win": avg_win, "avg_loss": avg_loss,
+            "profit_factor": float(profit_factor), "max_consec_loss": max_cl, "avg_hold": vbar}
 
 
 def purged_walk_forward(close, sigma, side, pt, sl, vbar=DEFAULT_HORIZON, cost_bps=10.0, folds=5):
@@ -400,69 +402,40 @@ def disposition(bt_long, bt_short):
     return verdict, (side if verdict != "NO EDGE" else 0), dom
 
 
-# ════════════════════════ NEW 1: TRANSACTION COST MODELING ════════════════════════
+# ════════════════════════ TRANSACTION COST MODEL ════════════════════════
 def transaction_cost_model(close, turnover_per_year, cost_bps=15.0, market_impact_bps=5.0,
                            slippage_bps=3.0, holding_days=5):
-    """
-    Decompose full round-trip cost into components:
-      - Commission/brokerage
-      - Market impact (Kyle lambda proxy: proportional to sqrt(trade_size/ADV))
-      - Slippage (bid-ask half-spread proxy)
-    Returns annualised cost drag and break-even gross alpha needed.
-    """
     r = _rets(close)
     ann_vol = float(r.std() * np.sqrt(TRADING_DAYS))
-    gross_edge = float(r.mean() * TRADING_DAYS * 100)  # % per year
-
+    gross_edge = float(r.mean() * TRADING_DAYS * 100)
     commission_bps = cost_bps
     impact_bps = market_impact_bps
     slip_bps = slippage_bps
-    total_rt_bps = commission_bps + impact_bps + slip_bps  # round-trip
-
+    total_rt_bps = commission_bps + impact_bps + slip_bps
     annual_cost_bps = total_rt_bps * turnover_per_year
     annual_cost_pct = annual_cost_bps / 100.0
-
-    # Break-even gross Sharpe needed to survive costs
     be_gross_alpha_pct = annual_cost_pct
     net_alpha_pct = gross_edge - annual_cost_pct
     cost_to_vol_ratio = annual_cost_pct / max(ann_vol * 100, 1e-6)
-
-    # Realistic Indian equity cost tiers
-    sebi_stt = 0.1        # STT (sell side, equity delivery) bps
-    sebi_stamp = 0.015    # Stamp duty bps
-    exchange_charges = 0.00335  # NSE charge bps
+    sebi_stt = 0.1; sebi_stamp = 0.015; exchange_charges = 0.00335
     regulatory_total = sebi_stt + sebi_stamp + exchange_charges
-
     return {
-        "commission_bps": round(commission_bps, 1),
-        "impact_bps": round(impact_bps, 1),
-        "slippage_bps": round(slip_bps, 1),
-        "regulatory_bps": round(regulatory_total, 3),
-        "total_rt_bps": round(total_rt_bps, 1),
-        "annual_cost_bps": round(annual_cost_bps, 1),
-        "annual_cost_pct": round(annual_cost_pct, 2),
-        "net_alpha_pct": round(net_alpha_pct, 2),
+        "commission_bps": round(commission_bps, 1), "impact_bps": round(impact_bps, 1),
+        "slippage_bps": round(slip_bps, 1), "regulatory_bps": round(regulatory_total, 3),
+        "total_rt_bps": round(total_rt_bps, 1), "annual_cost_bps": round(annual_cost_bps, 1),
+        "annual_cost_pct": round(annual_cost_pct, 2), "net_alpha_pct": round(net_alpha_pct, 2),
         "cost_to_vol_ratio": round(cost_to_vol_ratio, 3),
         "be_gross_alpha_pct": round(be_gross_alpha_pct, 2),
-        "turnover": round(turnover_per_year, 1),
-        "viable": net_alpha_pct > 0,
+        "turnover": round(turnover_per_year, 1), "viable": net_alpha_pct > 0,
     }
 
 
-# ════════════════════════ NEW 2: INFORMATION COEFFICIENT ════════════════════════
+# ════════════════════════ INFORMATION COEFFICIENT ════════════════════════
 def information_coefficient(close, sigma, horizons=None, n_lags=10):
-    """
-    IC = Spearman rank correlation between today's signal and future returns.
-    Signal: negative GARCH vol (low vol = bullish signal for mean-reversion).
-    ICIR = IC.mean() / IC.std() — measures signal consistency (>0.5 = usable).
-    Rank-IC uses rank of both signal and outcome for robustness.
-    Returns IC series, mean IC, ICIR, and per-lag decay.
-    """
     if horizons is None:
         horizons = [5]
     r = _rets(close)
-    signal = -sigma  # low vol predicts positive returns (contrarian)
-
+    signal = -sigma
     results = {}
     for h in horizons:
         fwd_ret = r.rolling(h).sum().shift(-h)
@@ -470,7 +443,6 @@ def information_coefficient(close, sigma, horizons=None, n_lags=10):
         if len(df) < 30:
             results[h] = {"ic_mean": np.nan, "ic_std": np.nan, "icir": np.nan, "n": 0}
             continue
-        # Rolling IC (60-day window)
         ic_series = df["signal"].rolling(60).apply(
             lambda w: scistats.spearmanr(w, df["fwd"].loc[w.index])[0], raw=False
         )
@@ -478,33 +450,21 @@ def information_coefficient(close, sigma, horizons=None, n_lags=10):
         ic_mean = float(np.nanmean(ic_vals))
         ic_std = float(np.nanstd(ic_vals))
         icir = ic_mean / ic_std if ic_std > 0 else 0.0
-        results[h] = {
-            "ic_mean": round(ic_mean, 3), "ic_std": round(ic_std, 3),
-            "icir": round(icir, 3), "n": len(ic_vals),
-            "ic_series": ic_series
-        }
-
-    # IC decay across lags
+        results[h] = {"ic_mean": round(ic_mean, 3), "ic_std": round(ic_std, 3),
+                      "icir": round(icir, 3), "n": len(ic_vals), "ic_series": ic_series}
     decay = []
     for lag in range(1, n_lags + 1):
         fwd_ret = r.shift(-lag)
         df = pd.DataFrame({"signal": signal, "fwd": fwd_ret}).dropna()
         if len(df) < 30:
-            decay.append({"lag": lag, "ic": np.nan})
-            continue
+            decay.append({"lag": lag, "ic": np.nan}); continue
         ic_at_lag = float(scistats.spearmanr(df["signal"], df["fwd"])[0])
         decay.append({"lag": lag, "ic": round(ic_at_lag, 4)})
-
     return {"by_horizon": results, "decay": decay}
 
 
-# ════════════════════════ NEW 3: FACTOR DECAY ANALYSIS ════════════════════════
+# ════════════════════════ FACTOR DECAY ════════════════════════
 def factor_decay_analysis(close, proxies, max_lag=20):
-    """
-    How fast does market/size/momentum beta decay as we look further forward?
-    Compute rolling beta between stock returns and each factor at each lag.
-    A factor that decays quickly has a short trading horizon.
-    """
     r = _rets(close)
     decay_rows = []
     for factor_name, proxy_series in proxies.items():
@@ -518,68 +478,47 @@ def factor_decay_analysis(close, proxies, max_lag=20):
             shifted_factor = common["factor"].shift(lag)
             df = pd.DataFrame({"s": common["stock"], "f": shifted_factor}).dropna()
             if len(df) < 30:
-                betas_at_lag.append(np.nan)
-                continue
+                betas_at_lag.append(np.nan); continue
             if df["f"].var() > 0:
                 b = float(np.cov(df["s"], df["f"])[0, 1] / df["f"].var())
             else:
                 b = np.nan
             betas_at_lag.append(b)
-
         if betas_at_lag and np.isfinite(betas_at_lag[0]) and abs(betas_at_lag[0]) > 1e-6:
-            norm_decay = [b / abs(betas_at_lag[0]) if np.isfinite(b) else np.nan
-                          for b in betas_at_lag]
+            norm_decay = [b / abs(betas_at_lag[0]) if np.isfinite(b) else np.nan for b in betas_at_lag]
         else:
             norm_decay = betas_at_lag
-
-        decay_rows.append({
-            "factor": factor_name,
-            "lags": list(range(0, max_lag + 1)),
-            "betas": betas_at_lag,
-            "normalized": norm_decay,
-            "half_life": _half_life(norm_decay),
-        })
+        decay_rows.append({"factor": factor_name, "lags": list(range(0, max_lag + 1)),
+                           "betas": betas_at_lag, "normalized": norm_decay,
+                           "half_life": _half_life(norm_decay)})
     return decay_rows
 
 
 def _half_life(norm_series):
-    """Lag at which normalized beta first crosses 0.5."""
     for i, v in enumerate(norm_series):
         if np.isfinite(v) and abs(v) <= 0.5:
             return i
     return len(norm_series)
 
 
-# ════════════════════════ NEW 4: HIDDEN MARKOV MODEL ════════════════════════
+# ════════════════════════ HMM ════════════════════════
 def hmm_regime_detection(close, n_states=2, n_iter=200):
-    """
-    2-state Gaussian HMM on log-returns via Baum-Welch (manual EM).
-    State 0 = low-vol / bullish, State 1 = high-vol / bearish.
-    Returns: state sequence, transition matrix, state means/stds,
-             current state, time-in-state, and per-state stats.
-    """
     r = _rets(close).values
     n = len(r)
     if n < 100:
         return {"error": "Need 100+ return observations for HMM."}
-
-    # ── Init: split on median vol ──
     half = len(r) // 2
     mu = np.array([r[:half].mean(), r[half:].mean()])
     sigma_arr = np.array([max(r[:half].std(), 1e-6), max(r[half:].std(), 1e-6)])
-    # ensure state 0 = lower vol
     if sigma_arr[0] > sigma_arr[1]:
         mu = mu[::-1]; sigma_arr = sigma_arr[::-1]
-
-    A = np.array([[0.95, 0.05], [0.05, 0.95]])  # transition matrix
-    pi = np.array([0.5, 0.5])                   # initial distribution
+    A = np.array([[0.95, 0.05], [0.05, 0.95]])
+    pi = np.array([0.5, 0.5])
 
     def gauss(x, m, s):
         return np.exp(-0.5 * ((x - m) / s) ** 2) / (s * np.sqrt(2 * np.pi)) + 1e-300
 
-    # ── Baum-Welch EM ──
     for _ in range(n_iter):
-        # Forward
         alpha_fw = np.zeros((n, n_states))
         alpha_fw[0] = pi * np.array([gauss(r[0], mu[k], sigma_arr[k]) for k in range(n_states)])
         scale = np.zeros(n); scale[0] = alpha_fw[0].sum(); alpha_fw[0] /= scale[0]
@@ -587,32 +526,22 @@ def hmm_regime_detection(close, n_states=2, n_iter=200):
             b = np.array([gauss(r[t], mu[k], sigma_arr[k]) for k in range(n_states)])
             alpha_fw[t] = (alpha_fw[t - 1] @ A) * b
             scale[t] = alpha_fw[t].sum()
-            if scale[t] > 0:
-                alpha_fw[t] /= scale[t]
-
-        # Backward
+            if scale[t] > 0: alpha_fw[t] /= scale[t]
         beta_bw = np.ones((n, n_states))
         for t in range(n - 2, -1, -1):
             b = np.array([gauss(r[t + 1], mu[k], sigma_arr[k]) for k in range(n_states)])
             beta_bw[t] = (A @ (b * beta_bw[t + 1]))
-            if scale[t + 1] > 0:
-                beta_bw[t] /= scale[t + 1]
-
-        # Gamma / Xi
+            if scale[t + 1] > 0: beta_bw[t] /= scale[t + 1]
         gamma = alpha_fw * beta_bw
         gamma_sum = gamma.sum(axis=1, keepdims=True)
         gamma_sum = np.where(gamma_sum > 0, gamma_sum, 1.0)
         gamma /= gamma_sum
-
         xi = np.zeros((n - 1, n_states, n_states))
         for t in range(n - 1):
             b_next = np.array([gauss(r[t + 1], mu[k], sigma_arr[k]) for k in range(n_states)])
             xi[t] = alpha_fw[t][:, None] * A * b_next[None, :] * beta_bw[t + 1][None, :]
             xi_s = xi[t].sum()
-            if xi_s > 0:
-                xi[t] /= xi_s
-
-        # Update
+            if xi_s > 0: xi[t] /= xi_s
         A = xi.sum(axis=0); A_row = A.sum(axis=1, keepdims=True)
         A = np.where(A_row > 0, A / A_row, 1.0 / n_states)
         pi = gamma[0]
@@ -621,8 +550,6 @@ def hmm_regime_detection(close, n_states=2, n_iter=200):
             if w_sum > 0:
                 mu[k] = (w * r).sum() / w_sum
                 sigma_arr[k] = max(np.sqrt((w * (r - mu[k]) ** 2).sum() / w_sum), 1e-6)
-
-    # Viterbi for final state sequence
     viterbi = np.zeros(n, dtype=int)
     delta = np.log(pi + 1e-300) + np.array([np.log(gauss(r[0], mu[k], sigma_arr[k])) for k in range(n_states)])
     psi = np.zeros((n, n_states), dtype=int)
@@ -636,134 +563,73 @@ def hmm_regime_detection(close, n_states=2, n_iter=200):
     viterbi[-1] = int(np.argmax(delta))
     for t in range(n - 2, -1, -1):
         viterbi[t] = psi[t + 1, viterbi[t + 1]]
-
-    # Sort so state 0 = low vol
     if sigma_arr[0] > sigma_arr[1]:
-        viterbi = 1 - viterbi
-        mu = mu[::-1]; sigma_arr = sigma_arr[::-1]
-        A = A[::-1, :][:, ::-1]
-
+        viterbi = 1 - viterbi; mu = mu[::-1]; sigma_arr = sigma_arr[::-1]; A = A[::-1, :][:, ::-1]
     current_state = int(viterbi[-1])
-    # time in current state
     streak = 1
     for i in range(n - 2, -1, -1):
-        if viterbi[i] == current_state:
-            streak += 1
-        else:
-            break
-
+        if viterbi[i] == current_state: streak += 1
+        else: break
     state_labels = ["LOW-VOL / BULL", "HIGH-VOL / BEAR"]
     state_rets = [float(r[viterbi == k].mean() * TRADING_DAYS * 100) for k in range(n_states)]
     state_vols = [float(sigma_arr[k] * np.sqrt(TRADING_DAYS) * 100) for k in range(n_states)]
-
-    return {
-        "states": viterbi,
-        "returns": r,
-        "state_labels": state_labels,
-        "transition_matrix": A.tolist(),
-        "state_means_ann_pct": state_rets,
-        "state_vols_ann_pct": state_vols,
-        "current_state": current_state,
-        "current_state_label": state_labels[current_state],
-        "days_in_state": streak,
-        "prob_stay": round(float(A[current_state, current_state]), 3),
-        "n": n,
-    }
+    return {"states": viterbi, "returns": r, "state_labels": state_labels,
+            "transition_matrix": A.tolist(), "state_means_ann_pct": state_rets,
+            "state_vols_ann_pct": state_vols, "current_state": current_state,
+            "current_state_label": state_labels[current_state], "days_in_state": streak,
+            "prob_stay": round(float(A[current_state, current_state]), 3), "n": n}
 
 
-# ════════════════════════ NEW 5: META-LABELING ════════════════════════
-def meta_labeling(close, sigma, side=1, pt=2.0, sl=1.5, vbar=DEFAULT_HORIZON,
-                  cost_bps=10.0, n_features=4):
-    """
-    Meta-labeling (AFML Ch.3): primary model = triple-barrier direction,
-    secondary = logistic regression on features to predict P(win|primary=LONG).
-    Features: vol_rank, momentum, autocorr, vol_of_vol.
-    Returns: meta_accuracy, meta_precision, meta_recall, F1,
-             and a confidence series for each primary trade.
-    """
+# ════════════════════════ META-LABELING ════════════════════════
+def meta_labeling(close, sigma, side=1, pt=2.0, sl=1.5, vbar=DEFAULT_HORIZON, cost_bps=10.0, n_features=4):
     px = close.reindex(sigma.index).dropna()
     sig = sigma.reindex(px.index)
     cost = cost_bps / 1e4
     r = _rets(px)
-
-    # Primary labels and features at each trade entry
-    labels = []
-    features = []
-    dates = []
-    i = 0
+    labels = []; features = []; dates = []; i = 0
     while i < len(px) - vbar - 60:
         s = float(sig.iloc[i])
         if not np.isfinite(s) or s <= 0:
             i += 1; continue
         outcome = _barrier_outcome(px, i, s, side, pt, sl, vbar, cost)
         binary = 1 if outcome > 0 else 0
-
-        # Build features from lookback window
         win = r.iloc[max(0, i - 60): i]
         if len(win) < 20:
             i += vbar; continue
-
         vol_rank = float((win.std() < sig.iloc[max(0, i - 60): i].mean()).mean())
         momentum = float(win.tail(20).mean() / (win.std() + 1e-8))
         autocorr = float(win.autocorr(1)) if len(win) > 5 else 0.0
         vol_of_vol = float(sig.iloc[max(0, i - 60): i].std() / (sig.iloc[i] + 1e-8))
-
         features.append([vol_rank, momentum, autocorr, vol_of_vol])
-        labels.append(binary)
-        dates.append(px.index[i])
-        i += vbar
-
+        labels.append(binary); dates.append(px.index[i]); i += vbar
     if len(labels) < 20:
         return {"error": "Insufficient trades for meta-labeling (need 20+).",
                 "meta_accuracy": np.nan, "meta_precision": np.nan,
                 "meta_recall": np.nan, "f1": np.nan, "n_trades": len(labels)}
-
-    X = np.array(features); y = np.array(labels)
-    n = len(y)
-
-    # Standardize
+    X = np.array(features); y = np.array(labels); n = len(y)
     mu_f = X.mean(axis=0); std_f = np.where(X.std(axis=0) > 0, X.std(axis=0), 1.0)
     X_sc = (X - mu_f) / std_f
 
-    # Logistic regression via gradient descent (no sklearn dep)
     def sigmoid(z): return 1.0 / (1.0 + np.exp(-np.clip(z, -30, 30)))
-
-    w = np.zeros(X_sc.shape[1]); b = 0.0
-    lr = 0.05
+    w = np.zeros(X_sc.shape[1]); b = 0.0; lr = 0.05
     for _ in range(300):
         p = sigmoid(X_sc @ w + b)
-        dw = X_sc.T @ (p - y) / n
-        db = float((p - y).mean())
+        dw = X_sc.T @ (p - y) / n; db = float((p - y).mean())
         w -= lr * dw; b -= lr * db
-
     proba = sigmoid(X_sc @ w + b)
     preds = (proba >= 0.5).astype(int)
-
     acc = float((preds == y).mean())
-    tp = float(((preds == 1) & (y == 1)).sum())
-    fp = float(((preds == 1) & (y == 0)).sum())
+    tp = float(((preds == 1) & (y == 1)).sum()); fp = float(((preds == 1) & (y == 0)).sum())
     fn = float(((preds == 0) & (y == 1)).sum())
-    precision = tp / (tp + fp + 1e-8)
-    recall = tp / (tp + fn + 1e-8)
+    precision = tp / (tp + fp + 1e-8); recall = tp / (tp + fn + 1e-8)
     f1 = 2 * precision * recall / (precision + recall + 1e-8)
-
-    # Feature importance (approximate: |weight * feature_std|)
     importance = {name: round(float(abs(w[i]) * std_f[i]), 4)
                   for i, name in enumerate(["vol_rank", "momentum", "autocorr", "vol_of_vol"])}
-
     conf_series = pd.Series(proba, index=pd.to_datetime(dates))
-
-    return {
-        "meta_accuracy": round(acc, 3),
-        "meta_precision": round(precision, 3),
-        "meta_recall": round(recall, 3),
-        "f1": round(f1, 3),
-        "n_trades": n,
-        "feature_importance": importance,
-        "confidence_series": conf_series,
-        "weights": w.tolist(),
-        "bias": float(b),
-    }
+    return {"meta_accuracy": round(acc, 3), "meta_precision": round(precision, 3),
+            "meta_recall": round(recall, 3), "f1": round(f1, 3), "n_trades": n,
+            "feature_importance": importance, "confidence_series": conf_series,
+            "weights": w.tolist(), "bias": float(b)}
 
 
 # ════════════════════════ GLOSSARY ════════════════════════
@@ -800,65 +666,140 @@ GLOSSARY = {
     "Meta-Label F1": "Harmonic mean of precision & recall for meta-label wins. Better than accuracy on imbalanced trade sets.",
     "Annual Cost Drag": "Total round-trip cost × turnover expressed as % per year. Subtract from gross alpha to get net alpha.",
     "Cost-to-Vol Ratio": "Annual cost drag / annual vol. >0.20 means costs consume >20% of one standard deviation of returns.",
+    "Profit Factor": "Gross winning PnL / Gross losing PnL. >1.5 = good; >2.0 = excellent.",
+    "Setup Score": "AI-generated score 0-100 rating overall trade quality across all metrics.",
 }
 
 
-# ════════════════════════ GEMINI NOTE ════════════════════════
-def gemini_research_note(sym, fund, fac, vol, stat, ex, dom, wf, size, factor,
+# ════════════════════════ GEMINI — FULL AI ANALYSIS ════════════════════════
+def gemini_full_analysis(sym, fund, fac, vol, stat, ex, dom, wf, size, factor,
                          mc, hist, stress, scan_best, verdict, tc, ic_res, hmm, meta, api_key):
+    """
+    Calls Gemini to:
+    1. Score the setup 0-100
+    2. Give BUY / SELL / AVOID
+    3. Summarize every tab in plain English
+    4. Give a full quant note
+    Returns dict with score, action, tab_summaries, full_note
+    """
     import google.generativeai as genai
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(
         model_name="gemini-2.5-flash",
         system_instruction=(
-            "You are a buy-side quant strategist writing for a profitable discretionary trader "
-            "backtesting his own strategy. Summarize ONLY the supplied numbers. Briefly state what "
-            "each metric is and how quant funds, banks, and systematic traders use it. No invented "
-            "numbers, no chart-pattern talk, no advice. Lead with Deflated Sharpe and OOS evidence. "
-            "Also interpret the IC/ICIR, HMM regime, meta-label F1, and cost drag numbers. "
-            "If OOS Deflated Sharpe < 0.60, say plainly there is no statistically reliable edge. "
-            "Educational only; not SEBI registered."
+            "You are a senior buy-side quant analyst at a top hedge fund. "
+            "You receive raw metrics from a quantitative backtest terminal for Indian NSE stocks. "
+            "Your job: score the setup, give a clear action, explain every section in plain English, "
+            "and write a professional research note. Be direct, honest, and data-driven. "
+            "Never give vague answers. If the data is weak, say so clearly. "
+            "Educational only — not SEBI registered investment advice."
         ),
     )
 
     def f(v, dp=2):
-        try:
-            return f"{float(v):.{dp}f}"
-        except Exception:
-            return "n/a"
+        try: return f"{float(v):.{dp}f}"
+        except: return "n/a"
 
-    betas = ", ".join(f"{k} {f(v)} (t={f(factor.get('tstats',{}).get(k))})"
-                      for k, v in factor.get("betas", {}).items()) or "n/a"
+    betas_str = ", ".join(f"{k} {f(v)} (t={f(factor.get('tstats',{}).get(k))})"
+                          for k, v in factor.get("betas", {}).items()) or "n/a"
     stress_txt = "; ".join(f"{k}: {f(v['pct'],1)}%" for k, v in stress.items())
     sb = scan_best or {}
     ic_h = ic_res.get("by_horizon", {})
     ic_5 = ic_h.get(5, {})
-    hmm_s = f"state={hmm.get('current_state_label','?')}, P(stay)={f(hmm.get('prob_stay'))}, days_in={hmm.get('days_in_state','?')}"
+    hmm_s = (f"state={hmm.get('current_state_label','?')}, P(stay)={f(hmm.get('prob_stay'))}, "
+             f"days_in={hmm.get('days_in_state','?')}") if "error" not in hmm else "insufficient data"
     meta_s = f"accuracy={f(meta.get('meta_accuracy'))}, F1={f(meta.get('f1'))}, n={meta.get('n_trades','?')}"
     tc_s = f"total_rt={tc.get('total_rt_bps','?')}bps, annual_drag={tc.get('annual_cost_pct','?')}%, net_alpha={tc.get('net_alpha_pct','?')}%"
 
-    prompt = f"""Quant validation note — {sym} ({fund['name']}, {fund['sector']}).
+    prompt = f"""
+You are analyzing {sym} ({fund['name']}, {fund['sector']}) on NSE.
 
-DECISION: Verdict {verdict} | DSR {f(dom['dsr'])} | OOS-DSR {f(wf['oos_dsr'])}
-BACKTEST [{dom.get('date_range','—')}]: expectancy {f(dom['expectancy']*100)}%/trade [CI {f(dom['exp_ci'][0]*100)}..{f(dom['exp_ci'][1]*100)}%], win {f(dom['win_rate'],0)}%, n={dom['n']}
-OOS (purged WF): exp {f((wf['oos_expectancy'] or 0)*100)}%, OOS-DSR {f(wf['oos_dsr'])}, n={wf['oos_n']}
+=== RAW METRICS ===
+VERDICT: {verdict} | DSR: {f(dom['dsr'])} | OOS-DSR: {f(wf['oos_dsr'])}
+BACKTEST [{dom.get('date_range','—')}]: expectancy {f(dom['expectancy']*100)}%/trade [CI {f(dom['exp_ci'][0]*100)}..{f(dom['exp_ci'][1]*100)}%], win {f(dom['win_rate'],0)}%, n={dom['n']}, profit_factor={f(dom.get('profit_factor',0))}, avg_win={f(dom.get('avg_win',0))}%, avg_loss={f(dom.get('avg_loss',0))}%, max_consec_loss={dom.get('max_consec_loss',0)}
+OOS: exp {f((wf['oos_expectancy'] or 0)*100)}%, OOS-DSR {f(wf['oos_dsr'])}, n={wf['oos_n']}
 COSTS: {tc_s}
-IC (5d): mean={f(ic_5.get('ic_mean'))}, ICIR={f(ic_5.get('icir'))}
+IC(5d): mean={f(ic_5.get('ic_mean'))}, ICIR={f(ic_5.get('icir'))}
 HMM: {hmm_s}
 META-LABEL: {meta_s}
-FACTOR: {betas} | alpha {f(factor.get('alpha_ann'),1)}%/yr | R² {f(factor.get('r2'))}
-RISK: Hist VaR {f(hist['var'])}%/ES {f(hist['es'])}% | MC VaR {f(mc['var'])}% | MaxDD {f(fac['max_dd'],1)}% | Beta {f(fac['beta'])} | Stress: {stress_txt}
-VOL: {vol['regime']} | GARCH sigma_ann {f(vol['sigma_annual']*100,1)}% | frac-diff d={f(stat['d'])}
+FACTOR: {betas_str} | alpha {f(factor.get('alpha_ann'),1)}%/yr | R²={f(factor.get('r2'))}
+RISK: Hist VaR {f(hist['var'])}%/ES {f(hist['es'])}% | MC VaR {f(mc['var'])}% | MaxDD {f(fac['max_dd'],1)}% | Beta {f(fac['beta'])} | Sharpe {f(fac['sharpe'])} | Sortino {f(fac['sortino'])}
+STRESS: {stress_txt}
+VOL: {vol['regime']} | sigma_ann {f(vol['sigma_annual']*100,1)}% | frac-diff d={f(stat['d'])}
+BEST HORIZON: {sb.get('horizon','?')}d {sb.get('side','?')} OOS-DSR={f(sb.get('oos_dsr'))}
 
-STRUCTURE (bold headers, <380 words):
-**Verdict & Edge Quality** — DSR/OOS reasoning.
-**Signal Quality** — IC/ICIR interpretation; what it means for holding horizon.
-**Market Regime (HMM)** — current state, persistence, how to use it.
-**Meta-Label Confidence** — F1 score meaning, whether to filter trades.
-**Cost Reality** — does break-even bps survive Indian costs (15-20 bps)?
-**Factor & Risk** — betas, alpha, VaR, stress.
-**Suggested Sizing** — weight, how vol-target and Kelly interact."""
-    return model.generate_content(prompt).text
+=== YOUR TASKS ===
+
+TASK 1 — SCORE (integer 0-100):
+Rate this setup holistically. Consider DSR, OOS-DSR, IC, HMM regime, meta F1, cost viability, profit factor, drawdown. 
+A score above 60 needs DSR≥0.60 AND OOS-DSR≥0.60. Score below 40 if no real edge.
+Output ONLY: SCORE: [number]
+
+TASK 2 — ACTION:
+Based on all metrics, give ONE word: BUY or SELL or AVOID
+If verdict is NO EDGE or OOS-DSR < 0.60, output AVOID.
+Output ONLY: ACTION: [word]
+
+TASK 3 — TAB SUMMARIES (plain English, 2-3 sentences each):
+Explain what each section means for a trader who doesn't know quant:
+OVERVIEW_SUMMARY: [explain the key signals, verdict, weight suggestion]
+CHARTS_SUMMARY: [explain what the price chart, equity curve and drawdown tell us]
+FACTOR_SUMMARY: [explain beta, alpha, R² in plain words]
+RISK_SUMMARY: [explain VaR, stress scenarios in plain words]
+BACKTEST_SUMMARY: [explain DSR, OOS, expectancy, win rate, profit factor in plain words]
+COST_SUMMARY: [explain if costs kill the edge or not]
+IC_SUMMARY: [explain IC/ICIR and what it means for timing]
+HMM_SUMMARY: [explain current regime and what trader should do]
+META_SUMMARY: [explain meta-label F1 and whether to filter trades]
+DECAY_SUMMARY: [explain factor decay and optimal hold period]
+STAT_SUMMARY: [explain frac-diff d and stationarity in plain words]
+
+TASK 4 — RESEARCH NOTE (<400 words, use **bold headers**):
+**Verdict & Edge Quality**
+**Signal Quality (IC/ICIR)**
+**Market Regime (HMM)**
+**Meta-Label Confidence**
+**Cost Reality**
+**Factor Exposure & Risk**
+**Sizing Recommendation**
+**Final Call**
+"""
+
+    response = model.generate_content(prompt).text
+
+    # Parse the response
+    score = 50  # default
+    action = "AVOID"
+    tab_summaries = {}
+    full_note = response
+
+    lines = response.split('\n')
+    note_start = 0
+    for i, line in enumerate(lines):
+        line_s = line.strip()
+        if line_s.startswith("SCORE:"):
+            try:
+                score = int(''.join(filter(str.isdigit, line_s.split("SCORE:")[1].strip().split()[0])))
+                score = max(0, min(100, score))
+            except: pass
+        elif line_s.startswith("ACTION:"):
+            raw = line_s.split("ACTION:")[1].strip().upper()
+            if "BUY" in raw: action = "BUY"
+            elif "SELL" in raw: action = "SELL"
+            else: action = "AVOID"
+        for key in ["OVERVIEW_SUMMARY", "CHARTS_SUMMARY", "FACTOR_SUMMARY", "RISK_SUMMARY",
+                    "BACKTEST_SUMMARY", "COST_SUMMARY", "IC_SUMMARY", "HMM_SUMMARY",
+                    "META_SUMMARY", "DECAY_SUMMARY", "STAT_SUMMARY"]:
+            if line_s.startswith(key + ":"):
+                tab_summaries[key] = line_s.split(key + ":")[1].strip()
+        if line_s.startswith("**Verdict"):
+            note_start = i
+            break
+
+    if note_start > 0:
+        full_note = '\n'.join(lines[note_start:])
+
+    return {"score": score, "action": action, "tab_summaries": tab_summaries, "full_note": full_note}
 
 
 # ════════════════════════ HELPERS ════════════════════════
@@ -894,82 +835,106 @@ def _plot_layout(fig, title, height=320):
     return fig
 
 
+def _ai_box(text, color=BLUE):
+    return (f"<div style='background:{PANEL2};border-left:3px solid {color};"
+            f"border-radius:6px;padding:10px 14px;margin:8px 0;"
+            f"font-family:{MONO};font-size:12px;color:{IVORY};line-height:1.6;'>"
+            f"🤖 <b>AI:</b> {text}</div>")
+
+
+def _score_gauge_html(score):
+    """Render a colorful SVG circular gauge for the score."""
+    if score >= 81: color = GREEN; label = "STRONG"
+    elif score >= 61: color = BLUE; label = "GOOD"
+    elif score >= 41: color = ORANGE; label = "WEAK"
+    else: color = RED; label = "POOR"
+
+    # SVG arc math
+    radius = 40
+    circumference = 2 * 3.14159 * radius
+    filled = circumference * score / 100
+    gap = circumference - filled
+
+    return f"""
+    <div style='display:flex;flex-direction:column;align-items:center;justify-content:center;'>
+      <svg width="110" height="110" viewBox="0 0 110 110">
+        <defs>
+          <filter id="glow">
+            <feGaussianBlur stdDeviation="2.5" result="coloredBlur"/>
+            <feMerge><feMergeNode in="coloredBlur"/><feMergeNode in="SourceGraphic"/></feMerge>
+          </filter>
+        </defs>
+        <!-- Background ring -->
+        <circle cx="55" cy="55" r="{radius}" fill="none" stroke="{BORDER}" stroke-width="10"/>
+        <!-- Score arc -->
+        <circle cx="55" cy="55" r="{radius}" fill="none" stroke="{color}" stroke-width="10"
+          stroke-dasharray="{filled:.1f} {gap:.1f}"
+          stroke-dashoffset="{circumference * 0.25:.1f}"
+          stroke-linecap="round" filter="url(#glow)"
+          style="transition: stroke-dasharray 0.5s ease;"/>
+        <!-- Score text -->
+        <text x="55" y="50" text-anchor="middle" font-family="monospace"
+          font-size="20" font-weight="bold" fill="{color}">{score}</text>
+        <text x="55" y="66" text-anchor="middle" font-family="monospace"
+          font-size="9" fill="{MUTE}">/100</text>
+        <text x="55" y="80" text-anchor="middle" font-family="monospace"
+          font-size="8" font-weight="600" fill="{color}">{label}</text>
+      </svg>
+    </div>"""
+
+
+def _cap(text):
+    import streamlit as st
+    st.caption(text)
+
+
 # ════════════════════════ CHARTS ════════════════════════
 def chart_price_setup(df, ex, verdict, sigma, trade_dates):
-    """Enhanced: candlestick + volume bars + GARCH shaded band + entry markers."""
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
-
     d = df.tail(180)
-    # Map sigma to same date range
     sig_d = sigma.reindex(d.index).ffill()
     close_d = d["Close"]
     upper_band = close_d * (1 + 2 * sig_d)
     lower_band = close_d * (1 - 2 * sig_d)
-
-    # Which entry markers fall in last 180 days?
     d_idx_set = set(d.index.normalize())
     entry_markers = [dt for dt in trade_dates
                      if hasattr(dt, 'normalize') and dt.normalize() in d_idx_set]
-
-    fig = make_subplots(
-        rows=2, cols=1,
-        shared_xaxes=True,
-        row_heights=[0.75, 0.25],
-        vertical_spacing=0.03,
-    )
-
-    # Candlesticks
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                        row_heights=[0.75, 0.25], vertical_spacing=0.03)
     fig.add_trace(go.Candlestick(
         x=d.index, open=d["Open"], high=d["High"], low=d["Low"], close=d["Close"],
-        increasing_line_color=GREEN, decreasing_line_color=RED, name="Price",
-        showlegend=False,
+        increasing_line_color=GREEN, decreasing_line_color=RED, name="Price", showlegend=False,
     ), row=1, col=1)
-
-    # GARCH ±2σ band (shaded)
     fig.add_trace(go.Scatter(
         x=list(d.index) + list(d.index[::-1]),
         y=list(upper_band) + list(lower_band[::-1]),
         fill="toself", fillcolor="rgba(76,141,214,0.08)",
         line=dict(color="rgba(0,0,0,0)"), name="GARCH ±2σ", showlegend=True,
     ), row=1, col=1)
-
-    # Setup levels
     for y, c, lbl in [(ex["entry"], BLUE, "Entry"), (ex["target"], GREEN, "Target"), (ex["stop"], RED, "Stop")]:
         fig.add_hline(y=y, line_color=c, line_dash="dot", line_width=1,
                       annotation_text=f"{lbl} {y:,.0f}", annotation_font_color=c,
                       annotation_position="right", row=1, col=1)
-
-    # Shaded target/stop zone
-    fig.add_hrect(y0=ex["stop"], y1=ex["entry"], fillcolor="rgba(232,85,78,0.06)",
-                  line_width=0, row=1, col=1)
-    fig.add_hrect(y0=ex["entry"], y1=ex["target"], fillcolor="rgba(31,185,122,0.06)",
-                  line_width=0, row=1, col=1)
-
-    # Entry markers (dots on price chart)
+    fig.add_hrect(y0=ex["stop"], y1=ex["entry"], fillcolor="rgba(232,85,78,0.06)", line_width=0, row=1, col=1)
+    fig.add_hrect(y0=ex["entry"], y1=ex["target"], fillcolor="rgba(31,185,122,0.06)", line_width=0, row=1, col=1)
     if entry_markers:
         marker_prices = [df.loc[dt, "Close"] if dt in df.index else np.nan for dt in entry_markers]
         fig.add_trace(go.Scatter(
-            x=entry_markers, y=marker_prices,
-            mode="markers", marker=dict(color=ACCENT, size=7, symbol="triangle-up"),
+            x=entry_markers, y=marker_prices, mode="markers",
+            marker=dict(color=ACCENT, size=7, symbol="triangle-up"),
             name="BT Entries", showlegend=True,
         ), row=1, col=1)
-
-    # Volume bars
     colors = [GREEN if d["Close"].iloc[i] >= d["Open"].iloc[i] else RED for i in range(len(d))]
-    fig.add_trace(go.Bar(
-        x=d.index, y=d["Volume"],
-        marker_color=colors, opacity=0.6, name="Volume", showlegend=False,
-    ), row=2, col=1)
-
+    fig.add_trace(go.Bar(x=d.index, y=d["Volume"], marker_color=colors, opacity=0.6,
+                         name="Volume", showlegend=False), row=2, col=1)
     fig.update_layout(
         template="plotly_dark",
         title=dict(text=f"PRICE · SETUP LEVELS · VOL BAND · {verdict}", font=dict(size=13, color=ACCENT)),
         paper_bgcolor=PANEL, plot_bgcolor=PANEL, height=520,
         margin=dict(l=10, r=10, t=40, b=10),
         font=dict(family="monospace", size=11, color=IVORY),
-        xaxis2=dict(gridcolor=BORDER),
-        yaxis=dict(gridcolor=BORDER),
+        xaxis2=dict(gridcolor=BORDER), yaxis=dict(gridcolor=BORDER),
         yaxis2=dict(gridcolor=BORDER, title="Volume"),
         xaxis_rangeslider_visible=False,
         legend=dict(orientation="h", y=1.02, x=0, font=dict(size=10)),
@@ -1001,6 +966,35 @@ def chart_drawdown(dom):
     return _plot_layout(fig, "STRATEGY DRAWDOWN (%)")
 
 
+def chart_trade_log(dom):
+    """Detailed trade-by-trade bar chart (Tardezilla style)."""
+    import plotly.graph_objects as go
+    rets = dom.get("rets", np.array([]))
+    dates = dom.get("dates", [])
+    outcomes = dom.get("outcomes", [])
+    if len(rets) == 0:
+        return _plot_layout(go.Figure(), "TRADE LOG")
+    colors = [GREEN if o == "WIN" else RED for o in outcomes]
+    text = [f"{'▲' if o=='WIN' else '▼'} {r*100:+.2f}%" for r, o in zip(rets, outcomes)]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=[pd.Timestamp(d).strftime('%Y-%m-%d') for d in dates],
+        y=rets * 100,
+        marker_color=colors,
+        text=text,
+        textposition="outside",
+        textfont=dict(size=9, color=IVORY),
+        opacity=0.9,
+        name="Trade P&L %",
+    ))
+    fig.add_hline(y=0, line_color=MUTE, line_width=1)
+    fig.add_hline(y=float(np.mean(rets) * 100), line_color=ACCENT, line_dash="dash",
+                  line_width=1.5, annotation_text=f"Avg {np.mean(rets)*100:+.2f}%",
+                  annotation_font_color=ACCENT)
+    fig.update_layout(showlegend=False, xaxis_tickangle=-45)
+    return _plot_layout(fig, f"TRADE-BY-TRADE P&L · {len(rets)} TRADES", height=380)
+
+
 def chart_trade_hist(dom, hist_var):
     import plotly.graph_objects as go
     r = dom.get("rets", np.array([])) * 100
@@ -1012,6 +1006,30 @@ def chart_trade_hist(dom, hist_var):
         fig.add_vline(x=hist_var, line_color=RED, line_dash="dot", line_width=2,
                       annotation_text=f"VaR95 {hist_var:.2f}%", annotation_font_color=RED)
     return _plot_layout(fig, "DISTRIBUTION OF TRADE RETURNS (%)")
+
+
+def chart_monthly_pnl(dom):
+    """Monthly P&L heatmap-style bar chart."""
+    import plotly.graph_objects as go
+    rets = dom.get("rets", np.array([]))
+    dates = dom.get("dates", [])
+    if len(rets) == 0:
+        return _plot_layout(go.Figure(), "MONTHLY P&L")
+    s = pd.Series(rets, index=pd.to_datetime(dates))
+    monthly = s.resample("ME").sum() * 100
+    colors = [GREEN if v >= 0 else RED for v in monthly.values]
+    fig = go.Figure(go.Bar(
+        x=[d.strftime('%b %Y') for d in monthly.index],
+        y=monthly.values,
+        marker_color=colors,
+        opacity=0.85,
+        text=[f"{v:+.1f}%" for v in monthly.values],
+        textposition="outside",
+        textfont=dict(size=9),
+    ))
+    fig.add_hline(y=0, line_color=MUTE, line_width=1)
+    fig.update_layout(xaxis_tickangle=-45, showlegend=False)
+    return _plot_layout(fig, "MONTHLY P&L (%)", height=300)
 
 
 def chart_horizon_scan(scan_rows):
@@ -1044,8 +1062,8 @@ def chart_ic_decay(ic_res):
     lags = [d["lag"] for d in decay]
     ics = [d["ic"] for d in decay]
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=lags, y=ics, marker_color=[GREEN if v > 0 else RED for v in ics],
-                         opacity=0.8))
+    fig.add_trace(go.Bar(x=lags, y=ics,
+                         marker_color=[GREEN if v > 0 else RED for v in ics], opacity=0.8))
     fig.add_hline(y=0, line_color=MUTE, line_width=1)
     return _plot_layout(fig, "IC DECAY BY LAG (days forward)")
 
@@ -1057,10 +1075,10 @@ def chart_hmm_states(hmm):
     states = hmm["states"]; r = hmm["returns"]
     n = min(len(states), len(r), 500)
     states_plot = states[-n:]; r_plot = r[-n:]
-    idx = list(range(n))
     colors = [GREEN if s == 0 else RED for s in states_plot]
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=idx, y=r_plot * 100, marker_color=colors, opacity=0.7, name="Returns"))
+    fig.add_trace(go.Bar(x=list(range(n)), y=r_plot * 100,
+                         marker_color=colors, opacity=0.7, name="Returns"))
     return _plot_layout(fig, f"HMM REGIME · {hmm['current_state_label']} (last {n} obs)", 280)
 
 
@@ -1083,18 +1101,12 @@ def chart_factor_decay(decay_rows):
     colors_map = {"MKT": BLUE, "SIZE": GREEN, "MOM": ACCENT}
     for row in decay_rows:
         fname = row["factor"]
-        lags = row["lags"]; norm = row["normalized"]
-        fig.add_trace(go.Scatter(x=lags, y=norm, name=fname,
+        fig.add_trace(go.Scatter(x=row["lags"], y=row["normalized"], name=fname,
                                  line=dict(color=colors_map.get(fname, MUTE), width=2)))
     fig.add_hline(y=0.5, line_color=MUTE, line_dash="dash", line_width=1,
                   annotation_text="half-life", annotation_font_color=MUTE)
     fig.update_layout(showlegend=True)
     return _plot_layout(fig, "FACTOR DECAY · NORMALIZED BETA vs LAG (days)")
-
-
-def _cap(text):
-    import streamlit as st
-    st.caption(text)
 
 
 # ════════════════════════ ENTRY POINT ════════════════════════
@@ -1107,8 +1119,8 @@ def render_quant_analysis():
 
     st.markdown(f"""
     <style>
-      .stTabs [data-baseweb="tab-list"] {{ gap: 34px; border-bottom:1px solid {BORDER}; }}
-      .stTabs [data-baseweb="tab"] {{ font-family:{MONO}; font-size:12px; letter-spacing:2px;
+      .stTabs [data-baseweb="tab-list"] {{ gap: 28px; border-bottom:1px solid {BORDER}; }}
+      .stTabs [data-baseweb="tab"] {{ font-family:{MONO}; font-size:11px; letter-spacing:1.5px;
         color:{MUTE}; padding:8px 4px; }}
       .stTabs [aria-selected="true"] {{ color:{ACCENT}; }}
       .block-container {{ padding-top:1.2rem; }}
@@ -1120,7 +1132,7 @@ def render_quant_analysis():
     padding:12px 18px;margin-bottom:10px;display:flex;
     justify-content:space-between;align-items:center;'>
       <div style='font-family:{MONO};font-size:13px;font-weight:700;
-        color:{ACCENT};letter-spacing:2px;'>ARKA · QUANT TERMINAL</div>
+        color:{ACCENT};letter-spacing:2px;'>ARKA · QUANT TERMINAL v2</div>
       <div style='font-family:{MONO};font-size:11px;color:{MUTE};'>
         {ts} · NSE · BACKTEST MODE</div>
     </div>""", unsafe_allow_html=True)
@@ -1133,28 +1145,24 @@ def render_quant_analysis():
         cost_bps = c2.number_input("Friction (bps)", value=15.0, min_value=0.0, step=1.0)
         ptsl = c3.selectbox("Barrier σ", ["2.0 / 1.5", "1.5 / 1.0", "3.0 / 2.0"])
         horizon = c4.selectbox("Horizon (d)", HORIZONS, index=0)
-        run = st.form_submit_button("RUN", type="primary", use_container_width=True)
+        run = st.form_submit_button("RUN ANALYSIS", type="primary", use_container_width=True)
 
     if not run:
-        st.info("Enter an NSE symbol and press RUN. Hover the ⓘ on any metric for a definition.")
+        st.info("Enter an NSE symbol and press RUN ANALYSIS. Hover ⓘ on any metric for a definition.")
         return
     if not symbol.strip():
         st.error("Enter a symbol."); return
     pt, sl = [float(x) for x in ptsl.split("/")]
 
-    with st.spinner("Running institutional pipeline..."):
+    with st.spinner("Running institutional quant pipeline..."):
         df, sym, info, period_used = _hist(symbol)
         if df.empty or len(df) < 60:
             st.error(f"Insufficient data for {sym} — need at least 60 bars."); return
 
-        # ── Short history warning ──
         short_history = len(df) < MIN_BARS * 2
         if short_history:
-            st.warning(
-                f"⚠ Only {len(df)} trading days of data ({period_used}) — sample is short. "
-                f"Statistical results are less reliable. Need 500+ bars for robust backtesting."
-            )
-        # ── Date range info ──
+            st.warning(f"⚠ Only {len(df)} trading days ({period_used}) — sample is short. Need 500+ bars.")
+
         actual_start = df.index[0].strftime("%Y-%m-%d")
         actual_end = df.index[-1].strftime("%Y-%m-%d")
         total_bars = len(df)
@@ -1178,99 +1186,149 @@ def render_quant_analysis():
         wf = purged_walk_forward(close, sigma, ex_side, pt, sl, horizon, cost_bps)
         size = position_sizing(dom, vol["sigma_annual"])
         scan_rows, scan_best = horizon_scan(close, pt, sl, cost_bps)
-
-        # ── NEW MODULES ──
         tc = transaction_cost_model(close, dom["turnover"], cost_bps,
-                                    market_impact_bps=5.0, slippage_bps=3.0,
-                                    holding_days=horizon)
+                                    market_impact_bps=5.0, slippage_bps=3.0, holding_days=horizon)
         ic_res = information_coefficient(close, sigma, horizons=[5, 10, 21])
         fd_rows = factor_decay_analysis(close, proxies, max_lag=20)
         hmm = hmm_regime_detection(close)
         meta = meta_labeling(close, sigma, side=ex_side, pt=pt, sl=sl,
                              vbar=horizon, cost_bps=cost_bps)
 
+    # ── AI ANALYSIS (auto-run if key present) ──
+    ai_result = None
+    try:
+        api_key = st.secrets.get("GEMINI_KEY", "")
+    except Exception:
+        api_key = ""
+
+    if api_key:
+        with st.spinner("🤖 AI analyzing all metrics..."):
+            try:
+                ai_result = gemini_full_analysis(
+                    sym, fund, fac, vol, stat, ex, dom, wf, size, factor,
+                    mc, hist, stress, scan_best, verdict, tc, ic_res, hmm, meta, api_key
+                )
+            except Exception as e:
+                st.warning(f"AI analysis failed: {e}")
+
+    ai_score = ai_result["score"] if ai_result else None
+    ai_action = ai_result["action"] if ai_result else None
+    ai_tabs = ai_result["tab_summaries"] if ai_result else {}
+
     # ── HEADER CARD ──
-    vcolor = {"LONG": GREEN, "SHORT": RED, "NO EDGE": ACCENT}[verdict]
+    vcolor = {"LONG": GREEN, "SHORT": RED, "NO EDGE": MUTE}[verdict]
+    action_color = {"BUY": GREEN, "SELL": RED, "AVOID": ORANGE}.get(ai_action, MUTE)
+    score_html = _score_gauge_html(ai_score) if ai_score is not None else ""
+
+    gauge_col_html = f"""
+    <div style='display:flex;flex-direction:column;align-items:center;gap:4px;'>
+      {score_html}
+      <div style='font-family:{MONO};font-size:10px;color:{MUTE};letter-spacing:1px;'>AI SCORE</div>
+    </div>""" if score_html else ""
+
+    action_html = f"""
+    <div style='text-align:center;margin-top:4px;'>
+      <div style='font-family:{MONO};font-size:10px;color:{MUTE};letter-spacing:1px;'>AI ACTION</div>
+      <div style='font-family:{MONO};font-size:22px;font-weight:800;color:{action_color};
+        letter-spacing:3px;'>{ai_action or "—"}</div>
+    </div>""" if ai_action else ""
+
     st.markdown(f"""
     <div style='background:linear-gradient(135deg,{PANEL2},{PANEL});
     border:1px solid {BORDER};border-left:4px solid {vcolor};
-    border-radius:8px;padding:16px 20px;margin:6px 0 12px;
-    display:flex;justify-content:space-between;align-items:center;'>
-      <div>
+    border-radius:10px;padding:18px 22px;margin:6px 0 12px;
+    display:flex;justify-content:space-between;align-items:center;gap:16px;'>
+      <!-- LEFT: stock info -->
+      <div style='flex:2;'>
         <div style='font-family:{MONO};font-size:12px;color:{MUTE};letter-spacing:1px;'>
           {sym} · {fund['name']}</div>
-        <div style='font-size:11px;color:{MUTE};'>{fund['sector']} · {fund['industry']}</div>
-        <div style='font-family:{MONO};font-size:24px;font-weight:700;color:{IVORY};margin-top:5px;'>
+        <div style='font-size:11px;color:{MUTE};margin-bottom:4px;'>{fund['sector']} · {fund['industry']}</div>
+        <div style='font-family:{MONO};font-size:26px;font-weight:700;color:{IVORY};'>
           ₹{price:,.2f}</div>
-        <div style='font-family:{MONO};font-size:10px;color:{MUTE};margin-top:3px;'>
-          Data: {actual_start} → {actual_end} · {total_bars} bars</div>
+        <div style='font-family:{MONO};font-size:10px;color:{MUTE};margin-top:2px;'>
+          Data: {actual_start} → {actual_end} · {total_bars} bars · {period_used}</div>
       </div>
-      <div style='text-align:right;'>
+      <!-- CENTER: gauge -->
+      <div style='flex:1;display:flex;flex-direction:column;align-items:center;'>
+        {gauge_col_html}
+        {action_html}
+      </div>
+      <!-- RIGHT: verdict -->
+      <div style='flex:2;text-align:right;'>
         <div style='font-family:{MONO};font-size:10px;color:{MUTE};letter-spacing:1px;'>
           DISPOSITION · DSR-GATED</div>
-        <div style='font-family:{MONO};font-size:30px;font-weight:700;
+        <div style='font-family:{MONO};font-size:28px;font-weight:700;
           color:{vcolor};line-height:1.1;'>{verdict}</div>
-        <div style='font-family:{MONO};font-size:13px;color:{IVORY};'>
+        <div style='font-family:{MONO};font-size:12px;color:{IVORY};margin-top:4px;'>
           DSR {dom['dsr']:.2f} · OOS-DSR {_fmt(wf['oos_dsr'],"",2)}</div>
-        <div style='font-family:{MONO};font-size:11px;color:{MUTE};'>
+        <div style='font-family:{MONO};font-size:11px;color:{MUTE};margin-top:2px;'>
           HMM: {hmm.get('current_state_label','—') if 'error' not in hmm else '—'}</div>
+        <div style='font-family:{MONO};font-size:11px;color:{MUTE};'>
+          Win: {dom['win_rate']:.0f}% · PF: {_fmt(dom.get('profit_factor',0),"",2)} · n={dom['n']}</div>
       </div>
     </div>""", unsafe_allow_html=True)
 
     tabs = st.tabs([
-        "OVERVIEW", "CHARTS", "FACTOR ATTRIBUTION", "RISK",
-        "BACKTEST / SKILL", "COST MODEL", "IC & SIGNAL",
-        "HMM REGIME", "META-LABEL", "FACTOR DECAY", "STATIONARITY", "RESEARCH"
+        "OVERVIEW", "CHARTS", "FACTOR", "RISK",
+        "BACKTEST", "COST MODEL", "IC & SIGNAL",
+        "HMM REGIME", "META-LABEL", "FACTOR DECAY", "STATIONARITY", "AI RESEARCH"
     ])
 
     # ── TAB 0: OVERVIEW ──
     with tabs[0]:
+        if ai_tabs.get("OVERVIEW_SUMMARY"):
+            st.markdown(_ai_box(ai_tabs["OVERVIEW_SUMMARY"]), unsafe_allow_html=True)
         st.markdown(_sec("EXECUTION MATRIX"), unsafe_allow_html=True)
-        _metric_row([("Entry", f"{ex['entry']:,.2f}"), ("Target", f"{ex['target']:,.2f}"),
-                     ("Stop", f"{ex['stop']:,.2f}"), ("R:R", f"{ex['rr']} : 1")])
+        _metric_row([("Entry", f"₹{ex['entry']:,.2f}"), ("Target", f"₹{ex['target']:,.2f}"),
+                     ("Stop", f"₹{ex['stop']:,.2f}"), ("R:R", f"{ex['rr']} : 1")])
         st.markdown(_sec("EDGE & COST REALITY"), unsafe_allow_html=True)
         _metric_row([("Suggested Weight", f"{size['weight']*100:.1f}%"),
                      ("Turnover", f"{dom['turnover']:.0f}/yr"),
                      ("Break-even bps", f"{dom['breakeven_bps']:.0f}"),
                      ("Vol Regime", vol['regime'])])
-        _cap("Break-even bps must exceed your real round-trip cost (Indian equities ≈ 15-20 bps) or the edge is fictional.")
-
+        _cap("Break-even bps must exceed real RT cost (Indian equities ≈ 15-20 bps).")
         st.markdown(_sec("SIGNAL QUALITY SNAPSHOT"), unsafe_allow_html=True)
         ic_5d = ic_res.get("by_horizon", {}).get(5, {})
         hmm_lbl = hmm.get("current_state_label", "—") if "error" not in hmm else "—"
-        meta_f1 = meta.get("f1", np.nan)
         _metric_row([("IC (5d)", _fmt(ic_5d.get("ic_mean"), "", 3)),
                      ("ICIR (5d)", _fmt(ic_5d.get("icir"), "", 3)),
                      ("HMM State", hmm_lbl),
-                     ("Meta-Label F1", _fmt(meta_f1, "", 3))])
-
+                     ("Meta-Label F1", _fmt(meta.get("f1"), "", 3))])
         st.markdown(_sec("RETURN / RISK BATTERY"), unsafe_allow_html=True)
         _metric_row([("Sharpe", _fmt(fac['sharpe'], "", 2)), ("Sortino", _fmt(fac['sortino'], "", 2)),
                      ("Max DD", _fmt(fac['max_dd'], "%", 1)), ("Beta", _fmt(fac['beta'], "", 2))])
+        st.markdown(_sec("FUNDAMENTALS"), unsafe_allow_html=True)
+        cells = []
+        if fund['mcap_cr']: cells.append(("Mkt Cap", f"₹{fund['mcap_cr']:,.0f}Cr"))
+        if fund['pe']: cells.append(("P/E", _fmt(fund['pe'], "", 1)))
+        if fund['pb']: cells.append(("P/B", _fmt(fund['pb'], "", 2)))
+        if fund['roe']: cells.append(("ROE", _fmt(fund['roe'], "%", 1)))
+        if cells: _metric_row(cells)
 
     # ── TAB 1: CHARTS ──
     with tabs[1]:
+        if ai_tabs.get("CHARTS_SUMMARY"):
+            st.markdown(_ai_box(ai_tabs["CHARTS_SUMMARY"]), unsafe_allow_html=True)
         trade_dates = [pd.Timestamp(d) for d in dom.get("dates", [])]
-        st.plotly_chart(chart_price_setup(df, ex, verdict, sigma, trade_dates),
-                        use_container_width=True)
-        _cap("Candlesticks (last 180d) + GARCH ±2σ band (blue shading) + volume bars + "
-             "backtest entry dots (gold triangles) + shaded target/stop zones.")
+        st.plotly_chart(chart_price_setup(df, ex, verdict, sigma, trade_dates), use_container_width=True)
+        _cap("Candlesticks (last 180d) + GARCH ±2σ band + volume + entry dots (▲) + target/stop zones.")
         st.plotly_chart(chart_equity(dom), use_container_width=True)
-        _cap(f"Cumulative P&L of backtested setup [{dom.get('date_range','')}]. "
-             f"{dom['n']} trades. Smooth slope = stable edge.")
+        _cap(f"Equity curve [{dom.get('date_range','')}]. {dom['n']} trades.")
         st.plotly_chart(chart_drawdown(dom), use_container_width=True)
-        _cap("Peak-to-trough loss of the strategy.")
+        _cap("Peak-to-trough drawdown of the strategy.")
         st.plotly_chart(chart_trade_hist(dom, hist['var']), use_container_width=True)
-        _cap("Distribution of all trade returns. Green=expectancy; red=VaR95.")
+        _cap("Return distribution. Green = expectancy line. Red = VaR95.")
         st.plotly_chart(chart_horizon_scan(scan_rows), use_container_width=True)
-        _cap("OOS Deflated Sharpe by holding period. Gold line = 0.60 credibility gate.")
+        _cap("OOS Deflated Sharpe by holding horizon. Gold = 0.60 credibility gate.")
         st.plotly_chart(chart_garch(sigma, vol_model), use_container_width=True)
-        _cap("Forecasted volatility: rising = size down, falling = regime normalising.")
+        _cap("Annualized GARCH volatility. Rising = size down.")
 
     # ── TAB 2: FACTOR ──
     with tabs[2]:
+        if ai_tabs.get("FACTOR_SUMMARY"):
+            st.markdown(_ai_box(ai_tabs["FACTOR_SUMMARY"]), unsafe_allow_html=True)
         st.markdown(_sec("FACTOR REGRESSION · NEWEY-WEST t-STATS"), unsafe_allow_html=True)
-        _cap("India proxies: MKT=^NSEI, SIZE=MID−LARGE, MOM=market momentum rolling. |t|>2 ≈ significant.")
+        _cap("Proxies: MKT=^NSEI, SIZE=MID−LARGE, MOM=rolling market mean. |t|>2 ≈ significant.")
         betas = factor.get("betas", {}); ts_ = factor.get("tstats", {})
         if betas:
             cells = [(k, f"{_fmt(v,'',2)} (t={_fmt(ts_.get(k),'',1)})") for k, v in betas.items()]
@@ -1281,26 +1339,30 @@ def render_quant_analysis():
             st.warning("Insufficient overlapping data for factor regression.")
         st.markdown(_sec("MARKET-RELATIVE"), unsafe_allow_html=True)
         _metric_row([("Beta", _fmt(fac['beta'], "", 2)), ("CAPM Alpha", _fmt(fac['alpha'], "%/yr", 1)),
-                     ("Skew", _fmt(fac['skew'], "", 2)), ("Kurtosis", _fmt(fac['kurt'], "", 2))])
+                     ("Skew", _fmt(fac['skew'], "", 2)), ("Excess Kurt", _fmt(fac['kurt'], "", 2))])
 
     # ── TAB 3: RISK ──
     with tabs[3]:
-        st.markdown(_sec(f"VaR / ES · {horizon}D · 95%"), unsafe_allow_html=True)
+        if ai_tabs.get("RISK_SUMMARY"):
+            st.markdown(_ai_box(ai_tabs["RISK_SUMMARY"]), unsafe_allow_html=True)
+        st.markdown(_sec(f"VaR / ES · {horizon}D HORIZON · 95% CONFIDENCE"), unsafe_allow_html=True)
         _metric_row([("VaR 95%", _fmt(hist['var'], "%", 2)),
                      ("Expected Shortfall", _fmt(hist['es'], "%", 2)),
                      ("Monte Carlo VaR", _fmt(mc['var'], "%", 2)),
-                     ("t df", _fmt(mc['t_df'], "", 1))])
+                     ("t-dist df", _fmt(mc['t_df'], "", 1))])
         st.markdown(_sec("STRESS SCENARIOS · BETA-PROPAGATED"), unsafe_allow_html=True)
-        _metric_row([(n.split(" (")[0], f"{v['pct']:+.1f}%") for n, v in stress.items()])
-        _cap("What the position loses if each historical crash repeats, scaled by beta.")
+        _metric_row([(n.split(" (")[0], f"{v['pct']:+.1f}% → ₹{v['price']:,.0f}") for n, v in stress.items()])
+        _cap("Estimated loss if each historical crash recurs, scaled by beta to NIFTY.")
         st.markdown(_sec(f"CONDITIONAL VOLATILITY · {vol_model}"), unsafe_allow_html=True)
-        _metric_row([("GARCH σ", _fmt(vol['sigma_daily']*100, "%", 2)),
+        _metric_row([("GARCH σ daily", _fmt(vol['sigma_daily']*100, "%", 2)),
                      ("σ annual", _fmt(vol['sigma_annual']*100, "%", 1)),
                      (f"σ {horizon}d fwd", _fmt(fwd*100, "%", 2)),
                      ("Vol Regime", vol['regime'])])
 
-    # ── TAB 4: BACKTEST / SKILL ──
+    # ── TAB 4: BACKTEST ──
     with tabs[4]:
+        if ai_tabs.get("BACKTEST_SUMMARY"):
+            st.markdown(_ai_box(ai_tabs["BACKTEST_SUMMARY"]), unsafe_allow_html=True)
         st.markdown(
             f"<div style='font-family:{MONO};font-size:10px;color:{MUTE};margin-bottom:6px;'>"
             f"Tested {dom.get('date_range','—')} · {dom['n']} trades · "
@@ -1310,60 +1372,85 @@ def render_quant_analysis():
         st.markdown(_sec("IN-SAMPLE SKILL"), unsafe_allow_html=True)
         lo, hi = dom['exp_ci']
         _metric_row([("Expectancy/trade", f"{dom['expectancy']*100:+.2f}%"),
-                     ("Expectancy CI", f"{lo*100:+.2f}..{hi*100:+.2f}%"),
+                     ("Expectancy CI", f"{lo*100:+.2f}% .. {hi*100:+.2f}%"),
                      ("Prob Sharpe", _fmt(dom['psr'], "", 2)),
-                     ("Deflated Sharpe", _fmt(dom['dsr'], "", 2)),
-                     ("Win Rate", f"{dom['win_rate']:.0f}% (n={dom['n']})")])
+                     ("Deflated Sharpe", _fmt(dom['dsr'], "", 2))])
+        _metric_row([("Win Rate", f"{dom['win_rate']:.0f}%"),
+                     ("Avg Win", f"{dom.get('avg_win',0):+.2f}%"),
+                     ("Avg Loss", f"{dom.get('avg_loss',0):+.2f}%"),
+                     ("Profit Factor", _fmt(dom.get('profit_factor',0), "", 2))])
+        _metric_row([("Max Consec. Loss", f"{dom.get('max_consec_loss',0)} trades"),
+                     ("Avg Hold", f"{dom.get('avg_hold',horizon)}d"),
+                     ("Turnover", f"{dom['turnover']:.0f}/yr"),
+                     ("Break-even", f"{dom['breakeven_bps']:.0f} bps")])
         st.markdown(_sec("OUT-OF-SAMPLE · PURGED WALK-FORWARD"), unsafe_allow_html=True)
         _metric_row([("OOS Deflated Sharpe", _fmt(wf['oos_dsr'], "", 2) if wf['oos_n'] else "—"),
                      ("OOS Expectancy", _fmt((wf['oos_expectancy'] or 0)*100, "%", 2) if wf['oos_n'] else "—"),
-                     ("OOS Win", _fmt(wf['oos_win_rate'], "%", 0) if wf['oos_n'] else "—"),
-                     ("OOS n", f"{wf['oos_n']}")])
+                     ("OOS Win Rate", _fmt(wf['oos_win_rate'], "%", 0) if wf['oos_n'] else "—"),
+                     ("OOS Trades", f"{wf['oos_n']}")])
+        if dom['dsr'] < 0.60:
+            st.warning("⚠ Deflated Sharpe < 0.60 → no statistically reliable in-sample edge.")
+        if wf['oos_n'] > 0 and (wf['oos_dsr'] or 0) < 0.60:
+            st.error("⛔ OOS Deflated Sharpe < 0.60 → edge does NOT survive out-of-sample. Do not trade.")
+
+        # Trade log chart
+        st.markdown(_sec("TRADE-BY-TRADE LOG"), unsafe_allow_html=True)
+        st.plotly_chart(chart_trade_log(dom), use_container_width=True)
+        st.plotly_chart(chart_monthly_pnl(dom), use_container_width=True)
+
         st.markdown(_sec("ALPHA-DECAY · MULTI-HORIZON OOS SCAN"), unsafe_allow_html=True)
         sdf = pd.DataFrame(scan_rows)
         if not sdf.empty:
-            sdf = sdf.assign(oos_dsr=sdf["oos_dsr"].round(2),
-                             oos_exp=(sdf["oos_exp"].astype(float) * 100).round(2))
-            sdf.columns = ["Horizon(d)", "Side", "OOS-DSR", "OOS-Exp %", "OOS n"]
-            st.dataframe(sdf, use_container_width=True, hide_index=True)
+            sdf2 = sdf.copy()
+            sdf2["oos_dsr"] = sdf2["oos_dsr"].round(2)
+            sdf2["oos_exp"] = (sdf2["oos_exp"].astype(float) * 100).round(2)
+            sdf2.columns = ["Horizon(d)", "Side", "OOS-DSR", "OOS-Exp %", "OOS n"]
+            st.dataframe(sdf2, use_container_width=True, hide_index=True)
         if scan_best:
-            st.success(f"Best: {scan_best['horizon']}d {scan_best['side']} "
+            st.success(f"Best horizon: {scan_best['horizon']}d {scan_best['side']} "
                        f"(OOS-DSR {scan_best['oos_dsr']:.2f})")
-        if dom['dsr'] < 0.60:
-            st.warning("Deflated Sharpe < 0.60 → no statistically reliable edge.")
+
+        # Detailed trade table
+        if dom['n'] > 0:
+            st.markdown(_sec("INDIVIDUAL TRADE LEDGER"), unsafe_allow_html=True)
+            trade_df = pd.DataFrame({
+                "Date": [pd.Timestamp(d).strftime('%Y-%m-%d') for d in dom['dates']],
+                "Outcome": dom['outcomes'],
+                "Return %": [f"{r*100:+.2f}%" for r in dom['rets']],
+                "Equity": [f"{e:.4f}" for e in dom['equity'].values],
+            })
+            st.dataframe(trade_df, use_container_width=True, hide_index=True, height=280)
 
     # ── TAB 5: COST MODEL ──
     with tabs[5]:
+        if ai_tabs.get("COST_SUMMARY"):
+            st.markdown(_ai_box(ai_tabs["COST_SUMMARY"]), unsafe_allow_html=True)
         st.markdown(_sec("TRANSACTION COST DECOMPOSITION"), unsafe_allow_html=True)
-        _cap("Full round-trip cost broken into: brokerage/commission, market impact (Kyle λ proxy), slippage. Regulatory = NSE + STT + stamp duty.")
-        _metric_row([
-            ("Commission", f"{tc['commission_bps']:.1f} bps"),
-            ("Market Impact", f"{tc['impact_bps']:.1f} bps"),
-            ("Slippage", f"{tc['slippage_bps']:.1f} bps"),
-            ("Regulatory", f"{tc['regulatory_bps']:.3f} bps"),
-        ])
-        _metric_row([
-            ("Total RT Cost", f"{tc['total_rt_bps']:.1f} bps"),
-            ("Turnover/yr", f"{tc['turnover']:.0f}x"),
-            ("Annual Cost Drag", f"{tc['annual_cost_pct']:.2f}%"),
-            ("Cost/Vol Ratio", _fmt(tc['cost_to_vol_ratio'], "", 3)),
-        ])
+        _cap("Round-trip cost: brokerage + market impact (Kyle λ) + slippage + regulatory.")
+        _metric_row([("Commission", f"{tc['commission_bps']:.1f} bps"),
+                     ("Market Impact", f"{tc['impact_bps']:.1f} bps"),
+                     ("Slippage", f"{tc['slippage_bps']:.1f} bps"),
+                     ("Regulatory", f"{tc['regulatory_bps']:.3f} bps")])
+        _metric_row([("Total RT Cost", f"{tc['total_rt_bps']:.1f} bps"),
+                     ("Turnover/yr", f"{tc['turnover']:.0f}x"),
+                     ("Annual Cost Drag", f"{tc['annual_cost_pct']:.2f}%"),
+                     ("Cost/Vol Ratio", _fmt(tc['cost_to_vol_ratio'], "", 3))])
         st.markdown(_sec("NET ALPHA AFTER COSTS"), unsafe_allow_html=True)
         net_color = GREEN if tc['viable'] else RED
         st.markdown(
-            f"<div style='font-family:{MONO};font-size:15px;color:{net_color};margin:8px 0;'>"
-            f"Net Alpha = {tc['net_alpha_pct']:+.2f}% / year "
-            f"({'VIABLE' if tc['viable'] else 'NOT VIABLE after costs'})</div>",
+            f"<div style='font-family:{MONO};font-size:16px;color:{net_color};margin:8px 0;'>"
+            f"Net Alpha = {tc['net_alpha_pct']:+.2f}% / year &nbsp;·&nbsp; "
+            f"{'✅ VIABLE' if tc['viable'] else '❌ NOT VIABLE — costs exceed gross alpha'}</div>",
             unsafe_allow_html=True
         )
-        _cap("If annual cost drag exceeds gross alpha, the strategy is destroyed by friction. "
-             "Indian equity delivery: typical RT ≈ 15-20 bps. Intraday: 5-10 bps.")
+        _cap("Indian equity delivery RT ≈ 15-20 bps. Intraday ≈ 5-10 bps.")
 
     # ── TAB 6: IC & SIGNAL ──
     with tabs[6]:
+        if ai_tabs.get("IC_SUMMARY"):
+            st.markdown(_ai_box(ai_tabs["IC_SUMMARY"]), unsafe_allow_html=True)
         st.markdown(_sec("INFORMATION COEFFICIENT · SIGNAL QUALITY"), unsafe_allow_html=True)
-        _cap("IC = Spearman rank-correlation of today's vol signal vs future returns. "
-             "Signal: low GARCH vol predicts positive returns. ICIR > 0.5 = consistent signal.")
+        _cap("IC = Spearman rank-correlation of vol signal vs future returns. ICIR > 0.5 = consistent.")
         ic_by_h = ic_res.get("by_horizon", {})
         ic_cells = []
         for h in [5, 10, 21]:
@@ -1372,13 +1459,14 @@ def render_quant_analysis():
             ic_cells.append((f"ICIR ({h}d)", _fmt(d_.get("icir"), "", 3)))
         if ic_cells:
             _metric_row(ic_cells[:4])
-            if len(ic_cells) > 4:
-                _metric_row(ic_cells[4:])
+            if len(ic_cells) > 4: _metric_row(ic_cells[4:])
         st.plotly_chart(chart_ic_decay(ic_res), use_container_width=True)
-        _cap("IC decay: how fast the signal's predictive power fades. Steep drop = short hold horizon.")
+        _cap("IC decay: steep drop = short optimal hold period.")
 
-    # ── TAB 7: HMM REGIME ──
+    # ── TAB 7: HMM ──
     with tabs[7]:
+        if ai_tabs.get("HMM_SUMMARY"):
+            st.markdown(_ai_box(ai_tabs["HMM_SUMMARY"]), unsafe_allow_html=True)
         st.markdown(_sec("HIDDEN MARKOV MODEL · 2-STATE REGIME"), unsafe_allow_html=True)
         if "error" in hmm:
             st.warning(hmm["error"])
@@ -1390,37 +1478,30 @@ def render_quant_analysis():
                 f"{hmm['days_in_state']} days in state · P(stay)={hmm['prob_stay']:.3f}</div>",
                 unsafe_allow_html=True
             )
-            _metric_row([
-                ("State 0 (BULL) Ann Ret", f"{hmm['state_means_ann_pct'][0]:+.1f}%"),
-                ("State 0 Ann Vol", f"{hmm['state_vols_ann_pct'][0]:.1f}%"),
-                ("State 1 (BEAR) Ann Ret", f"{hmm['state_means_ann_pct'][1]:+.1f}%"),
-                ("State 1 Ann Vol", f"{hmm['state_vols_ann_pct'][1]:.1f}%"),
-            ])
+            _metric_row([("State 0 (BULL) Ann Ret", f"{hmm['state_means_ann_pct'][0]:+.1f}%"),
+                         ("State 0 Ann Vol", f"{hmm['state_vols_ann_pct'][0]:.1f}%"),
+                         ("State 1 (BEAR) Ann Ret", f"{hmm['state_means_ann_pct'][1]:+.1f}%"),
+                         ("State 1 Ann Vol", f"{hmm['state_vols_ann_pct'][1]:.1f}%")])
             st.markdown(_sec("TRANSITION MATRIX"), unsafe_allow_html=True)
             A = hmm["transition_matrix"]
-            tdf = pd.DataFrame(A, index=["From BULL", "From BEAR"],
-                               columns=["→ BULL", "→ BEAR"])
+            tdf = pd.DataFrame(A, index=["From BULL", "From BEAR"], columns=["→ BULL", "→ BEAR"])
             st.dataframe(tdf.round(3), use_container_width=True)
-            _cap("P(stay) on diagonal. High diagonal = regime persistence. "
-                 "Size up in BULL, reduce/hedge in BEAR.")
+            _cap("Diagonal = P(stay). High diagonal = regime persistence.")
             st.plotly_chart(chart_hmm_states(hmm), use_container_width=True)
-            _cap("Bar chart: green = LOW-VOL/BULL state, red = HIGH-VOL/BEAR. Last 500 observations.")
 
     # ── TAB 8: META-LABEL ──
     with tabs[8]:
+        if ai_tabs.get("META_SUMMARY"):
+            st.markdown(_ai_box(ai_tabs["META_SUMMARY"]), unsafe_allow_html=True)
         st.markdown(_sec("META-LABELING · SECONDARY CLASSIFIER"), unsafe_allow_html=True)
-        _cap("Meta-labeling (AFML Ch.3): primary signal = triple-barrier direction. "
-             "Secondary logistic model predicts P(this trade wins) from vol, momentum, autocorr, vol-of-vol. "
-             "High F1 = filter trades by confidence threshold to improve quality.")
+        _cap("Primary: triple-barrier direction. Secondary: logistic model predicts P(win). F1 > 0.55 = useful filter.")
         if "error" in meta:
             st.warning(meta["error"])
         else:
-            _metric_row([
-                ("Accuracy", _fmt(meta['meta_accuracy'], "", 3)),
-                ("Precision", _fmt(meta['meta_precision'], "", 3)),
-                ("Recall", _fmt(meta['meta_recall'], "", 3)),
-                ("F1 Score", _fmt(meta['f1'], "", 3)),
-            ])
+            _metric_row([("Accuracy", _fmt(meta['meta_accuracy'], "", 3)),
+                         ("Precision", _fmt(meta['meta_precision'], "", 3)),
+                         ("Recall", _fmt(meta['meta_recall'], "", 3)),
+                         ("F1 Score", _fmt(meta['f1'], "", 3))])
             st.markdown(_sec("FEATURE IMPORTANCE"), unsafe_allow_html=True)
             fi = meta.get("feature_importance", {})
             if fi:
@@ -1428,65 +1509,78 @@ def render_quant_analysis():
                 fi_df = fi_df.sort_values("Importance", ascending=False)
                 st.dataframe(fi_df, use_container_width=True, hide_index=True)
             st.plotly_chart(chart_meta_confidence(meta), use_container_width=True)
-            _cap("P(win) for each trade. Trades above 0.5 threshold are high-confidence. "
-                 "Consider only trading when meta-label confidence > 0.55-0.60.")
+            _cap("Trades above 0.5 threshold = high confidence. Consider filtering below 0.55.")
 
     # ── TAB 9: FACTOR DECAY ──
     with tabs[9]:
-        st.markdown(_sec("FACTOR DECAY ANALYSIS · NORMALIZED BETA vs LAG"), unsafe_allow_html=True)
-        _cap("How quickly each factor's predictive beta decays as signal lag increases. "
-             "Half-life = days until beta drops to 50% of spot value. Short half-life = "
-             "trade quickly or the factor edge is gone.")
+        if ai_tabs.get("DECAY_SUMMARY"):
+            st.markdown(_ai_box(ai_tabs["DECAY_SUMMARY"]), unsafe_allow_html=True)
+        st.markdown(_sec("FACTOR DECAY · NORMALIZED BETA vs LAG"), unsafe_allow_html=True)
+        _cap("Half-life = days until factor beta drops to 50%. Short half-life = trade fast.")
         if fd_rows:
             hl_cells = [(row["factor"], f"{row['half_life']}d half-life") for row in fd_rows]
             _metric_row(hl_cells)
             st.plotly_chart(chart_factor_decay(fd_rows), use_container_width=True)
         else:
-            st.warning("Insufficient factor proxy data for decay analysis.")
+            st.warning("Insufficient factor proxy data.")
 
     # ── TAB 10: STATIONARITY ──
     with tabs[10]:
+        if ai_tabs.get("STAT_SUMMARY"):
+            st.markdown(_ai_box(ai_tabs["STAT_SUMMARY"]), unsafe_allow_html=True)
         st.markdown(_sec("FRACTIONAL DIFFERENTIATION · AFML CH.5"), unsafe_allow_html=True)
         _metric_row([("Frac-diff d", _fmt(stat['d'], "", 2)),
                      ("ADF p-value", _fmt(stat['adf_pvalue'], "", 4)),
                      ("Memory Retained", _fmt(stat['memory_retained'], "", 3)),
                      ("Memory Gain", _fmt(stat['memory_gain'], "", 3))])
-        _cap("Lowest d achieving ADF p<0.05 — keeps maximum memory while achieving stationarity.")
+        _cap("Lowest d achieving ADF p<0.05 — stationarity with maximum memory retention.")
 
-    # ── TAB 11: RESEARCH ──
+    # ── TAB 11: AI RESEARCH ──
     with tabs[11]:
-        st.markdown(_sec("QUANT STRATEGIST NOTE · AI SUMMARY OF ALL METRICS"), unsafe_allow_html=True)
-        try:
-            api_key = st.secrets.get("GEMINI_KEY", "")
-        except Exception:
-            api_key = ""
+        st.markdown(_sec("AI QUANT RESEARCH NOTE"), unsafe_allow_html=True)
         if not api_key:
-            st.warning("GEMINI_KEY not in secrets — AI note disabled.")
+            st.warning("Add GEMINI_KEY to Streamlit secrets to enable AI analysis.")
+        elif ai_result:
+            # Score + Action banner
+            score_val = ai_result["score"]
+            act = ai_result["action"]
+            act_c = {"BUY": GREEN, "SELL": RED, "AVOID": ORANGE}.get(act, MUTE)
+            sc_c = GREEN if score_val >= 61 else (ORANGE if score_val >= 41 else RED)
+            st.markdown(f"""
+            <div style='display:flex;gap:16px;margin-bottom:12px;'>
+              <div style='flex:1;background:{PANEL2};border:1px solid {sc_c};border-radius:8px;
+                padding:14px;text-align:center;'>
+                <div style='font-family:{MONO};font-size:11px;color:{MUTE};'>SETUP SCORE</div>
+                <div style='font-family:{MONO};font-size:36px;font-weight:800;color:{sc_c};'>{score_val}</div>
+                <div style='font-family:{MONO};font-size:11px;color:{MUTE};'>/100</div>
+              </div>
+              <div style='flex:1;background:{PANEL2};border:1px solid {act_c};border-radius:8px;
+                padding:14px;text-align:center;'>
+                <div style='font-family:{MONO};font-size:11px;color:{MUTE};'>AI RECOMMENDATION</div>
+                <div style='font-family:{MONO};font-size:36px;font-weight:800;color:{act_c};'>{act}</div>
+                <div style='font-family:{MONO};font-size:11px;color:{MUTE};'>based on all metrics</div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+
+            # Full research note
+            st.markdown(
+                f"<div style='background:{PANEL};border:1px solid {BORDER};"
+                f"border-radius:8px;padding:18px 22px;color:{IVORY};"
+                f"line-height:1.8;font-size:13.5px;'>{ai_result['full_note']}</div>",
+                unsafe_allow_html=True
+            )
         else:
-            with st.spinner("Generating note..."):
-                try:
-                    note = gemini_research_note(
-                        sym, fund, fac, vol, stat, ex, dom, wf, size, factor,
-                        mc, hist, stress, scan_best, verdict,
-                        tc, ic_res, hmm, meta, api_key
-                    )
-                    st.markdown(
-                        f"<div style='background:{PANEL};border:1px solid {BORDER};"
-                        f"border-radius:8px;padding:16px 20px;color:{IVORY};"
-                        f"line-height:1.7;font-size:13.5px;'>{note}</div>",
-                        unsafe_allow_html=True
-                    )
-                except Exception as e:
-                    st.error(f"Note failed: {e}")
-        with st.expander("Full metric glossary"):
+            st.error("AI analysis failed. Check GEMINI_KEY and try again.")
+
+        with st.expander("📖 Full Metric Glossary"):
             for k, v in GLOSSARY.items():
                 st.markdown(f"**{k}** — {v}")
-        _cap("AI summarizes computed numbers only. No independent analysis or advice.")
+        _cap("AI summarizes computed numbers only. Educational tool — not SEBI-registered investment advice.")
 
     st.markdown(
-        f"<div style='font-family:{MONO};font-size:10px;color:{MUTE};margin-top:14px;'>"
+        f"<div style='font-family:{MONO};font-size:10px;color:{MUTE};margin-top:14px;text-align:center;'>"
         "Backtesting / educational tool · Not investment advice · "
         "Statistical edge does not guarantee future returns · "
-        "Validate against your own execution costs</div>",
+        "Always validate against your own execution costs and risk tolerance</div>",
         unsafe_allow_html=True
     )
