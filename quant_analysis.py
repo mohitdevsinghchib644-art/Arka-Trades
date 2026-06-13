@@ -1,134 +1,47 @@
 """
-quant_analysis.py — Statistical Arbitrage Pairs Trading with Meta-Labeling
+quant_analysis.py — Single-Stock Swing-Trade Quant Engine (1-week horizon)
 ==========================================================================
-Methodology:
-  - Ernest Chan, "Quantitative Trading": cointegration-based pairs trading,
-    half-life of mean reversion, z-score entries, stop-loss, transaction costs.
+Frameworks:
   - Marcos López de Prado, "Advances in Financial Machine Learning":
-    fractional differentiation, triple-barrier labeling, meta-labeling,
-    purged k-fold CV with embargo, MDA feature importance.
+    fractional differentiation (Ch.5), triple-barrier labeling (Ch.3).
+  - Ernest Chan, "Quantitative Trading": ATR-based barriers, transaction
+    costs in bps, explicit stop-loss / profit-target risk management.
+  - Gemini Vision cross-check of an uploaded chart image vs. the math.
 
-Pipeline:
-  Data -> Pair Selection -> Primary Signal (z-score) -> Features ->
-  Triple-Barrier Meta-Labels -> Purged CV Model -> Filtered/Sized Signals ->
-  Backtest with costs & stops.
+UI entry point: render_quant_analysis()
 
-Dependencies: pandas, numpy, scikit-learn, statsmodels, yfinance, streamlit
+Dependencies: pandas, numpy, scikit-learn, statsmodels, yfinance,
+              google-generativeai, Pillow, streamlit
 """
 
+import io
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from itertools import combinations
-from dataclasses import dataclass
-
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import f1_score, log_loss
-from sklearn.model_selection._split import _BaseKFold
-from statsmodels.tsa.stattools import coint, adfuller
-import statsmodels.api as sm
 
 
 # ════════════════════════════════════════════════════════════
 # 1. DATA INGESTION
 # ════════════════════════════════════════════════════════════
 
-def get_data(tickers: list, start: str = "2018-01-01", end: str = None) -> pd.DataFrame:
-    """Download adjusted close prices, aligned and cleaned."""
-    px = yf.download(tickers, start=start, end=end, auto_adjust=True,
-                     progress=False)["Close"]
-    if isinstance(px, pd.Series):
-        px = px.to_frame(tickers[0])
-    px = px.dropna(how="all").ffill().dropna()
-    return px
+def fetch_history(symbol: str, period: str = "2y", interval: str = "1d") -> pd.DataFrame:
+    """Download OHLCV for a single NSE symbol (auto-appends .NS)."""
+    sym = symbol.strip().upper()
+    if not sym.endswith(".NS"):
+        sym = sym + ".NS"
+    df = yf.Ticker(sym).history(period=period, interval=interval)
+    if df.empty:
+        return df
+    df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+    return df
 
 
 # ════════════════════════════════════════════════════════════
-# 2. PAIR SELECTION  (Chan: cointegration + half-life)
+# 2. FRACTIONAL DIFFERENTIATION  (López de Prado, Ch.5)
 # ════════════════════════════════════════════════════════════
 
-@dataclass
-class Pair:
-    y: str            # dependent leg
-    x: str            # hedge leg
-    pvalue: float     # Engle-Granger cointegration p-value
-    hedge: float      # OLS hedge ratio
-    half_life: float  # mean-reversion half-life (days)
-
-
-def half_life_of_mean_reversion(spread: pd.Series) -> float:
-    """Chan: fit OU process dS = lambda*(S - mu)dt; HL = -ln(2)/lambda."""
-    s = spread.dropna()
-    lag = s.shift(1).dropna()
-    ret = s.diff().dropna()
-    lag, ret = lag.align(ret, join="inner")
-    beta = sm.OLS(ret, sm.add_constant(lag)).fit().params.iloc[1]
-    if beta >= 0:
-        return np.inf
-    return -np.log(2) / beta
-
-
-class PairSelector:
-    """Engle-Granger test across all pairs; keep cointegrated, tradeable ones."""
-
-    def __init__(self, pval_threshold=0.05, hl_range=(2, 60)):
-        self.pval_threshold = pval_threshold
-        self.hl_range = hl_range
-
-    def fit(self, prices: pd.DataFrame) -> list:
-        pairs = []
-        logp = np.log(prices)
-        for a, b in combinations(prices.columns, 2):
-            score, pval, _ = coint(logp[a], logp[b])
-            if pval > self.pval_threshold:
-                continue
-            hedge = sm.OLS(logp[a], sm.add_constant(logp[b])).fit().params.iloc[1]
-            spread = logp[a] - hedge * logp[b]
-            # confirm stationarity of the spread itself
-            if adfuller(spread.dropna())[1] > self.pval_threshold:
-                continue
-            hl = half_life_of_mean_reversion(spread)
-            if not (self.hl_range[0] <= hl <= self.hl_range[1]):
-                continue
-            pairs.append(Pair(a, b, pval, hedge, hl))
-        return sorted(pairs, key=lambda p: p.pvalue)
-
-
-# ════════════════════════════════════════════════════════════
-# 3. PRIMARY STRATEGY  (Chan: z-score mean reversion)
-# ════════════════════════════════════════════════════════════
-
-class PrimaryStrategy:
-    """
-    Side generation only (meta-labeling separates side from size, AFML 3.6):
-      z = (spread - rolling_mean) / rolling_std,  lookback = ~half-life
-      Long spread  (long y, short hedge*x) when z < -entry_z
-      Short spread (short y, long hedge*x) when z > +entry_z
-    """
-
-    def __init__(self, pair: Pair, entry_z=2.0):
-        self.pair = pair
-        self.entry_z = entry_z
-        self.lookback = max(int(round(pair.half_life)), 5)
-
-    def compute(self, prices: pd.DataFrame) -> pd.DataFrame:
-        lp = np.log(prices)
-        spread = lp[self.pair.y] - self.pair.hedge * lp[self.pair.x]
-        mu = spread.rolling(self.lookback).mean()
-        sd = spread.rolling(self.lookback).std()
-        z = (spread - mu) / sd
-        side = pd.Series(0, index=z.index)
-        side[z < -self.entry_z] = 1     # long the spread
-        side[z > self.entry_z] = -1     # short the spread
-        return pd.DataFrame({"spread": spread, "z": z, "side": side})
-
-
-# ════════════════════════════════════════════════════════════
-# 4. FEATURES  (AFML Ch.5: fractional differentiation + regime feats)
-# ════════════════════════════════════════════════════════════
-
-def get_ffd_weights(d: float, threshold: float = 1e-4) -> np.ndarray:
-    """Fixed-width window fractional differentiation weights (AFML 5.4)."""
+def _ffd_weights(d: float, threshold: float = 1e-4) -> np.ndarray:
+    """Fixed-width window fractional-differentiation weights."""
     w, k = [1.0], 1
     while abs(w[-1]) > threshold:
         w.append(-w[-1] * (d - k + 1) / k)
@@ -136,9 +49,9 @@ def get_ffd_weights(d: float, threshold: float = 1e-4) -> np.ndarray:
     return np.array(w[::-1])
 
 
-def frac_diff_ffd(series: pd.Series, d: float = 0.4) -> pd.Series:
-    """Stationary yet memory-preserving transform of a price/spread series."""
-    w = get_ffd_weights(d)
+def frac_diff_ffd(series: pd.Series, d: float) -> pd.Series:
+    """Memory-preserving stationary transform of a price series."""
+    w = _ffd_weights(d)
     width = len(w)
     vals = series.ffill().values
     out = np.full(len(vals), np.nan)
@@ -147,429 +60,330 @@ def frac_diff_ffd(series: pd.Series, d: float = 0.4) -> pd.Series:
     return pd.Series(out, index=series.index)
 
 
-def build_features(prices: pd.DataFrame, sig: pd.DataFrame, pair: Pair) -> pd.DataFrame:
-    """Features the meta-model sees when deciding to act on a primary signal."""
-    lp = np.log(prices)
-    spread, z = sig["spread"], sig["z"]
-    lb = max(int(round(pair.half_life)), 5)
+def optimal_d(series: pd.Series, ds=np.arange(0.0, 1.01, 0.1),
+              pval_target: float = 0.05):
+    """
+    Find the smallest d that makes the series stationary (ADF p < target),
+    preserving maximum memory (López de Prado 5.5).
+    Returns (best_d, adf_pvalue, frac_diff_series).
+    """
+    from statsmodels.tsa.stattools import adfuller
+    logp = np.log(series.dropna())
+    best = None
+    for d in ds:
+        fd = frac_diff_ffd(logp, d).dropna()
+        if len(fd) < 30:
+            continue
+        try:
+            pval = adfuller(fd, maxlag=1, regression="c", autolag=None)[1]
+        except Exception:
+            continue
+        if best is None:
+            best = (d, pval, fd)
+        if pval < pval_target:
+            return d, pval, fd
+    return best if best else (1.0, np.nan, frac_diff_ffd(logp, 1.0).dropna())
 
-    feats = pd.DataFrame(index=spread.index)
-    feats["z"] = z
-    feats["z_abs"] = z.abs()
-    feats["z_chg_3"] = z.diff(3)
-    feats["ffd_spread"] = frac_diff_ffd(spread, d=0.4)
-    feats["spread_vol"] = spread.diff().rolling(lb).std()
-    feats["vol_regime"] = (feats["spread_vol"]
-                           / spread.diff().rolling(lb * 4).std())
-    feats["corr"] = (lp[pair.y].diff()
-                     .rolling(lb * 2).corr(lp[pair.x].diff()))
-    feats["mom_y"] = lp[pair.y].diff(lb)
-    feats["mom_x"] = lp[pair.x].diff(lb)
-    # rolling half-life drift: is the relationship decaying?
-    feats["hurst_proxy"] = (np.log(spread.rolling(lb * 2).std())
-                            - np.log(spread.rolling(lb).std()))
+
+# ════════════════════════════════════════════════════════════
+# 3. FEATURE ENGINEERING  (Technical & Structural)
+# ════════════════════════════════════════════════════════════
+
+def rsi(close: pd.Series, period: int = 14) -> pd.Series:
+    d = close.diff()
+    gain = d.clip(lower=0).rolling(period).mean()
+    loss = (-d.clip(upper=0)).rolling(period).mean()
+    rs = gain / loss.replace(0, np.nan)
+    return 100 - 100 / (1 + rs)
+
+
+def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    high, low, close = df["High"], df["Low"], df["Close"]
+    prev_close = close.shift(1)
+    tr = pd.concat([(high - low),
+                    (high - prev_close).abs(),
+                    (low - prev_close).abs()], axis=1).max(axis=1)
+    return tr.rolling(period).mean()
+
+
+def support_resistance(df: pd.DataFrame, window: int = 10, lookback: int = 120):
+    """Structural levels from recent swing highs/lows."""
+    recent = df.tail(lookback)
+    highs = recent["High"]
+    lows = recent["Low"]
+    # local swing points
+    swing_high = highs[(highs == highs.rolling(window, center=True).max())]
+    swing_low = lows[(lows == lows.rolling(window, center=True).min())]
+    price = df["Close"].iloc[-1]
+    res_levels = sorted([h for h in swing_high.dropna().unique() if h > price])
+    sup_levels = sorted([l for l in swing_low.dropna().unique() if l < price],
+                        reverse=True)
+    resistance = res_levels[0] if res_levels else float(highs.max())
+    support = sup_levels[0] if sup_levels else float(lows.min())
+    return float(support), float(resistance)
+
+
+def build_features(df: pd.DataFrame) -> dict:
+    close = df["Close"]
+    feats = {}
+    feats["price"] = float(close.iloc[-1])
+    feats["rsi"] = float(rsi(close).iloc[-1])
+    feats["atr"] = float(atr(df).iloc[-1])
+    feats["atr_pct"] = float(feats["atr"] / feats["price"] * 100)
+    feats["roc_10"] = float((close.iloc[-1] / close.iloc[-11] - 1) * 100) if len(close) > 11 else 0.0
+    feats["daily_vol"] = float(close.pct_change().rolling(20).std().iloc[-1] * 100)
+    feats["sma20"] = float(close.rolling(20).mean().iloc[-1])
+    feats["sma50"] = float(close.rolling(50).mean().iloc[-1])
+    feats["sma200"] = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else float("nan")
+    sup, res = support_resistance(df)
+    feats["support"] = sup
+    feats["resistance"] = res
     return feats
 
 
 # ════════════════════════════════════════════════════════════
-# 5. TRIPLE-BARRIER LABELING  (AFML Ch.3)
+# 4. TRIPLE-BARRIER SWING SETUP  (Chan ATR barriers + costs)
 # ════════════════════════════════════════════════════════════
 
-def daily_vol(series: pd.Series, span: int = 50) -> pd.Series:
-    return series.diff().ewm(span=span).std()
-
-
-def triple_barrier_labels(spread: pd.Series, events: pd.DatetimeIndex,
-                          side: pd.Series, pt_mult=1.0, sl_mult=1.0,
-                          max_hold=20) -> pd.DataFrame:
+def triple_barrier_levels(feats: dict, side: int = 1,
+                          pt_mult: float = 2.0, sl_mult: float = 1.5,
+                          cost_bps: float = 10.0) -> dict:
     """
-    For each primary-signal event, walk forward until:
-      profit-take barrier (pt_mult * vol), stop-loss barrier (sl_mult * vol),
-      or vertical barrier (max_hold days).
-    Meta-label bin: 1 if the primary signal made money, else 0.
+    1-week swing setup (max hold = 5 business days).
+    Profit-target and stop-loss as ATR multiples (Chan), net of bps costs.
+    side = +1 for long setup, -1 for short.
     """
-    vol = daily_vol(spread)
-    rows = []
-    for t0 in events:
-        if t0 not in spread.index:
-            continue
-        v = vol.loc[t0]
-        if pd.isna(v) or v <= 0:
-            continue
-        s = side.loc[t0]
-        path = spread.loc[t0:].iloc[1:max_hold + 1]
-        if path.empty:
-            continue
-        ret_path = (path - spread.loc[t0]) * s   # signed P&L path of spread
-        pt, sl = pt_mult * v, -sl_mult * v
-        hit_pt = ret_path[ret_path >= pt].index.min()
-        hit_sl = ret_path[ret_path <= sl].index.min()
-        t1 = min([x for x in [hit_pt, hit_sl, path.index[-1]] if x is not None])
-        ret = ret_path.loc[t1]
-        rows.append({"t0": t0, "t1": t1, "ret": ret,
-                     "bin": int(ret > 0), "side": s})
-    return pd.DataFrame(rows).set_index("t0") if rows else pd.DataFrame()
+    price = feats["price"]
+    a = feats["atr"]
+    cost = price * cost_bps / 1e4
+
+    if side >= 0:  # long
+        entry = price
+        target = price + pt_mult * a - cost
+        stop = price - sl_mult * a - cost
+    else:          # short
+        entry = price
+        target = price - pt_mult * a + cost
+        stop = price + sl_mult * a + cost
+
+    rr = abs(target - entry) / abs(entry - stop) if (entry - stop) != 0 else 0
+    return {
+        "entry": round(entry, 2),
+        "target": round(target, 2),
+        "stop": round(stop, 2),
+        "rr": round(rr, 2),
+        "max_hold_days": 5,
+        "cost_bps": cost_bps,
+    }
 
 
 # ════════════════════════════════════════════════════════════
-# 6. PURGED K-FOLD WITH EMBARGO  (AFML Ch.7)
+# 5. COMPOSITE QUANT SCORE + VERDICT
 # ════════════════════════════════════════════════════════════
 
-class PurgedKFold(_BaseKFold):
+def composite_score(feats: dict) -> tuple:
     """
-    K-Fold that purges training samples whose label intervals [t0, t1]
-    overlap the test fold, plus an embargo after the test set.
-    Prevents leakage from overlapping triple-barrier labels.
+    0–100 score blending trend, momentum, and mean-reversion posture.
+    Returns (score, side, drivers).
     """
+    price = feats["price"]
+    score = 50.0
+    drivers = []
 
-    def __init__(self, n_splits=5, t1: pd.Series = None, pct_embargo=0.02):
-        super().__init__(n_splits, shuffle=False, random_state=None)
-        self.t1 = t1
-        self.pct_embargo = pct_embargo
+    # Trend (SMA stack)
+    if not np.isnan(feats["sma200"]):
+        if price > feats["sma50"] > feats["sma200"]:
+            score += 15; drivers.append("Uptrend: price > SMA50 > SMA200")
+        elif price < feats["sma50"] < feats["sma200"]:
+            score -= 15; drivers.append("Downtrend: price < SMA50 < SMA200")
+    if price > feats["sma20"]:
+        score += 7; drivers.append("Price above SMA20 (short-term bullish)")
+    else:
+        score -= 7; drivers.append("Price below SMA20 (short-term bearish)")
 
-    def split(self, X, y=None, groups=None):
-        indices = np.arange(X.shape[0])
-        embargo = int(X.shape[0] * self.pct_embargo)
-        test_starts = [(i[0], i[-1] + 1) for i in
-                       np.array_split(indices, self.n_splits)]
-        for st, end in test_starts:
-            test_idx = indices[st:end]
-            t0_test = self.t1.index[st]
-            t1_test_max = self.t1.iloc[test_idx].max()
-            train_mask = (
-                (self.t1 < t0_test) |                     # labels end before test
-                (self.t1.index > t1_test_max)             # labels start after test
-            )
-            # embargo: drop training samples right after the test window
-            if embargo > 0 and end + embargo < len(indices):
-                emb_idx = self.t1.index[end:end + embargo]
-                train_mask.loc[emb_idx] = False
-            train_idx = indices[train_mask.values]
-            yield train_idx, test_idx
+    # Momentum (RSI)
+    r = feats["rsi"]
+    if r < 30:
+        score += 10; drivers.append(f"RSI {r:.0f}: oversold, mean-reversion long")
+    elif r > 70:
+        score -= 10; drivers.append(f"RSI {r:.0f}: overbought, mean-reversion short")
+    elif 50 <= r <= 65:
+        score += 6; drivers.append(f"RSI {r:.0f}: healthy momentum zone")
 
+    # ROC
+    if feats["roc_10"] > 0:
+        score += 5; drivers.append(f"ROC(10) +{feats['roc_10']:.1f}% positive")
+    else:
+        score -= 5; drivers.append(f"ROC(10) {feats['roc_10']:.1f}% negative")
 
-# ════════════════════════════════════════════════════════════
-# 7. META-LABELING MODEL + MDA FEATURE IMPORTANCE  (AFML Ch.3, 8)
-# ════════════════════════════════════════════════════════════
-
-class MetaLabeler:
-    """Secondary model: P(primary signal is profitable). Filters + sizes bets."""
-
-    def __init__(self, n_splits=5, pct_embargo=0.02, prob_threshold=0.55):
-        self.n_splits = n_splits
-        self.pct_embargo = pct_embargo
-        self.prob_threshold = prob_threshold
-        self.model = RandomForestClassifier(
-            n_estimators=400, max_depth=4, min_samples_leaf=0.05,
-            max_features="sqrt", class_weight="balanced_subsample",
-            random_state=42, n_jobs=-1)
-        self.cv_scores_ = []
-
-    def fit(self, X: pd.DataFrame, labels: pd.DataFrame):
-        y = labels["bin"]
-        cv = PurgedKFold(self.n_splits, t1=labels["t1"], pct_embargo=self.pct_embargo)
-        for tr, te in cv.split(X):
-            if len(tr) < 30 or y.iloc[tr].nunique() < 2:
-                continue
-            self.model.fit(X.iloc[tr], y.iloc[tr])
-            p = self.model.predict_proba(X.iloc[te])[:, 1]
-            self.cv_scores_.append(f1_score(y.iloc[te], (p > 0.5).astype(int),
-                                            zero_division=0))
-        self.model.fit(X, y)   # final fit on full set
-        return self
-
-    def predict_size(self, X: pd.DataFrame) -> pd.Series:
-        """Bet sizing from predicted probability (AFML 10.2 simplified):
-        size = 0 below threshold, else scaled (p - 0.5) * 2."""
-        p = pd.Series(self.model.predict_proba(X)[:, 1], index=X.index)
-        size = ((p - 0.5) * 2).clip(0, 1)
-        size[p < self.prob_threshold] = 0.0
-        return size
+    score = max(0, min(100, score))
+    side = 1 if score >= 55 else (-1 if score <= 45 else 0)
+    return round(score, 1), side, drivers
 
 
-def feature_importance_mda(model, X: pd.DataFrame, labels: pd.DataFrame,
-                           n_splits=5, pct_embargo=0.02) -> pd.Series:
-    """Mean Decrease Accuracy: permute each feature out-of-sample,
-    measure log-loss degradation under purged CV (AFML 8.3)."""
-    y = labels["bin"]
-    cv = PurgedKFold(n_splits, t1=labels["t1"], pct_embargo=pct_embargo)
-    imp = pd.DataFrame(columns=X.columns, dtype=float)
-    base = pd.Series(dtype=float)
-    for i, (tr, te) in enumerate(cv.split(X)):
-        if len(tr) < 30 or y.iloc[tr].nunique() < 2:
-            continue
-        model.fit(X.iloc[tr], y.iloc[tr])
-        p = model.predict_proba(X.iloc[te])
-        base.loc[i] = -log_loss(y.iloc[te], p, labels=model.classes_)
-        for col in X.columns:
-            Xp = X.iloc[te].copy()
-            Xp[col] = np.random.permutation(Xp[col].values)
-            pp = model.predict_proba(Xp)
-            imp.loc[i, col] = -log_loss(y.iloc[te], pp, labels=model.classes_)
-    imp = (-imp).add(base, axis=0)             # degradation per feature
-    return imp.mean().sort_values(ascending=False)
+def verdict_from(score: float, side: int) -> str:
+    if side == 1:
+        return "BUY"
+    if side == -1:
+        return "SELL"
+    return "HOLD"
 
 
 # ════════════════════════════════════════════════════════════
-# 8. BACKTESTER  (Chan: costs, stop-loss, dollar-neutral execution)
+# 6. GEMINI VISION CROSS-CHECK
 # ════════════════════════════════════════════════════════════
 
-class Backtester:
-    """
-    Event-driven simulation of the pair:
-      - dollar-neutral legs scaled by meta-model bet size
-      - per-leg transaction costs in bps (commission + slippage)
-      - hard stop-loss in % of allocated capital (Chan's catastrophic stop)
-      - exit on z mean reversion (|z| < exit_z), stop, or max holding period
-    """
+def gemini_chart_analysis(image_bytes: bytes, symbol: str, feats: dict, api_key: str) -> str:
+    """Send chart image + computed features to Gemini for visual cross-check."""
+    import google.generativeai as genai
+    from PIL import Image
 
-    def __init__(self, cost_bps=5.0, stop_loss_pct=0.03,
-                 exit_z=0.25, max_hold=20, capital=100_000):
-        self.cost = cost_bps / 1e4
-        self.stop = stop_loss_pct
-        self.exit_z = exit_z
-        self.max_hold = max_hold
-        self.capital = capital
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel("gemini-1.5-flash")
+    img = Image.open(io.BytesIO(image_bytes))
 
-    def run(self, prices: pd.DataFrame, sig: pd.DataFrame,
-            size: pd.Series, pair: Pair) -> dict:
-        y_px, x_px = prices[pair.y], prices[pair.x]
-        z, side = sig["z"], sig["side"]
-        equity = pd.Series(self.capital, index=prices.index, dtype=float)
-        pos = None
-        trades = []
+    prompt = f"""You are an institutional quant analyst doing a VISUAL cross-check of a stock chart
+for a 1-week swing trade on {symbol} (NSE).
 
-        for i, t in enumerate(prices.index[1:], start=1):
-            equity.iloc[i] = equity.iloc[i - 1]
+Computed mathematical features:
+- Price: {feats['price']:.2f}
+- RSI(14): {feats['rsi']:.1f}
+- ATR(14): {feats['atr']:.2f} ({feats['atr_pct']:.2f}% of price)
+- ROC(10): {feats['roc_10']:.2f}%
+- 20d daily volatility: {feats['daily_vol']:.2f}%
+- SMA20/50/200: {feats['sma20']:.2f} / {feats['sma50']:.2f} / {feats['sma200']:.2f}
+- Support / Resistance: {feats['support']:.2f} / {feats['resistance']:.2f}
 
-            # ── mark-to-market open position ──
-            if pos:
-                pnl = (pos["sy"] * (y_px.loc[t] - pos["py"]) * pos["qy"]
-                       + pos["sx"] * (x_px.loc[t] - pos["px"]) * pos["qx"])
-                pos["days"] += 1
-                unreal = pnl / pos["alloc"]
-                stop_hit = unreal <= -self.stop
-                reverted = abs(z.loc[t]) < self.exit_z
-                timed_out = pos["days"] >= self.max_hold
-                if stop_hit or reverted or timed_out:
-                    exit_cost = (abs(y_px.loc[t] * pos["qy"])
-                                 + abs(x_px.loc[t] * pos["qx"])) * self.cost
-                    equity.iloc[i] += pnl - exit_cost
-                    trades.append({"entry": pos["t"], "exit": t, "pnl": pnl - exit_cost,
-                                   "reason": "STOP" if stop_hit else
-                                             "REVERT" if reverted else "TIME"})
-                    pos = None
+From the CHART IMAGE, identify:
+1. Visible chart pattern (flag, triangle, double top/bottom, breakout, range, etc.)
+2. Macro trend direction (up / down / sideways)
+3. Notable candlestick setup near the latest candle
+4. DIVERGENCES: does the visual picture agree or disagree with the math above?
 
-            # ── new entry: primary side + meta-model approval ──
-            if pos is None and t in size.index and size.loc[t] > 0 and side.loc[t] != 0:
-                s = side.loc[t]
-                alloc = equity.iloc[i] * 0.5 * size.loc[t]   # bet-sized allocation
-                qy = alloc / y_px.loc[t]
-                qx = (alloc * pair.hedge) / x_px.loc[t]
-                entry_cost = (alloc + alloc * pair.hedge) * self.cost
-                equity.iloc[i] -= entry_cost
-                pos = {"t": t, "sy": s, "sx": -s, "qy": qy, "qx": qx,
-                       "py": y_px.loc[t], "px": x_px.loc[t],
-                       "alloc": alloc, "days": 0}
+Be concise (max ~150 words), use bullet points, and end with a one-line visual bias:
+VISUAL BIAS: BULLISH / BEARISH / NEUTRAL."""
 
-        return self._metrics(equity, trades)
-
-    def _metrics(self, equity: pd.Series, trades: list) -> dict:
-        rets = equity.pct_change().dropna()
-        sharpe = (rets.mean() / rets.std() * np.sqrt(252)) if rets.std() > 0 else 0
-        dd = (equity / equity.cummax() - 1).min()
-        wins = [tr for tr in trades if tr["pnl"] > 0]
-        return {
-            "equity": equity,
-            "trades": pd.DataFrame(trades),
-            "total_return_pct": (equity.iloc[-1] / equity.iloc[0] - 1) * 100,
-            "sharpe": sharpe,
-            "max_drawdown_pct": dd * 100,
-            "n_trades": len(trades),
-            "win_rate": len(wins) / len(trades) * 100 if trades else 0,
-        }
+    resp = model.generate_content([prompt, img])
+    return resp.text
 
 
 # ════════════════════════════════════════════════════════════
-# 9. FULL PIPELINE  (returns structured results; logs via callback)
+# 7. STREAMLIT UI
 # ════════════════════════════════════════════════════════════
-
-def run_pipeline(tickers: list, start="2018-01-01", train_frac=0.7, log=print):
-    """
-    Run the full stat-arb meta-labeling pipeline.
-    `log` is a callback(str) so the UI can stream progress. Returns a dict:
-      {"status": "ok"|"error", "message": str, "pair": Pair, "results": dict,
-       "cv_scores": list, "feature_importance": pd.Series}
-    """
-    log(f"[1/6] Downloading {len(tickers)} tickers...")
-    prices = get_data(tickers, start=start)
-    if prices.shape[1] < 2:
-        return {"status": "error",
-                "message": "Need at least 2 tickers with overlapping price history."}
-
-    log("[2/6] Selecting cointegrated pairs (Engle-Granger + ADF + half-life)...")
-    pairs = PairSelector().fit(prices.iloc[: int(len(prices) * train_frac)])
-    if not pairs:
-        return {"status": "error",
-                "message": "No tradeable cointegrated pairs found."}
-    pair = pairs[0]
-    log(f"      Best pair: {pair.y}/{pair.x}  p={pair.pvalue:.4f}  "
-        f"hedge={pair.hedge:.3f}  HL={pair.half_life:.1f}d")
-
-    log("[3/6] Primary signals + features...")
-    sig = PrimaryStrategy(pair).compute(prices)
-    feats = build_features(prices, sig, pair)
-
-    log("[4/6] Triple-barrier meta-labels...")
-    events = sig.index[sig["side"] != 0]
-    labels = triple_barrier_labels(sig["spread"], events, sig["side"])
-    if labels.empty or len(labels) < 50:
-        return {"status": "error",
-                "message": f"Insufficient labeled events ({0 if labels.empty else len(labels)}). "
-                           f"Need at least 50."}
-
-    X = feats.loc[labels.index].dropna()
-    labels = labels.loc[X.index]
-
-    split_t = X.index[int(len(X) * train_frac)]
-    X_tr, lab_tr = X[X.index < split_t], labels[labels.index < split_t]
-    X_te = X[X.index >= split_t]
-
-    log(f"[5/6] Meta-model: purged 5-fold CV w/ embargo ({len(X_tr)} train events)...")
-    meta = MetaLabeler().fit(X_tr, lab_tr)
-    log(f"      CV F1 scores: {[f'{s:.2f}' for s in meta.cv_scores_]}")
-
-    fi = feature_importance_mda(
-        RandomForestClassifier(n_estimators=200, max_depth=4,
-                               min_samples_leaf=0.05, random_state=42, n_jobs=-1),
-        X_tr, lab_tr)
-
-    log("[6/6] Out-of-sample backtest with costs + stop-loss...")
-    size = meta.predict_size(X_te)
-    oos_prices = prices[prices.index >= split_t]
-    oos_sig = sig[sig.index >= split_t]
-    results = Backtester(cost_bps=5, stop_loss_pct=0.03).run(
-        oos_prices, oos_sig, size, pair)
-
-    return {"status": "ok", "message": "Pipeline complete.",
-            "pair": pair, "results": results,
-            "cv_scores": meta.cv_scores_, "feature_importance": fi}
-
-
-# ════════════════════════════════════════════════════════════
-# 10. STREAMLIT UI
-# ════════════════════════════════════════════════════════════
-
-DEFAULT_UNIVERSE = ("HDFCBANK.NS, ICICIBANK.NS, KOTAKBANK.NS, "
-                    "AXISBANK.NS, SBIN.NS, INDUSINDBK.NS")
-
 
 def render_quant_analysis():
     import streamlit as st
 
-    st.markdown("### Statistical Arbitrage — Pairs Trading with Meta-Labeling")
-    st.caption("Cointegration pair selection (Chan) + triple-barrier meta-labeling "
-               "and purged CV (López de Prado). Out-of-sample backtest with costs "
-               "and stop-loss.")
+    st.markdown("### Quant Analysis — Single-Stock Swing Engine (1-Week Horizon)")
+    st.caption("López de Prado fractional differentiation + triple-barrier · "
+               "Ernest Chan ATR risk management + costs · Gemini Vision cross-check.")
 
-    with st.form("quant_form"):
-        c1, c2, c3 = st.columns([3, 1, 1])
-        tickers_raw = c1.text_input(
-            "Tickers (comma separated, use .NS for NSE)",
-            value=DEFAULT_UNIVERSE,
-            help="Provide at least 2 tickers. The model hunts for the best "
-                 "cointegrated pair among them.")
-        start = c2.text_input("Start date", value="2018-01-01")
-        train_frac = c3.slider("Train fraction", 0.5, 0.9, 0.7, 0.05)
-        run = st.form_submit_button("Run Analysis", type="primary",
+    with st.form("quant_single"):
+        c1, c2 = st.columns([2, 1])
+        symbol = c1.text_input("NSE Symbol (any sector)", value="RELIANCE",
+                               help="Type any NSE ticker, e.g. TCS, DLF, SUNPHARMA. "
+                                    "'.NS' is added automatically.")
+        cost_bps = c2.number_input("Transaction cost (bps)", value=10.0,
+                                   min_value=0.0, step=1.0)
+        chart_img = st.file_uploader("Upload chart screenshot (from Downloads)",
+                                     type=["png", "jpg", "jpeg"])
+        run = st.form_submit_button("Run Quant Analysis", type="primary",
                                     use_container_width=True)
 
     if not run:
-        st.info("Enter tickers and click **Run Analysis** to start. "
-                "Indian banking names are pre-filled as a classic cointegration set.")
+        st.info("Enter an NSE symbol, optionally upload its chart screenshot, "
+                "then click **Run Quant Analysis**.")
         return
 
-    tickers = [t.strip().upper() for t in tickers_raw.split(",") if t.strip()]
-    if len(tickers) < 2:
-        st.error("Please enter at least 2 tickers.")
+    if not symbol.strip():
+        st.error("Please enter an NSE symbol.")
         return
 
-    log_box = st.empty()
-    logs = []
-
-    def log(msg):
-        logs.append(msg)
-        log_box.code("\n".join(logs))
-
-    with st.spinner("Running pipeline... this can take a minute on first run."):
-        try:
-            out = run_pipeline(tickers, start=start, train_frac=train_frac, log=log)
-        except Exception as e:
-            import traceback
-            st.error(f"Pipeline crashed: {e}")
-            st.code(traceback.format_exc())
-            return
-
-    if out["status"] != "ok":
-        st.warning(out["message"])
+    # ── Data ──
+    with st.spinner(f"Fetching {symbol.upper()} history..."):
+        df = fetch_history(symbol)
+    if df.empty or len(df) < 60:
+        st.error(f"Not enough data for {symbol.upper()}. Check the symbol and try again.")
         return
 
-    pair = out["pair"]
-    res = out["results"]
+    # ── Math pipeline ──
+    feats = build_features(df)
+    d_opt, d_pval, _ = optimal_d(df["Close"])
+    score, side, drivers = composite_score(feats)
+    # if neutral, default barrier orientation to long for level display
+    barrier_side = side if side != 0 else 1
+    levels = triple_barrier_levels(feats, side=barrier_side, cost_bps=cost_bps)
+    verdict = verdict_from(score, side)
 
-    st.success(out["message"])
+    # ── Header verdict ──
+    vcolor = {"BUY": "#22C55E", "SELL": "#EF4444", "HOLD": "#F59E0B"}[verdict]
+    st.markdown(
+        f"<div style='background:#11161D;border:1px solid #242D3A;border-left:5px solid {vcolor};"
+        f"border-radius:12px;padding:18px 22px;margin:8px 0 18px;'>"
+        f"<span style='font-size:13px;color:#8C97A8;letter-spacing:1px;'>VERDICT · {symbol.upper()}</span><br>"
+        f"<span style='font-size:30px;font-weight:800;color:{vcolor};'>{verdict}</span>"
+        f"<span style='font-size:18px;color:#E8ECF2;margin-left:14px;'>Composite Quant Score: "
+        f"<b>{score}/100</b></span></div>", unsafe_allow_html=True)
 
-    # ── Selected pair ──
-    st.markdown("#### Selected Pair")
-    p1, p2, p3, p4 = st.columns(4)
-    p1.metric("Pair", f"{pair.y} / {pair.x}")
-    p2.metric("Coint p-value", f"{pair.pvalue:.4f}")
-    p3.metric("Hedge ratio", f"{pair.hedge:.3f}")
-    p4.metric("Half-life (days)", f"{pair.half_life:.1f}")
+    # ── Execution levels ──
+    st.markdown("#### Execution Levels (1-Week Swing)")
+    e1, e2, e3, e4 = st.columns(4)
+    e1.metric("Entry", f"Rs {levels['entry']:,.2f}")
+    e2.metric("Profit Target", f"Rs {levels['target']:,.2f}")
+    e3.metric("Stop-Loss", f"Rs {levels['stop']:,.2f}")
+    e4.metric("Risk:Reward", f"{levels['rr']} : 1")
+    st.caption(f"Max holding: {levels['max_hold_days']} business days · "
+               f"ATR-based barriers · costs {levels['cost_bps']:.0f} bps included.")
 
-    # ── Out-of-sample performance ──
-    st.markdown("#### Out-of-Sample Performance")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total Return", f"{res['total_return_pct']:+.2f}%")
-    m2.metric("Sharpe Ratio", f"{res['sharpe']:.2f}")
-    m3.metric("Max Drawdown", f"{res['max_drawdown_pct']:.2f}%")
-    m4.metric("Trades / Win%", f"{res['n_trades']} / {res['win_rate']:.0f}%")
+    # ── Quant features ──
+    st.markdown("#### Quantitative Features")
+    f1, f2, f3, f4 = st.columns(4)
+    f1.metric("Price", f"Rs {feats['price']:,.2f}")
+    f2.metric("RSI(14)", f"{feats['rsi']:.0f}")
+    f3.metric("ATR(14)", f"{feats['atr']:.2f} ({feats['atr_pct']:.1f}%)")
+    f4.metric("ROC(10)", f"{feats['roc_10']:+.1f}%")
+    g1, g2, g3, g4 = st.columns(4)
+    g1.metric("Daily Vol (20d)", f"{feats['daily_vol']:.2f}%")
+    g2.metric("SMA 20 / 50", f"{feats['sma20']:.0f} / {feats['sma50']:.0f}")
+    g3.metric("Support", f"Rs {feats['support']:,.2f}")
+    g4.metric("Resistance", f"Rs {feats['resistance']:,.2f}")
 
-    # ── Equity curve ──
-    st.markdown("#### Equity Curve (OOS)")
-    equity = res["equity"]
-    st.line_chart(equity.rename("Equity"))
+    # ── Stationarity ──
+    pval_txt = f"{d_pval:.4f}" if not np.isnan(d_pval) else "n/a"
+    st.markdown("#### Stationarity (López de Prado, Ch.5)")
+    st.write(f"Optimal fractional-differentiation **d = {d_opt:.2f}** "
+             f"(ADF p-value = {pval_txt}). Lower d preserves more memory while staying stationary.")
 
-    # ── CV scores ──
-    if out["cv_scores"]:
-        st.markdown("#### Meta-Model CV F1 Scores")
-        cv_df = pd.DataFrame({
-            "Fold": [f"Fold {i+1}" for i in range(len(out["cv_scores"]))],
-            "F1": [round(s, 3) for s in out["cv_scores"]],
-        }).set_index("Fold")
-        st.bar_chart(cv_df)
+    # ── Score drivers ──
+    st.markdown("#### Score Drivers")
+    for dr in drivers:
+        st.markdown(f"- {dr}")
 
-    # ── Feature importance ──
-    fi = out.get("feature_importance")
-    if fi is not None and len(fi):
-        st.markdown("#### Feature Importance (MDA)")
-        st.bar_chart(fi.rename("Importance"))
+    # ── Price + SMA chart ──
+    st.markdown("#### Price & Moving Averages")
+    chart_df = pd.DataFrame({
+        "Close": df["Close"],
+        "SMA20": df["Close"].rolling(20).mean(),
+        "SMA50": df["Close"].rolling(50).mean(),
+    }).tail(250)
+    st.line_chart(chart_df)
 
-    # ── Trades ──
-    st.markdown("#### Trade Log")
-    trades = res["trades"]
-    if isinstance(trades, pd.DataFrame) and not trades.empty:
-        st.dataframe(trades, use_container_width=True)
+    # ── Gemini Vision cross-check ──
+    st.markdown("#### Gemini Vision Cross-Check")
+    if chart_img is None:
+        st.info("Upload a chart screenshot above to enable the visual cross-check.")
     else:
-        st.caption("No trades were generated in the out-of-sample window.")
+        st.image(chart_img, caption=f"{symbol.upper()} — uploaded chart", use_column_width=True)
+        api_key = st.secrets.get("GEMINI_KEY", "")
+        if not api_key:
+            st.warning("GEMINI_KEY not found in secrets. Add it to enable vision analysis.")
+        else:
+            with st.spinner("Gemini analyzing the chart vs. the math..."):
+                try:
+                    visual = gemini_chart_analysis(
+                        chart_img.getvalue(), symbol.upper(), feats, api_key)
+                    st.markdown(visual)
+                except Exception as e:
+                    st.error(f"Gemini vision failed: {e}")
 
-
-# ════════════════════════════════════════════════════════════
-# 11. CLI ENTRY POINT
-# ════════════════════════════════════════════════════════════
-
-if __name__ == "__main__":
-    # Indian banking sector — classic cointegration hunting ground (use .NS for NSE)
-    UNIVERSE = ["HDFCBANK.NS", "ICICIBANK.NS", "KOTAKBANK.NS",
-                "AXISBANK.NS", "SBIN.NS", "INDUSINDBK.NS"]
-    run_pipeline(UNIVERSE)
+    st.caption("Educational use only. Not investment advice. Trading involves risk.")
