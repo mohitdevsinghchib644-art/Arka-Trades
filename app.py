@@ -896,14 +896,14 @@ with right:
         from smart_scan_page import render_smart_scanner
         render_smart_scanner(supabase)
 
-   elif pg == "quant":
-        try:
-            from quant_analysis import render_quant_analysis
-            render_quant_analysis()
-        except Exception as e:
-            import traceback
-            st.error(f"Quant module failed to load: {e}")
-            st.code(traceback.format_exc())
+    elif pg == "quant":
+         try:
+             from quant_analysis import render_quant_analysis
+             render_quant_analysis()
+         except Exception as e:
+             import traceback
+             st.error(f"Quant module failed to load: {e}")
+             st.code(traceback.format_exc())
 
         
 
