@@ -454,9 +454,12 @@ def run_pipeline(tickers: list, start="2018-01-01", train_frac=0.7):
 
 if __name__ == "__main__":
     # Indian banking sector — classic cointegration hunting ground (use .NS for NSE)
+    if __name__ == "__main__":
     UNIVERSE = ["HDFCBANK.NS", "ICICIBANK.NS", "KOTAKBANK.NS",
                 "AXISBANK.NS", "SBIN.NS", "INDUSINDBK.NS"]
     run_pipeline(UNIVERSE)
-  def render_quant_analysis():
+
+
+def render_quant_analysis():
     import streamlit as st
     st.info("Quant Analysis module is loading. Check back shortly.")
