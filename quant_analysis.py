@@ -291,7 +291,7 @@ def composite_alpha(fac, vol, bt_long, bt_short):
 def gemini_research_note(sym, fund, fac, vol, stat, ex, dom, score, verdict, api_key):
     import google.generativeai as genai
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    model = genai.GenerativeModel("gemini-2.5-flash")
     prompt = f"""You are a sell-side equity research analyst at an investment bank writing a concise
 institutional research note for a 1-week (5 business day) swing trade on {sym} ({fund['name']},
 {fund['sector']} / {fund['industry']}).
