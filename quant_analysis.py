@@ -1,3 +1,4 @@
+"""
 quant_analysis.py — Institutional Quant Terminal v2.0
 ======================================================
 Methods: AFML frac-diff (Ch.5), non-overlapping triple-barrier (Ch.3),
