@@ -1,30 +1,33 @@
 """
-quant_analysis.py — Single-Stock Swing-Trade Quant Engine (1-week horizon)
-==========================================================================
+quant_analysis.py — Institutional Single-Asset Quant Engine (5-day horizon)
+===========================================================================
 Frameworks:
   - Marcos López de Prado, "Advances in Financial Machine Learning":
-    fractional differentiation (Ch.5), triple-barrier labeling (Ch.3).
-  - Ernest Chan, "Quantitative Trading": ATR-based barriers, transaction
-    costs in bps, explicit stop-loss / profit-target risk management.
-  - Gemini Vision cross-check of an uploaded chart image vs. the math.
+    Fractional Differentiation (Ch.5), Triple-Barrier Labeling (Ch.3).
+  - Ernest Chan: volatility-scaled barriers, bps transaction-cost model,
+    statistical expectancy / Sharpe-equivalent of the setup.
+
+Four vectors:
+  1. Stationarity & memory conservation (optimal d, memory retained).
+  2. EWMA conditional-variance volatility regime + Volume-Profile S/R.
+  3. Path-dependent triple-barrier, vol-sized, t+5 vertical, bps penalty.
+  4. Composite Alpha Score + execution matrix + statistical expectancy.
 
 UI entry point: render_quant_analysis()
-
-Dependencies: pandas, numpy, scikit-learn, statsmodels, yfinance,
-              google-generativeai, Pillow, streamlit
+Dependencies: pandas, numpy, scikit-learn, statsmodels, yfinance, streamlit
 """
 
-import io
 import numpy as np
 import pandas as pd
 import yfinance as yf
+from statsmodels.tsa.stattools import adfuller
 
 
 # ════════════════════════════════════════════════════════════
-# 1. DATA INGESTION
+# 0. DATA INGESTION
 # ════════════════════════════════════════════════════════════
 
-def fetch_history(symbol: str, period: str = "2y", interval: str = "1d") -> pd.DataFrame:
+def fetch_history(symbol: str, period: str = "3y", interval: str = "1d") -> pd.DataFrame:
     """Download OHLCV for a single NSE symbol (auto-appends .NS)."""
     sym = symbol.strip().upper()
     if not sym.endswith(".NS"):
@@ -32,16 +35,14 @@ def fetch_history(symbol: str, period: str = "2y", interval: str = "1d") -> pd.D
     df = yf.Ticker(sym).history(period=period, interval=interval)
     if df.empty:
         return df
-    df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
-    return df
+    return df[["Open", "High", "Low", "Close", "Volume"]].dropna()
 
 
 # ════════════════════════════════════════════════════════════
-# 2. FRACTIONAL DIFFERENTIATION  (López de Prado, Ch.5)
+# 1. FRACTIONAL DIFFERENTIATION & MEMORY  (López de Prado, Ch.5)
 # ════════════════════════════════════════════════════════════
 
 def _ffd_weights(d: float, threshold: float = 1e-4) -> np.ndarray:
-    """Fixed-width window fractional-differentiation weights."""
     w, k = [1.0], 1
     while abs(w[-1]) > threshold:
         w.append(-w[-1] * (d - k + 1) / k)
@@ -50,7 +51,7 @@ def _ffd_weights(d: float, threshold: float = 1e-4) -> np.ndarray:
 
 
 def frac_diff_ffd(series: pd.Series, d: float) -> pd.Series:
-    """Memory-preserving stationary transform of a price series."""
+    """Fixed-width-window fractional differentiation (memory-preserving)."""
     w = _ffd_weights(d)
     width = len(w)
     vals = series.ffill().values
@@ -60,330 +61,351 @@ def frac_diff_ffd(series: pd.Series, d: float) -> pd.Series:
     return pd.Series(out, index=series.index)
 
 
-def optimal_d(series: pd.Series, ds=np.arange(0.0, 1.01, 0.1),
-              pval_target: float = 0.05):
+def stationarity_analysis(close: pd.Series,
+                          ds=np.round(np.arange(0.0, 1.01, 0.05), 2),
+                          pval_target: float = 0.05) -> dict:
     """
-    Find the smallest d that makes the series stationary (ADF p < target),
-    preserving maximum memory (López de Prado 5.5).
-    Returns (best_d, adf_pvalue, frac_diff_series).
+    Find smallest d s.t. ADF p < target (max memory retention, LdP 5.5).
+    Memory retained = corr(frac_diff, log-price) vs corr(first-diff, log-price).
     """
-    from statsmodels.tsa.stattools import adfuller
-    logp = np.log(series.dropna())
-    best = None
+    logp = np.log(close.dropna())
+    first_diff = logp.diff().dropna()
+    base_mem = abs(np.corrcoef(first_diff, logp.loc[first_diff.index])[0, 1])
+
+    best_d, best_p, best_mem = 1.0, np.nan, base_mem
     for d in ds:
         fd = frac_diff_ffd(logp, d).dropna()
-        if len(fd) < 30:
+        if len(fd) < 50:
             continue
         try:
             pval = adfuller(fd, maxlag=1, regression="c", autolag=None)[1]
         except Exception:
             continue
-        if best is None:
-            best = (d, pval, fd)
+        mem = abs(np.corrcoef(fd, logp.loc[fd.index])[0, 1])
         if pval < pval_target:
-            return d, pval, fd
-    return best if best else (1.0, np.nan, frac_diff_ffd(logp, 1.0).dropna())
+            best_d, best_p, best_mem = float(d), float(pval), float(mem)
+            break
+        best_d, best_p, best_mem = float(d), float(pval), float(mem)
 
-
-# ════════════════════════════════════════════════════════════
-# 3. FEATURE ENGINEERING  (Technical & Structural)
-# ════════════════════════════════════════════════════════════
-
-def rsi(close: pd.Series, period: int = 14) -> pd.Series:
-    d = close.diff()
-    gain = d.clip(lower=0).rolling(period).mean()
-    loss = (-d.clip(upper=0)).rolling(period).mean()
-    rs = gain / loss.replace(0, np.nan)
-    return 100 - 100 / (1 + rs)
-
-
-def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    high, low, close = df["High"], df["Low"], df["Close"]
-    prev_close = close.shift(1)
-    tr = pd.concat([(high - low),
-                    (high - prev_close).abs(),
-                    (low - prev_close).abs()], axis=1).max(axis=1)
-    return tr.rolling(period).mean()
-
-
-def support_resistance(df: pd.DataFrame, window: int = 10, lookback: int = 120):
-    """Structural levels from recent swing highs/lows."""
-    recent = df.tail(lookback)
-    highs = recent["High"]
-    lows = recent["Low"]
-    # local swing points
-    swing_high = highs[(highs == highs.rolling(window, center=True).max())]
-    swing_low = lows[(lows == lows.rolling(window, center=True).min())]
-    price = df["Close"].iloc[-1]
-    res_levels = sorted([h for h in swing_high.dropna().unique() if h > price])
-    sup_levels = sorted([l for l in swing_low.dropna().unique() if l < price],
-                        reverse=True)
-    resistance = res_levels[0] if res_levels else float(highs.max())
-    support = sup_levels[0] if sup_levels else float(lows.min())
-    return float(support), float(resistance)
-
-
-def build_features(df: pd.DataFrame) -> dict:
-    close = df["Close"]
-    feats = {}
-    feats["price"] = float(close.iloc[-1])
-    feats["rsi"] = float(rsi(close).iloc[-1])
-    feats["atr"] = float(atr(df).iloc[-1])
-    feats["atr_pct"] = float(feats["atr"] / feats["price"] * 100)
-    feats["roc_10"] = float((close.iloc[-1] / close.iloc[-11] - 1) * 100) if len(close) > 11 else 0.0
-    feats["daily_vol"] = float(close.pct_change().rolling(20).std().iloc[-1] * 100)
-    feats["sma20"] = float(close.rolling(20).mean().iloc[-1])
-    feats["sma50"] = float(close.rolling(50).mean().iloc[-1])
-    feats["sma200"] = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else float("nan")
-    sup, res = support_resistance(df)
-    feats["support"] = sup
-    feats["resistance"] = res
-    return feats
-
-
-# ════════════════════════════════════════════════════════════
-# 4. TRIPLE-BARRIER SWING SETUP  (Chan ATR barriers + costs)
-# ════════════════════════════════════════════════════════════
-
-def triple_barrier_levels(feats: dict, side: int = 1,
-                          pt_mult: float = 2.0, sl_mult: float = 1.5,
-                          cost_bps: float = 10.0) -> dict:
-    """
-    1-week swing setup (max hold = 5 business days).
-    Profit-target and stop-loss as ATR multiples (Chan), net of bps costs.
-    side = +1 for long setup, -1 for short.
-    """
-    price = feats["price"]
-    a = feats["atr"]
-    cost = price * cost_bps / 1e4
-
-    if side >= 0:  # long
-        entry = price
-        target = price + pt_mult * a - cost
-        stop = price - sl_mult * a - cost
-    else:          # short
-        entry = price
-        target = price - pt_mult * a + cost
-        stop = price + sl_mult * a + cost
-
-    rr = abs(target - entry) / abs(entry - stop) if (entry - stop) != 0 else 0
     return {
-        "entry": round(entry, 2),
-        "target": round(target, 2),
-        "stop": round(stop, 2),
-        "rr": round(rr, 2),
-        "max_hold_days": 5,
-        "cost_bps": cost_bps,
+        "d": best_d,
+        "adf_pvalue": best_p,
+        "memory_retained": best_mem,           # corr of FFD series to log-price
+        "memory_first_diff": float(base_mem),  # corr of first-diff to log-price
+        "memory_gain": float(best_mem - base_mem),
     }
 
 
 # ════════════════════════════════════════════════════════════
-# 5. COMPOSITE QUANT SCORE + VERDICT
+# 2. CONDITIONAL VOLATILITY REGIME + VOLUME-PROFILE S/R
 # ════════════════════════════════════════════════════════════
 
-def composite_score(feats: dict) -> tuple:
+def ewma_vol(close: pd.Series, lam: float = 0.94) -> pd.Series:
     """
-    0–100 score blending trend, momentum, and mean-reversion posture.
-    Returns (score, side, drivers).
+    RiskMetrics EWMA conditional variance: sigma_t^2 = lam*sigma_{t-1}^2
+    + (1-lam)*r_{t-1}^2. GARCH(1,1)-like instantaneous vol path.
     """
-    price = feats["price"]
+    r = np.log(close / close.shift(1)).dropna()
+    var = np.zeros(len(r))
+    var[0] = r.var()
+    for t in range(1, len(r)):
+        var[t] = lam * var[t - 1] + (1 - lam) * r.iloc[t - 1] ** 2
+    return pd.Series(np.sqrt(var), index=r.index)
+
+
+def volatility_regime(sigma: pd.Series) -> dict:
+    """Classify instantaneous vol vs its own 1y distribution (percentile)."""
+    cur = float(sigma.iloc[-1])
+    hist = sigma.tail(252)
+    pct = float((hist < cur).mean() * 100)
+    if pct >= 80:
+        regime = "HIGH / STRESSED"
+    elif pct <= 20:
+        regime = "LOW / COMPRESSED"
+    else:
+        regime = "NORMAL"
+    return {
+        "sigma_daily": cur,
+        "sigma_annual": cur * np.sqrt(252),
+        "percentile": pct,
+        "regime": regime,
+    }
+
+
+def volume_profile_levels(df: pd.DataFrame, lookback: int = 120,
+                          bins: int = 30) -> dict:
+    """
+    Microstructure liquidity pools: bin price range, accumulate traded volume,
+    find high-concentration nodes (POC + nearest high-volume node above/below).
+    """
+    recent = df.tail(lookback)
+    price = float(recent["Close"].iloc[-1])
+    typical = (recent["High"] + recent["Low"] + recent["Close"]) / 3
+    lo, hi = typical.min(), typical.max()
+    edges = np.linspace(lo, hi, bins + 1)
+    centers = (edges[:-1] + edges[1:]) / 2
+    vol = np.zeros(bins)
+    idx = np.clip(np.digitize(typical, edges) - 1, 0, bins - 1)
+    for i, v in zip(idx, recent["Volume"].values):
+        vol[i] += v
+
+    poc = float(centers[int(np.argmax(vol))])                 # point of control
+    # high-volume nodes (top 40% by volume)
+    thresh = np.quantile(vol[vol > 0], 0.6) if (vol > 0).any() else 0
+    nodes = centers[vol >= thresh]
+    res_nodes = sorted([n for n in nodes if n > price])
+    sup_nodes = sorted([n for n in nodes if n < price], reverse=True)
+    resistance = float(res_nodes[0]) if res_nodes else float(hi)
+    support = float(sup_nodes[0]) if sup_nodes else float(lo)
+    return {"poc": poc, "support": support, "resistance": resistance}
+
+
+# ════════════════════════════════════════════════════════════
+# 3. PATH-DEPENDENT TRIPLE-BARRIER  (LdP Ch.3 + Chan costs)
+# ════════════════════════════════════════════════════════════
+
+def triple_barrier_backtest(close: pd.Series, sigma: pd.Series,
+                            side: int = 1, pt_mult: float = 2.0,
+                            sl_mult: float = 1.5, vbar: int = 5,
+                            cost_bps: float = 10.0) -> dict:
+    """
+    Path-dependent triple-barrier over history (LdP 3.4).
+    Horizontal barriers = vol-scaled (pt_mult/sl_mult * instantaneous sigma).
+    Vertical barrier at t+vbar business days. Returns net of bps round-trip cost.
+    Produces the statistical expectancy / Sharpe-equivalent of the setup.
+    """
+    px = close.reindex(sigma.index).dropna()
+    sig = sigma.reindex(px.index)
+    cost = cost_bps / 1e4
+    rets, labels = [], []
+
+    n = len(px)
+    for i in range(n - vbar):
+        s = float(sig.iloc[i])
+        if not np.isfinite(s) or s <= 0:
+            continue
+        p0 = px.iloc[i]
+        up = p0 * (1 + side * pt_mult * s)
+        dn = p0 * (1 + side * -sl_mult * s)
+        path = px.iloc[i + 1: i + 1 + vbar]
+        outcome = None
+        for p in path:
+            if side == 1:
+                if p >= up: outcome = side * pt_mult * s; break
+                if p <= dn: outcome = -side * sl_mult * s; break
+            else:
+                if p <= up: outcome = pt_mult * s; break
+                if p >= dn: outcome = -sl_mult * s; break
+        if outcome is None:  # vertical barrier
+            outcome = side * (path.iloc[-1] / p0 - 1)
+        outcome -= cost  # round-trip friction (Chan)
+        rets.append(outcome)
+        labels.append(1 if outcome > 0 else 0)
+
+    rets = np.array(rets)
+    if len(rets) == 0:
+        return {"expectancy": 0, "sharpe": 0, "win_rate": 0, "n": 0,
+                "mean_ret": 0, "std_ret": 0}
+
+    mean_r, std_r = rets.mean(), rets.std()
+    # per-trade Sharpe annualized to ~50 weekly setups
+    sharpe = (mean_r / std_r * np.sqrt(50)) if std_r > 0 else 0
+    return {
+        "expectancy": float(mean_r),
+        "sharpe": float(sharpe),
+        "win_rate": float(np.mean(labels) * 100),
+        "n": int(len(rets)),
+        "mean_ret": float(mean_r),
+        "std_ret": float(std_r),
+    }
+
+
+def execution_matrix(price: float, sigma_daily: float, side: int,
+                     pt_mult: float = 2.0, sl_mult: float = 1.5,
+                     cost_bps: float = 10.0) -> dict:
+    """Forward-looking vol-adjusted entry/target/stop for the next setup."""
+    cost = price * cost_bps / 1e4
+    if side >= 0:
+        entry = price
+        target = price * (1 + pt_mult * sigma_daily) - cost
+        stop = price * (1 - sl_mult * sigma_daily) - cost
+    else:
+        entry = price
+        target = price * (1 - pt_mult * sigma_daily) + cost
+        stop = price * (1 + sl_mult * sigma_daily) + cost
+    rr = abs(target - entry) / abs(entry - stop) if (entry - stop) != 0 else 0
+    return {"entry": round(entry, 2), "target": round(target, 2),
+            "stop": round(stop, 2), "rr": round(rr, 2)}
+
+
+# ════════════════════════════════════════════════════════════
+# 4. COMPOSITE ALPHA SCORE
+# ════════════════════════════════════════════════════════════
+
+def composite_alpha(stat: dict, vol: dict, bt_long: dict, bt_short: dict,
+                    drift_ann: float) -> tuple:
+    """
+    Synthesize vectors into 0–100 alpha score and directional side.
+    Blends: backtested expectancy edge, Sharpe quality, drift, vol regime.
+    """
+    long_edge = bt_long["expectancy"] - bt_short["expectancy"]
     score = 50.0
     drivers = []
 
-    # Trend (SMA stack)
-    if not np.isnan(feats["sma200"]):
-        if price > feats["sma50"] > feats["sma200"]:
-            score += 15; drivers.append("Uptrend: price > SMA50 > SMA200")
-        elif price < feats["sma50"] < feats["sma200"]:
-            score -= 15; drivers.append("Downtrend: price < SMA50 < SMA200")
-    if price > feats["sma20"]:
-        score += 7; drivers.append("Price above SMA20 (short-term bullish)")
+    # Directional edge from path-dependent backtest
+    if long_edge > 0:
+        score += min(20, long_edge * 4000); drivers.append(
+            f"Long triple-barrier expectancy exceeds short by {long_edge*100:.2f}% net of costs")
     else:
-        score -= 7; drivers.append("Price below SMA20 (short-term bearish)")
+        score += max(-20, long_edge * 4000); drivers.append(
+            f"Short triple-barrier expectancy exceeds long by {abs(long_edge)*100:.2f}% net of costs")
 
-    # Momentum (RSI)
-    r = feats["rsi"]
-    if r < 30:
-        score += 10; drivers.append(f"RSI {r:.0f}: oversold, mean-reversion long")
-    elif r > 70:
-        score -= 10; drivers.append(f"RSI {r:.0f}: overbought, mean-reversion short")
-    elif 50 <= r <= 65:
-        score += 6; drivers.append(f"RSI {r:.0f}: healthy momentum zone")
+    # Sharpe quality of dominant side
+    dom = bt_long if long_edge >= 0 else bt_short
+    score += np.clip(dom["sharpe"] * 6, -12, 12)
+    drivers.append(f"Setup Sharpe-equivalent {dom['sharpe']:.2f}, "
+                   f"win-rate {dom['win_rate']:.0f}% over {dom['n']} historical events")
 
-    # ROC
-    if feats["roc_10"] > 0:
-        score += 5; drivers.append(f"ROC(10) +{feats['roc_10']:.1f}% positive")
-    else:
-        score -= 5; drivers.append(f"ROC(10) {feats['roc_10']:.1f}% negative")
+    # Annualized drift
+    score += np.clip(drift_ann * 40, -10, 10)
+    drivers.append(f"Annualized log-drift {drift_ann*100:+.1f}%")
 
-    score = max(0, min(100, score))
+    # Volatility regime penalty (stressed regimes reduce conviction)
+    if vol["regime"].startswith("HIGH"):
+        score -= 6; drivers.append(
+            f"Vol regime {vol['regime']} ({vol['percentile']:.0f}th pct) — conviction trimmed")
+    elif vol["regime"].startswith("LOW"):
+        score += 3; drivers.append(
+            f"Vol regime {vol['regime']} ({vol['percentile']:.0f}th pct) — favorable compression")
+
+    score = float(max(0, min(100, score)))
     side = 1 if score >= 55 else (-1 if score <= 45 else 0)
     return round(score, 1), side, drivers
 
 
-def verdict_from(score: float, side: int) -> str:
-    if side == 1:
-        return "BUY"
-    if side == -1:
-        return "SELL"
-    return "HOLD"
+def verdict_from(side: int) -> str:
+    return "BUY" if side == 1 else ("SELL" if side == -1 else "HOLD")
 
 
 # ════════════════════════════════════════════════════════════
-# 6. GEMINI VISION CROSS-CHECK
-# ════════════════════════════════════════════════════════════
-
-def gemini_chart_analysis(image_bytes: bytes, symbol: str, feats: dict, api_key: str) -> str:
-    """Send chart image + computed features to Gemini for visual cross-check."""
-    import google.generativeai as genai
-    from PIL import Image
-
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-1.5-flash")
-    img = Image.open(io.BytesIO(image_bytes))
-
-    prompt = f"""You are an institutional quant analyst doing a VISUAL cross-check of a stock chart
-for a 1-week swing trade on {symbol} (NSE).
-
-Computed mathematical features:
-- Price: {feats['price']:.2f}
-- RSI(14): {feats['rsi']:.1f}
-- ATR(14): {feats['atr']:.2f} ({feats['atr_pct']:.2f}% of price)
-- ROC(10): {feats['roc_10']:.2f}%
-- 20d daily volatility: {feats['daily_vol']:.2f}%
-- SMA20/50/200: {feats['sma20']:.2f} / {feats['sma50']:.2f} / {feats['sma200']:.2f}
-- Support / Resistance: {feats['support']:.2f} / {feats['resistance']:.2f}
-
-From the CHART IMAGE, identify:
-1. Visible chart pattern (flag, triangle, double top/bottom, breakout, range, etc.)
-2. Macro trend direction (up / down / sideways)
-3. Notable candlestick setup near the latest candle
-4. DIVERGENCES: does the visual picture agree or disagree with the math above?
-
-Be concise (max ~150 words), use bullet points, and end with a one-line visual bias:
-VISUAL BIAS: BULLISH / BEARISH / NEUTRAL."""
-
-    resp = model.generate_content([prompt, img])
-    return resp.text
-
-
-# ════════════════════════════════════════════════════════════
-# 7. STREAMLIT UI
+# 5. STREAMLIT UI
 # ════════════════════════════════════════════════════════════
 
 def render_quant_analysis():
     import streamlit as st
 
-    st.markdown("### Quant Analysis — Single-Stock Swing Engine (1-Week Horizon)")
-    st.caption("López de Prado fractional differentiation + triple-barrier · "
-               "Ernest Chan ATR risk management + costs · Gemini Vision cross-check.")
+    st.markdown("### Quant Analysis — Institutional Single-Asset Engine (5-Day Horizon)")
+    st.caption("Fractional differentiation & memory conservation (LdP Ch.5) · "
+               "EWMA conditional-variance regime + Volume-Profile liquidity pools · "
+               "Path-dependent triple-barrier with bps friction (LdP Ch.3 / Chan).")
 
-    with st.form("quant_single"):
-        c1, c2 = st.columns([2, 1])
+    with st.form("quant_inst"):
+        c1, c2, c3 = st.columns([2, 1, 1])
         symbol = c1.text_input("NSE Symbol (any sector)", value="RELIANCE",
-                               help="Type any NSE ticker, e.g. TCS, DLF, SUNPHARMA. "
-                                    "'.NS' is added automatically.")
-        cost_bps = c2.number_input("Transaction cost (bps)", value=10.0,
-                                   min_value=0.0, step=1.0)
-        chart_img = st.file_uploader("Upload chart screenshot (from Downloads)",
-                                     type=["png", "jpg", "jpeg"])
+                               help="Any NSE ticker, e.g. TCS, DLF, SUNPHARMA. '.NS' auto-added.")
+        cost_bps = c2.number_input("Friction (bps)", value=10.0, min_value=0.0, step=1.0)
+        ptsl = c3.selectbox("Barrier σ-multiples (PT / SL)",
+                            ["2.0 / 1.5", "1.5 / 1.0", "3.0 / 2.0"], index=0)
         run = st.form_submit_button("Run Quant Analysis", type="primary",
                                     use_container_width=True)
 
     if not run:
-        st.info("Enter an NSE symbol, optionally upload its chart screenshot, "
-                "then click **Run Quant Analysis**.")
+        st.info("Enter an NSE symbol and click **Run Quant Analysis**.")
         return
-
     if not symbol.strip():
         st.error("Please enter an NSE symbol.")
         return
 
-    # ── Data ──
-    with st.spinner(f"Fetching {symbol.upper()} history..."):
+    pt_mult, sl_mult = [float(x) for x in ptsl.split("/")]
+
+    with st.spinner(f"Fetching {symbol.upper()} and running quant pipeline..."):
         df = fetch_history(symbol)
-    if df.empty or len(df) < 60:
-        st.error(f"Not enough data for {symbol.upper()}. Check the symbol and try again.")
-        return
+        if df.empty or len(df) < 260:
+            st.error(f"Insufficient data for {symbol.upper()} (need ~1y+). Check symbol.")
+            return
 
-    # ── Math pipeline ──
-    feats = build_features(df)
-    d_opt, d_pval, _ = optimal_d(df["Close"])
-    score, side, drivers = composite_score(feats)
-    # if neutral, default barrier orientation to long for level display
-    barrier_side = side if side != 0 else 1
-    levels = triple_barrier_levels(feats, side=barrier_side, cost_bps=cost_bps)
-    verdict = verdict_from(score, side)
+        close = df["Close"]
+        price = float(close.iloc[-1])
 
-    # ── Header verdict ──
+        # Vector 1
+        stat = stationarity_analysis(close)
+        # Vector 2
+        sigma = ewma_vol(close)
+        vol = volatility_regime(sigma)
+        vp = volume_profile_levels(df)
+        # Vector 3 — path-dependent backtest both sides
+        bt_long = triple_barrier_backtest(close, sigma, side=1, pt_mult=pt_mult,
+                                          sl_mult=sl_mult, vbar=5, cost_bps=cost_bps)
+        bt_short = triple_barrier_backtest(close, sigma, side=-1, pt_mult=pt_mult,
+                                           sl_mult=sl_mult, vbar=5, cost_bps=cost_bps)
+        drift_ann = float(np.log(close / close.shift(1)).dropna().tail(252).mean() * 252)
+        # Vector 4
+        score, side, drivers = composite_alpha(stat, vol, bt_long, bt_short, drift_ann)
+        verdict = verdict_from(side)
+        ex_side = side if side != 0 else 1
+        ex = execution_matrix(price, vol["sigma_daily"], ex_side,
+                              pt_mult, sl_mult, cost_bps)
+        dom = bt_long if ex_side == 1 else bt_short
+
+    # ── Verdict header ──
     vcolor = {"BUY": "#22C55E", "SELL": "#EF4444", "HOLD": "#F59E0B"}[verdict]
     st.markdown(
         f"<div style='background:#11161D;border:1px solid #242D3A;border-left:5px solid {vcolor};"
         f"border-radius:12px;padding:18px 22px;margin:8px 0 18px;'>"
-        f"<span style='font-size:13px;color:#8C97A8;letter-spacing:1px;'>VERDICT · {symbol.upper()}</span><br>"
+        f"<span style='font-size:13px;color:#8C97A8;letter-spacing:1px;'>ALPHA VERDICT · {symbol.upper()}</span><br>"
         f"<span style='font-size:30px;font-weight:800;color:{vcolor};'>{verdict}</span>"
-        f"<span style='font-size:18px;color:#E8ECF2;margin-left:14px;'>Composite Quant Score: "
+        f"<span style='font-size:18px;color:#E8ECF2;margin-left:14px;'>Composite Alpha Score: "
         f"<b>{score}/100</b></span></div>", unsafe_allow_html=True)
 
-    # ── Execution levels ──
-    st.markdown("#### Execution Levels (1-Week Swing)")
+    # ── Execution matrix ──
+    st.markdown("#### Structural Execution Matrix (t+5 horizon)")
     e1, e2, e3, e4 = st.columns(4)
-    e1.metric("Entry", f"Rs {levels['entry']:,.2f}")
-    e2.metric("Profit Target", f"Rs {levels['target']:,.2f}")
-    e3.metric("Stop-Loss", f"Rs {levels['stop']:,.2f}")
-    e4.metric("Risk:Reward", f"{levels['rr']} : 1")
-    st.caption(f"Max holding: {levels['max_hold_days']} business days · "
-               f"ATR-based barriers · costs {levels['cost_bps']:.0f} bps included.")
+    e1.metric("Mathematical Entry", f"Rs {ex['entry']:,.2f}")
+    e2.metric("Vol-Adj Profit Target", f"Rs {ex['target']:,.2f}")
+    e3.metric("Vol-Adj Stop-Loss", f"Rs {ex['stop']:,.2f}")
+    e4.metric("Risk : Reward", f"{ex['rr']} : 1")
+    s1, s2, s3 = st.columns(3)
+    s1.metric("Statistical Expectancy / trade", f"{dom['expectancy']*100:+.2f}%")
+    s2.metric("Sharpe-equivalent", f"{dom['sharpe']:.2f}")
+    s3.metric("Hist. Win-Rate", f"{dom['win_rate']:.0f}%  (n={dom['n']})")
+    st.caption(f"Horizontal barriers = ±σ·multiples (PT {pt_mult} / SL {sl_mult}), "
+               f"vertical barrier t+5, round-trip friction {cost_bps:.0f} bps deducted.")
 
-    # ── Quant features ──
-    st.markdown("#### Quantitative Features")
-    f1, f2, f3, f4 = st.columns(4)
-    f1.metric("Price", f"Rs {feats['price']:,.2f}")
-    f2.metric("RSI(14)", f"{feats['rsi']:.0f}")
-    f3.metric("ATR(14)", f"{feats['atr']:.2f} ({feats['atr_pct']:.1f}%)")
-    f4.metric("ROC(10)", f"{feats['roc_10']:+.1f}%")
-    g1, g2, g3, g4 = st.columns(4)
-    g1.metric("Daily Vol (20d)", f"{feats['daily_vol']:.2f}%")
-    g2.metric("SMA 20 / 50", f"{feats['sma20']:.0f} / {feats['sma50']:.0f}")
-    g3.metric("Support", f"Rs {feats['support']:,.2f}")
-    g4.metric("Resistance", f"Rs {feats['resistance']:,.2f}")
+    # ── Vector 1: stationarity ──
+    st.markdown("#### 1 · Stationarity & Memory Conservation (López de Prado Ch.5)")
+    a1, a2, a3 = st.columns(3)
+    a1.metric("Optimal d", f"{stat['d']:.2f}")
+    a2.metric("ADF p-value", f"{stat['adf_pvalue']:.4f}" if np.isfinite(stat['adf_pvalue']) else "n/a")
+    a3.metric("Memory retained", f"{stat['memory_retained']:.3f}")
+    st.markdown(
+        f"At **d = {stat['d']:.2f}** the log-price series achieves stationarity "
+        f"(ADF p = {stat['adf_pvalue']:.4f}) while retaining correlation "
+        f"**{stat['memory_retained']:.3f}** to the original log-price. Integer "
+        f"first-differencing (d=1) retains only **{stat['memory_first_diff']:.3f}** — "
+        f"fractional differentiation conserves **{stat['memory_gain']:+.3f}** additional "
+        f"memory, preserving predictive structure destroyed by naive differencing.")
 
-    # ── Stationarity ──
-    pval_txt = f"{d_pval:.4f}" if not np.isnan(d_pval) else "n/a"
-    st.markdown("#### Stationarity (López de Prado, Ch.5)")
-    st.write(f"Optimal fractional-differentiation **d = {d_opt:.2f}** "
-             f"(ADF p-value = {pval_txt}). Lower d preserves more memory while staying stationary.")
+    # ── Vector 2: vol regime + liquidity pools ──
+    st.markdown("#### 2 · Conditional Volatility Regime & Liquidity Pools")
+    b1, b2, b3 = st.columns(3)
+    b1.metric("EWMA σ (daily)", f"{vol['sigma_daily']*100:.2f}%")
+    b2.metric("EWMA σ (annual)", f"{vol['sigma_annual']*100:.1f}%")
+    b3.metric("Vol Regime", f"{vol['regime']}")
+    st.markdown(
+        f"Instantaneous EWMA conditional variance (λ=0.94, RiskMetrics) places current "
+        f"volatility at the **{vol['percentile']:.0f}th percentile** of its trailing-year "
+        f"distribution → regime **{vol['regime']}**. Volume-Profile order-flow nodes: "
+        f"**POC Rs {vp['poc']:,.2f}**, nearest liquidity support **Rs {vp['support']:,.2f}**, "
+        f"resistance **Rs {vp['resistance']:,.2f}** (high-concentration traded-volume clusters, "
+        f"not arbitrary swing points).")
 
-    # ── Score drivers ──
-    st.markdown("#### Score Drivers")
+    # ── Vector 4: score drivers ──
+    st.markdown("#### Composite Alpha Rationale")
     for dr in drivers:
         st.markdown(f"- {dr}")
 
-    # ── Price + SMA chart ──
-    st.markdown("#### Price & Moving Averages")
-    chart_df = pd.DataFrame({
-        "Close": df["Close"],
-        "SMA20": df["Close"].rolling(20).mean(),
-        "SMA50": df["Close"].rolling(50).mean(),
-    }).tail(250)
-    st.line_chart(chart_df)
-
-    # ── Gemini Vision cross-check ──
-    st.markdown("#### Gemini Vision Cross-Check")
-    if chart_img is None:
-        st.info("Upload a chart screenshot above to enable the visual cross-check.")
-    else:
-        st.image(chart_img, caption=f"{symbol.upper()} — uploaded chart", use_column_width=True)
-        api_key = st.secrets.get("GEMINI_KEY", "")
-        if not api_key:
-            st.warning("GEMINI_KEY not found in secrets. Add it to enable vision analysis.")
-        else:
-            with st.spinner("Gemini analyzing the chart vs. the math..."):
-                try:
-                    visual = gemini_chart_analysis(
-                        chart_img.getvalue(), symbol.upper(), feats, api_key)
-                    st.markdown(visual)
-                except Exception as e:
-                    st.error(f"Gemini vision failed: {e}")
+    # ── Vol path chart ──
+    st.markdown("#### EWMA Conditional Volatility Path (annualized)")
+    st.line_chart((sigma.tail(250) * np.sqrt(252) * 100).rename("Annualized σ %"))
 
     st.caption("Educational use only. Not investment advice. Trading involves risk.")
