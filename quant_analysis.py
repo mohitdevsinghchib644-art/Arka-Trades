@@ -291,26 +291,38 @@ def composite_alpha(fac, vol, bt_long, bt_short):
 def gemini_research_note(sym, fund, fac, vol, stat, ex, dom, score, verdict, api_key):
     import google.generativeai as genai
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-2.5-flash")
-    prompt = f"""You are a sell-side equity research analyst at an investment bank writing a concise
-institutional research note for a 1-week (5 business day) swing trade on {sym} ({fund['name']},
-{fund['sector']} / {fund['industry']}).
+    model = genai.GenerativeModel(
+        model_name="gemini-2.5-flash",
+        system_instruction=(
+            "You are a sell-side equity research analyst at an investment bank. "
+            "Write crisp, institutional desk notes grounded strictly in the supplied "
+            "quantitative evidence. No retail TA fluff, no emotional language. "
+            "You are NOT SEBI registered — educational analysis only."
+        ),
+    )
 
-Use ONLY the quantitative evidence below. Write like a professional desk note: crisp, no fluff,
-no generic 'RSI is high' retail commentary. Reference the actual statistics.
+    def fmt(v, dp=2):
+        try:
+            return f"{float(v):.{dp}f}"
+        except Exception:
+            return "n/a"
+
+    prompt = f"""Write a concise institutional research note for a 1-week (5 business day)
+swing trade on {sym} ({fund['name']}, {fund['sector']} / {fund['industry']}).
+Use ONLY the metrics below. Reference the actual statistics.
 
 COMPUTED METRICS
 - Composite Alpha Score: {score}/100 | Model verdict: {verdict}
-- Fractional differentiation optimal d={stat['d']:.2f} (ADF p={stat['adf_pvalue']:.4f}), memory retained {stat['memory_retained']:.3f} vs first-diff {stat['memory_first_diff']:.3f}
-- Annualized return {fac['ann_ret']:.1f}%, vol {fac['ann_vol']:.1f}%, Sharpe {fac['sharpe']:.2f}, Sortino {fac['sortino']:.2f}
-- Beta {fac['beta']:.2f}, Alpha {fac['alpha']:.1f}% (vs NIFTY), Max DD {fac['max_dd']:.1f}%
-- VaR95 {fac['var95']:.2f}%, CVaR95 {fac['cvar95']:.2f}%, Skew {fac['skew']:.2f}, Kurt {fac['kurt']:.2f}, Hurst {fac['hurst']:.2f}
-- EWMA vol regime: {vol['regime']} ({vol['percentile']:.0f}th pct), annualized {vol['sigma_annual']*100:.1f}%
-- Triple-barrier setup: expectancy {dom['expectancy']*100:+.2f}%/trade, Sharpe-eq {dom['sharpe']:.2f}, win-rate {dom['win_rate']:.0f}%
+- Fractional differentiation d={fmt(stat['d'])} (ADF p={fmt(stat['adf_pvalue'],4)}), memory retained {fmt(stat['memory_retained'],3)} vs first-diff {fmt(stat['memory_first_diff'],3)}
+- Annualized return {fmt(fac['ann_ret'],1)}%, vol {fmt(fac['ann_vol'],1)}%, Sharpe {fmt(fac['sharpe'])}, Sortino {fmt(fac['sortino'])}
+- Beta {fmt(fac['beta'])}, Alpha {fmt(fac['alpha'],1)}% (vs NIFTY), Max DD {fmt(fac['max_dd'],1)}%
+- VaR95 {fmt(fac['var95'])}%, CVaR95 {fmt(fac['cvar95'])}%, Skew {fmt(fac['skew'])}, Kurt {fmt(fac['kurt'])}, Hurst {fmt(fac['hurst'])}
+- EWMA vol regime: {vol['regime']} ({fmt(vol['percentile'],0)}th pct), annualized {fmt(vol['sigma_annual']*100,1)}%
+- Triple-barrier setup: expectancy {fmt(dom['expectancy']*100)}%/trade, Sharpe-eq {fmt(dom['sharpe'])}, win-rate {fmt(dom['win_rate'],0)}%
 - Execution: entry {ex['entry']}, target {ex['target']}, stop {ex['stop']}, R:R {ex['rr']}
 - Fundamentals: P/E {fund['pe']}, Fwd P/E {fund['fwd_pe']}, P/B {fund['pb']}, ROE {fund['roe']}%, Margin {fund['profit_margin']}%, MCap Rs {fund['mcap_cr']} cr
 
-STRUCTURE (use these exact short headers):
+STRUCTURE (use these exact short headers, bold them):
 **Thesis** — 2-3 sentences on the directional edge and statistical basis.
 **Risk Profile** — tail risk (VaR/CVaR), drawdown, beta, vol regime.
 **Valuation Context** — fundamentals relative to the setup (1-2 sentences).
@@ -318,7 +330,9 @@ STRUCTURE (use these exact short headers):
 **Recommendation** — verdict with the execution levels restated.
 
 Keep total under 280 words."""
+
     return model.generate_content(prompt).text
+
 
 
 # ════════════════════════════════════════════════════════════
