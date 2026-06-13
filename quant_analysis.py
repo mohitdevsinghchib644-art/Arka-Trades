@@ -902,7 +902,7 @@ def chart_price_setup(df, ex, verdict, sigma, trade_dates):
 
     d = df.tail(180)
     # Map sigma to same date range
-    sig_d = sigma.reindex(d.index).fillna(method="ffill")
+    sig_d = sigma.reindex(d.index).ffill()
     close_d = d["Close"]
     upper_band = close_d * (1 + 2 * sig_d)
     lower_band = close_d * (1 - 2 * sig_d)
