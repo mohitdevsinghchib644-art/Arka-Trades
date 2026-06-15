@@ -4,11 +4,13 @@ smart_scan_page.py  —  Arka Trades Smart Screener
 How it works:
   1. SAVE A SETUP   : upload a reference chart image + describe the setup in
                       plain English. AI parses your text into filters.
-  2. TAP & SCAN     : pick a setup, hit Run Scan.
+  2. TAP & SCAN     : pick a setup, set live overrides (price / RSI / volume),
+                      hit Run Scan.
                       Stage 1 — price pre-filter across ALL NSE stocks.
                       Stage 2 — deep indicator scan on survivors.
   3. AI VISION      : Gemini compares every shortlisted chart against your
                       reference image and ranks by pattern similarity.
+                      A min-similarity slider hides weak matches.
 """
 
 import streamlit as st
@@ -648,6 +650,15 @@ def _verdict_colors(verdict: str):
         return RED, "rgba(239,68,68,0.06)", "rgba(239,68,68,0.35)"
 
 
+def _override_badge(text: str):
+    """Small pill that shows an active live override at scan time."""
+    st.markdown(f"""
+    <span style="display:inline-block;background:rgba(79,141,253,0.12);
+         border:1px solid rgba(79,141,253,0.4);color:{BLUE};font-size:11px;
+         font-weight:700;border-radius:20px;padding:3px 10px;margin:2px 4px 2px 0;">
+         {text}</span>""", unsafe_allow_html=True)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SETUP MANAGER
 # ══════════════════════════════════════════════════════════════════════════════
@@ -872,8 +883,9 @@ def _render_scan_page(supabase, gemini_key: str):
          padding:14px 20px;margin-bottom:18px;">
         <div style="font-size:16px;font-weight:800;color:{IVORY};margin-bottom:2px;">Smart Scan</div>
         <div style="font-size:12px;color:{T2};">
-            Pick a setup, hit Run Scan. Your rules filter the universe, then AI vision
-            compares every shortlisted chart against your reference image.
+            Pick a setup, tune the live overrides (price / RSI / volume), hit Run Scan.
+            Your rules filter the universe, then AI vision compares every shortlisted
+            chart against your reference image.
         </div>
     </div>""", unsafe_allow_html=True)
 
@@ -912,6 +924,97 @@ def _render_scan_page(supabase, gemini_key: str):
         st.info("Select a setup above to start scanning.")
         return
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # LIVE OVERRIDES — price range + RSI / volume quick filters
+    # These DO NOT touch the saved setup. They only apply to this scan.
+    # ──────────────────────────────────────────────────────────────────────────
+    _section("Price Range — Pick Before Scanning")
+
+    base_pmin = float(selected_setup.get("price_min") or 0)
+    base_pmax = float(selected_setup.get("price_max") or 99999)
+
+    PRESETS = {
+        "Use setup's range": (base_pmin, base_pmax),
+        "0 - 100":           (0, 100),
+        "100 - 300":         (100, 300),
+        "300 - 1000":        (300, 1000),
+        "1000 - 5000":       (1000, 5000),
+        "5000+":             (5000, 99999),
+        "Custom":            None,
+    }
+    pcol1, pcol2, pcol3 = st.columns([2, 1, 1])
+    with pcol1:
+        preset = st.selectbox("Price band (Rs)", list(PRESETS.keys()),
+                              key="price_preset",
+                              help="Override the saved setup's price range just for this scan.")
+    if preset == "Custom":
+        with pcol2:
+            ov_pmin = st.number_input("Min price (Rs)", 0.0, 99999.0,
+                                      value=max(base_pmin, 0.0), step=10.0, key="ov_pmin")
+        with pcol3:
+            ov_pmax = st.number_input("Max price (Rs)", 0.0, 99999.0,
+                                      value=min(base_pmax, 99999.0), step=10.0, key="ov_pmax")
+    else:
+        ov_pmin, ov_pmax = PRESETS[preset]
+        with pcol2:
+            st.metric("Min", f"Rs {ov_pmin:,.0f}")
+        with pcol3:
+            st.metric("Max", f"Rs {ov_pmax:,.0f}")
+
+    if ov_pmin > ov_pmax:
+        st.error("Min price is greater than Max price — fix the range before scanning.")
+
+    _section("Quick Filters — Live Overrides (RSI / Volume)")
+    st.caption("Temporarily tighten or loosen rules without editing your saved setup. "
+               "Leave a control OFF to keep the setup's own value.")
+
+    qcol1, qcol2 = st.columns(2)
+    with qcol1:
+        rsi_override_on = st.toggle("Override RSI range", value=False, key="rsi_ov_on")
+        if rsi_override_on:
+            ov_rsi_min, ov_rsi_max = st.slider(
+                "RSI between", 0, 100,
+                (int(float(selected_setup.get("rsi_min") or 0)),
+                 int(float(selected_setup.get("rsi_max") or 100))),
+                key="ov_rsi")
+        else:
+            ov_rsi_min = float(selected_setup.get("rsi_min") or 0)
+            ov_rsi_max = float(selected_setup.get("rsi_max") or 100)
+    with qcol2:
+        vol_override_on = st.toggle("Override volume rule", value=False, key="vol_ov_on")
+        if vol_override_on:
+            ov_vol = st.slider("Min volume (x 20-day avg)", 0.0, 5.0,
+                               float(selected_setup.get("volume_multiplier") or 0.0),
+                               0.1, key="ov_vol")
+        else:
+            ov_vol = float(selected_setup.get("volume_multiplier") or 0.0)
+
+    # Build the effective setup used for THIS scan only.
+    scan_setup = dict(selected_setup)
+    scan_setup["price_min"] = float(ov_pmin)
+    scan_setup["price_max"] = float(ov_pmax)
+    scan_setup["rsi_min"]   = float(ov_rsi_min)
+    scan_setup["rsi_max"]   = float(ov_rsi_max)
+    scan_setup["volume_multiplier"] = float(ov_vol)
+
+    # Show active override badges
+    badges = []
+    if (ov_pmin, ov_pmax) != (base_pmin, base_pmax):
+        badges.append(f"Price {ov_pmin:,.0f}-{ov_pmax:,.0f}")
+    if rsi_override_on:
+        badges.append(f"RSI {ov_rsi_min:.0f}-{ov_rsi_max:.0f}")
+    if vol_override_on and ov_vol > 0:
+        badges.append(f"Vol ≥ {ov_vol:.1f}x")
+    if badges:
+        chips = "".join(
+            f"<span style='display:inline-block;background:rgba(79,141,253,0.12);"
+            f"border:1px solid rgba(79,141,253,0.4);color:{BLUE};font-size:11px;"
+            f"font-weight:700;border-radius:20px;padding:3px 10px;margin:2px 4px 2px 0;'>{b}</span>"
+            for b in badges)
+        st.markdown(f"<div style='margin:6px 0 2px;'><span style='font-size:11px;color:{T2};'>"
+                    f"Active overrides for this scan: </span>{chips}</div>",
+                    unsafe_allow_html=True)
+
     _section(f"Scan With: {selected_setup['name']}")
     c1, c2 = st.columns([2, 1])
     with c1:
@@ -944,7 +1047,9 @@ def _render_scan_page(supabase, gemini_key: str):
     if not gemini_key:
         st.warning("GEMINI_KEY not found in secrets — AI vision comparison will be skipped.")
 
-    if st.button("Run Scan", type="primary", use_container_width=True, key="run_scan"):
+    run_disabled = ov_pmin > ov_pmax
+    if st.button("Run Scan", type="primary", use_container_width=True,
+                 key="run_scan", disabled=run_disabled):
         for k in ("scan_math_results", "scan_ai_results"):
             st.session_state.pop(k, None)
 
@@ -957,25 +1062,25 @@ def _render_scan_page(supabase, gemini_key: str):
 
         # ── Stage 1: price pre-filter (only for big universes) ───────────
         scan_universe = universe
-        pmin = float(selected_setup.get("price_min") or 0)
-        pmax = float(selected_setup.get("price_max") or 99999)
+        pmin = float(scan_setup.get("price_min") or 0)
+        pmax = float(scan_setup.get("price_max") or 99999)
         if len(universe) > 300:
             _prog(0.05, f"Stage 1: price check on {len(universe)} NSE stocks "
                         f"(keeping Rs {pmin:,.0f} - {pmax:,.0f})...")
             scan_universe = prefilter_by_price(tuple(universe), pmin, pmax)
             if not scan_universe:
                 prog.progress(1.0); stat.empty()
-                st.warning("No NSE stocks found inside your price range. Widen the range in the setup.")
+                st.warning("No NSE stocks found inside your price range. Widen the range above.")
                 st.stop()
             _prog(0.15, f"Stage 1 done: {len(scan_universe)} stocks inside your price range. "
                         f"Stage 2: deep indicator scan...")
 
-        # ── Stage 2: deep indicator scan ─────────────────────────────────
-        shortlist, failed = run_math_scan(scan_universe, selected_setup, _prog)
+        # ── Stage 2: deep indicator scan (uses overridden scan_setup) ────
+        shortlist, failed = run_math_scan(scan_universe, scan_setup, _prog)
 
         if not shortlist:
             prog.progress(1.0); stat.empty()
-            st.warning("No stocks passed your rules. Edit the setup description to relax them.")
+            st.warning("No stocks passed your rules. Loosen the live overrides or edit the setup.")
             if failed:
                 with st.expander(f"{len(failed)} symbols had no data"):
                     st.write(", ".join(failed[:60]))
@@ -993,7 +1098,7 @@ def _render_scan_page(supabase, gemini_key: str):
                 ai_prog.progress(min(float(pct), 1.0))
                 ai_stat.markdown(f"**{msg}**")
 
-            ai_results = run_ai_audit(shortlist, selected_setup, gemini_key,
+            ai_results = run_ai_audit(shortlist, scan_setup, gemini_key,
                                       int(max_ai), _ai_prog)
             ai_prog.empty(); ai_stat.empty()
             st.session_state["scan_ai_results"] = ai_results
@@ -1022,25 +1127,43 @@ def _render_scan_page(supabase, gemini_key: str):
 
     if ai_results:
         _section("Pattern Match Results")
-        sort_opt = st.selectbox("Sort by",
-            ["Similarity", "RSI (oversold first)", "Volume Ratio", "% Change"],
-            key="sort_results")
-        filt_v = st.radio("Show",
-            ["All", "Strong Match only", "Partial Match only", "No Match only"],
-            horizontal=True, key="filt_verdict")
+
+        fcol1, fcol2, fcol3 = st.columns([1.2, 1.5, 1.5])
+        with fcol1:
+            # Min-similarity slider (0-10 scale to match the AI score).
+            min_sim = st.slider("Min similarity", 0, 10, 0, 1, key="min_sim",
+                                help="Hide any AI match scoring below this. "
+                                     "7+ = only high-quality setups.")
+        with fcol2:
+            sort_opt = st.selectbox("Sort by",
+                ["Similarity", "RSI (oversold first)", "Volume Ratio", "% Change"],
+                key="sort_results")
+        with fcol3:
+            filt_v = st.radio("Show",
+                ["All", "Strong", "Partial", "No Match"],
+                horizontal=True, key="filt_verdict")
 
         ordered = ai_results[:]
+
+        # Min-similarity filter first.
+        ordered = [r for r in ordered if r.get("score", 0) >= min_sim]
+
         if sort_opt == "Similarity":        ordered.sort(key=lambda x: x.get("score", 0), reverse=True)
         elif "RSI" in sort_opt:             ordered.sort(key=lambda x: x.get("rsi", 50))
         elif "Volume" in sort_opt:          ordered.sort(key=lambda x: x.get("vol_ratio", 0), reverse=True)
         else:                               ordered.sort(key=lambda x: x.get("chg_pct", 0), reverse=True)
 
-        if filt_v == "Strong Match only":   ordered = [r for r in ordered if r.get("verdict") == "STRONG MATCH"]
-        elif filt_v == "Partial Match only":ordered = [r for r in ordered if r.get("verdict") == "PARTIAL MATCH"]
-        elif filt_v == "No Match only":     ordered = [r for r in ordered if r.get("verdict") == "NO MATCH"]
+        if filt_v == "Strong":      ordered = [r for r in ordered if r.get("verdict") == "STRONG MATCH"]
+        elif filt_v == "Partial":   ordered = [r for r in ordered if r.get("verdict") == "PARTIAL MATCH"]
+        elif filt_v == "No Match":  ordered = [r for r in ordered if r.get("verdict") == "NO MATCH"]
+
+        hidden = len(ai_results) - len(ordered)
+        if min_sim > 0:
+            st.caption(f"Showing {len(ordered)} of {len(ai_results)} matches "
+                       f"(similarity ≥ {min_sim}/10 · {hidden} hidden).")
 
         if not ordered:
-            st.info("No results match this filter.")
+            st.info("No results match these filters. Lower the min-similarity slider.")
         else:
             for res in ordered:
                 _render_result_card(res, selected_setup)
