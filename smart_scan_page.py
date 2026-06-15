@@ -5,12 +5,10 @@ How it works:
   1. SAVE A SETUP   : upload a reference chart image + describe the setup in
                       plain English. AI parses your text into filters.
   2. TAP & SCAN     : pick a setup, set live overrides (price / RSI / volume),
-                      hit Run Scan.
-                      Stage 1 — price pre-filter across ALL NSE stocks.
-                      Stage 2 — deep indicator scan on survivors.
-  3. AI VISION      : Gemini compares every shortlisted chart against your
-                      reference image and ranks by pattern similarity.
-                      A min-similarity slider hides weak matches.
+                      hit Run Scan. Single fast parallel scan across NSE.
+  3. AI VISION      : Gemini STRICTLY compares every shortlisted chart against
+                      your reference image + rules and ranks by real similarity.
+                      Weak matches are auto-hidden so you only see true setups.
 """
 
 import streamlit as st
@@ -59,6 +57,9 @@ FONT   = "'Plus Jakarta Sans','Inter',sans-serif"
 MONO   = "'JetBrains Mono',monospace"
 
 MODEL_NAME = "gemini-2.5-flash"
+
+# Strictness: hide anything the AI scores below this out of 10.
+MIN_SIMILARITY_FLOOR = 6
 
 # ── Liquid NSE Universe (fast fallback) ─────────────────────────────────────
 NSE_UNIVERSE = [
@@ -118,42 +119,6 @@ def get_full_nse_universe() -> list:
         return syms if len(syms) > 500 else NSE_UNIVERSE
     except Exception:
         return NSE_UNIVERSE   # fallback if NSE blocks the request
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def prefilter_by_price(symbols_tuple: tuple, price_min: float, price_max: float) -> list:
-    """
-    Stage 1: fast price check across the WHOLE universe using only 5 days
-    of data. Cuts ~2000 stocks down to only those inside your price range
-    before the heavy 60-day scan runs.
-    """
-    symbols = list(symbols_tuple)
-    ns_syms = [s + ".NS" for s in symbols]
-    keep    = []
-    BATCH   = 200
-    for start in range(0, len(ns_syms), BATCH):
-        batch_ns    = ns_syms[start:start + BATCH]
-        batch_plain = symbols[start:start + BATCH]
-        try:
-            raw = yf.download(batch_ns, period="5d", interval="1d",
-                              auto_adjust=True, progress=False, threads=True)
-            if raw.empty:
-                continue
-            closes = raw["Close"] if "Close" in raw else raw
-            if isinstance(closes, pd.Series):
-                closes = closes.to_frame(name=batch_ns[0])
-            last = closes.ffill().iloc[-1]
-            for sym, ns in zip(batch_plain, batch_ns):
-                try:
-                    px = float(last.get(ns, float("nan")))
-                    if px == px and price_min <= px <= price_max:
-                        keep.append(sym)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        time.sleep(0.4)
-    return keep
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -309,43 +274,49 @@ def _atr(high, low, close, period=14):
     return tr.rolling(period).mean()
 
 
+# ── ONE-PASS PARALLEL FETCH (fast) ───────────────────────────────────────────
 @st.cache_data(ttl=3600, show_spinner=False)
 def _fetch_bulk(symbols_tuple: tuple, period: str = "60d") -> dict:
+    """Download all symbols in parallel batches. One network pass, no sleeps."""
     symbols = list(symbols_tuple)
     ns_syms = [s + ".NS" for s in symbols]
     results = {}
-    BATCH   = 150
-    for start in range(0, len(ns_syms), BATCH):
+    BATCH   = 250
+
+    def _download_batch(batch_idx):
+        start       = batch_idx * BATCH
         batch_ns    = ns_syms[start:start + BATCH]
         batch_plain = symbols[start:start + BATCH]
-        if len(batch_ns) == 1:
-            try:
-                df = yf.download(batch_ns[0], period=period, interval="1d",
-                                 auto_adjust=True, progress=False)
-                if not df.empty and len(df) >= 20:
-                    results[batch_plain[0]] = df
-            except Exception:
-                pass
-            continue
+        out = {}
+        if not batch_ns:
+            return out
         try:
             raw = yf.download(batch_ns, period=period, interval="1d",
                               auto_adjust=True, progress=False, threads=True)
             if raw.empty:
-                continue
+                return out
             if isinstance(raw.columns, pd.MultiIndex):
-                available = raw.columns.get_level_values(1).unique().tolist()
+                available = set(raw.columns.get_level_values(1))
                 for sym, ns in zip(batch_plain, batch_ns):
                     if ns not in available:
                         continue
                     try:
                         df = raw.xs(ns, level=1, axis=1).dropna(how="all")
                         if not df.empty and len(df) >= 20 and "Close" in df.columns:
-                            results[sym] = df
+                            out[sym] = df
                     except Exception:
                         pass
+            else:
+                if not raw.empty and len(raw) >= 20:
+                    out[batch_plain[0]] = raw
         except Exception:
             pass
-        time.sleep(0.3)
+        return out
+
+    n_batches = (len(ns_syms) + BATCH - 1) // BATCH
+    with ThreadPoolExecutor(max_workers=min(6, n_batches or 1)) as ex:
+        for batch_result in ex.map(_download_batch, range(n_batches)):
+            results.update(batch_result)
     return results
 
 
@@ -413,11 +384,12 @@ def _apply_filter(df, setup, symbol):
 
 
 def run_math_scan(symbols, setup, progress_cb=None):
+    """One parallel download pass, then apply rules (price filter is built in)."""
     if progress_cb:
-        progress_cb(0.0, f"Downloading data for {len(symbols)} stocks...")
+        progress_cb(0.10, f"Downloading {len(symbols)} stocks in parallel...")
     data_dict = _fetch_bulk(tuple(symbols), "60d")
     if progress_cb:
-        progress_cb(0.35, f"Data ready for {len(data_dict)} stocks — applying your rules...")
+        progress_cb(0.55, f"Data ready for {len(data_dict)} — applying your rules...")
     shortlist = []
     total = len(data_dict) or 1
     for i, (sym, df) in enumerate(data_dict.items()):
@@ -427,11 +399,11 @@ def run_math_scan(symbols, setup, progress_cb=None):
                 shortlist.append(result)
         except Exception:
             pass
-        if progress_cb and i % 15 == 0:
-            progress_cb(0.35 + 0.55 * (i / total), f"Scanning... {i}/{total}")
+        if progress_cb and i % 25 == 0:
+            progress_cb(0.55 + 0.40 * (i / total), f"Scanning... {i}/{total}")
     failed = [s for s in symbols if s not in set(data_dict.keys())]
     if progress_cb:
-        progress_cb(0.95, f"Rules filter done — {len(shortlist)} candidates")
+        progress_cb(0.97, f"Rules filter done — {len(shortlist)} candidates")
     shortlist.sort(key=lambda x: x["rsi"])
     return shortlist, failed
 
@@ -494,42 +466,56 @@ def _make_chart_image(symbol: str, df: pd.DataFrame) -> bytes:
 
     plt.tight_layout(pad=1.0)
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=130, facecolor=DARK, bbox_inches="tight")
+    fig.savefig(buf, format="png", dpi=110, facecolor=DARK, bbox_inches="tight")
     plt.close(fig)
     buf.seek(0)
     return buf.read()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# GEMINI VISION — PATTERN SIMILARITY AUDIT
+# GEMINI VISION — STRICT PATTERN SIMILARITY AUDIT
 # ══════════════════════════════════════════════════════════════════════════════
 
-_PROMPT_TEMPLATE = """You are a professional technical analyst for NSE Indian equities.
+_PROMPT_TEMPLATE = """You are a STRICT technical-pattern matching judge for NSE Indian equities.
+Your ONLY job is to decide if a live chart truly matches the user's REFERENCE SETUP.
 
 You are given:
-1. A REFERENCE PATTERN IMAGE — the user's ideal setup (if provided above).
-2. A live 60-day daily candlestick chart for: {symbol}
-   (Top panel: candles + SMA-20 blue + SMA-50 purple. Bottom: volume + 20-day avg.)
+1. A REFERENCE PATTERN IMAGE — the user's ideal setup. THIS IS THE GROUND TRUTH.
+2. The user's written rules describing that same setup.
+3. A live 60-day daily candlestick chart for: {symbol}
+   (Top: candles + SMA-20 blue + SMA-50 purple. Bottom: volume + 20-day avg.)
 
-USER'S SETUP DESCRIPTION:
+USER'S WRITTEN RULES:
 {visual_rules}
 
-TASK: How closely does the live chart's CURRENT structure (the most recent
-candles matter most) match the reference pattern and description?
-Judge: price structure, trend shape, consolidation/base shape, breakout
-position, volume behaviour. Ignore colors, watermark, timeframe labels.
+HOW TO JUDGE (be harsh — most stocks should FAIL):
+- The live chart must reproduce the SAME visual structure as the reference image:
+  same kind of trend, same base/consolidation shape, same pullback/breakout location,
+  and similar volume behaviour. The MOST RECENT candles matter most.
+- A chart that is only "generally bullish" but does NOT copy the reference structure
+  is a NO MATCH. Looking vaguely similar is NOT enough.
+- Every written rule that you can verify on the chart MUST hold. If a clear rule is
+  broken, it cannot be a STRONG MATCH.
+- Ignore colors, watermarks, timeframe labels, and ticker text.
+
+SCORING (0-10, be strict):
+- 9-10 = nearly identical structure, all rules satisfied (STRONG MATCH)
+- 7-8  = same pattern with minor differences, rules mostly satisfied (STRONG MATCH)
+- 5-6  = related but clearly different in structure or a rule fails (PARTIAL MATCH)
+- 0-4  = different pattern / rules broken (NO MATCH)
+When unsure, score LOWER, not higher.
 
 Respond in EXACTLY this format (one value per line):
 
 VERDICT: STRONG MATCH | PARTIAL MATCH | NO MATCH
 SIMILARITY: [0-10]
 PATTERN: [pattern name you see on the live chart]
-KEY_FINDING: [one sentence — strongest similarity or mismatch vs the reference]
-VISUAL_ANALYSIS: [2-3 sentences: structure, key levels, how it compares to reference]
+KEY_FINDING: [one sentence — strongest similarity or the rule/structure that fails]
+VISUAL_ANALYSIS: [2-3 sentences comparing the live chart directly to the reference]
 RISK: [main risk visible on the live chart]
 ACTION: [specific note e.g. Entry above X, stop Y — or "No trade"]
 
-Be direct. Base everything ONLY on the charts."""
+Base everything ONLY on the charts. Do not invent data you cannot see."""
 
 
 def _audit_one(symbol: str, chart_bytes: bytes, visual_rules: str,
@@ -539,21 +525,23 @@ def _audit_one(symbol: str, chart_bytes: bytes, visual_rules: str,
         model = genai.GenerativeModel(MODEL_NAME)
         prompt = _PROMPT_TEMPLATE.format(
             symbol=symbol,
-            visual_rules=visual_rules.strip() or "General strong technical setup.")
+            visual_rules=visual_rules.strip() or "(No written rules — match the reference image as closely as possible.)")
 
         content = []
+        has_reference = False
         if ref_image_url and HAS_PIL and HAS_REQUESTS:
             try:
                 r = _requests.get(ref_image_url, timeout=8)
                 if r.status_code == 200:
                     ref_img = PILImage.open(io.BytesIO(r.content)).convert("RGB")
-                    content.append("REFERENCE PATTERN IMAGE (the user's ideal setup):")
+                    content.append("REFERENCE PATTERN IMAGE (the user's ideal setup — this is the ground truth):")
                     content.append(ref_img)
+                    has_reference = True
             except Exception:
                 pass
 
         if HAS_PIL:
-            content.append(f"LIVE CHART for {symbol}:")
+            content.append(f"LIVE CHART to judge for {symbol}:")
             content.append(PILImage.open(io.BytesIO(chart_bytes)).convert("RGB"))
         else:
             content.append({"mime_type": "image/png",
@@ -561,7 +549,11 @@ def _audit_one(symbol: str, chart_bytes: bytes, visual_rules: str,
         content.append(prompt)
 
         response = model.generate_content(content)
-        return _parse_audit(symbol, response.text.strip())
+        parsed = _parse_audit(symbol, response.text.strip())
+        # If there was NO reference image, similarity is less reliable — cap score.
+        if not has_reference and parsed.get("score", 0) > 7:
+            parsed["score"] = 7.0
+        return parsed
     except Exception as exc:
         return {"symbol": symbol, "verdict": "ERROR", "score": 0,
                 "key_finding": str(exc)[:120], "pattern": "N/A",
@@ -569,7 +561,7 @@ def _audit_one(symbol: str, chart_bytes: bytes, visual_rules: str,
 
 
 def _parse_audit(symbol: str, text: str) -> dict:
-    result = dict(symbol=symbol, verdict="UNKNOWN", score=5.0,
+    result = dict(symbol=symbol, verdict="UNKNOWN", score=0.0,
                   pattern="N/A", key_finding="", visual_analysis="",
                   risk="", action="", raw=text)
     for line in text.strip().splitlines():
@@ -591,6 +583,12 @@ def _parse_audit(symbol: str, text: str) -> dict:
         elif key == "VISUAL_ANALYSIS": result["visual_analysis"] = val
         elif key == "RISK":            result["risk"] = val
         elif key == "ACTION":          result["action"] = val
+
+    # Enforce consistency: low score can never be a STRONG MATCH.
+    if result["score"] < 7 and result["verdict"] == "STRONG MATCH":
+        result["verdict"] = "PARTIAL MATCH"
+    if result["score"] < 5 and result["verdict"] == "PARTIAL MATCH":
+        result["verdict"] = "NO MATCH"
     return result
 
 
@@ -611,7 +609,7 @@ def run_ai_audit(candidates, setup, gemini_key, max_stocks=15, progress_cb=None)
                      "visual_analysis": "", "risk": "", "action": "", "raw": ""}
         return {**candidate, **audit}
 
-    with ThreadPoolExecutor(max_workers=4) as ex:
+    with ThreadPoolExecutor(max_workers=6) as ex:
         futures = {ex.submit(_process, c): c for c in top}
         done = 0
         for future in as_completed(futures):
@@ -650,15 +648,6 @@ def _verdict_colors(verdict: str):
         return RED, "rgba(239,68,68,0.06)", "rgba(239,68,68,0.35)"
 
 
-def _override_badge(text: str):
-    """Small pill that shows an active live override at scan time."""
-    st.markdown(f"""
-    <span style="display:inline-block;background:rgba(79,141,253,0.12);
-         border:1px solid rgba(79,141,253,0.4);color:{BLUE};font-size:11px;
-         font-weight:700;border-radius:20px;padding:3px 10px;margin:2px 4px 2px 0;">
-         {text}</span>""", unsafe_allow_html=True)
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # SETUP MANAGER
 # ══════════════════════════════════════════════════════════════════════════════
@@ -678,8 +667,9 @@ def _render_setup_form(supabase, gemini_key: str, existing: dict = None):
         <div style="font-size:12px;font-weight:700;letter-spacing:1px;color:{BLUE};
              text-transform:uppercase;margin:14px 0 6px;">Reference Chart Image</div>
         <div style="font-size:12px;color:{T2};margin-bottom:8px;">
-            Upload a screenshot of your ideal setup. The AI will look for charts
-            that visually match this pattern.</div>""", unsafe_allow_html=True)
+            Upload a screenshot of your ideal setup. The AI uses this as the ground
+            truth and only returns charts that truly match this pattern.</div>""",
+            unsafe_allow_html=True)
         img_col1, img_col2 = st.columns([2, 1])
         with img_col1:
             uploaded_img = st.file_uploader("Upload setup image",
@@ -695,9 +685,9 @@ def _render_setup_form(supabase, gemini_key: str, existing: dict = None):
         <div style="font-size:12px;font-weight:700;letter-spacing:1px;color:{BLUE};
              text-transform:uppercase;margin:14px 0 6px;">Describe Your Setup — Plain English</div>
         <div style="font-size:12px;color:{T2};margin-bottom:8px;">
-            Write everything in one place: the pattern AND any number rules.
-            The AI automatically extracts price, RSI, volume and trend filters
-            from your sentence — no sliders needed.</div>""", unsafe_allow_html=True)
+            Write the pattern AND any number rules. The AI extracts price, RSI, volume
+            and trend filters from your words, and matches the chart shape to your image.</div>""",
+            unsafe_allow_html=True)
         visual_rules = st.text_area(
             "Setup description", label_visibility="collapsed",
             value=existing.get("visual_rules", "") if is_edit else "",
@@ -768,7 +758,7 @@ def _render_setup_manager(supabase, gemini_key: str):
         <div style="font-size:12px;color:{T2};line-height:1.7;">
             Save unlimited setups. Each one = a reference chart image + a plain-English
             description. The AI extracts the numeric rules from your words and uses the
-            image for visual pattern matching during scans.
+            image as the ground truth for strict visual pattern matching during scans.
         </div>
     </div>""", unsafe_allow_html=True)
 
@@ -884,8 +874,8 @@ def _render_scan_page(supabase, gemini_key: str):
         <div style="font-size:16px;font-weight:800;color:{IVORY};margin-bottom:2px;">Smart Scan</div>
         <div style="font-size:12px;color:{T2};">
             Pick a setup, tune the live overrides (price / RSI / volume), hit Run Scan.
-            Your rules filter the universe, then AI vision compares every shortlisted
-            chart against your reference image.
+            Your rules filter the universe, then strict AI vision keeps ONLY the charts
+            that truly match your reference setup.
         </div>
     </div>""", unsafe_allow_html=True)
 
@@ -924,10 +914,7 @@ def _render_scan_page(supabase, gemini_key: str):
         st.info("Select a setup above to start scanning.")
         return
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # LIVE OVERRIDES — price range + RSI / volume quick filters
-    # These DO NOT touch the saved setup. They only apply to this scan.
-    # ──────────────────────────────────────────────────────────────────────────
+    # ── LIVE OVERRIDES — price range + RSI / volume (per-scan only) ───────────
     _section("Price Range — Pick Before Scanning")
 
     base_pmin = float(selected_setup.get("price_min") or 0)
@@ -935,11 +922,12 @@ def _render_scan_page(supabase, gemini_key: str):
 
     PRESETS = {
         "Use setup's range": (base_pmin, base_pmax),
-        "0 - 100":           (0, 100),
-        "100 - 300":         (100, 300),
-        "300 - 1000":        (300, 1000),
-        "1000 - 5000":       (1000, 5000),
-        "5000+":             (5000, 99999),
+        "100 - 250":         (100, 250),
+        "250 - 500":         (250, 500),
+        "500 - 750":         (500, 750),
+        "750 - 1000":        (750, 1000),
+        "1000 - 1500":       (1000, 1500),
+        "1500 - 2000":       (1500, 2000),
         "Custom":            None,
     }
     pcol1, pcol2, pcol3 = st.columns([2, 1, 1])
@@ -989,7 +977,6 @@ def _render_scan_page(supabase, gemini_key: str):
         else:
             ov_vol = float(selected_setup.get("volume_multiplier") or 0.0)
 
-    # Build the effective setup used for THIS scan only.
     scan_setup = dict(selected_setup)
     scan_setup["price_min"] = float(ov_pmin)
     scan_setup["price_max"] = float(ov_pmax)
@@ -997,7 +984,6 @@ def _render_scan_page(supabase, gemini_key: str):
     scan_setup["rsi_max"]   = float(ov_rsi_max)
     scan_setup["volume_multiplier"] = float(ov_vol)
 
-    # Show active override badges
     badges = []
     if (ov_pmin, ov_pmax) != (base_pmin, base_pmax):
         badges.append(f"Price {ov_pmin:,.0f}-{ov_pmax:,.0f}")
@@ -1027,10 +1013,16 @@ def _render_scan_page(supabase, gemini_key: str):
         max_ai = st.number_input("Max AI Comparisons", 3, 25, 12, 1, key="scan_max_ai",
                                  help="Top N candidates sent to Gemini Vision after the rules filter")
 
+    # Strictness control: only show matches at/above this score.
+    strict_min = st.slider("Match strictness (hide anything below this score)",
+                           0, 10, MIN_SIMILARITY_FLOOR, 1, key="strict_min",
+                           help="6 = balanced. 8 = only near-identical setups. "
+                                "Set to 0 to see everything.")
+
     if universe_opt.startswith("ALL"):
         with st.spinner("Loading full NSE stock list..."):
             universe = get_full_nse_universe()
-        st.caption(f"{len(universe)} NSE stocks loaded · price pre-filter narrows this before the deep scan")
+        st.caption(f"{len(universe)} NSE stocks loaded · scanned in one fast parallel pass")
     elif universe_opt.startswith("Liquid"):
         universe = NSE_UNIVERSE
     elif universe_opt == "Your Watchlist":
@@ -1045,12 +1037,13 @@ def _render_scan_page(supabase, gemini_key: str):
             return
 
     if not gemini_key:
-        st.warning("GEMINI_KEY not found in secrets — AI vision comparison will be skipped.")
+        st.warning("GEMINI_KEY not found in secrets — AI vision comparison will be skipped, "
+                   "so strict matching cannot run. Results will be rules-only.")
 
     run_disabled = ov_pmin > ov_pmax
     if st.button("Run Scan", type="primary", use_container_width=True,
                  key="run_scan", disabled=run_disabled):
-        for k in ("scan_math_results", "scan_ai_results"):
+        for k in ("scan_math_results", "scan_ai_results", "scan_strict_min"):
             st.session_state.pop(k, None)
 
         prog = st.progress(0.0)
@@ -1060,23 +1053,9 @@ def _render_scan_page(supabase, gemini_key: str):
             prog.progress(min(float(pct), 1.0))
             stat.markdown(f"**{msg}**")
 
-        # ── Stage 1: price pre-filter (only for big universes) ───────────
-        scan_universe = universe
-        pmin = float(scan_setup.get("price_min") or 0)
-        pmax = float(scan_setup.get("price_max") or 99999)
-        if len(universe) > 300:
-            _prog(0.05, f"Stage 1: price check on {len(universe)} NSE stocks "
-                        f"(keeping Rs {pmin:,.0f} - {pmax:,.0f})...")
-            scan_universe = prefilter_by_price(tuple(universe), pmin, pmax)
-            if not scan_universe:
-                prog.progress(1.0); stat.empty()
-                st.warning("No NSE stocks found inside your price range. Widen the range above.")
-                st.stop()
-            _prog(0.15, f"Stage 1 done: {len(scan_universe)} stocks inside your price range. "
-                        f"Stage 2: deep indicator scan...")
-
-        # ── Stage 2: deep indicator scan (uses overridden scan_setup) ────
-        shortlist, failed = run_math_scan(scan_universe, scan_setup, _prog)
+        # ── Single fast parallel scan (price filter built into rules) ────
+        _prog(0.05, f"Scanning {len(universe)} NSE stocks in one parallel pass...")
+        shortlist, failed = run_math_scan(universe, scan_setup, _prog)
 
         if not shortlist:
             prog.progress(1.0); stat.empty()
@@ -1087,9 +1066,10 @@ def _render_scan_page(supabase, gemini_key: str):
             st.stop()
 
         st.session_state["scan_math_results"] = shortlist
-        stat.markdown(f"Rules filter: **{len(shortlist)} candidates** from {len(scan_universe)} scanned")
+        st.session_state["scan_strict_min"]   = int(strict_min)
+        stat.markdown(f"Rules filter: **{len(shortlist)} candidates** from {len(universe)} scanned")
 
-        # ── Stage 3: AI vision comparison ────────────────────────────────
+        # ── Strict AI vision comparison ──────────────────────────────────
         if gemini_key:
             ai_prog = st.progress(0.0)
             ai_stat = st.empty()
@@ -1102,15 +1082,16 @@ def _render_scan_page(supabase, gemini_key: str):
                                       int(max_ai), _ai_prog)
             ai_prog.empty(); ai_stat.empty()
             st.session_state["scan_ai_results"] = ai_results
-            strong = sum(1 for r in ai_results if r.get("verdict") == "STRONG MATCH")
-            st.success(f"Vision comparison complete — {len(ai_results)} charts compared, "
-                       f"{strong} strong matches found.")
+            kept = sum(1 for r in ai_results if r.get("score", 0) >= strict_min)
+            st.success(f"Vision comparison complete — {len(ai_results)} compared, "
+                       f"{kept} truly match your setup (score ≥ {strict_min}/10).")
         prog.empty(); stat.empty()
         time.sleep(0.3)
         st.rerun()
 
     math_results = st.session_state.get("scan_math_results")
     ai_results   = st.session_state.get("scan_ai_results")
+    used_strict  = st.session_state.get("scan_strict_min", MIN_SIMILARITY_FLOOR)
     if math_results is None:
         return
 
@@ -1120,20 +1101,19 @@ def _render_scan_page(supabase, gemini_key: str):
     m2.metric("Passed Your Rules", len(math_results))
     m3.metric("AI Compared", len(ai_results) if ai_results else "—")
     if ai_results:
-        strong = sum(1 for r in ai_results if r.get("verdict") == "STRONG MATCH")
-        m4.metric("Strong Matches", strong)
+        kept = sum(1 for r in ai_results if r.get("score", 0) >= used_strict)
+        m4.metric(f"True Matches (≥{used_strict})", kept)
     else:
         m4.metric("AI Status", "Skipped")
 
     if ai_results:
         _section("Pattern Match Results")
 
-        fcol1, fcol2, fcol3 = st.columns([1.2, 1.5, 1.5])
+        fcol1, fcol2, fcol3 = st.columns([1.4, 1.4, 1.4])
         with fcol1:
-            # Min-similarity slider (0-10 scale to match the AI score).
-            min_sim = st.slider("Min similarity", 0, 10, 0, 1, key="min_sim",
+            min_sim = st.slider("Min similarity", 0, 10, int(used_strict), 1, key="min_sim",
                                 help="Hide any AI match scoring below this. "
-                                     "7+ = only high-quality setups.")
+                                     "8+ = only near-identical setups.")
         with fcol2:
             sort_opt = st.selectbox("Sort by",
                 ["Similarity", "RSI (oversold first)", "Volume Ratio", "% Change"],
@@ -1143,10 +1123,7 @@ def _render_scan_page(supabase, gemini_key: str):
                 ["All", "Strong", "Partial", "No Match"],
                 horizontal=True, key="filt_verdict")
 
-        ordered = ai_results[:]
-
-        # Min-similarity filter first.
-        ordered = [r for r in ordered if r.get("score", 0) >= min_sim]
+        ordered = [r for r in ai_results if r.get("score", 0) >= min_sim]
 
         if sort_opt == "Similarity":        ordered.sort(key=lambda x: x.get("score", 0), reverse=True)
         elif "RSI" in sort_opt:             ordered.sort(key=lambda x: x.get("rsi", 50))
@@ -1158,12 +1135,12 @@ def _render_scan_page(supabase, gemini_key: str):
         elif filt_v == "No Match":  ordered = [r for r in ordered if r.get("verdict") == "NO MATCH"]
 
         hidden = len(ai_results) - len(ordered)
-        if min_sim > 0:
-            st.caption(f"Showing {len(ordered)} of {len(ai_results)} matches "
-                       f"(similarity ≥ {min_sim}/10 · {hidden} hidden).")
+        st.caption(f"Showing {len(ordered)} of {len(ai_results)} — only setups scoring "
+                   f"≥ {min_sim}/10 are shown ({hidden} weaker ones hidden).")
 
         if not ordered:
-            st.info("No results match these filters. Lower the min-similarity slider.")
+            st.info("No charts matched your setup closely enough. "
+                    "Lower 'Min similarity', or your setup may be rare in this price band.")
         else:
             for res in ordered:
                 _render_result_card(res, selected_setup)
