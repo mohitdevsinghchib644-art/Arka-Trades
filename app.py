@@ -897,15 +897,13 @@ with right:
         render_smart_scanner(supabase)
 
     elif pg == "quant":
-    try:
-        from quant_analysis import render_quant_analysis
-        from quant_options import render_quant_options_page
-        render_quant_analysis()
-        render_quant_options_page()
-    except Exception as e:
-        import traceback
-        st.error(f"Quant module failed to load: {e}")
-        st.code(traceback.format_exc())
+     try:
+         from quant_analysis import render_quant_analysis
+         render_quant_analysis()
+     except Exception as e:
+         import traceback
+         st.error(f"Quant module failed to load: {e}")
+         st.code(traceback.format_exc())
 
         
 
