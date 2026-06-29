@@ -16,3 +16,4 @@ scikit-learn
 statsmodels
 scipy>=1.11.0
 arch>=6.3.0
+seaborn
