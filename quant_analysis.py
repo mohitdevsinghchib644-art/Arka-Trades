@@ -1,20 +1,19 @@
 """
-quant_analysis.py — Arka Trades | Institutional Swing Terminal v3
+quant_analysis.py — Arka Trades | Institutional Swing Terminal v4
 =================================================================
 app.py: from quant_analysis import render_quant_analysis
 
 WHAT'S INSIDE
 ─────────────
-• Institutional Footprint   — Volume surge detection (big player entry)
-• VPIN Order Flow Toxicity  — Jane Street's informed-trader signal
-• Volume Profile            — Point of Control, Value Area (real S/R)
-• VWAP Analysis             — Institutional benchmark price + bands
-• GARCH(1,1) Volatility     — Regime detection + 10-day forecast
-• Monte Carlo Risk          — 1000 fat-tail paths, VaR, Expected Shortfall
-• Score Engine              — 0-100 per section + big combined rating circle
-• Swing Backtest            — Price chart with BUY/SELL arrows + trade table
-
-All data: real yfinance NSE feeds. No fake options data.
+• MODE 1 — Full Terminal    : Footprint, VPIN, Volume Profile, VWAP,
+                              GARCH, Monte Carlo, Score Engine, Backtest
+• MODE 2 — Signal Backtester: Type symbols + date range → every BUY/SELL
+                              signal date, trade table, alpha vs buy-hold
+• v4 ENGINE FIXES (institutional-grade honesty):
+    - No look-ahead: signal on bar t → entry at OPEN of bar t+1
+    - Intrabar stops/targets: checked vs Low/High, not just Close
+    - Benchmark alpha: strategy return vs buy-and-hold, every run
+All data: real yfinance NSE feeds.
 """
 
 from __future__ import annotations
@@ -50,11 +49,10 @@ MONO   = "'IBM Plex Mono','JetBrains Mono','SF Mono',monospace"
 SANS   = "'Inter','Plus Jakarta Sans',sans-serif"
 TRADING_DAYS = 252
 
-# ── Pre-computed rgba versions (Plotly candlestick does NOT accept 8-digit hex)
-GREEN_27 = "rgba(31,185,122,0.27)"   # replaces GREEN+"44"
-GREEN_20 = "rgba(31,185,122,0.20)"   # replaces GREEN+"33"
-RED_27   = "rgba(232,85,78,0.27)"    # replaces RED+"44"
-RED_20   = "rgba(232,85,78,0.20)"    # replaces RED+"33"
+GREEN_27 = "rgba(31,185,122,0.27)"
+GREEN_20 = "rgba(31,185,122,0.20)"
+RED_27   = "rgba(232,85,78,0.27)"
+RED_20   = "rgba(232,85,78,0.20)"
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -496,8 +494,35 @@ def institutional_footprint(df: pd.DataFrame,
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# SWING BACKTEST
+# SWING BACKTEST — v4 BIAS-FREE ENGINE
+#   • Signal on bar t → entry at OPEN of bar t+1 (no look-ahead)
+#   • Stops/targets checked vs intrabar Low/High (no close-only cheating)
+#   • Benchmark alpha vs buy-and-hold included in every result
 # ════════════════════════════════════════════════════════════════════════════
+
+def prepare_indicators(df: pd.DataFrame, lookback: int = 20) -> pd.DataFrame:
+    d = df.copy()
+    d["avg_vol"]   = d["Volume"].rolling(lookback).mean()
+    d["vol_ratio"] = d["Volume"]/d["avg_vol"]
+    d["ma20"]      = d["Close"].rolling(20).mean()
+    d["ma50"]      = d["Close"].rolling(50).mean()
+    delta = d["Close"].diff()
+    gain  = delta.clip(lower=0).rolling(14).mean()
+    loss  = (-delta.clip(upper=0)).rolling(14).mean()
+    d["rsi"] = 100-100/(1+gain/loss.replace(0,np.nan))
+    hl=(d["High"]-d["Low"])
+    hc=(d["High"]-d["Close"].shift()).abs()
+    lc=(d["Low"]-d["Close"].shift()).abs()
+    d["atr"] = pd.concat([hl,hc,lc],axis=1).max(axis=1).rolling(14).mean()
+    return d.dropna()
+
+
+def _entry_signal(row, vol_mult: float) -> bool:
+    return (float(row["vol_ratio"]) >= vol_mult
+            and float(row["Close"]) > float(row["Open"])
+            and float(row["Close"]) > float(row["ma50"])
+            and 35 < float(row["rsi"]) < 75)
+
 
 @st.cache_data(ttl=300, show_spinner=False)
 def swing_backtest(df: pd.DataFrame, vol_mult: float = 2.5,
@@ -505,78 +530,81 @@ def swing_backtest(df: pd.DataFrame, vol_mult: float = 2.5,
                    stop_pct: float = 0.04, target_pct: float = 0.08,
                    pos_pct: float = 0.20, commission: float = 0.0015,
                    slippage: float = 0.0005) -> dict:
-    if df.empty or len(df)<60:
+    if df.empty or len(df) < 60:
         return {"error": "Need 60+ bars. Try a longer date range."}
-    df2 = df.copy()
-    df2["avg_vol"]   = df2["Volume"].rolling(lookback).mean()
-    df2["vol_ratio"] = df2["Volume"]/df2["avg_vol"]
-    df2["ma20"]      = df2["Close"].rolling(20).mean()
-    df2["ma50"]      = df2["Close"].rolling(50).mean()
-    d = df2["Close"].diff()
-    g = d.clip(lower=0).rolling(14).mean()
-    l = (-d.clip(upper=0)).rolling(14).mean()
-    df2["rsi"] = 100-100/(1+g/l.replace(0,np.nan))
-    hl=(df2["High"]-df2["Low"])
-    hc=(df2["High"]-df2["Close"].shift()).abs()
-    lc=(df2["Low"]-df2["Close"].shift()).abs()
-    df2["atr"] = pd.concat([hl,hc,lc],axis=1).max(axis=1).rolling(14).mean()
-    df2 = df2.dropna()
-    if len(df2)<30:
+    d = prepare_indicators(df, lookback)
+    if len(d) < 30:
         return {"error": "Too many NaN. Try 2+ years of data."}
 
-    equity=1_000_000; trades=[]; equity_curve=[]; position=None; hold_count=0
+    capital0 = 1_000_000
+    equity, trades, curve, signals = capital0, [], [], []
+    position, hold = None, 0
+    rows = list(d.iterrows())
 
-    for i, (date, row) in enumerate(df2.iterrows()):
-        price = float(row["Close"])
-        equity_curve.append({"date":date,"equity":equity})
+    for i, (date, row) in enumerate(rows):
+        curve.append({"date": date, "equity": equity})
+
         if position is None:
-            vr    = float(row["vol_ratio"])
-            bull  = float(row["Close"])>float(row["Open"])
-            trend = price>float(row["ma50"])
-            rsi_ok= 35<float(row["rsi"])<75
-            if vr>=vol_mult and bull and trend and rsi_ok:
-                ep     = price*(1+slippage)
+            # signal today → execute at NEXT bar's open (real-world fill)
+            if i < len(rows)-1 and _entry_signal(row, vol_mult):
+                nd, nrow = rows[i+1]
+                ep     = float(nrow["Open"])*(1+slippage)
                 shares = (equity*pos_pct)/ep
-                position = {"ep":ep,"shares":shares,"date":date,
-                            "cost_in":equity*pos_pct*commission,
-                            "target":ep*(1+target_pct),"stop":ep*(1-stop_pct)}
-                hold_count = 0
+                position = {"ep": ep, "shares": shares, "date": nd,
+                            "signal_date": date,
+                            "cost_in": equity*pos_pct*commission,
+                            "target": ep*(1+target_pct),
+                            "stop":   ep*(1-stop_pct)}
+                hold = 0
+                signals.append({"date": date, "side": "BUY SIGNAL",
+                                "price": round(float(row["Close"]),2),
+                                "detail": f"{float(row['vol_ratio']):.1f}x vol surge"})
         else:
-            hold_count += 1
-            ep = position["ep"]
-            at_stop   = price<=ep*(1-stop_pct)
-            at_target = price>=ep*(1+target_pct)
-            at_time   = hold_count>=hold_days
-            vol_dry   = float(row["vol_ratio"])<0.55 and hold_count>=3
-            ma_flip   = price<float(row["ma20"]) and hold_count>=2
-            if at_stop or at_target or at_time or vol_dry or ma_flip or i==len(df2)-1:
-                xp      = price*(1-slippage)
-                pnl     = position["shares"]*(xp-ep) - position["cost_in"] \
-                          - position["shares"]*xp*commission
+            if date <= position["date"]:
+                continue                       # skip the entry bar itself
+            hold += 1
+            lo, hi, close = float(row["Low"]), float(row["High"]), float(row["Close"])
+            xp, reason = None, None
+            if lo <= position["stop"]:          # intrabar stop first (conservative)
+                xp, reason = position["stop"], "Stop 🛑"
+            elif hi >= position["target"]:
+                xp, reason = position["target"], "Target 🎯"
+            elif float(row["vol_ratio"]) < 0.55 and hold >= 3:
+                xp, reason = close, "VolDry 📉"
+            elif close < float(row["ma20"]) and hold >= 2:
+                xp, reason = close, "MAFlip 🔄"
+            elif hold >= hold_days or i == len(rows)-1:
+                xp, reason = close, "Time ⏱"
+            if xp is not None:
+                xp *= (1-slippage)
+                ep  = position["ep"]
+                pnl = (position["shares"]*(xp-ep)
+                       - position["cost_in"] - position["shares"]*xp*commission)
                 equity += pnl
-                reason  = ("Target 🎯" if at_target else "Stop 🛑" if at_stop else
-                           "VolDry 📉" if vol_dry else "MAFlip 🔄" if ma_flip else "Time ⏱")
                 trades.append({
-                    "entry_date": str(position["date"])[:10],
-                    "exit_date":  str(date)[:10],
-                    "entry":      round(ep,2),
-                    "exit":       round(xp,2),
-                    "target_lvl": round(position["target"],2),
-                    "stop_lvl":   round(position["stop"],2),
-                    "pnl":        round(pnl,2),
-                    "pnl_pct":    round((xp/ep-1)*100,2),
-                    "hold_days":  hold_count,
-                    "exit_reason":reason,
-                    "outcome":    "WIN" if pnl>0 else "LOSS",
+                    "signal_date": str(position["signal_date"])[:10],
+                    "entry_date":  str(position["date"])[:10],
+                    "exit_date":   str(date)[:10],
+                    "entry":       round(ep,2),
+                    "exit":        round(xp,2),
+                    "target_lvl":  round(position["target"],2),
+                    "stop_lvl":    round(position["stop"],2),
+                    "pnl":         round(pnl,2),
+                    "pnl_pct":     round((xp/ep-1)*100,2),
+                    "hold_days":   hold,
+                    "exit_reason": reason,
+                    "outcome":     "WIN" if pnl>0 else "LOSS",
                 })
-                position=None; hold_count=0
+                signals.append({"date": date, "side": "SELL SIGNAL",
+                                "price": round(xp,2), "detail": reason})
+                position, hold = None, 0
 
     if not trades:
         return {"error": f"No trades triggered at {vol_mult}x vol surge. "
                 "Try lowering the multiplier or using a longer date range."}
 
     tdf   = pd.DataFrame(trades)
-    eq_df = pd.DataFrame(equity_curve).set_index("date")
+    eq_df = pd.DataFrame(curve).set_index("date")
     eq_s  = eq_df["equity"]
     rets  = eq_s.pct_change().dropna()
     wins  = tdf[tdf["outcome"]=="WIN"]; losses = tdf[tdf["outcome"]=="LOSS"]
@@ -586,10 +614,11 @@ def swing_backtest(df: pd.DataFrame, vol_mult: float = 2.5,
     ann_r = float(rets.mean()*TRADING_DAYS)
     ann_v = float(rets.std()*np.sqrt(TRADING_DAYS))
     dv    = rets[rets<0].std()*np.sqrt(TRADING_DAYS)
-    sharpe  = ann_r/ann_v  if ann_v>0  else 0.0
-    sortino = ann_r/dv     if dv>0     else 0.0
+    sharpe  = ann_r/ann_v if ann_v>0 else 0.0
+    sortino = ann_r/dv    if dv and dv>0 else 0.0
     dd      = (eq_s-eq_s.cummax())/eq_s.cummax()*100
-    tot_r   = (equity-1_000_000)/1_000_000*100
+    tot_r   = (equity-capital0)/capital0*100
+    bh_ret  = (float(d["Close"].iloc[-1])/float(d["Close"].iloc[0])-1)*100
     max_cl=cl=0
     for o in tdf["outcome"].values:
         if o=="LOSS": cl+=1; max_cl=max(max_cl,cl)
@@ -606,11 +635,14 @@ def swing_backtest(df: pd.DataFrame, vol_mult: float = 2.5,
     avg_l = round(losses["pnl_pct"].mean(),2) if len(losses) else 0.0
     rr    = round(abs(avg_w/avg_l),2) if avg_l!=0 else 0.0
     return {
-        "trades":tdf,"equity_curve":eq_df,"drawdown":dd,"monthly_pnl":mpnl,
+        "trades":tdf,"signals":pd.DataFrame(signals),
+        "equity_curve":eq_df,"drawdown":dd,"monthly_pnl":mpnl,
         "total_trades":len(tdf),"win_rate":round(wr,1),
         "profit_factor":round(pf,2),"sharpe":round(sharpe,3),
         "sortino":round(sortino,3),"max_dd":round(float(dd.min()),2),
         "total_ret":round(tot_r,2),"final_equity":round(equity,2),
+        "buy_hold_ret":round(bh_ret,2),
+        "alpha_vs_bh":round(tot_r-bh_ret,2),
         "avg_win":avg_w,"avg_loss":avg_l,"rr":rr,
         "max_consec_loss":max_cl,"strat_verdict":verdict,
         "ann_ret":round(ann_r*100,2),"ann_vol":round(ann_v*100,2),
@@ -680,7 +712,6 @@ def chart_price_vwap(df, vwap_df, vp, fp, symbol):
     vd = vwap_df.tail(120).copy()
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                         row_heights=[0.75,0.25], vertical_spacing=0.02)
-    # ✅ FIX: use rgba() strings instead of hex+"44" / hex+"33"
     fig.add_trace(go.Candlestick(
         x=d.index, open=d["Open"], high=d["High"], low=d["Low"], close=d["Close"],
         increasing_line_color=GREEN, decreasing_line_color=RED,
@@ -827,7 +858,6 @@ def chart_backtest_price(df, bt):
     d = df.copy()
     vc = [GREEN if float(d["Close"].iloc[i])>=float(d["Open"].iloc[i]) else RED
           for i in range(len(d))]
-    # ✅ FIX: use rgba() strings instead of hex+"33"
     fig.add_trace(go.Candlestick(
         x=d.index, open=d["Open"], high=d["High"], low=d["Low"], close=d["Close"],
         increasing_line_color=GREEN, decreasing_line_color=RED,
@@ -924,6 +954,96 @@ def chart_exit_breakdown(bt):
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# MODE 2 — BATCH SIGNAL BACKTESTER
+# ════════════════════════════════════════════════════════════════════════════
+
+def render_mode2():
+    st.markdown(f"""
+    <div style='background:{PANEL2};border:1px solid {BORDER};border-left:3px solid {TEAL};
+    border-radius:8px;padding:14px 18px;margin-bottom:14px;'>
+      <div style='font-family:{MONO};font-size:11px;font-weight:700;color:{TEAL};
+        letter-spacing:1.5px;margin-bottom:6px;'>MODE 2 · SIGNAL BACKTESTER</div>
+      <div style='font-size:12.5px;color:{IVORY};line-height:1.8;'>
+      Type one or more NSE symbols, pick a date range, and the terminal backtests the
+      <b>main strategy</b> (vol surge + trend + RSI) showing <b>every BUY and SELL signal
+      date</b>, the full trade log, and <b>alpha vs buy-and-hold</b> per stock.
+      </div>
+    </div>""", unsafe_allow_html=True)
+
+    with st.form("mode2_form"):
+        c1, c2, c3 = st.columns([2,1,1])
+        syms  = c1.text_input("Symbols (comma-separated)", "RELIANCE, TCS, HDFCBANK")
+        start = c2.date_input("From", datetime.date(2021,1,1))
+        end   = c3.date_input("To", datetime.date.today())
+        c4, c5, c6, c7 = st.columns(4)
+        vol_mult = c4.slider("Vol Surge ×", 1.5, 5.0, 2.5, 0.5)
+        hold_d   = c5.slider("Max Hold Days", 3, 21, 7)
+        stop_p   = c6.slider("Stop Loss %", 1, 10, 4)
+        tgt_p    = c7.slider("Target %", 2, 20, 8)
+        go = st.form_submit_button("▶ RUN MODE 2", type="primary", use_container_width=True)
+    if not go:
+        st.info("Enter symbols and date range, then press RUN MODE 2.")
+        return
+    if start >= end:
+        st.error("From date must be before To date."); return
+
+    summary = []
+    symbols = [s.strip().upper() for s in syms.split(",") if s.strip()]
+    if not symbols:
+        st.error("Enter at least one symbol."); return
+
+    for sym in symbols:
+        with st.spinner(f"Backtesting {sym}..."):
+            df = fetch_range(sym, str(start), str(end))
+            if df.empty:
+                st.warning(f"{sym}: no data in that range."); continue
+            bt = swing_backtest(df, vol_mult=vol_mult, hold_days=hold_d,
+                                stop_pct=stop_p/100, target_pct=tgt_p/100)
+        if "error" in bt:
+            st.warning(f"{sym}: {bt['error']}"); continue
+
+        summary.append({"Symbol": sym, "Trades": bt["total_trades"],
+                        "Win %": bt["win_rate"], "PF": bt["profit_factor"],
+                        "Sharpe": bt["sharpe"], "Strategy %": bt["total_ret"],
+                        "Buy&Hold %": bt["buy_hold_ret"],
+                        "Alpha %": bt["alpha_vs_bh"], "MaxDD %": bt["max_dd"]})
+
+        a_c = GREEN if bt["alpha_vs_bh"] >= 0 else RED
+        with st.expander(f"📊 {sym} — {bt['total_trades']} trades · "
+                         f"{bt['win_rate']}% WR · alpha {bt['alpha_vs_bh']:+.1f}% vs buy-hold",
+                         expanded=(len(symbols)==1)):
+            st.markdown(f"""
+            <div style='font-family:{MONO};font-size:11px;color:{IVORY};margin-bottom:8px;'>
+              {bt["strat_verdict"]} &nbsp;·&nbsp;
+              Strategy <b style='color:{GREEN if bt["total_ret"]>=0 else RED};'>{bt["total_ret"]:+.1f}%</b>
+              vs Buy&Hold <b>{bt["buy_hold_ret"]:+.1f}%</b>
+              → Alpha <b style='color:{a_c};'>{bt["alpha_vs_bh"]:+.1f}%</b>
+            </div>""", unsafe_allow_html=True)
+            st.plotly_chart(chart_backtest_price(df, bt), use_container_width=True)
+            st.markdown(_sec("EVERY BUY / SELL SIGNAL", TEAL), unsafe_allow_html=True)
+            sig = bt["signals"].copy()
+            sig["date"] = pd.to_datetime(sig["date"]).dt.strftime("%Y-%m-%d")
+            sig.columns = ["Date","Signal","Price","Detail"]
+            st.dataframe(sig, use_container_width=True, hide_index=True)
+            st.markdown(_sec("COMPLETED TRADES", TEAL), unsafe_allow_html=True)
+            st.dataframe(bt["trades"], use_container_width=True, hide_index=True)
+
+    if summary:
+        st.markdown(_sec("PORTFOLIO SUMMARY · ALL SYMBOLS"), unsafe_allow_html=True)
+        sdf = pd.DataFrame(summary)
+        st.dataframe(sdf, use_container_width=True, hide_index=True)
+        avg_alpha = sdf["Alpha %"].mean()
+        st.markdown(f"""
+        <div style='background:{PANEL2};border:1px solid {BORDER};border-radius:8px;
+        padding:12px 18px;font-family:{MONO};font-size:12px;color:{IVORY};'>
+          Average alpha across {len(sdf)} symbols:
+          <b style='color:{GREEN if avg_alpha>=0 else RED};'>{avg_alpha:+.2f}%</b>
+          &nbsp;·&nbsp; {'✅ Strategy adds value over buy-and-hold' if avg_alpha>0
+          else '❌ Buy-and-hold beat the strategy in this period'}
+        </div>""", unsafe_allow_html=True)
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # MAIN RENDER
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -974,7 +1094,7 @@ def render_quant_analysis():
           ARKA · INSTITUTIONAL SWING TERMINAL</div>
         <div style='font-family:{MONO};font-size:9px;color:{MUTE2};
           margin-top:3px;letter-spacing:1px;'>
-          GARCH · VPIN · VOLUME PROFILE · MONTE CARLO · SWING BACKTEST</div>
+          GARCH · VPIN · VOLUME PROFILE · MONTE CARLO · BIAS-FREE BACKTEST</div>
       </div>
       <div style='text-align:right;'>
         <div style='font-family:{MONO};font-size:10px;color:{MUTE};'>{ts}</div>
@@ -982,6 +1102,13 @@ def render_quant_analysis():
           margin-top:2px;'>{"🤖 AI ACTIVE" if api_key else "📐 RULE-BASED"} · NSE INDIA</div>
       </div>
     </div>""", unsafe_allow_html=True)
+
+    # ── MODE SWITCH ──────────────────────────────────────────────────────────
+    mode = st.radio("mode", ["🖥 MODE 1 · FULL TERMINAL", "🎯 MODE 2 · SIGNAL BACKTESTER"],
+                    horizontal=True, label_visibility="collapsed")
+    if "MODE 2" in mode:
+        render_mode2()
+        return
 
     c1, c2, c3 = st.columns([3,1,1])
     symbol = c1.text_input("", value="RELIANCE",
@@ -1005,8 +1132,8 @@ def render_quant_analysis():
               ("📉 GARCH VOLATILITY","Regime detection + 10-day forward vol forecast"),
               ("🎲 MONTE CARLO RISK","1000 fat-tail paths, VaR & Expected Shortfall in ₹"),
               ("⭕ SCORE 0–100","Section scores + combined rating circle across all signals"),
-              ("📈 VWAP ANALYSIS","Institutional benchmark price + standard deviation bands"),
-              ("⚙️ SWING BACKTEST","Price chart with BUY arrows + full performance metrics"),
+              ("🎯 MODE 2 BACKTESTER","Batch backtest — every BUY/SELL signal + alpha vs buy-hold"),
+              ("⚙️ BIAS-FREE BACKTEST","Next-open entries, intrabar stops — honest numbers"),
             ]])}
           </div>
         </div>""", unsafe_allow_html=True)
@@ -1277,7 +1404,7 @@ def render_quant_analysis():
                ("MEDIAN EXIT",   f"₹{mc['p50']:,.0f}"),
                ("P90 UPSIDE",    f"₹{mc['p90']:,.0f}"),
                ("P10 DOWNSIDE",  f"₹{mc['p10']:,.0f}")])
-        _mrow([("VaR 95% (₹)",   f"₹{mc['var95_rs']:,.0f}"),
+                _mrow([("VaR 95% (₹)",   f"₹{mc['var95_rs']:,.0f}"),
                ("ES 95% (₹)",    f"₹{mc['es95_rs']:,.0f}"),
                ("VaR 99% (₹)",   f"₹{mc['var99_rs']:,.0f}"),
                ("ES 99% (₹)",    f"₹{mc['es99_rs']:,.0f}")])
@@ -1314,12 +1441,13 @@ def render_quant_analysis():
         <div style='background:{PANEL2};border:1px solid {BORDER};border-left:3px solid {GREEN};
         border-radius:8px;padding:14px 18px;margin-bottom:14px;'>
           <div style='font-family:{MONO};font-size:11px;font-weight:700;color:{GREEN};
-            letter-spacing:1.5px;margin-bottom:6px;'>HOW THE STRATEGY WORKS</div>
+            letter-spacing:1.5px;margin-bottom:6px;'>HOW THE STRATEGY WORKS (v4 BIAS-FREE)</div>
           <div style='font-size:12.5px;color:{IVORY};line-height:1.8;'>
-          <b>Entry:</b> Volume ≥ X× 20-day average AND bullish close AND price above 50MA AND RSI 35–75.<br>
-          <b>Exit:</b> Target hit → profit lock · Stop hit → cut loss ·
+          <b>Entry:</b> Volume ≥ X× 20-day average AND bullish close AND price above 50MA
+          AND RSI 35–75 → <b>executed at NEXT day's open</b> (no look-ahead).<br>
+          <b>Exit:</b> Stop/Target checked vs <b>intrabar Low/High</b> ·
           Volume dries up → exit · MA flip → exit · Max hold → time exit.<br>
-          <b>Why it works:</b> Big players can't hide. When they buy, volume spikes. Price follows.
+          <b>Benchmark:</b> Every result shows alpha vs buy-and-hold — the honest test.
           </div>
         </div>""", unsafe_allow_html=True)
         with st.form("swing_form"):
@@ -1356,6 +1484,7 @@ def render_quant_analysis():
             bg_v = ("rgba(31,185,122,0.10)" if "✅" in sv else
                     "rgba(245,158,11,0.10)"  if "⚠️" in sv else
                     "rgba(232,85,78,0.10)")
+            a_c  = GREEN if bt["alpha_vs_bh"] >= 0 else RED
             st.markdown(f"""
             <div style='background:{bg_v};border:1px solid {sv_c}40;
             border-left:5px solid {sv_c};border-radius:10px;padding:18px 24px;margin:12px 0;'>
@@ -1371,6 +1500,8 @@ def render_quant_analysis():
                 Sharpe <b>{bt["sharpe"]}</b> &nbsp;·&nbsp;
                 Return <b style='color:{GREEN if bt["total_ret"]>=0 else RED};'>
                   {bt["total_ret"]:+.2f}%</b> &nbsp;·&nbsp;
+                Buy&Hold <b>{bt["buy_hold_ret"]:+.2f}%</b> &nbsp;·&nbsp;
+                Alpha <b style='color:{a_c};'>{bt["alpha_vs_bh"]:+.2f}%</b> &nbsp;·&nbsp;
                 Max DD <b style='color:{RED};'>{bt["max_dd"]:.1f}%</b>
               </div>
             </div>""", unsafe_allow_html=True)
@@ -1380,18 +1511,27 @@ def render_quant_analysis():
                    ("AVG WIN",     f"{bt['avg_win']:+.2f}%"),("AVG LOSS",f"{bt['avg_loss']:+.2f}%")])
             _mrow([("R:R RATIO",   f"{bt['rr']:.2f}"),("PROFIT FACTOR",f"{bt['profit_factor']:.2f}"),
                    ("SHARPE",      f"{bt['sharpe']:.2f}"),("SORTINO",f"{bt['sortino']:.2f}")])
-            _mrow([("TOTAL RETURN",f"{bt['total_ret']:+.2f}%"),("ANN. RETURN",f"{bt['ann_ret']:+.2f}%"),
-                   ("ANN. VOL",    f"{bt['ann_vol']:.2f}%"),("MAX DRAWDOWN",f"{bt['max_dd']:.1f}%")])
+            _mrow([("TOTAL RETURN",f"{bt['total_ret']:+.2f}%"),("BUY & HOLD",f"{bt['buy_hold_ret']:+.2f}%"),
+                   ("ALPHA",       f"{bt['alpha_vs_bh']:+.2f}%"),("MAX DRAWDOWN",f"{bt['max_dd']:.1f}%")])
 
             st.markdown(_sec("PRICE CHART · ENTRY & EXIT MARKERS"), unsafe_allow_html=True)
             st.plotly_chart(chart_backtest_price(df_bt, bt), use_container_width=True)
             st.markdown(f"""
             <div style='background:{PANEL2};border:1px solid {BORDER};border-radius:8px;
             padding:10px 16px;margin:4px 0 12px;font-size:11px;color:{MUTE};line-height:1.7;'>
-            <b style='color:{GREEN};'>▲ BUY</b> = entry on vol surge &nbsp;·&nbsp;
+            <b style='color:{GREEN};'>▲ BUY</b> = entry at next-day open after vol surge &nbsp;·&nbsp;
             <b style='color:{ACCENT};'>● WIN</b> = target/vol-dry exit &nbsp;·&nbsp;
             <b style='color:{RED};'>✕ LOSS</b> = stop/MA-flip exit
             </div>""", unsafe_allow_html=True)
+
+            st.markdown(_sec("SIGNAL LOG · EVERY BUY / SELL"), unsafe_allow_html=True)
+            sig = bt["signals"].copy()
+            sig["date"] = pd.to_datetime(sig["date"]).dt.strftime("%Y-%m-%d")
+            sig.columns = ["Date","Signal","Price","Detail"]
+            st.dataframe(sig, use_container_width=True, hide_index=True)
+
+            st.markdown(_sec("TRADE LOG"), unsafe_allow_html=True)
+            st.dataframe(bt["trades"], use_container_width=True, hide_index=True)
 
             r_left, r_right = st.columns(2)
             with r_left:
@@ -1401,20 +1541,6 @@ def render_quant_analysis():
                 st.plotly_chart(chart_drawdown(bt), use_container_width=True)
                 st.plotly_chart(chart_exit_breakdown(bt), use_container_width=True)
 
-            st.markdown(_sec("INDIVIDUAL TRADE LEDGER"), unsafe_allow_html=True)
-            tdf = bt["trades"].copy()
-            tdf["pnl"]     = tdf["pnl"].apply(lambda x: f"₹{x:,.0f}")
-            tdf["pnl_pct"] = tdf["pnl_pct"].apply(lambda x: f"{x:+.2f}%")
-            tdf["entry"]   = tdf["entry"].apply(lambda x: f"₹{x:,.2f}")
-            tdf["exit"]    = tdf["exit"].apply(lambda x: f"₹{x:,.2f}")
-            tdf.columns    = [c.replace("_"," ").title() for c in tdf.columns]
-            st.dataframe(tdf, use_container_width=True, hide_index=True, height=320)
-            st.caption(
-                f"Strategy: vol ≥ {vol_mult}× avg + bullish + above 50MA + RSI 35–75 · "
-                f"Stop {stop_p}% · Target {tgt_p}% · Max hold {hold_d}d · "
-                "Real NSE data · Educational only · Not SEBI advice."
-            )
-
 
 render_quant_options_page = render_quant_analysis
 
@@ -1422,3 +1548,4 @@ if __name__ == "__main__":
     st.set_page_config(page_title="ARKA · Swing Terminal",
                        layout="wide", initial_sidebar_state="collapsed")
     render_quant_analysis()
+
