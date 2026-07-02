@@ -50,6 +50,12 @@ MONO   = "'IBM Plex Mono','JetBrains Mono','SF Mono',monospace"
 SANS   = "'Inter','Plus Jakarta Sans',sans-serif"
 TRADING_DAYS = 252
 
+# ── Pre-computed rgba versions (Plotly candlestick does NOT accept 8-digit hex)
+GREEN_27 = "rgba(31,185,122,0.27)"   # replaces GREEN+"44"
+GREEN_20 = "rgba(31,185,122,0.20)"   # replaces GREEN+"33"
+RED_27   = "rgba(232,85,78,0.27)"    # replaces RED+"44"
+RED_20   = "rgba(232,85,78,0.20)"    # replaces RED+"33"
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # SCORE ENGINE
@@ -58,30 +64,19 @@ TRADING_DAYS = 252
 def compute_scores(vpin_pct, garch_pct, fp_bias, fp_n_events,
                    price, poc, va_low, va_high, vwap,
                    mc_prob_up, mc_var95_pct) -> dict:
-    """Returns dict of section scores (each 0-25) + total 0-100."""
-
-    # FOOTPRINT (0-25): events + directional bias
     fp_event_pts = min(15, fp_n_events / 5 * 15)
     fp_bias_pts  = (fp_bias + 3) / 6 * 10
     fp_score     = round(min(25, fp_event_pts + fp_bias_pts))
-
-    # VPIN (0-25): higher percentile = more informed flow
-    vp_score = round(min(25, vpin_pct / 100 * 25))
-
-    # GARCH (0-25): lower percentile = better entry (vol compression)
+    vp_score     = round(min(25, vpin_pct / 100 * 25))
     if garch_pct < 25:   g_score = 22
     elif garch_pct < 50: g_score = 16
     elif garch_pct < 75: g_score = 10
     else:                g_score = 4
     garch_score = g_score
-
-    # MONTE CARLO (0-25): prob of profit + VaR not catastrophic
     mc_pts   = (mc_prob_up / 100) * 15
-    var_pts  = max(0, min(10, 10 + mc_var95_pct))  # var95_pct is negative
+    var_pts  = max(0, min(10, 10 + mc_var95_pct))
     mc_score = round(min(25, mc_pts + var_pts))
-
-    total = fp_score + vp_score + garch_score + mc_score
-
+    total    = fp_score + vp_score + garch_score + mc_score
     return {
         "footprint"   : fp_score,
         "vpin"        : vp_score,
@@ -209,7 +204,6 @@ def _signal_card(title: str, verdict: str, body: str, score: int,
                    f"color:{MUTE2};'>/25</span></div>"
                    f"<div style='font-family:{MONO};font-size:8px;color:{sc_c};"
                    f"letter-spacing:1px;'>{sc_r}</div>")
-
     st.markdown(f"""
     <div style='background:{bg};border:1px solid {c}30;border-left:3px solid {c};
     border-radius:10px;padding:16px 20px;margin:10px 0;
@@ -666,7 +660,6 @@ def _rule_note(symbol, price, vpin, garch, fp, vp):
     else:
         parts.append(f"📊 Normal vol at {garch['annual_vol_pct']:.0f}% annual.")
 
-    cr = levels_verdict = ""
     if fp["bias_score"] > 0:
         parts.append(f"🐂 Bullish footprint. POC ₹{vp['poc']:,.0f} = key support.")
     elif fp["bias_score"] < 0:
@@ -687,10 +680,11 @@ def chart_price_vwap(df, vwap_df, vp, fp, symbol):
     vd = vwap_df.tail(120).copy()
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                         row_heights=[0.75,0.25], vertical_spacing=0.02)
+    # ✅ FIX: use rgba() strings instead of hex+"44" / hex+"33"
     fig.add_trace(go.Candlestick(
         x=d.index, open=d["Open"], high=d["High"], low=d["Low"], close=d["Close"],
         increasing_line_color=GREEN, decreasing_line_color=RED,
-        increasing_fillcolor=GREEN+"44", decreasing_fillcolor=RED+"44",
+        increasing_fillcolor=GREEN_27, decreasing_fillcolor=RED_27,
         name="Price", showlegend=False), row=1, col=1)
     if "vwap" in vd.columns:
         fig.add_trace(go.Scatter(x=vd.index, y=vd["vwap"],
@@ -827,40 +821,32 @@ def chart_surge_history(fp):
 
 
 def chart_backtest_price(df, bt):
-    """Price chart with BUY arrows at entry and WIN/LOSS markers at exit."""
     tdf = bt["trades"]
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                         row_heights=[0.75,0.25], vertical_spacing=0.02)
-
     d = df.copy()
     vc = [GREEN if float(d["Close"].iloc[i])>=float(d["Open"].iloc[i]) else RED
           for i in range(len(d))]
+    # ✅ FIX: use rgba() strings instead of hex+"33"
     fig.add_trace(go.Candlestick(
         x=d.index, open=d["Open"], high=d["High"], low=d["Low"], close=d["Close"],
         increasing_line_color=GREEN, decreasing_line_color=RED,
-        increasing_fillcolor=GREEN+"33", decreasing_fillcolor=RED+"33",
+        increasing_fillcolor=GREEN_20, decreasing_fillcolor=RED_20,
         name="Price", showlegend=False), row=1,col=1)
 
-    # Entry BUY markers
     buy_x=[]; buy_y=[]
-    # Exit WIN markers
     win_x=[]; win_y=[]
-    # Exit LOSS markers
     los_x=[]; los_y=[]
-
     for _, t in tdf.iterrows():
-        ed  = pd.Timestamp(t["entry_date"])
-        xd  = pd.Timestamp(t["exit_date"])
-        # find nearest date
+        ed = pd.Timestamp(t["entry_date"])
+        xd = pd.Timestamp(t["exit_date"])
         if ed in d.index:
-            buy_x.append(ed)
-            buy_y.append(float(t["entry"])*0.993)
+            buy_x.append(ed); buy_y.append(float(t["entry"])*0.993)
         if xd in d.index:
             if t["outcome"]=="WIN":
                 win_x.append(xd); win_y.append(float(t["exit"])*1.005)
             else:
                 los_x.append(xd); los_y.append(float(t["exit"])*1.005)
-
     if buy_x:
         fig.add_trace(go.Scatter(x=buy_x, y=buy_y, mode="markers+text",
             marker=dict(color=GREEN, size=12, symbol="triangle-up",
@@ -879,11 +865,8 @@ def chart_backtest_price(df, bt):
                         line=dict(color=IVORY,width=1)),
             text=["LOSS"]*len(los_x), textposition="top center",
             textfont=dict(color=RED,size=9), name="Exit LOSS"), row=1,col=1)
-
-    # Volume
     fig.add_trace(go.Bar(x=d.index, y=d["Volume"],
                          marker_color=vc, opacity=0.5, showlegend=False), row=2,col=1)
-
     fig.update_layout(
         template="plotly_dark", paper_bgcolor=PANEL, plot_bgcolor=PANEL2,
         height=580, margin=dict(l=8,r=8,t=44,b=8),
@@ -948,7 +931,6 @@ def render_quant_analysis():
     try:    api_key = st.secrets.get("GEMINI_KEY","")
     except: api_key = ""
 
-    # ── Global CSS ──────────────────────────────────────────────────────
     st.markdown(f"""
     <style>
     [data-testid="metric-container"] {{
@@ -980,7 +962,6 @@ def render_quant_analysis():
     }}
     </style>""", unsafe_allow_html=True)
 
-    # ── Header ──────────────────────────────────────────────────────────
     ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     st.markdown(f"""
     <div style='background:linear-gradient(135deg,{PANEL2},{PANEL});
@@ -1002,7 +983,6 @@ def render_quant_analysis():
       </div>
     </div>""", unsafe_allow_html=True)
 
-    # ── Input row ───────────────────────────────────────────────────────
     c1, c2, c3 = st.columns([3,1,1])
     symbol = c1.text_input("", value="RELIANCE",
                             placeholder="NSE symbol — e.g. RELIANCE, TCS, HDFCBANK, ^NSEI",
@@ -1046,7 +1026,6 @@ def render_quant_analysis():
     chg   = (price-prev)/prev*100
     chg_c = GREEN if chg>=0 else RED
 
-    # ── Price bar ───────────────────────────────────────────────────────
     st.markdown(f"""
     <div style='background:linear-gradient(135deg,{PANEL3},{PANEL2});
     border:1px solid {BORDER2};border-radius:10px;
@@ -1066,7 +1045,6 @@ def render_quant_analysis():
       </div>
     </div>""", unsafe_allow_html=True)
 
-    # ── Run all engines ──────────────────────────────────────────────────
     with st.spinner("Running all engines..."):
         garch_r   = garch_analysis(df["Close"])
         vpin_d    = compute_vpin(df)
@@ -1091,20 +1069,17 @@ def render_quant_analysis():
     if not note:
         note = _rule_note(symbol, price, vpin_d, garch_r, fp, vp)
 
-    # ── MASTER VERDICT + BIG SCORE ───────────────────────────────────────
     fp_v   = fp["verdict"]
     fp_cfg = VERDICT_CFG.get(fp_v, VERDICT_CFG["NEUTRAL"])
     fp_c   = fp_cfg["c"]
     total  = scores["total"]
-    tot_c, tot_r = _score_rating(total)
 
-    # Big circle + 4 small circles
     big_svg   = _circle_svg(total, "OVERALL", size=130, font_score=26)
     small_svgs = [
-        _circle_svg(scores["footprint"],   "FOOTPRINT", 82, 17),
-        _circle_svg(scores["vpin"],        "VPIN",      82, 17),
-        _circle_svg(scores["garch"],       "GARCH",     82, 17),
-        _circle_svg(scores["monte_carlo"], "MONTE CARLO",82,17),
+        _circle_svg(scores["footprint"],   "FOOTPRINT",   82, 17),
+        _circle_svg(scores["vpin"],        "VPIN",        82, 17),
+        _circle_svg(scores["garch"],       "GARCH",       82, 17),
+        _circle_svg(scores["monte_carlo"], "MONTE CARLO", 82, 17),
     ]
     small_row = "".join([f"<div style='flex:1;'>{s}</div>" for s in small_svgs])
 
@@ -1118,8 +1093,6 @@ def render_quant_analysis():
     box-shadow:0 4px 24px rgba(0,0,0,0.4);'>
       <div style='display:flex;justify-content:space-between;align-items:flex-start;
         gap:20px;flex-wrap:wrap;'>
-
-        <!-- LEFT: verdict + note -->
         <div style='flex:2;min-width:220px;'>
           <div style='font-family:{MONO};font-size:9px;color:{MUTE2};
             letter-spacing:2px;margin-bottom:6px;'>
@@ -1136,21 +1109,15 @@ def render_quant_analysis():
           <div style='font-size:12.5px;color:{IVORY};line-height:1.8;
             border-top:1px solid {BORDER};padding-top:12px;'>{note}</div>
         </div>
-
-        <!-- RIGHT: score circles -->
         <div style='flex:1;min-width:200px;'>
           <div style='display:flex;justify-content:center;margin-bottom:12px;'>
             {big_svg}
           </div>
           <div style='display:flex;gap:4px;justify-content:center;'>{small_row}</div>
         </div>
-
       </div>
     </div>""", unsafe_allow_html=True)
 
-    # ════════════════════════════════════════════════════════════════
-    # TABS
-    # ════════════════════════════════════════════════════════════════
     t0, t1, t2, t3, t4 = st.tabs([
         "📦 FOOTPRINT & VWAP",
         "⚡ VPIN & SURGE",
@@ -1159,7 +1126,6 @@ def render_quant_analysis():
         "⚙️ SWING BACKTEST",
     ])
 
-    # ── TAB 0: FOOTPRINT & VWAP ─────────────────────────────────────
     with t0:
         st.plotly_chart(chart_price_vwap(df, vwap_df, vp, fp, symbol.upper()),
                         use_container_width=True)
@@ -1171,12 +1137,10 @@ def render_quant_analysis():
         <b style='color:{BLUE};'>Blue zone</b> = 70% Value Area &nbsp;·&nbsp;
         <b style='color:{ACCENT};'>Gold dot</b> = VWAP (institutional benchmark)
         </div>""", unsafe_allow_html=True)
-
-        col1, col2 = st.columns([1, 1])
+        col1, col2 = st.columns([1,1])
         with col1:
             st.markdown(_sec("VOLUME PROFILE"), unsafe_allow_html=True)
             st.plotly_chart(chart_volume_profile(vp), use_container_width=True)
-
         with col2:
             st.markdown(_sec("KEY LEVELS & READING"), unsafe_allow_html=True)
             kpi_html = "".join([
@@ -1189,7 +1153,6 @@ def render_quant_analysis():
                 _premium_kpi("VWAP (20d)",        f"₹{curr_vwap:,.0f}", "Institutional benchmark", ACCENT, "📈"),
             ])
             st.markdown(kpi_html, unsafe_allow_html=True)
-
             pos_poc  = (price - vp["poc"])/vp["poc"]*100
             pos_vwap = (price - curr_vwap)/curr_vwap*100 if curr_vwap else 0
             body = (
@@ -1202,7 +1165,6 @@ def render_quant_analysis():
                          _score_to_verdict(2 if price>=vp["poc"] else -2, 3),
                          body, 2 if price>=vp["poc"] else -2,
                          section_score=scores["footprint"])
-
         if fp["n_events"]>0 and not fp["recent"].empty:
             st.markdown(_sec("RECENT INSTITUTIONAL EVENTS"), unsafe_allow_html=True)
             disp = fp["recent"][["date","type","price","vol_ratio","strength"]].copy()
@@ -1211,17 +1173,14 @@ def render_quant_analysis():
             disp["strength"]  = disp["strength"].apply(lambda x: "★"*x)
             disp.columns      = ["Date","Event","Price","Volume","Strength"]
             st.dataframe(disp, use_container_width=True, hide_index=True)
-
         bs = fp["bias_score"]
-        _signal_card("INSTITUTIONAL FOOTPRINT",
-                     fp["verdict"],
+        _signal_card("INSTITUTIONAL FOOTPRINT", fp["verdict"],
                      f"{fp['n_events']} volume surge events detected. "
                      f"Last 3 trades bias: <b>{bs:+d}/3</b>. "
                      f"{'Smart money predominantly buying — bullish footprint.' if bs>0 else 'Smart money predominantly selling — bearish footprint.' if bs<0 else 'Mixed institutional activity — no clear directional bias.'} "
                      f"Current vol ratio: <b>{fp['last_ratio']:.1f}× average.</b>",
                      abs(bs), section_score=scores["footprint"])
 
-    # ── TAB 1: VPIN & SURGE ─────────────────────────────────────────
     with t1:
         st.markdown(f"""
         <div style='background:{PANEL2};border:1px solid {BORDER};border-left:3px solid {PURPLE};
@@ -1235,26 +1194,14 @@ def render_quant_analysis():
           widen spreads. <b>This is your earliest signal that a big directional move is coming.</b>
           </div>
         </div>""", unsafe_allow_html=True)
-
-        vpin_kpi_html = "".join([
-            _premium_kpi("CURRENT VPIN", f"{vpin_d['current']:.4f}", "Latest reading", PURPLE, "📊"),
-            "<div style='width:8px;'></div>",
-            _premium_kpi("AVERAGE VPIN",  f"{vpin_d['avg']:.4f}", "Historical mean", MUTE, "📈"),
-            "<div style='width:8px;'></div>",
-            _premium_kpi("PERCENTILE",    f"{vpin_d['percentile']:.0f}th", ">70 = high toxicity", RED if vpin_d['percentile']>70 else AMBER if vpin_d['percentile']>40 else GREEN, "🎯"),
-            "<div style='width:8px;'></div>",
-            _premium_kpi("TOXICITY",      vpin_d['toxicity'], "Informed flow level", RED if "HIGH" in vpin_d['toxicity'] else AMBER if "MOD" in vpin_d['toxicity'] else GREEN, "⚡"),
-        ])
-        kpi_cols = st.columns(4)
         kpi_vals = [
             ("CURRENT VPIN",  f"{vpin_d['current']:.4f}"),
             ("AVERAGE",       f"{vpin_d['avg']:.4f}"),
             ("PERCENTILE",    f"{vpin_d['percentile']:.0f}th"),
             ("TOXICITY",      vpin_d['toxicity']),
         ]
-        for col, (lbl, val) in zip(kpi_cols, kpi_vals):
+        for col, (lbl, val) in zip(st.columns(4), kpi_vals):
             col.metric(lbl, val)
-
         st.plotly_chart(chart_vpin(vpin_d), use_container_width=True)
         pct = vpin_d["percentile"]
         _signal_card("VPIN SIGNAL",
@@ -1262,12 +1209,10 @@ def render_quant_analysis():
                      vpin_d["meaning"],
                      3 if pct>70 else 0 if pct>40 else -1,
                      section_score=scores["vpin"])
-
         st.markdown(_sec("VOLUME SURGE HISTORY"), unsafe_allow_html=True)
         st.plotly_chart(chart_surge_history(fp), use_container_width=True)
         st.caption("🔺 Bull surge = institutional buying · 🔻 Bear surge = selling · Marker size = signal strength")
 
-    # ── TAB 2: GARCH ────────────────────────────────────────────────
     with t2:
         st.markdown(f"""
         <div style='background:{PANEL2};border:1px solid {BORDER};border-left:3px solid {AMBER};
@@ -1280,18 +1225,13 @@ def render_quant_analysis():
           <b>Low vol regime → size up.</b> <b>High vol regime → reduce size, widen stops.</b>
           </div>
         </div>""", unsafe_allow_html=True)
-
-        garch_kpis = [
-            ("DAILY VOL",    f"{garch_r['daily_vol_pct']:.2f}%"),
-            ("ANNUAL VOL",   f"{garch_r['annual_vol_pct']:.1f}%"),
-            ("HIST AVG",     f"{garch_r['hist_avg_annual']:.1f}%"),
-            ("PERCENTILE",   f"{garch_r['percentile']:.0f}th"),
-            ("REGIME",       garch_r["regime"]),
-            ("PERSISTENCE",  f"{garch_r['persistence']:.3f}"),
-        ]
-        _mrow(garch_kpis)
+        _mrow([("DAILY VOL",    f"{garch_r['daily_vol_pct']:.2f}%"),
+               ("ANNUAL VOL",   f"{garch_r['annual_vol_pct']:.1f}%"),
+               ("HIST AVG",     f"{garch_r['hist_avg_annual']:.1f}%"),
+               ("PERCENTILE",   f"{garch_r['percentile']:.0f}th"),
+               ("REGIME",       garch_r["regime"]),
+               ("PERSISTENCE",  f"{garch_r['persistence']:.3f}")])
         st.plotly_chart(chart_garch(garch_r, df["Close"]), use_container_width=True)
-
         st.markdown(_sec("10-DAY FORWARD VOLATILITY FORECAST"), unsafe_allow_html=True)
         fwd = garch_r["forecast_daily"]
         fdf = pd.DataFrame({
@@ -1301,7 +1241,6 @@ def render_quant_analysis():
             "1σ Move ₹":  [round(price*v/100, 1) for v in fwd],
         })
         st.dataframe(fdf.set_index("Day"), use_container_width=True)
-
         gp = garch_r["percentile"]
         _signal_card("GARCH SIGNAL",
                      "WEAK SELL" if "HIGH" in garch_r["regime"] else
@@ -1313,7 +1252,6 @@ def render_quant_analysis():
                      -2 if gp>75 else 2 if gp<25 else 0,
                      section_score=scores["garch"])
 
-    # ── TAB 3: MONTE CARLO ──────────────────────────────────────────
     with t3:
         st.markdown(f"""
         <div style='background:{PANEL2};border:1px solid {BORDER};border-left:3px solid {BLUE};
@@ -1326,17 +1264,14 @@ def render_quant_analysis():
           Use VaR and Expected Shortfall to size your position correctly before entering.
           </div>
         </div>""", unsafe_allow_html=True)
-
-        cap_col, _, __ = st.columns([1, 1, 2])
+        cap_col, _, __ = st.columns([1,1,2])
         capital = cap_col.number_input("Position Size (₹)", value=100_000,
                                        step=10_000, min_value=10_000)
         if capital != 100_000:
             mc = monte_carlo_risk(price, garch_r["daily_vol_pct"]/100,
                                   mu=float(log_rets.mean()),
                                   horizon=10, n_sims=1000, capital=capital)
-
         st.plotly_chart(chart_monte_carlo(mc, price, symbol.upper()), use_container_width=True)
-
         st.markdown(_sec("RISK METRICS"), unsafe_allow_html=True)
         _mrow([("PROB OF PROFIT",f"{mc['prob_up_pct']:.1f}%"),
                ("MEDIAN EXIT",   f"₹{mc['p50']:,.0f}"),
@@ -1346,7 +1281,6 @@ def render_quant_analysis():
                ("ES 95% (₹)",    f"₹{mc['es95_rs']:,.0f}"),
                ("VaR 99% (₹)",   f"₹{mc['var99_rs']:,.0f}"),
                ("ES 99% (₹)",    f"₹{mc['es99_rs']:,.0f}")])
-
         var_c = RED if mc["var95_pct"]<-5 else AMBER if mc["var95_pct"]<-3 else GREEN
         st.markdown(f"""
         <div style='background:{PANEL2};border:1px solid {var_c}35;border-left:4px solid {var_c};
@@ -1362,7 +1296,6 @@ def render_quant_analysis():
             Worst case P10: <b>₹{mc['p10']:,.0f}</b>
           </div>
         </div>""", unsafe_allow_html=True)
-
         _signal_card("MONTE CARLO SIGNAL",
                      "BUY"       if mc["prob_up_pct"]>58 and mc["var95_pct"]>-6 else
                      "WEAK BUY"  if mc["prob_up_pct"]>52 else
@@ -1376,7 +1309,6 @@ def render_quant_analysis():
                      -1 if mc["prob_up_pct"]<48 else 0,
                      section_score=scores["monte_carlo"])
 
-    # ── TAB 4: SWING BACKTEST ────────────────────────────────────────
     with t4:
         st.markdown(f"""
         <div style='background:{PANEL2};border:1px solid {BORDER};border-left:3px solid {GREEN};
@@ -1388,32 +1320,24 @@ def render_quant_analysis():
           <b>Exit:</b> Target hit → profit lock · Stop hit → cut loss ·
           Volume dries up → exit · MA flip → exit · Max hold → time exit.<br>
           <b>Why it works:</b> Big players can't hide. When they buy, volume spikes. Price follows.
-          Select a date range on the chart to see entries and exits visually.
           </div>
         </div>""", unsafe_allow_html=True)
-
         with st.form("swing_form"):
             st.markdown(_sec("BACKTEST PARAMETERS"), unsafe_allow_html=True)
             r1c1, r1c2, r1c3, r1c4 = st.columns(4)
             start_d  = r1c1.date_input("Start Date", value=datetime.date(2020,1,1))
             end_d    = r1c2.date_input("End Date",   value=datetime.date.today())
-            vol_mult = r1c3.slider("Vol Surge ×", 1.5, 5.0, 2.5, 0.5,
-                                   help="Entry when vol ≥ this × 20-day average")
+            vol_mult = r1c3.slider("Vol Surge ×", 1.5, 5.0, 2.5, 0.5)
             hold_d   = r1c4.slider("Max Hold Days", 3, 21, 7)
-
             r2c1, r2c2, r2c3, r2c4 = st.columns(4)
             stop_p   = r2c1.slider("Stop Loss %",  1, 10, 4)
             tgt_p    = r2c2.slider("Target %",     2, 20, 8)
-            pos_p    = r2c3.slider("Position %",   5, 40, 20,
-                                   help="% of ₹10L capital per trade")
+            pos_p    = r2c3.slider("Position %",   5, 40, 20)
             comm_bps = r2c4.number_input("Commission (bps)", value=15.0, step=1.0)
-
-            run_bt = st.form_submit_button("▶ RUN BACKTEST",
-                                           type="primary", use_container_width=True)
+            run_bt   = st.form_submit_button("▶ RUN BACKTEST", type="primary", use_container_width=True)
 
         if not run_bt:
-            st.info("Set parameters above and press RUN BACKTEST. "
-                    "Real NSE data via yfinance — no simulation.")
+            st.info("Set parameters above and press RUN BACKTEST.")
         else:
             if start_d >= end_d:
                 st.error("Start must be before End."); st.stop()
@@ -1423,13 +1347,10 @@ def render_quant_analysis():
                     st.error(f"No data for {symbol.upper()} in that range."); st.stop()
                 bt = swing_backtest(df_bt, vol_mult=vol_mult, hold_days=hold_d,
                                     stop_pct=stop_p/100, target_pct=tgt_p/100,
-                                    pos_pct=pos_p/100,
-                                    commission=comm_bps/10_000)
-
+                                    pos_pct=pos_p/100, commission=comm_bps/10_000)
             if "error" in bt:
                 st.error(bt["error"]); st.stop()
 
-            # Verdict banner
             sv   = bt["strat_verdict"]
             sv_c = GREEN if "✅" in sv else AMBER if "⚠️" in sv else RED
             bg_v = ("rgba(31,185,122,0.10)" if "✅" in sv else
@@ -1437,8 +1358,7 @@ def render_quant_analysis():
                     "rgba(232,85,78,0.10)")
             st.markdown(f"""
             <div style='background:{bg_v};border:1px solid {sv_c}40;
-            border-left:5px solid {sv_c};border-radius:10px;
-            padding:18px 24px;margin:12px 0;'>
+            border-left:5px solid {sv_c};border-radius:10px;padding:18px 24px;margin:12px 0;'>
               <div style='font-family:{MONO};font-size:9px;color:{MUTE2};
                 letter-spacing:2px;margin-bottom:4px;'>
                 BACKTEST RESULT · {symbol.upper()} · {start_d} → {end_d}</div>
@@ -1455,22 +1375,14 @@ def render_quant_analysis():
               </div>
             </div>""", unsafe_allow_html=True)
 
-            # KPI grid
             st.markdown(_sec("PERFORMANCE METRICS"), unsafe_allow_html=True)
-            _mrow([("TRADES",      str(bt["total_trades"])),
-                   ("WIN RATE",    f"{bt['win_rate']}%"),
-                   ("AVG WIN",     f"{bt['avg_win']:+.2f}%"),
-                   ("AVG LOSS",    f"{bt['avg_loss']:+.2f}%")])
-            _mrow([("R:R RATIO",   f"{bt['rr']:.2f}"),
-                   ("PROFIT FACTOR",f"{bt['profit_factor']:.2f}"),
-                   ("SHARPE",      f"{bt['sharpe']:.2f}"),
-                   ("SORTINO",     f"{bt['sortino']:.2f}")])
-            _mrow([("TOTAL RETURN",f"{bt['total_ret']:+.2f}%"),
-                   ("ANN. RETURN", f"{bt['ann_ret']:+.2f}%"),
-                   ("ANN. VOL",    f"{bt['ann_vol']:.2f}%"),
-                   ("MAX DRAWDOWN",f"{bt['max_dd']:.1f}%")])
+            _mrow([("TRADES",      str(bt["total_trades"])),("WIN RATE",f"{bt['win_rate']}%"),
+                   ("AVG WIN",     f"{bt['avg_win']:+.2f}%"),("AVG LOSS",f"{bt['avg_loss']:+.2f}%")])
+            _mrow([("R:R RATIO",   f"{bt['rr']:.2f}"),("PROFIT FACTOR",f"{bt['profit_factor']:.2f}"),
+                   ("SHARPE",      f"{bt['sharpe']:.2f}"),("SORTINO",f"{bt['sortino']:.2f}")])
+            _mrow([("TOTAL RETURN",f"{bt['total_ret']:+.2f}%"),("ANN. RETURN",f"{bt['ann_ret']:+.2f}%"),
+                   ("ANN. VOL",    f"{bt['ann_vol']:.2f}%"),("MAX DRAWDOWN",f"{bt['max_dd']:.1f}%")])
 
-            # Price chart with BUY/WIN/LOSS arrows
             st.markdown(_sec("PRICE CHART · ENTRY & EXIT MARKERS"), unsafe_allow_html=True)
             st.plotly_chart(chart_backtest_price(df_bt, bt), use_container_width=True)
             st.markdown(f"""
@@ -1481,7 +1393,6 @@ def render_quant_analysis():
             <b style='color:{RED};'>✕ LOSS</b> = stop/MA-flip exit
             </div>""", unsafe_allow_html=True)
 
-            # Supporting charts
             r_left, r_right = st.columns(2)
             with r_left:
                 st.plotly_chart(chart_equity(bt), use_container_width=True)
@@ -1490,7 +1401,6 @@ def render_quant_analysis():
                 st.plotly_chart(chart_drawdown(bt), use_container_width=True)
                 st.plotly_chart(chart_exit_breakdown(bt), use_container_width=True)
 
-            # Trade table
             st.markdown(_sec("INDIVIDUAL TRADE LEDGER"), unsafe_allow_html=True)
             tdf = bt["trades"].copy()
             tdf["pnl"]     = tdf["pnl"].apply(lambda x: f"₹{x:,.0f}")
