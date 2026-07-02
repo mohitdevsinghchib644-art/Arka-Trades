@@ -1404,7 +1404,7 @@ def render_quant_analysis():
                ("MEDIAN EXIT",   f"₹{mc['p50']:,.0f}"),
                ("P90 UPSIDE",    f"₹{mc['p90']:,.0f}"),
                ("P10 DOWNSIDE",  f"₹{mc['p10']:,.0f}")])
-                _mrow([("VaR 95% (₹)",   f"₹{mc['var95_rs']:,.0f}"),
+        _mrow([("VaR 95% (₹)",   f"₹{mc['var95_rs']:,.0f}"),
                ("ES 95% (₹)",    f"₹{mc['es95_rs']:,.0f}"),
                ("VaR 99% (₹)",   f"₹{mc['var99_rs']:,.0f}"),
                ("ES 99% (₹)",    f"₹{mc['es99_rs']:,.0f}")])
