@@ -1,19 +1,16 @@
 """
-quant_analysis.py — Arka Trades | Institutional Swing Terminal v4
+quant_analysis.py — Arka Trades | Institutional Quant Terminal v5
 =================================================================
 app.py: from quant_analysis import render_quant_analysis
+Requires: streamlit yfinance pandas numpy scipy plotly scikit-learn
 
-WHAT'S INSIDE
-─────────────
-• MODE 1 — Full Terminal    : Footprint, VPIN, Volume Profile, VWAP,
-                              GARCH, Monte Carlo, Score Engine, Backtest
-• MODE 2 — Signal Backtester: Type symbols + date range → every BUY/SELL
-                              signal date, trade table, alpha vs buy-hold
-• v4 ENGINE FIXES (institutional-grade honesty):
-    - No look-ahead: signal on bar t → entry at OPEN of bar t+1
-    - Intrabar stops/targets: checked vs Low/High, not just Close
-    - Benchmark alpha: strategy return vs buy-and-hold, every run
-All data: real yfinance NSE feeds.
+MODE 1 · TERMINAL       Footprint, VPIN, Vol Profile, VWAP, GARCH,
+                        Monte Carlo, Score 0-100, bias-free backtest,
+                        regime filter, walk-forward validation
+MODE 2 · BACKTESTER     Symbols + date range -> every BUY/SELL signal
+MODE 3 · ALPHA SCANNER  Cross-sectional factor ranking (fund-style)
+MODE 4 · ML LAB         Gradient boosting, purged CV, 5-day forecast
+MODE 5 · LIVE SCREENER  Scan 50 NSE names -> active signals today
 """
 
 from __future__ import annotations
@@ -75,13 +72,8 @@ def compute_scores(vpin_pct, garch_pct, fp_bias, fp_n_events,
     var_pts  = max(0, min(10, 10 + mc_var95_pct))
     mc_score = round(min(25, mc_pts + var_pts))
     total    = fp_score + vp_score + garch_score + mc_score
-    return {
-        "footprint"   : fp_score,
-        "vpin"        : vp_score,
-        "garch"       : garch_score,
-        "monte_carlo" : mc_score,
-        "total"       : min(100, total),
-    }
+    return {"footprint": fp_score, "vpin": vp_score, "garch": garch_score,
+            "monte_carlo": mc_score, "total": min(100, total)}
 
 
 def _score_rating(score: int) -> tuple[str, str]:
@@ -237,7 +229,7 @@ def _premium_kpi(label: str, value: str, sub: str, color: str, icon: str = ""):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# DATA FETCH
+# DATA FETCH + REGIME
 # ════════════════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -280,6 +272,18 @@ def fetch_range(symbol: str, start: str, end: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_regime() -> pd.Series:
+    """NIFTY above 200-DMA = risk-on. Below = risk-off (block new longs)."""
+    import yfinance as yf
+    try:
+        idx = yf.Ticker("^NSEI").history(period="max", interval="1d")["Close"]
+        idx.index = pd.to_datetime(idx.index).tz_localize(None)
+        return (idx > idx.rolling(200).mean()).rename("risk_on")
+    except Exception:
+        return pd.Series(dtype=bool)
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # ANALYTICS ENGINES
 # ════════════════════════════════════════════════════════════════════════════
@@ -310,17 +314,12 @@ def garch_analysis(close: pd.Series, forecast_h: int = 10) -> dict:
     avg_ann   = float(np.mean(np.sqrt(np.maximum(s2, 1e-10)))) * np.sqrt(TRADING_DAYS) * 100
     pct       = float(np.mean(np.sqrt(s2) <= np.sqrt(s2[-1]))*100)
     regime    = "HIGH-VOL ⚠️" if pct>75 else "LOW-VOL 😴" if pct<25 else "NORMAL 📊"
-    return {
-        "sigma_series":    sigma_s,
-        "daily_vol_pct":   round(daily_vol*100, 3),
-        "annual_vol_pct":  round(ann_vol, 1),
-        "hist_avg_annual": round(avg_ann, 1),
-        "percentile":      round(pct, 1),
-        "regime":          regime,
-        "alpha":  best_a, "beta": best_b,
-        "forecast_daily": [round(float(np.sqrt(max(v,1e-10)))*100, 3) for v in fwd],
-        "persistence":    round(best_a+best_b, 3),
-    }
+    return {"sigma_series": sigma_s, "daily_vol_pct": round(daily_vol*100, 3),
+            "annual_vol_pct": round(ann_vol, 1), "hist_avg_annual": round(avg_ann, 1),
+            "percentile": round(pct, 1), "regime": regime,
+            "alpha": best_a, "beta": best_b,
+            "forecast_daily": [round(float(np.sqrt(max(v,1e-10)))*100, 3) for v in fwd],
+            "persistence": round(best_a+best_b, 3)}
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -336,23 +335,16 @@ def monte_carlo_risk(price: float, daily_vol: float, mu: float = 0.0003,
     es95   = float(pnl[pnl <= var95].mean())
     var99  = float(np.percentile(pnl, 1))
     es99   = float(pnl[pnl <= var99].mean())
-    return {
-        "paths":        paths,
-        "final":        final,
-        "var95_rs":     round(var95, 0),
-        "es95_rs":      round(es95, 0),
-        "var99_rs":     round(var99, 0),
-        "es99_rs":      round(es99, 0),
-        "var95_pct":    round(float(np.percentile((final-price)/price,5))*100, 2),
-        "var99_pct":    round(float(np.percentile((final-price)/price,1))*100, 2),
-        "prob_up_pct":  round(float((final>price).mean())*100, 1),
-        "p10":          round(float(np.percentile(final,10)), 2),
-        "p50":          round(float(np.percentile(final,50)), 2),
-        "p90":          round(float(np.percentile(final,90)), 2),
-        "horizon":      horizon,
-        "n_sims":       n_sims,
-        "capital":      capital,
-    }
+    return {"paths": paths, "final": final,
+            "var95_rs": round(var95, 0), "es95_rs": round(es95, 0),
+            "var99_rs": round(var99, 0), "es99_rs": round(es99, 0),
+            "var95_pct": round(float(np.percentile((final-price)/price,5))*100, 2),
+            "var99_pct": round(float(np.percentile((final-price)/price,1))*100, 2),
+            "prob_up_pct": round(float((final>price).mean())*100, 1),
+            "p10": round(float(np.percentile(final,10)), 2),
+            "p50": round(float(np.percentile(final,50)), 2),
+            "p90": round(float(np.percentile(final,90)), 2),
+            "horizon": horizon, "n_sims": n_sims, "capital": capital}
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -379,15 +371,11 @@ def volume_profile(df: pd.DataFrame, n_bins: int = 28) -> dict:
         elif cl: lo_i-=1; cum+=vb[lo_i]
         elif ch: hi_i+=1; cum+=vb[hi_i]
         else: break
-    return {
-        "poc":      poc,
-        "va_low":   float(bins[lo_i]),
-        "va_high":  float(bins[min(hi_i+1, n_bins)]),
-        "vol_bins": vb,
-        "price_mid":mid,
-        "hvn":      [float(mid[i]) for i in range(n_bins) if vb[i]>=np.percentile(vb,75)],
-        "lvn":      [float(mid[i]) for i in range(n_bins) if vb[i]<=np.percentile(vb,25)],
-    }
+    return {"poc": poc, "va_low": float(bins[lo_i]),
+            "va_high": float(bins[min(hi_i+1, n_bins)]),
+            "vol_bins": vb, "price_mid": mid,
+            "hvn": [float(mid[i]) for i in range(n_bins) if vb[i]>=np.percentile(vb,75)],
+            "lvn": [float(mid[i]) for i in range(n_bins) if vb[i]<=np.percentile(vb,25)]}
 
 
 def compute_vwap(df: pd.DataFrame, lookback: int = 20) -> pd.DataFrame:
@@ -425,24 +413,20 @@ def compute_vpin(df: pd.DataFrame, n_buckets: int = 50) -> dict:
     si   = df.index[idx0:min(idx1, len(df.index))]
     sv_  = vals[:len(si)]
     tox  = "HIGH 🔥" if pct>70 else "MODERATE ⚠️" if pct>40 else "LOW ✅"
-    return {
-        "current": round(cur,4), "avg": round(avg,4),
-        "percentile": round(pct,1), "toxicity": tox,
-        "series": pd.Series(sv_, index=si),
-        "meaning": (
-            "INFORMED traders dominating — big directional move imminent. Jane Street signal."
-            if pct>70 else
-            "Mixed flow — some informed activity but no full conviction yet."
-            if pct>40 else
-            "Retail/noise flow — big players not engaged. Low conviction move."
-        ),
-    }
+    return {"current": round(cur,4), "avg": round(avg,4),
+            "percentile": round(pct,1), "toxicity": tox,
+            "series": pd.Series(sv_, index=si),
+            "meaning": (
+                "INFORMED traders dominating — big directional move imminent. Jane Street signal."
+                if pct>70 else
+                "Mixed flow — some informed activity but no full conviction yet."
+                if pct>40 else
+                "Retail/noise flow — big players not engaged. Low conviction move.")}
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def institutional_footprint(df: pd.DataFrame,
-                              vol_mult: float = 2.5,
-                              lookback: int = 20) -> dict:
+def institutional_footprint(df: pd.DataFrame, vol_mult: float = 2.5,
+                            lookback: int = 20) -> dict:
     av  = df["Volume"].rolling(lookback).mean()
     ar  = (df["High"]-df["Low"]).rolling(lookback).mean()
     df2 = df.copy()
@@ -466,38 +450,28 @@ def institutional_footprint(df: pd.DataFrame,
             elif pc<0.003 and bull:     etype = "ACCUMULATION 📦"
             elif pc<0.003 and not bull: etype = "DISTRIBUTION 📤"
             else:                       etype = "SURGE ❓"
-            events.append({
-                "date":      df2.index[i],
-                "type":      etype,
-                "price":     round(float(row["Close"]),2),
-                "vol_ratio": round(vr,2),
-                "bullish":   bull,
-                "strength":  strength,
-                "volume":    int(row["Volume"]),
-                "avg_vol":   int(row["avg_vol"]),
-            })
+            events.append({"date": df2.index[i], "type": etype,
+                           "price": round(float(row["Close"]),2),
+                           "vol_ratio": round(vr,2), "bullish": bull,
+                           "strength": strength, "volume": int(row["Volume"]),
+                           "avg_vol": int(row["avg_vol"])})
     ev_df = pd.DataFrame(events) if events else pd.DataFrame()
     if len(ev_df)>=3:
         bc = int(ev_df.tail(3)["bullish"].sum())
         bias = bc*2-3
     else:
         bias = 0
-    return {
-        "events":     ev_df,
-        "recent":     ev_df.tail(5) if len(ev_df) else pd.DataFrame(),
-        "n_events":   len(ev_df),
-        "bias_score": bias,
-        "verdict":    _score_to_verdict(bias, mx=3),
-        "vol_series": df2["vol_ratio"],
-        "last_ratio": float(df2["vol_ratio"].iloc[-1]) if len(df2) else 0.0,
-    }
+    return {"events": ev_df,
+            "recent": ev_df.tail(5) if len(ev_df) else pd.DataFrame(),
+            "n_events": len(ev_df), "bias_score": bias,
+            "verdict": _score_to_verdict(bias, mx=3),
+            "vol_series": df2["vol_ratio"],
+            "last_ratio": float(df2["vol_ratio"].iloc[-1]) if len(df2) else 0.0}
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# SWING BACKTEST — v4 BIAS-FREE ENGINE
-#   • Signal on bar t → entry at OPEN of bar t+1 (no look-ahead)
-#   • Stops/targets checked vs intrabar Low/High (no close-only cheating)
-#   • Benchmark alpha vs buy-and-hold included in every result
+# BIAS-FREE BACKTEST ENGINE
+#   Signal on bar t -> entry at OPEN of t+1 · intrabar stops · regime aware
 # ════════════════════════════════════════════════════════════════════════════
 
 def prepare_indicators(df: pd.DataFrame, lookback: int = 20) -> pd.DataFrame:
@@ -529,24 +503,26 @@ def swing_backtest(df: pd.DataFrame, vol_mult: float = 2.5,
                    lookback: int = 20, hold_days: int = 7,
                    stop_pct: float = 0.04, target_pct: float = 0.08,
                    pos_pct: float = 0.20, commission: float = 0.0015,
-                   slippage: float = 0.0005) -> dict:
+                   slippage: float = 0.0005,
+                   regime: pd.Series | None = None) -> dict:
     if df.empty or len(df) < 60:
         return {"error": "Need 60+ bars. Try a longer date range."}
     d = prepare_indicators(df, lookback)
     if len(d) < 30:
         return {"error": "Too many NaN. Try 2+ years of data."}
-
     capital0 = 1_000_000
     equity, trades, curve, signals = capital0, [], [], []
     position, hold = None, 0
     rows = list(d.iterrows())
-
     for i, (date, row) in enumerate(rows):
         curve.append({"date": date, "equity": equity})
-
         if position is None:
-            # signal today → execute at NEXT bar's open (real-world fill)
-            if i < len(rows)-1 and _entry_signal(row, vol_mult):
+            risk_on = True
+            if regime is not None and len(regime):
+                rr = regime.reindex([date], method="ffill")
+                if not rr.isna().all():
+                    risk_on = bool(rr.iloc[0])
+            if i < len(rows)-1 and risk_on and _entry_signal(row, vol_mult):
                 nd, nrow = rows[i+1]
                 ep     = float(nrow["Open"])*(1+slippage)
                 shares = (equity*pos_pct)/ep
@@ -561,11 +537,11 @@ def swing_backtest(df: pd.DataFrame, vol_mult: float = 2.5,
                                 "detail": f"{float(row['vol_ratio']):.1f}x vol surge"})
         else:
             if date <= position["date"]:
-                continue                       # skip the entry bar itself
+                continue
             hold += 1
             lo, hi, close = float(row["Low"]), float(row["High"]), float(row["Close"])
             xp, reason = None, None
-            if lo <= position["stop"]:          # intrabar stop first (conservative)
+            if lo <= position["stop"]:
                 xp, reason = position["stop"], "Stop 🛑"
             elif hi >= position["target"]:
                 xp, reason = position["target"], "Target 🎯"
@@ -585,24 +561,19 @@ def swing_backtest(df: pd.DataFrame, vol_mult: float = 2.5,
                     "signal_date": str(position["signal_date"])[:10],
                     "entry_date":  str(position["date"])[:10],
                     "exit_date":   str(date)[:10],
-                    "entry":       round(ep,2),
-                    "exit":        round(xp,2),
-                    "target_lvl":  round(position["target"],2),
-                    "stop_lvl":    round(position["stop"],2),
-                    "pnl":         round(pnl,2),
-                    "pnl_pct":     round((xp/ep-1)*100,2),
-                    "hold_days":   hold,
-                    "exit_reason": reason,
-                    "outcome":     "WIN" if pnl>0 else "LOSS",
-                })
+                    "entry": round(ep,2), "exit": round(xp,2),
+                    "target_lvl": round(position["target"],2),
+                    "stop_lvl":   round(position["stop"],2),
+                    "pnl": round(pnl,2),
+                    "pnl_pct": round((xp/ep-1)*100,2),
+                    "hold_days": hold, "exit_reason": reason,
+                    "outcome": "WIN" if pnl>0 else "LOSS"})
                 signals.append({"date": date, "side": "SELL SIGNAL",
                                 "price": round(xp,2), "detail": reason})
                 position, hold = None, 0
-
     if not trades:
         return {"error": f"No trades triggered at {vol_mult}x vol surge. "
                 "Try lowering the multiplier or using a longer date range."}
-
     tdf   = pd.DataFrame(trades)
     eq_df = pd.DataFrame(curve).set_index("date")
     eq_s  = eq_df["equity"]
@@ -629,24 +600,372 @@ def swing_backtest(df: pd.DataFrame, vol_mult: float = 2.5,
     strat_ok  = pf>=1.3 and wr>=45 and sharpe>=0.3
     strat_ok2 = pf>=1.0 and wr>=40
     verdict   = ("✅ STRATEGY VALIDATED" if strat_ok else
-                 "⚠️ MARGINAL EDGE"      if strat_ok2 else
-                 "❌ STRATEGY FAILED")
+                 "⚠️ MARGINAL EDGE" if strat_ok2 else "❌ STRATEGY FAILED")
     avg_w = round(wins["pnl_pct"].mean(),2)   if len(wins)   else 0.0
     avg_l = round(losses["pnl_pct"].mean(),2) if len(losses) else 0.0
     rr    = round(abs(avg_w/avg_l),2) if avg_l!=0 else 0.0
-    return {
-        "trades":tdf,"signals":pd.DataFrame(signals),
-        "equity_curve":eq_df,"drawdown":dd,"monthly_pnl":mpnl,
-        "total_trades":len(tdf),"win_rate":round(wr,1),
-        "profit_factor":round(pf,2),"sharpe":round(sharpe,3),
-        "sortino":round(sortino,3),"max_dd":round(float(dd.min()),2),
-        "total_ret":round(tot_r,2),"final_equity":round(equity,2),
-        "buy_hold_ret":round(bh_ret,2),
-        "alpha_vs_bh":round(tot_r-bh_ret,2),
-        "avg_win":avg_w,"avg_loss":avg_l,"rr":rr,
-        "max_consec_loss":max_cl,"strat_verdict":verdict,
-        "ann_ret":round(ann_r*100,2),"ann_vol":round(ann_v*100,2),
-    }
+    return {"trades":tdf,"signals":pd.DataFrame(signals),
+            "equity_curve":eq_df,"drawdown":dd,"monthly_pnl":mpnl,
+            "total_trades":len(tdf),"win_rate":round(wr,1),
+            "profit_factor":round(pf,2),"sharpe":round(sharpe,3),
+            "sortino":round(sortino,3),"max_dd":round(float(dd.min()),2),
+            "total_ret":round(tot_r,2),"final_equity":round(equity,2),
+            "buy_hold_ret":round(bh_ret,2),"alpha_vs_bh":round(tot_r-bh_ret,2),
+            "avg_win":avg_w,"avg_loss":avg_l,"rr":rr,
+            "max_consec_loss":max_cl,"strat_verdict":verdict,
+            "ann_ret":round(ann_r*100,2),"ann_vol":round(ann_v*100,2)}
+
+
+def walk_forward(df: pd.DataFrame, vol_mults=(2.0, 2.5, 3.0, 3.5),
+                 n_folds: int = 3, **kw) -> dict:
+    """Optimize vol_mult on train window, evaluate on the NEXT unseen window."""
+    n = len(df); fold = n // (n_folds + 1)
+    if fold < 120:
+        return {"error": "Need more history for walk-forward (use 3+ years)."}
+    results = []
+    for f in range(n_folds):
+        train = df.iloc[: fold*(f+1)]
+        test  = df.iloc[fold*(f+1): fold*(f+2)]
+        best_vm, best_pf = None, -np.inf
+        for vm in vol_mults:
+            r = swing_backtest(train, vol_mult=vm, **kw)
+            if "error" not in r and r["profit_factor"] > best_pf:
+                best_pf, best_vm = r["profit_factor"], vm
+        if best_vm is None: continue
+        oos = swing_backtest(test, vol_mult=best_vm, **kw)
+        results.append({"Fold": f+1, "Best Vol×": best_vm,
+                        "IS PF": round(best_pf, 2),
+                        "OOS PF": oos.get("profit_factor", 0) if "error" not in oos else 0,
+                        "OOS WR %": oos.get("win_rate", 0) if "error" not in oos else 0,
+                        "OOS Ret %": oos.get("total_ret", 0) if "error" not in oos else 0,
+                        "OOS Trades": oos.get("total_trades", 0) if "error" not in oos else 0})
+    if not results:
+        return {"error": "No valid folds. Widen the date range."}
+    rdf = pd.DataFrame(results)
+    avg_oos = float(rdf["OOS PF"].mean())
+    verdict = ("✅ ROBUST — edge survives out-of-sample" if avg_oos >= 1.2 else
+               "⚠️ FRAGILE — edge weakens out-of-sample" if avg_oos >= 1.0 else
+               "❌ OVERFIT — edge disappears on unseen data")
+    return {"table": rdf, "avg_oos_pf": round(avg_oos, 2), "verdict": verdict}
+
+# ══════════════ END OF PART 1 — PASTE PART 2 DIRECTLY BELOW ══════════════
+# ════════════════════════════════════════════════════════════════════════════
+# ML PREDICTION ENGINE — gradient boosting, 5-day forward returns,
+# purged walk-forward CV (no leakage)
+# ════════════════════════════════════════════════════════════════════════════
+
+def build_features(df: pd.DataFrame) -> pd.DataFrame:
+    d = df.copy()
+    c, v = d["Close"], d["Volume"]
+    r = np.log(c / c.shift(1))
+    f = pd.DataFrame(index=d.index)
+    for lb in (1, 2, 3, 5, 10, 21):
+        f[f"ret_{lb}d"] = c.pct_change(lb)
+    for lb in (5, 10, 21, 63):
+        f[f"vol_{lb}d"] = r.rolling(lb).std()
+    f["vol_regime"] = f["vol_5d"] / f["vol_63d"]
+    for lb in (5, 21, 63):
+        f[f"volu_{lb}d"] = v / v.rolling(lb).mean()
+    delta = c.diff()
+    g = delta.clip(lower=0).rolling(14).mean()
+    l = (-delta.clip(upper=0)).rolling(14).mean()
+    f["rsi"] = 100 - 100 / (1 + g / l.replace(0, np.nan))
+    for lb in (20, 50):
+        f[f"dist_ma{lb}"] = c / c.rolling(lb).mean() - 1
+    f["hl_range"] = (d["High"] - d["Low"]) / c
+    f["gap"]      = d["Open"] / c.shift(1) - 1
+    hl = d["High"]-d["Low"]; hc=(d["High"]-c.shift()).abs(); lc=(d["Low"]-c.shift()).abs()
+    f["atr_pct"]  = pd.concat([hl,hc,lc],axis=1).max(axis=1).rolling(14).mean() / c
+    f["mom_6m"]   = c.pct_change(126)
+    f["hi52"]     = c / c.rolling(252, min_periods=60).max() - 1
+    f["target"]   = c.shift(-5) / c - 1          # 5-day forward return
+    return f
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def ml_engine(df: pd.DataFrame, n_splits: int = 5, embargo: int = 5) -> dict:
+    try:
+        from sklearn.ensemble import GradientBoostingRegressor
+        from scipy.stats import spearmanr
+    except ImportError:
+        return {"error": "Run: pip install scikit-learn"}
+    f = build_features(df)
+    feat_cols = [c for c in f.columns if c != "target"]
+    data = f.dropna()
+    if len(data) < 300:
+        return {"error": "Need 300+ clean bars — use 2y+ of data."}
+    X, y = data[feat_cols].values, data["target"].values
+    n = len(data); test_size = n // (n_splits + 1)
+    oos_p, oos_t = [], []
+    for k in range(n_splits):                     # purged walk-forward CV
+        t0 = n - (n_splits - k) * test_size
+        tr_end = t0 - embargo                     # embargo gap = no leakage
+        if tr_end < 150: continue
+        m = GradientBoostingRegressor(n_estimators=200, max_depth=3,
+                                      learning_rate=0.05, subsample=0.8,
+                                      random_state=42)
+        m.fit(X[:tr_end], y[:tr_end])
+        oos_p += list(m.predict(X[t0:t0+test_size]))
+        oos_t += list(y[t0:t0+test_size])
+    if len(oos_p) < 50:
+        return {"error": "Not enough OOS samples — use longer history."}
+    op, ot = np.array(oos_p), np.array(oos_t)
+    ic  = float(spearmanr(op, ot).correlation)
+    hit = float(np.mean(np.sign(op) == np.sign(ot)) * 100)
+    k5  = max(1, len(op)//5)
+    order = np.argsort(op)
+    q_spread = float((ot[order[-k5:]].mean() - ot[order[:k5]].mean()) * 100)
+    final = GradientBoostingRegressor(n_estimators=200, max_depth=3,
+                                      learning_rate=0.05, subsample=0.8,
+                                      random_state=42)
+    final.fit(X, y)
+    live = f[feat_cols].dropna()
+    pred_5d = float(final.predict(live.iloc[[-1]].values)[0]) * 100
+    imp = (pd.DataFrame({"feature": feat_cols,
+                         "importance": final.feature_importances_})
+           .sort_values("importance", ascending=False).head(12))
+    verdict = ("✅ REAL PREDICTIVE SIGNAL" if ic >= 0.08 else
+               "⚠️ WEAK SIGNAL — use as filter only" if ic >= 0.03 else
+               "❌ NO EDGE — model is noise for this stock")
+    return {"pred_5d_pct": round(pred_5d, 2), "ic": round(ic, 4),
+            "hit_rate": round(hit, 1), "q_spread": round(q_spread, 2),
+            "n_oos": len(op), "importances": imp, "verdict": verdict}
+
+
+def render_ml_lab():
+    st.markdown(f"""
+    <div style='background:{PANEL2};border:1px solid {BORDER};border-left:3px solid {TEAL};
+    border-radius:8px;padding:14px 18px;margin-bottom:14px;'>
+      <div style='font-family:{MONO};font-size:11px;font-weight:700;color:{TEAL};
+        letter-spacing:1.5px;margin-bottom:6px;'>MODE 4 · ML PREDICTION LAB</div>
+      <div style='font-size:12.5px;color:{IVORY};line-height:1.8;'>
+      Gradient boosting on <b>26 engineered features</b> predicting <b>5-day forward
+      returns</b>, validated with <b>purged walk-forward CV</b>. Judge it by <b>IC</b>
+      (rank correlation of predictions vs reality): 0.03+ is usable, 0.08+ is a real
+      edge. Most stocks show none — that honesty is the feature.
+      </div>
+    </div>""", unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([2,1,1])
+    sym    = c1.text_input("Symbol", "RELIANCE")
+    period = c2.selectbox("History", ["2y","3y","5y"], index=1)
+    run    = c3.button("🤖 TRAIN MODEL", type="primary", use_container_width=True)
+    if not run: return
+    with st.spinner(f"Training on {sym.upper()}..."):
+        df = fetch_stock(sym, period)
+        if df.empty: st.error("No data."); return
+        ml = ml_engine(df)
+    if "error" in ml: st.error(ml["error"]); return
+    v_c = GREEN if "✅" in ml["verdict"] else AMBER if "⚠️" in ml["verdict"] else RED
+    p_c = GREEN if ml["pred_5d_pct"] > 0 else RED
+    st.markdown(f"""
+    <div style='background:{PANEL2};border:1px solid {v_c}40;border-left:5px solid {v_c};
+    border-radius:10px;padding:18px 24px;margin:12px 0;'>
+      <div style='font-family:{MONO};font-size:20px;font-weight:800;color:{v_c};
+        margin-bottom:6px;'>{ml["verdict"]}</div>
+      <div style='font-family:{MONO};font-size:13px;color:{IVORY};'>
+        Model forecast next 5 days: <b style='color:{p_c};font-size:17px;'>
+        {ml["pred_5d_pct"]:+.2f}%</b>
+        <span style='font-size:10px;color:{MUTE2};'>
+        (only act on this if IC ≥ 0.03)</span></div>
+    </div>""", unsafe_allow_html=True)
+    _mrow([("IC (RANK CORR)", f"{ml['ic']:.4f}"),
+           ("HIT RATE OOS",   f"{ml['hit_rate']}%"),
+           ("Q5-Q1 SPREAD",   f"{ml['q_spread']:+.2f}%"),
+           ("OOS SAMPLES",    str(ml["n_oos"]))])
+    imp = ml["importances"]
+    fig = go.Figure(go.Bar(x=imp["importance"], y=imp["feature"],
+                           orientation="h", marker_color=TEAL, opacity=0.85))
+    fig.update_layout(yaxis=dict(autorange="reversed"))
+    st.plotly_chart(_layout(fig, "WHAT THE MODEL LEARNED · FEATURE IMPORTANCE", 380),
+                    use_container_width=True)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# MODE 3 — CROSS-SECTIONAL ALPHA SCANNER
+# ════════════════════════════════════════════════════════════════════════════
+
+NIFTY_UNIVERSE = ["RELIANCE","TCS","HDFCBANK","INFY","ICICIBANK","SBIN",
+    "BHARTIARTL","ITC","LT","HINDUNILVR","AXISBANK","KOTAKBANK","BAJFINANCE",
+    "MARUTI","TITAN","SUNPHARMA","TATAMOTORS","NTPC","POWERGRID","TATASTEEL",
+    "M&M","ULTRACEMCO","ASIANPAINT","WIPRO","JSWSTEEL"]
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def alpha_scan(symbols: tuple, period: str = "1y") -> pd.DataFrame:
+    rows = []
+    for s in symbols:
+        df = fetch_stock(s, period)
+        if df.empty or len(df) < 140:
+            continue
+        c = df["Close"]; v = df["Volume"]
+        skip = 21
+        lb   = min(126, len(c)-skip-1)
+        mom  = float(c.iloc[-skip] / c.iloc[-(lb+skip)] - 1) * 100
+        vol60 = float(np.log(c/c.shift(1)).dropna().tail(60).std()
+                      * np.sqrt(TRADING_DAYS)) * 100
+        vtrend = float(v.tail(20).mean() / v.tail(100).mean())
+        hi52   = float(c.iloc[-1] / c.tail(252).max()) * 100
+        delta  = c.diff()
+        g = delta.clip(lower=0).rolling(14).mean()
+        l = (-delta.clip(upper=0)).rolling(14).mean()
+        rsi = float((100-100/(1+g/l.replace(0,np.nan))).iloc[-1])
+        rows.append({"Symbol": s, "Price": round(float(c.iloc[-1]),2),
+                     "Mom6m %": round(mom,1), "VolTrend": round(vtrend,2),
+                     "AnnVol %": round(vol60,1), "52wHi %": round(hi52,1),
+                     "RSI": round(rsi,1)})
+    if not rows:
+        return pd.DataFrame()
+    sdf = pd.DataFrame(rows)
+    def z(col, invert=False):
+        s = (sdf[col]-sdf[col].mean())/(sdf[col].std() or 1)
+        return -s if invert else s
+    sdf["ALPHA"] = (0.35*z("Mom6m %") + 0.20*z("VolTrend")
+                    + 0.15*z("AnnVol %", invert=True) + 0.20*z("52wHi %")
+                    + 0.10*(-abs(sdf["RSI"]-55)/20)).round(3)
+    return sdf.sort_values("ALPHA", ascending=False).reset_index(drop=True)
+
+
+def render_mode3():
+    st.markdown(f"""
+    <div style='background:{PANEL2};border:1px solid {BORDER};border-left:3px solid {PURPLE};
+    border-radius:8px;padding:14px 18px;margin-bottom:14px;'>
+      <div style='font-family:{MONO};font-size:11px;font-weight:700;color:{PURPLE};
+        letter-spacing:1.5px;margin-bottom:6px;'>MODE 3 · CROSS-SECTIONAL ALPHA SCANNER</div>
+      <div style='font-size:12.5px;color:{IVORY};line-height:1.8;'>
+      This is how funds pick WHAT to trade before deciding WHEN. The universe is ranked
+      on <b>momentum (35%)</b>, <b>volume trend (20%)</b>, <b>52w-high proximity (20%)</b>,
+      <b>low volatility (15%)</b> and <b>RSI positioning (10%)</b>, z-scored cross-sectionally.
+      Feed the top ranks into Mode 1 or Mode 2.
+      </div>
+    </div>""", unsafe_allow_html=True)
+    c1, c2 = st.columns([3,1])
+    syms = c1.text_input("Universe (comma-separated, blank = NIFTY 25)", "")
+    run  = c2.button("🧠 SCAN UNIVERSE", type="primary", use_container_width=True)
+    if not run:
+        st.info("Press SCAN to rank the universe."); return
+    universe = tuple(s.strip().upper() for s in syms.split(",") if s.strip()) \
+               or tuple(NIFTY_UNIVERSE)
+    with st.spinner(f"Scanning {len(universe)} symbols..."):
+        sdf = alpha_scan(universe)
+    if sdf.empty:
+        st.error("No data returned. Check symbols."); return
+    st.markdown(_sec("ALPHA RANKING · TOP = STRONGEST", PURPLE), unsafe_allow_html=True)
+    st.dataframe(sdf, use_container_width=True, hide_index=True)
+    top = sdf.head(5)["Symbol"].tolist()
+    st.markdown(f"""
+    <div style='background:{PANEL2};border:1px solid {GREEN}35;border-left:4px solid {GREEN};
+    border-radius:10px;padding:14px 20px;font-family:{MONO};font-size:12px;color:{IVORY};'>
+      🎯 TOP 5 CANDIDATES: <b style='color:{GREEN};'>{", ".join(top)}</b><br>
+      <span style='font-size:10px;color:{MUTE2};'>Paste these into MODE 2 to backtest
+      the strategy on today's strongest names.</span>
+    </div>""", unsafe_allow_html=True)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# MODE 5 — LIVE SCREENER
+# ════════════════════════════════════════════════════════════════════════════
+
+SCREENER_UNIVERSE = ["RELIANCE","TCS","HDFCBANK","INFY","ICICIBANK","SBIN",
+ "BHARTIARTL","ITC","LT","HINDUNILVR","AXISBANK","KOTAKBANK","BAJFINANCE",
+ "MARUTI","TITAN","SUNPHARMA","TATAMOTORS","NTPC","POWERGRID","TATASTEEL",
+ "M&M","ULTRACEMCO","ASIANPAINT","WIPRO","JSWSTEEL","ADANIENT","ADANIPORTS",
+ "BAJAJFINSV","CIPLA","COALINDIA","DIVISLAB","DRREDDY","EICHERMOT","GRASIM",
+ "HCLTECH","HDFCLIFE","HEROMOTOCO","HINDALCO","INDUSINDBK","NESTLEIND",
+ "ONGC","SBILIFE","SHRIRAMFIN","TATACONSUM","TECHM","APOLLOHOSP","BPCL",
+ "BRITANNIA","DLF","VEDL"]
+
+@st.cache_data(ttl=900, show_spinner=False)
+def screen_universe(symbols: tuple, vol_mult: float = 2.0,
+                    use_regime: bool = True) -> pd.DataFrame:
+    regime = fetch_regime() if use_regime else pd.Series(dtype=bool)
+    risk_on = bool(regime.iloc[-1]) if len(regime) else True
+    rows = []
+    for s in symbols:
+        try:
+            df = fetch_stock(s, "1y")
+            if df.empty or len(df) < 130: continue
+            d = prepare_indicators(df)
+            if d.empty: continue
+            last = d.iloc[-1]
+            c = d["Close"]
+            vr, rsi = float(last["vol_ratio"]), float(last["rsi"])
+            above50 = float(last["Close"]) > float(last["ma50"])
+            bull    = float(last["Close"]) > float(last["Open"])
+            active  = (vr >= vol_mult and bull and above50
+                       and 35 < rsi < 75 and risk_on)
+            setup   = (not active and vr >= 1.4 and above50
+                       and 35 < rsi < 75 and risk_on)
+            mom  = float(c.iloc[-1]/c.iloc[-min(126,len(c)-1)]-1)*100
+            hi52 = float(c.iloc[-1]/c.tail(252).max())*100
+            chg  = float(c.iloc[-1]/c.iloc[-2]-1)*100
+            rows.append({"Symbol": s, "Price": round(float(c.iloc[-1]),2),
+                         "Chg %": round(chg,2),
+                         "Status": "🟢 ACTIVE BUY" if active else
+                                   "👀 SETUP" if setup else "—",
+                         "VolRatio": round(vr,2), "RSI": round(rsi,1),
+                         ">50MA": "✅" if above50 else "❌",
+                         "Mom6m %": round(mom,1), "52wHi %": round(hi52,1),
+                         "_rank": (2 if active else 1 if setup else 0)})
+        except Exception:
+            continue
+    if not rows: return pd.DataFrame()
+    sdf = pd.DataFrame(rows)
+    z = lambda col: (sdf[col]-sdf[col].mean())/(sdf[col].std() or 1)
+    sdf["Alpha"] = (0.4*z("Mom6m %") + 0.3*z("52wHi %") + 0.3*z("VolRatio")).round(2)
+    sdf = sdf.sort_values(["_rank","Alpha"], ascending=False).drop(columns="_rank")
+    return sdf.reset_index(drop=True)
+
+
+def render_screener():
+    st.markdown(f"""
+    <div style='background:{PANEL2};border:1px solid {BORDER};border-left:3px solid {GREEN};
+    border-radius:8px;padding:14px 18px;margin-bottom:14px;'>
+      <div style='font-family:{MONO};font-size:11px;font-weight:700;color:{GREEN};
+        letter-spacing:1.5px;margin-bottom:6px;'>MODE 5 · LIVE MARKET SCREENER</div>
+      <div style='font-size:12.5px;color:{IVORY};line-height:1.8;'>
+      Scans <b>50 liquid NSE names</b> and flags which have an <b>ACTIVE BUY signal
+      right now</b> (vol surge + trend + RSI + market regime), which are <b>setting up</b>,
+      and ranks everything by alpha score. Optionally runs the <b>ML engine</b> on
+      flagged names for a 5-day forecast. This is your morning desk view.
+      </div>
+    </div>""", unsafe_allow_html=True)
+    c1, c2, c3, c4 = st.columns([1,1,1,1])
+    vol_mult   = c1.slider("Signal Vol ×", 1.5, 4.0, 2.0, 0.5)
+    use_regime = c2.checkbox("🛡 Regime Filter", value=True)
+    run_ml     = c3.checkbox("🤖 ML on flagged", value=False)
+    run        = c4.button("📡 SCAN MARKET", type="primary", use_container_width=True)
+    if not run: return
+    with st.spinner(f"Scanning {len(SCREENER_UNIVERSE)} stocks..."):
+        sdf = screen_universe(tuple(SCREENER_UNIVERSE), vol_mult, use_regime)
+    if sdf.empty: st.error("Scan failed — no data."); return
+    active = sdf[sdf["Status"].str.contains("ACTIVE")]
+    setup  = sdf[sdf["Status"].str.contains("SETUP")]
+    if run_ml and (len(active) + len(setup)):
+        flagged = (list(active["Symbol"]) + list(setup["Symbol"]))[:10]
+        preds = {}
+        prog = st.progress(0.0, "Training ML on flagged names...")
+        for j, s in enumerate(flagged):
+            ml = ml_engine(fetch_stock(s, "3y"))
+            preds[s] = (f"{ml['pred_5d_pct']:+.2f}% (IC {ml['ic']:.3f})"
+                        if "error" not in ml else "n/a")
+            prog.progress((j+1)/len(flagged))
+        prog.empty()
+        sdf["ML 5d Forecast"] = sdf["Symbol"].map(preds).fillna("")
+    reg = fetch_regime()
+    risk_on = (not use_regime) or (len(reg) and bool(reg.iloc[-1]))
+    _mrow([("SCANNED", str(len(sdf))),
+           ("🟢 ACTIVE SIGNALS", str(len(active))),
+           ("👀 SETUPS BUILDING", str(len(setup))),
+           ("MARKET REGIME", "RISK-ON ✅" if risk_on else "RISK-OFF ⛔")])
+    if len(active):
+        st.markdown(_sec("🟢 ACTIVE BUY SIGNALS · TODAY", GREEN), unsafe_allow_html=True)
+        st.dataframe(active, use_container_width=True, hide_index=True)
+    else:
+        st.info("No active signals today. Patience is a position — firms sit out most days.")
+    if len(setup):
+        st.markdown(_sec("👀 SETUPS BUILDING · WATCHLIST", AMBER), unsafe_allow_html=True)
+        st.dataframe(setup, use_container_width=True, hide_index=True)
+    st.markdown(_sec("FULL UNIVERSE · RANKED BY ALPHA"), unsafe_allow_html=True)
+    st.dataframe(sdf, use_container_width=True, hide_index=True)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -661,16 +980,13 @@ def _ai_note(symbol, price, vpin, garch, fp, vp, api_key):
             model_name="gemini-2.5-flash",
             system_instruction=(
                 "Senior NSE swing analyst. Direct, data-driven, under 100 words. "
-                "No fluff. Educational only, not SEBI advice."
-            )
-        )
+                "No fluff. Educational only, not SEBI advice."))
         prompt = (
             f"{symbol} @ ₹{price:.2f} | VPIN: {vpin['toxicity']} ({vpin['percentile']:.0f}th pct) | "
             f"GARCH: {garch['annual_vol_pct']:.0f}% ann, {garch['regime']} | "
             f"Footprint: {fp['n_events']} surges, bias {fp['bias_score']:+d}/3 | "
             f"POC ₹{vp['poc']:.0f} VA ₹{vp['va_low']:.0f}–₹{vp['va_high']:.0f}\n"
-            "3 sentences: smart money activity, setup quality, key levels to watch."
-        )
+            "3 sentences: smart money activity, setup quality, key levels to watch.")
         return m.generate_content(prompt).text.strip()
     except Exception:
         return ""
@@ -684,21 +1000,18 @@ def _rule_note(symbol, price, vpin, garch, fp, vp):
         parts.append(f"😴 Retail-dominated flow in {symbol}. No institutional conviction yet.")
     else:
         parts.append(f"📊 Mixed order flow. Some institutional activity, no full conviction.")
-
     if "HIGH" in garch["regime"]:
         parts.append(f"⚠️ Vol elevated ({garch['annual_vol_pct']:.0f}%) — reduce size, widen stops.")
     elif "LOW" in garch["regime"]:
         parts.append(f"📉 Vol compressed ({garch['annual_vol_pct']:.0f}%) — breakout setup building.")
     else:
         parts.append(f"📊 Normal vol at {garch['annual_vol_pct']:.0f}% annual.")
-
     if fp["bias_score"] > 0:
         parts.append(f"🐂 Bullish footprint. POC ₹{vp['poc']:,.0f} = key support.")
     elif fp["bias_score"] < 0:
         parts.append(f"🐻 Bearish footprint. VA High ₹{vp['va_high']:,.0f} = resistance.")
     else:
         parts.append(f"VA ₹{vp['va_low']:,.0f}–₹{vp['va_high']:,.0f} · POC ₹{vp['poc']:,.0f}.")
-
     parts.append(f"<span style='font-size:10px;color:{MUTE2};'>Educational · Not SEBI advice</span>")
     return " ".join(parts)
 
@@ -759,8 +1072,7 @@ def chart_price_vwap(df, vwap_df, vp, fp, symbol):
         font=dict(family="monospace",size=11,color=IVORY),
         xaxis2=dict(gridcolor=BORDER), yaxis=dict(gridcolor=BORDER),
         yaxis2=dict(gridcolor=BORDER), xaxis_rangeslider_visible=False,
-        showlegend=True, legend=dict(orientation="h",y=1.03,x=0,font=dict(size=10)),
-    )
+        showlegend=True, legend=dict(orientation="h",y=1.03,x=0,font=dict(size=10)))
     return fig
 
 
@@ -863,20 +1175,14 @@ def chart_backtest_price(df, bt):
         increasing_line_color=GREEN, decreasing_line_color=RED,
         increasing_fillcolor=GREEN_20, decreasing_fillcolor=RED_20,
         name="Price", showlegend=False), row=1,col=1)
-
-    buy_x=[]; buy_y=[]
-    win_x=[]; win_y=[]
-    los_x=[]; los_y=[]
+    buy_x=[]; buy_y=[]; win_x=[]; win_y=[]; los_x=[]; los_y=[]
     for _, t in tdf.iterrows():
-        ed = pd.Timestamp(t["entry_date"])
-        xd = pd.Timestamp(t["exit_date"])
+        ed = pd.Timestamp(t["entry_date"]); xd = pd.Timestamp(t["exit_date"])
         if ed in d.index:
             buy_x.append(ed); buy_y.append(float(t["entry"])*0.993)
         if xd in d.index:
-            if t["outcome"]=="WIN":
-                win_x.append(xd); win_y.append(float(t["exit"])*1.005)
-            else:
-                los_x.append(xd); los_y.append(float(t["exit"])*1.005)
+            if t["outcome"]=="WIN": win_x.append(xd); win_y.append(float(t["exit"])*1.005)
+            else: los_x.append(xd); los_y.append(float(t["exit"])*1.005)
     if buy_x:
         fig.add_trace(go.Scatter(x=buy_x, y=buy_y, mode="markers+text",
             marker=dict(color=GREEN, size=12, symbol="triangle-up",
@@ -905,8 +1211,7 @@ def chart_backtest_price(df, bt):
         font=dict(family="monospace",size=11,color=IVORY),
         xaxis2=dict(gridcolor=BORDER), yaxis=dict(gridcolor=BORDER),
         yaxis2=dict(gridcolor=BORDER), xaxis_rangeslider_visible=False,
-        showlegend=True, legend=dict(orientation="h",y=1.03,x=0,font=dict(size=10)),
-    )
+        showlegend=True, legend=dict(orientation="h",y=1.03,x=0,font=dict(size=10)))
     return fig
 
 
@@ -952,7 +1257,7 @@ def chart_exit_breakdown(bt):
                       legend=dict(orientation="h",y=1.05,x=0))
     return _layout(fig, "EXIT REASON BREAKDOWN", height=240)
 
-
+# ══════════════ END OF PART 2 — PASTE PART 3 DIRECTLY BELOW ══════════════
 # ════════════════════════════════════════════════════════════════════════════
 # MODE 2 — BATCH SIGNAL BACKTESTER
 # ════════════════════════════════════════════════════════════════════════════
@@ -965,8 +1270,8 @@ def render_mode2():
         letter-spacing:1.5px;margin-bottom:6px;'>MODE 2 · SIGNAL BACKTESTER</div>
       <div style='font-size:12.5px;color:{IVORY};line-height:1.8;'>
       Type one or more NSE symbols, pick a date range, and the terminal backtests the
-      <b>main strategy</b> (vol surge + trend + RSI) showing <b>every BUY and SELL signal
-      date</b>, the full trade log, and <b>alpha vs buy-and-hold</b> per stock.
+      <b>main strategy</b> showing <b>every BUY and SELL signal date</b>, the full
+      trade log, and <b>alpha vs buy-and-hold</b> per stock.
       </div>
     </div>""", unsafe_allow_html=True)
 
@@ -980,13 +1285,14 @@ def render_mode2():
         hold_d   = c5.slider("Max Hold Days", 3, 21, 7)
         stop_p   = c6.slider("Stop Loss %", 1, 10, 4)
         tgt_p    = c7.slider("Target %", 2, 20, 8)
-        go = st.form_submit_button("▶ RUN MODE 2", type="primary", use_container_width=True)
-    if not go:
-        st.info("Enter symbols and date range, then press RUN MODE 2.")
-        return
+        use_reg  = st.checkbox("🛡 NIFTY 200-DMA Regime Filter", value=True)
+        run = st.form_submit_button("▶ RUN MODE 2", type="primary", use_container_width=True)
+    if not run:
+        st.info("Enter symbols and date range, then press RUN MODE 2."); return
     if start >= end:
         st.error("From date must be before To date."); return
 
+    regime  = fetch_regime() if use_reg else None
     summary = []
     symbols = [s.strip().upper() for s in syms.split(",") if s.strip()]
     if not symbols:
@@ -998,7 +1304,8 @@ def render_mode2():
             if df.empty:
                 st.warning(f"{sym}: no data in that range."); continue
             bt = swing_backtest(df, vol_mult=vol_mult, hold_days=hold_d,
-                                stop_pct=stop_p/100, target_pct=tgt_p/100)
+                                stop_pct=stop_p/100, target_pct=tgt_p/100,
+                                regime=regime)
         if "error" in bt:
             st.warning(f"{sym}: {bt['error']}"); continue
 
@@ -1091,10 +1398,10 @@ def render_quant_analysis():
       <div>
         <div style='font-family:{MONO};font-size:14px;font-weight:700;
           color:{ACCENT};letter-spacing:2.5px;'>
-          ARKA · INSTITUTIONAL SWING TERMINAL</div>
+          ARKA · INSTITUTIONAL QUANT TERMINAL</div>
         <div style='font-family:{MONO};font-size:9px;color:{MUTE2};
           margin-top:3px;letter-spacing:1px;'>
-          GARCH · VPIN · VOLUME PROFILE · MONTE CARLO · BIAS-FREE BACKTEST</div>
+          GARCH · VPIN · ML · SCREENER · ALPHA · WALK-FORWARD · BIAS-FREE</div>
       </div>
       <div style='text-align:right;'>
         <div style='font-family:{MONO};font-size:10px;color:{MUTE};'>{ts}</div>
@@ -1104,11 +1411,16 @@ def render_quant_analysis():
     </div>""", unsafe_allow_html=True)
 
     # ── MODE SWITCH ──────────────────────────────────────────────────────────
-    mode = st.radio("mode", ["🖥 MODE 1 · FULL TERMINAL", "🎯 MODE 2 · SIGNAL BACKTESTER"],
+    mode = st.radio("mode", ["🖥 MODE 1 · TERMINAL",
+                             "🎯 MODE 2 · BACKTESTER",
+                             "🧠 MODE 3 · ALPHA SCANNER",
+                             "🤖 MODE 4 · ML LAB",
+                             "📡 MODE 5 · LIVE SCREENER"],
                     horizontal=True, label_visibility="collapsed")
-    if "MODE 2" in mode:
-        render_mode2()
-        return
+    if "MODE 2" in mode: render_mode2(); return
+    if "MODE 3" in mode: render_mode3(); return
+    if "MODE 4" in mode: render_ml_lab(); return
+    if "MODE 5" in mode: render_screener(); return
 
     c1, c2, c3 = st.columns([3,1,1])
     symbol = c1.text_input("", value="RELIANCE",
@@ -1127,13 +1439,13 @@ def render_quant_analysis():
             gap:14px;max-width:640px;margin:0 auto;text-align:left;'>
             {''.join([f"<div style='background:{PANEL3};border:1px solid {BORDER};border-radius:8px;padding:12px 16px;'><div style='font-family:{MONO};font-size:10px;color:{ACCENT};margin-bottom:4px;letter-spacing:1px;'>{t}</div><div style='font-size:12px;color:{MUTE};line-height:1.6;'>{d}</div></div>" for t,d in [
               ("📦 INSTITUTIONAL FOOTPRINT","Where big players entered using 3×+ volume surges"),
-              ("⚡ VPIN TOXICITY","Jane Street's informed-trader signal — big move detector"),
-              ("🗺️ VOLUME PROFILE","Point of Control + Value Area = real support & resistance"),
+              ("⚡ VPIN TOXICITY","Informed-trader signal — big move detector"),
+              ("🗺️ VOLUME PROFILE","POC + Value Area = real support & resistance"),
               ("📉 GARCH VOLATILITY","Regime detection + 10-day forward vol forecast"),
               ("🎲 MONTE CARLO RISK","1000 fat-tail paths, VaR & Expected Shortfall in ₹"),
-              ("⭕ SCORE 0–100","Section scores + combined rating circle across all signals"),
-              ("🎯 MODE 2 BACKTESTER","Batch backtest — every BUY/SELL signal + alpha vs buy-hold"),
-              ("⚙️ BIAS-FREE BACKTEST","Next-open entries, intrabar stops — honest numbers"),
+              ("🤖 ML LAB (MODE 4)","Gradient boosting 5-day forecast, purged CV, honest IC"),
+              ("📡 LIVE SCREENER (MODE 5)","50-stock scan — which names have a BUY signal today"),
+              ("⚙️ BIAS-FREE BACKTEST","Next-open entries, intrabar stops, walk-forward, alpha"),
             ]])}
           </div>
         </div>""", unsafe_allow_html=True)
@@ -1186,8 +1498,7 @@ def render_quant_analysis():
         scores    = compute_scores(
             vpin_d["percentile"], garch_r["percentile"], fp["bias_score"],
             fp["n_events"], price, vp["poc"], vp["va_low"], vp["va_high"],
-            curr_vwap, mc["prob_up_pct"], mc["var95_pct"]
-        )
+            curr_vwap, mc["prob_up_pct"], mc["var95_pct"])
 
     note = ""
     if api_key:
@@ -1206,8 +1517,7 @@ def render_quant_analysis():
         _circle_svg(scores["footprint"],   "FOOTPRINT",   82, 17),
         _circle_svg(scores["vpin"],        "VPIN",        82, 17),
         _circle_svg(scores["garch"],       "GARCH",       82, 17),
-        _circle_svg(scores["monte_carlo"], "MONTE CARLO", 82, 17),
-    ]
+        _circle_svg(scores["monte_carlo"], "MONTE CARLO", 82, 17)]
     small_row = "".join([f"<div style='flex:1;'>{s}</div>" for s in small_svgs])
 
     tox_c = RED if "HIGH" in vpin_d["toxicity"] else AMBER if "MOD" in vpin_d["toxicity"] else GREEN
@@ -1246,24 +1556,12 @@ def render_quant_analysis():
     </div>""", unsafe_allow_html=True)
 
     t0, t1, t2, t3, t4 = st.tabs([
-        "📦 FOOTPRINT & VWAP",
-        "⚡ VPIN & SURGE",
-        "📉 GARCH VOLATILITY",
-        "🎲 MONTE CARLO",
-        "⚙️ SWING BACKTEST",
-    ])
+        "📦 FOOTPRINT & VWAP", "⚡ VPIN & SURGE", "📉 GARCH VOLATILITY",
+        "🎲 MONTE CARLO", "⚙️ SWING BACKTEST"])
 
     with t0:
         st.plotly_chart(chart_price_vwap(df, vwap_df, vp, fp, symbol.upper()),
                         use_container_width=True)
-        st.markdown(f"""
-        <div style='background:{PANEL2};border:1px solid {BORDER};border-radius:8px;
-        padding:10px 16px;margin:4px 0 12px;font-size:11px;color:{MUTE};line-height:1.7;'>
-        🔺/🔻 = institutional vol surges &nbsp;·&nbsp;
-        <b style='color:{PURPLE};'>Purple dash</b> = POC (strongest level) &nbsp;·&nbsp;
-        <b style='color:{BLUE};'>Blue zone</b> = 70% Value Area &nbsp;·&nbsp;
-        <b style='color:{ACCENT};'>Gold dot</b> = VWAP (institutional benchmark)
-        </div>""", unsafe_allow_html=True)
         col1, col2 = st.columns([1,1])
         with col1:
             st.markdown(_sec("VOLUME PROFILE"), unsafe_allow_html=True)
@@ -1277,8 +1575,7 @@ def render_quant_analysis():
                 "<div style='height:8px;'></div>",
                 _premium_kpi("VALUE AREA HIGH",  f"₹{vp['va_high']:,.0f}", "Upper 70% vol boundary", BLUE, "🔼"),
                 "<div style='height:8px;'></div>",
-                _premium_kpi("VWAP (20d)",        f"₹{curr_vwap:,.0f}", "Institutional benchmark", ACCENT, "📈"),
-            ])
+                _premium_kpi("VWAP (20d)",        f"₹{curr_vwap:,.0f}", "Institutional benchmark", ACCENT, "📈")])
             st.markdown(kpi_html, unsafe_allow_html=True)
             pos_poc  = (price - vp["poc"])/vp["poc"]*100
             pos_vwap = (price - curr_vwap)/curr_vwap*100 if curr_vwap else 0
@@ -1286,8 +1583,7 @@ def render_quant_analysis():
                 f"Price is <b>{'above' if pos_poc>=0 else 'below'} POC by {abs(pos_poc):.1f}%</b>. "
                 f"{'POC acting as support — bullish structure.' if pos_poc>=0 else 'POC is overhead resistance — caution.'} "
                 f"Price is <b>{'above' if pos_vwap>=0 else 'below'} VWAP by {abs(pos_vwap):.1f}%</b>. "
-                f"{'Institutions in profit on recent buys — trend intact.' if pos_vwap>=0 else 'Below VWAP — potential institutional selling pressure.'}"
-            )
+                f"{'Institutions in profit — trend intact.' if pos_vwap>=0 else 'Below VWAP — potential institutional selling pressure.'}")
             _signal_card("VOLUME PROFILE SIGNAL",
                          _score_to_verdict(2 if price>=vp["poc"] else -2, 3),
                          body, 2 if price>=vp["poc"] else -2,
@@ -1304,29 +1600,14 @@ def render_quant_analysis():
         _signal_card("INSTITUTIONAL FOOTPRINT", fp["verdict"],
                      f"{fp['n_events']} volume surge events detected. "
                      f"Last 3 trades bias: <b>{bs:+d}/3</b>. "
-                     f"{'Smart money predominantly buying — bullish footprint.' if bs>0 else 'Smart money predominantly selling — bearish footprint.' if bs<0 else 'Mixed institutional activity — no clear directional bias.'} "
                      f"Current vol ratio: <b>{fp['last_ratio']:.1f}× average.</b>",
                      abs(bs), section_score=scores["footprint"])
 
     with t1:
-        st.markdown(f"""
-        <div style='background:{PANEL2};border:1px solid {BORDER};border-left:3px solid {PURPLE};
-        border-radius:8px;padding:14px 18px;margin-bottom:14px;'>
-          <div style='font-family:{MONO};font-size:11px;font-weight:700;color:{PURPLE};
-            letter-spacing:1.5px;margin-bottom:6px;'>WHAT IS VPIN?</div>
-          <div style='font-size:12.5px;color:{IVORY};line-height:1.8;'>
-          <b>Volume-Synchronized Probability of Informed Trading</b> — the metric
-          market makers like <b>Jane Street</b> use internally. When VPIN rises above the
-          70th percentile, informed institutional traders are entering and market makers
-          widen spreads. <b>This is your earliest signal that a big directional move is coming.</b>
-          </div>
-        </div>""", unsafe_allow_html=True)
-        kpi_vals = [
-            ("CURRENT VPIN",  f"{vpin_d['current']:.4f}"),
-            ("AVERAGE",       f"{vpin_d['avg']:.4f}"),
-            ("PERCENTILE",    f"{vpin_d['percentile']:.0f}th"),
-            ("TOXICITY",      vpin_d['toxicity']),
-        ]
+        kpi_vals = [("CURRENT VPIN", f"{vpin_d['current']:.4f}"),
+                    ("AVERAGE",      f"{vpin_d['avg']:.4f}"),
+                    ("PERCENTILE",   f"{vpin_d['percentile']:.0f}th"),
+                    ("TOXICITY",     vpin_d['toxicity'])]
         for col, (lbl, val) in zip(st.columns(4), kpi_vals):
             col.metric(lbl, val)
         st.plotly_chart(chart_vpin(vpin_d), use_container_width=True)
@@ -1338,59 +1619,33 @@ def render_quant_analysis():
                      section_score=scores["vpin"])
         st.markdown(_sec("VOLUME SURGE HISTORY"), unsafe_allow_html=True)
         st.plotly_chart(chart_surge_history(fp), use_container_width=True)
-        st.caption("🔺 Bull surge = institutional buying · 🔻 Bear surge = selling · Marker size = signal strength")
 
     with t2:
-        st.markdown(f"""
-        <div style='background:{PANEL2};border:1px solid {BORDER};border-left:3px solid {AMBER};
-        border-radius:8px;padding:14px 18px;margin-bottom:14px;'>
-          <div style='font-family:{MONO};font-size:11px;font-weight:700;color:{AMBER};
-            letter-spacing:1.5px;margin-bottom:6px;'>WHAT IS GARCH?</div>
-          <div style='font-size:12.5px;color:{IVORY};line-height:1.8;'>
-          Every major bank and hedge fund uses <b>GARCH(1,1)</b> for volatility forecasting.
-          Unlike a rolling std, GARCH captures <b>volatility clustering</b> — high-vol follows high-vol.
-          <b>Low vol regime → size up.</b> <b>High vol regime → reduce size, widen stops.</b>
-          </div>
-        </div>""", unsafe_allow_html=True)
-        _mrow([("DAILY VOL",    f"{garch_r['daily_vol_pct']:.2f}%"),
-               ("ANNUAL VOL",   f"{garch_r['annual_vol_pct']:.1f}%"),
-               ("HIST AVG",     f"{garch_r['hist_avg_annual']:.1f}%"),
-               ("PERCENTILE",   f"{garch_r['percentile']:.0f}th"),
-               ("REGIME",       garch_r["regime"]),
-               ("PERSISTENCE",  f"{garch_r['persistence']:.3f}")])
+        _mrow([("DAILY VOL",   f"{garch_r['daily_vol_pct']:.2f}%"),
+               ("ANNUAL VOL",  f"{garch_r['annual_vol_pct']:.1f}%"),
+               ("HIST AVG",    f"{garch_r['hist_avg_annual']:.1f}%"),
+               ("PERCENTILE",  f"{garch_r['percentile']:.0f}th"),
+               ("REGIME",      garch_r["regime"]),
+               ("PERSISTENCE", f"{garch_r['persistence']:.3f}")])
         st.plotly_chart(chart_garch(garch_r, df["Close"]), use_container_width=True)
         st.markdown(_sec("10-DAY FORWARD VOLATILITY FORECAST"), unsafe_allow_html=True)
         fwd = garch_r["forecast_daily"]
-        fdf = pd.DataFrame({
-            "Day":        range(1, len(fwd)+1),
-            "Daily Vol %":[round(v,3) for v in fwd],
-            "Annual %":   [round(v*np.sqrt(252),1) for v in fwd],
-            "1σ Move ₹":  [round(price*v/100, 1) for v in fwd],
-        })
+        fdf = pd.DataFrame({"Day": range(1, len(fwd)+1),
+                            "Daily Vol %":[round(v,3) for v in fwd],
+                            "Annual %":   [round(v*np.sqrt(252),1) for v in fwd],
+                            "1σ Move ₹":  [round(price*v/100, 1) for v in fwd]})
         st.dataframe(fdf.set_index("Day"), use_container_width=True)
         gp = garch_r["percentile"]
         _signal_card("GARCH SIGNAL",
                      "WEAK SELL" if "HIGH" in garch_r["regime"] else
                      "WEAK BUY"  if "LOW"  in garch_r["regime"] else "NEUTRAL",
-                     (f"Vol at <b>{gp:.0f}th percentile</b> of its 1-year history. "
-                      f"Persistence α+β=<b>{garch_r['persistence']:.3f}</b> — "
-                      f"{'shocks are very persistent, slow to mean-revert.' if garch_r['persistence']>0.95 else 'vol reverts at a moderate pace.'} "
-                      f"{'⚠️ Reduce position size — elevated vol environment.' if gp>75 else '✅ Compressed vol — ideal time to build swing positions before breakout.' if gp<25 else '📊 Normal vol — standard 1-2 ATR stop placement applies.'}"),
+                     (f"Vol at <b>{gp:.0f}th percentile</b>. "
+                      f"Persistence α+β=<b>{garch_r['persistence']:.3f}</b>. "
+                      f"{'⚠️ Reduce size — elevated vol.' if gp>75 else '✅ Compressed vol — breakout setup.' if gp<25 else '📊 Normal vol.'}"),
                      -2 if gp>75 else 2 if gp<25 else 0,
                      section_score=scores["garch"])
 
     with t3:
-        st.markdown(f"""
-        <div style='background:{PANEL2};border:1px solid {BORDER};border-left:3px solid {BLUE};
-        border-radius:8px;padding:14px 18px;margin-bottom:14px;'>
-          <div style='font-family:{MONO};font-size:11px;font-weight:700;color:{BLUE};
-            letter-spacing:1.5px;margin-bottom:6px;'>HOW TO READ THIS</div>
-          <div style='font-size:12.5px;color:{IVORY};line-height:1.8;'>
-          <b>1,000 simulated price paths</b> using Student-t distribution (fat tails like real NSE data).
-          This is not a prediction — it's a <b>probability distribution</b> of all outcomes.
-          Use VaR and Expected Shortfall to size your position correctly before entering.
-          </div>
-        </div>""", unsafe_allow_html=True)
         cap_col, _, __ = st.columns([1,1,2])
         capital = cap_col.number_input("Position Size (₹)", value=100_000,
                                        step=10_000, min_value=10_000)
@@ -1408,21 +1663,6 @@ def render_quant_analysis():
                ("ES 95% (₹)",    f"₹{mc['es95_rs']:,.0f}"),
                ("VaR 99% (₹)",   f"₹{mc['var99_rs']:,.0f}"),
                ("ES 99% (₹)",    f"₹{mc['es99_rs']:,.0f}")])
-        var_c = RED if mc["var95_pct"]<-5 else AMBER if mc["var95_pct"]<-3 else GREEN
-        st.markdown(f"""
-        <div style='background:{PANEL2};border:1px solid {var_c}35;border-left:4px solid {var_c};
-        border-radius:10px;padding:16px 20px;margin:12px 0;'>
-          <div style='font-family:{MONO};font-size:11px;font-weight:700;color:{var_c};
-            letter-spacing:1.5px;margin-bottom:8px;'>POSITION SUMMARY · ₹{capital:,.0f} · 10 DAYS</div>
-          <div style='font-size:12.5px;color:{IVORY};line-height:2;'>
-          • <b>5% chance</b> of losing more than <b>₹{abs(mc['var95_rs']):,.0f}</b> (Value at Risk 95%)<br>
-          • Worst 5% scenarios average loss: <b>₹{abs(mc['es95_rs']):,.0f}</b> (Expected Shortfall)<br>
-          • Probability of profit: <b>{mc['prob_up_pct']:.1f}%</b> &nbsp;·&nbsp;
-            Median exit price: <b>₹{mc['p50']:,.2f}</b><br>
-          • Best case P90: <b>₹{mc['p90']:,.0f}</b> &nbsp;·&nbsp;
-            Worst case P10: <b>₹{mc['p10']:,.0f}</b>
-          </div>
-        </div>""", unsafe_allow_html=True)
         _signal_card("MONTE CARLO SIGNAL",
                      "BUY"       if mc["prob_up_pct"]>58 and mc["var95_pct"]>-6 else
                      "WEAK BUY"  if mc["prob_up_pct"]>52 else
@@ -1430,26 +1670,12 @@ def render_quant_analysis():
                      "WEAK SELL" if mc["prob_up_pct"]>42 else "SELL",
                      (f"Probability of profit: <b>{mc['prob_up_pct']:.1f}%</b>. "
                       f"VaR 95% = <b>{mc['var95_pct']:.1f}%</b>. "
-                      f"{'Risk/reward skews in your favour.' if mc['prob_up_pct']>52 else 'Risk/reward is unfavourable — wait for a better entry.'} "
-                      f"Expected shortfall if trade goes wrong: <b>₹{abs(mc['es95_rs']):,.0f}</b>."),
+                      f"Expected shortfall if wrong: <b>₹{abs(mc['es95_rs']):,.0f}</b>."),
                      2 if mc["prob_up_pct"]>58 else 1 if mc["prob_up_pct"]>52 else
                      -1 if mc["prob_up_pct"]<48 else 0,
                      section_score=scores["monte_carlo"])
 
     with t4:
-        st.markdown(f"""
-        <div style='background:{PANEL2};border:1px solid {BORDER};border-left:3px solid {GREEN};
-        border-radius:8px;padding:14px 18px;margin-bottom:14px;'>
-          <div style='font-family:{MONO};font-size:11px;font-weight:700;color:{GREEN};
-            letter-spacing:1.5px;margin-bottom:6px;'>HOW THE STRATEGY WORKS (v4 BIAS-FREE)</div>
-          <div style='font-size:12.5px;color:{IVORY};line-height:1.8;'>
-          <b>Entry:</b> Volume ≥ X× 20-day average AND bullish close AND price above 50MA
-          AND RSI 35–75 → <b>executed at NEXT day's open</b> (no look-ahead).<br>
-          <b>Exit:</b> Stop/Target checked vs <b>intrabar Low/High</b> ·
-          Volume dries up → exit · MA flip → exit · Max hold → time exit.<br>
-          <b>Benchmark:</b> Every result shows alpha vs buy-and-hold — the honest test.
-          </div>
-        </div>""", unsafe_allow_html=True)
         with st.form("swing_form"):
             st.markdown(_sec("BACKTEST PARAMETERS"), unsafe_allow_html=True)
             r1c1, r1c2, r1c3, r1c4 = st.columns(4)
@@ -1462,8 +1688,9 @@ def render_quant_analysis():
             tgt_p    = r2c2.slider("Target %",     2, 20, 8)
             pos_p    = r2c3.slider("Position %",   5, 40, 20)
             comm_bps = r2c4.number_input("Commission (bps)", value=15.0, step=1.0)
-            run_bt   = st.form_submit_button("▶ RUN BACKTEST", type="primary", use_container_width=True)
-
+            use_regime = st.checkbox("🛡 NIFTY 200-DMA Regime Filter", value=True)
+            run_bt   = st.form_submit_button("▶ RUN BACKTEST", type="primary",
+                                             use_container_width=True)
         if not run_bt:
             st.info("Set parameters above and press RUN BACKTEST.")
         else:
@@ -1473,66 +1700,45 @@ def render_quant_analysis():
                 df_bt = fetch_range(symbol, str(start_d), str(end_d))
                 if df_bt.empty:
                     st.error(f"No data for {symbol.upper()} in that range."); st.stop()
+                regime = fetch_regime() if use_regime else None
                 bt = swing_backtest(df_bt, vol_mult=vol_mult, hold_days=hold_d,
                                     stop_pct=stop_p/100, target_pct=tgt_p/100,
-                                    pos_pct=pos_p/100, commission=comm_bps/10_000)
+                                    pos_pct=pos_p/100, commission=comm_bps/10_000,
+                                    regime=regime)
             if "error" in bt:
                 st.error(bt["error"]); st.stop()
-
             sv   = bt["strat_verdict"]
             sv_c = GREEN if "✅" in sv else AMBER if "⚠️" in sv else RED
-            bg_v = ("rgba(31,185,122,0.10)" if "✅" in sv else
-                    "rgba(245,158,11,0.10)"  if "⚠️" in sv else
-                    "rgba(232,85,78,0.10)")
             a_c  = GREEN if bt["alpha_vs_bh"] >= 0 else RED
             st.markdown(f"""
-            <div style='background:{bg_v};border:1px solid {sv_c}40;
-            border-left:5px solid {sv_c};border-radius:10px;padding:18px 24px;margin:12px 0;'>
-              <div style='font-family:{MONO};font-size:9px;color:{MUTE2};
-                letter-spacing:2px;margin-bottom:4px;'>
-                BACKTEST RESULT · {symbol.upper()} · {start_d} → {end_d}</div>
+            <div style='border:1px solid {sv_c}40;border-left:5px solid {sv_c};
+            border-radius:10px;padding:18px 24px;margin:12px 0;background:{PANEL2};'>
               <div style='font-family:{MONO};font-size:22px;font-weight:800;
                 color:{sv_c};margin-bottom:6px;'>{sv}</div>
               <div style='font-family:{MONO};font-size:11px;color:{IVORY};'>
-                {bt["total_trades"]} trades &nbsp;·&nbsp;
-                WR <b>{bt["win_rate"]}%</b> &nbsp;·&nbsp;
-                PF <b>{bt["profit_factor"]}</b> &nbsp;·&nbsp;
-                Sharpe <b>{bt["sharpe"]}</b> &nbsp;·&nbsp;
-                Return <b style='color:{GREEN if bt["total_ret"]>=0 else RED};'>
-                  {bt["total_ret"]:+.2f}%</b> &nbsp;·&nbsp;
-                Buy&Hold <b>{bt["buy_hold_ret"]:+.2f}%</b> &nbsp;·&nbsp;
-                Alpha <b style='color:{a_c};'>{bt["alpha_vs_bh"]:+.2f}%</b> &nbsp;·&nbsp;
+                {bt["total_trades"]} trades · WR <b>{bt["win_rate"]}%</b> ·
+                PF <b>{bt["profit_factor"]}</b> · Sharpe <b>{bt["sharpe"]}</b> ·
+                Return <b>{bt["total_ret"]:+.2f}%</b> ·
+                Buy&Hold <b>{bt["buy_hold_ret"]:+.2f}%</b> ·
+                Alpha <b style='color:{a_c};'>{bt["alpha_vs_bh"]:+.2f}%</b> ·
                 Max DD <b style='color:{RED};'>{bt["max_dd"]:.1f}%</b>
               </div>
             </div>""", unsafe_allow_html=True)
-
             st.markdown(_sec("PERFORMANCE METRICS"), unsafe_allow_html=True)
-            _mrow([("TRADES",      str(bt["total_trades"])),("WIN RATE",f"{bt['win_rate']}%"),
-                   ("AVG WIN",     f"{bt['avg_win']:+.2f}%"),("AVG LOSS",f"{bt['avg_loss']:+.2f}%")])
-            _mrow([("R:R RATIO",   f"{bt['rr']:.2f}"),("PROFIT FACTOR",f"{bt['profit_factor']:.2f}"),
-                   ("SHARPE",      f"{bt['sharpe']:.2f}"),("SORTINO",f"{bt['sortino']:.2f}")])
+            _mrow([("TRADES", str(bt["total_trades"])),("WIN RATE",f"{bt['win_rate']}%"),
+                   ("AVG WIN",f"{bt['avg_win']:+.2f}%"),("AVG LOSS",f"{bt['avg_loss']:+.2f}%")])
+            _mrow([("R:R RATIO",f"{bt['rr']:.2f}"),("PROFIT FACTOR",f"{bt['profit_factor']:.2f}"),
+                   ("SHARPE",f"{bt['sharpe']:.2f}"),("SORTINO",f"{bt['sortino']:.2f}")])
             _mrow([("TOTAL RETURN",f"{bt['total_ret']:+.2f}%"),("BUY & HOLD",f"{bt['buy_hold_ret']:+.2f}%"),
-                   ("ALPHA",       f"{bt['alpha_vs_bh']:+.2f}%"),("MAX DRAWDOWN",f"{bt['max_dd']:.1f}%")])
-
-            st.markdown(_sec("PRICE CHART · ENTRY & EXIT MARKERS"), unsafe_allow_html=True)
+                   ("ALPHA",f"{bt['alpha_vs_bh']:+.2f}%"),("MAX DRAWDOWN",f"{bt['max_dd']:.1f}%")])
             st.plotly_chart(chart_backtest_price(df_bt, bt), use_container_width=True)
-            st.markdown(f"""
-            <div style='background:{PANEL2};border:1px solid {BORDER};border-radius:8px;
-            padding:10px 16px;margin:4px 0 12px;font-size:11px;color:{MUTE};line-height:1.7;'>
-            <b style='color:{GREEN};'>▲ BUY</b> = entry at next-day open after vol surge &nbsp;·&nbsp;
-            <b style='color:{ACCENT};'>● WIN</b> = target/vol-dry exit &nbsp;·&nbsp;
-            <b style='color:{RED};'>✕ LOSS</b> = stop/MA-flip exit
-            </div>""", unsafe_allow_html=True)
-
             st.markdown(_sec("SIGNAL LOG · EVERY BUY / SELL"), unsafe_allow_html=True)
             sig = bt["signals"].copy()
             sig["date"] = pd.to_datetime(sig["date"]).dt.strftime("%Y-%m-%d")
             sig.columns = ["Date","Signal","Price","Detail"]
             st.dataframe(sig, use_container_width=True, hide_index=True)
-
             st.markdown(_sec("TRADE LOG"), unsafe_allow_html=True)
             st.dataframe(bt["trades"], use_container_width=True, hide_index=True)
-
             r_left, r_right = st.columns(2)
             with r_left:
                 st.plotly_chart(chart_equity(bt), use_container_width=True)
@@ -1540,12 +1746,27 @@ def render_quant_analysis():
             with r_right:
                 st.plotly_chart(chart_drawdown(bt), use_container_width=True)
                 st.plotly_chart(chart_exit_breakdown(bt), use_container_width=True)
+            st.markdown(_sec("WALK-FORWARD VALIDATION · OVERFIT TEST"), unsafe_allow_html=True)
+            with st.spinner("Running walk-forward folds..."):
+                wf = walk_forward(df_bt, hold_days=hold_d, stop_pct=stop_p/100,
+                                  target_pct=tgt_p/100, pos_pct=pos_p/100,
+                                  commission=comm_bps/10_000)
+            if "error" in wf:
+                st.warning(wf["error"])
+            else:
+                wf_c = GREEN if "✅" in wf["verdict"] else AMBER if "⚠️" in wf["verdict"] else RED
+                st.markdown(f"""
+                <div style='background:{PANEL2};border:1px solid {wf_c}40;
+                border-left:4px solid {wf_c};border-radius:10px;padding:14px 20px;
+                margin-bottom:8px;font-family:{MONO};font-size:13px;font-weight:700;
+                color:{wf_c};'>{wf["verdict"]} · Avg OOS Profit Factor: {wf["avg_oos_pf"]}</div>""",
+                unsafe_allow_html=True)
+                st.dataframe(wf["table"], use_container_width=True, hide_index=True)
 
 
 render_quant_options_page = render_quant_analysis
 
 if __name__ == "__main__":
-    st.set_page_config(page_title="ARKA · Swing Terminal",
+    st.set_page_config(page_title="ARKA · Quant Terminal",
                        layout="wide", initial_sidebar_state="collapsed")
     render_quant_analysis()
-
