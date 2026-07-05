@@ -9,13 +9,54 @@ How it works:
   3. AI VISION      : Gemini STRICTLY compares every shortlisted chart against
                       your reference image + rules and ranks by real similarity.
                       Weak matches are auto-hidden so you only see true setups.
+
+--------------------------------------------------------------------------
+FIXES IN THIS VERSION — read once, then ignore
+--------------------------------------------------------------------------
+1) "Matches" showing up that weren't remotely similar
+   Root cause: the reference image was only ever stored as a Supabase Storage
+   *public URL*, then re-downloaded over plain HTTP at scan time. Any bucket
+   permission hiccup (you've hit RLS 403s on this exact bucket before) made
+   that download fail *silently* — so Gemini was judging blind off the text
+   rules alone, and a blind guess could still score high enough to clear the
+   strictness floor. Fixed by storing the reference image as base64 directly
+   on the `scan_setups` row, so matching never depends on a network fetch
+   succeeding. If a reference image genuinely isn't available, the result is
+   now hard-capped at <=4/10 and clearly labeled TEXT-ONLY instead of quietly
+   scoring like a real visual match.
+
+   Also migrated off the `google-generativeai` SDK (deprecated Nov 2025,
+   increasingly unstable) to the current `google-genai` SDK, and switched
+   Gemini's response to strict structured JSON output instead of hand-parsed
+   text — this removes an entire class of "the AI's answer didn't parse the
+   way the code expected" bugs.
+
+   >>> ONE-TIME ACTION NEEDED — run once in the Supabase SQL editor:
+       alter table scan_setups add column if not exists reference_image_b64 text;
+
+2) "ALL NSE Stocks" only ever scanning ~190 stocks
+   Root cause: the official symbol list was fetched from archives.nseindia.com,
+   which NSE has since moved to nsearchives.nseindia.com. The old URL failed
+   every single time, silently, and the code fell back to the small ~190-stock
+   hardcoded list while still labeling the scan "ALL NSE Stocks (~2000)".
+   Fixed with the corrected URL, a real browser session with retries, a
+   transparent status line showing exactly what was loaded and from where, an
+   optional Supabase-backed cache so a good list survives NSE outages, and a
+   manual CSV upload you can use if NSE ever blocks the server outright.
+--------------------------------------------------------------------------
 """
+
+import base64
+import io
+import json
+import time
+from datetime import datetime, timezone
+from typing import Literal
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
-import base64, io, json, time
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -23,10 +64,18 @@ import matplotlib.patches as mpatches
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
-    import google.generativeai as genai
+    from google import genai
+    from google.genai import types as genai_types
     HAS_GEMINI = True
 except ImportError:
     HAS_GEMINI = False
+
+try:
+    from pydantic import BaseModel, Field
+    HAS_PYDANTIC = True
+except ImportError:
+    HAS_PYDANTIC = False
+    BaseModel = object  # placeholder so the class defs below don't crash on import
 
 try:
     from PIL import Image as PILImage
@@ -56,12 +105,78 @@ T2     = "#94A3B8"
 FONT   = "'Plus Jakarta Sans','Inter',sans-serif"
 MONO   = "'JetBrains Mono',monospace"
 
-MODEL_NAME = "gemini-2.5-flash"
+# Gemini model: using the "-latest" flash alias rather than a pinned version.
+# Google has been shutting down/replacing flash models every few months
+# (2.0-flash died June 2026, 2.5-flash is slated for Oct 16 2026) — pinning an
+# exact version here is exactly what silently broke things last time via the
+# deprecated SDK. This alias always points at Google's current GA flash model.
+# If you'd rather pin an exact version, swap this for e.g. "gemini-2.5-flash".
+MODEL_NAME = "gemini-flash-latest"
 
 # Strictness: hide anything the AI scores below this out of 10.
 MIN_SIMILARITY_FLOOR = 6
 
-# ── Liquid NSE Universe (fast fallback) ─────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# STRUCTURED SCHEMAS FOR GEMINI (forces valid JSON every time — no text parsing)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class SetupFilters(BaseModel):
+    price_min: float = 0.0
+    price_max: float = 99999.0
+    rsi_min: float = 0.0
+    rsi_max: float = 100.0
+    volume_multiplier: float = 0.0
+    roc_min: float = -999.0
+    require_above_sma20: bool = False
+    require_above_sma50: bool = False
+    require_below_sma20: bool = False
+    require_breakout: bool = False
+
+
+if HAS_PYDANTIC:
+    class PatternAudit(BaseModel):
+        verdict: Literal["STRONG MATCH", "PARTIAL MATCH", "NO MATCH"]
+        similarity: float = Field(ge=0, le=10)
+        pattern: str
+        key_finding: str
+        visual_analysis: str
+        risk: str
+        action: str
+else:
+    class PatternAudit(BaseModel):
+        pass
+
+
+def _call_gemini_structured(gemini_key: str, contents, schema, temperature: float = 0.15, retries: int = 1):
+    """Call Gemini via the current google-genai SDK, forcing structured JSON output
+    that matches `schema` (a pydantic BaseModel class). Returns (parsed_instance, error).
+    Never raises — failures come back as (None, exception) so callers can degrade cleanly."""
+    last_exc = None
+    for _attempt in range(retries + 1):
+        try:
+            client = genai.Client(api_key=gemini_key)
+            response = client.models.generate_content(
+                model=MODEL_NAME,
+                contents=contents,
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                    temperature=temperature,
+                ),
+            )
+            parsed = response.parsed
+            if parsed is None and getattr(response, "text", None):
+                parsed = schema.model_validate_json(response.text)
+            if parsed is not None:
+                return parsed, None
+            last_exc = RuntimeError("Empty response from Gemini")
+        except Exception as exc:
+            last_exc = exc
+        time.sleep(0.8)
+    return None, last_exc
+
+
+# ── Liquid NSE Universe (final-resort fallback if everything else fails) ────
 NSE_UNIVERSE = [
     "RELIANCE","TCS","HDFCBANK","INFY","ICICIBANK","HINDUNILVR","SBIN",
     "BHARTIARTL","KOTAKBANK","BAJFINANCE","LT","WIPRO","HCLTECH","ASIANPAINT",
@@ -97,28 +212,134 @@ NSE_UNIVERSE = list(dict.fromkeys(NSE_UNIVERSE))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FULL NSE UNIVERSE  (official list, ~2000 stocks, cached 24h)
+# FULL NSE UNIVERSE  (official list, ~2000 stocks) — live fetch, cache, upload
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def get_full_nse_universe() -> list:
-    """Download the official NSE equity list (all listed stocks, EQ series)."""
+# NSE moved this file from archives.nseindia.com -> nsearchives.nseindia.com.
+# The old host is kept as a last-resort mirror in case that ever changes back.
+_NSE_EQUITY_URLS = [
+    "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv",
+    "https://archives.nseindia.com/content/equities/EQUITY_L.csv",
+]
+
+_NSE_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+    "Accept": "text/csv,application/csv,text/plain,*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+}
+
+_UNIVERSE_CACHE_BUCKET = "setup-images"      # reuses the bucket that already exists/works
+_UNIVERSE_CACHE_PATH   = "system/nse_universe_cache.json"
+
+
+def _parse_universe_csv_bytes(file_bytes: bytes) -> list:
+    """Parse an EQUITY_L.csv-shaped file (from NSE or manually uploaded) into a symbol list."""
     try:
-        import requests as _rq
-        url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        r = _rq.get(url, headers=headers, timeout=15)
-        r.raise_for_status()
-        df = pd.read_csv(io.StringIO(r.text))
+        df = pd.read_csv(io.BytesIO(file_bytes))
         df.columns = [c.strip() for c in df.columns]
         if "SERIES" in df.columns:
             df = df[df["SERIES"].astype(str).str.strip() == "EQ"]
-        syms = (df["SYMBOL"].astype(str).str.strip().str.upper()
-                .dropna().unique().tolist())
-        syms = [s for s in syms if s and s.isascii()]
-        return syms if len(syms) > 500 else NSE_UNIVERSE
+        col = "SYMBOL" if "SYMBOL" in df.columns else df.columns[0]
+        syms = df[col].astype(str).str.strip().str.upper().dropna().unique().tolist()
+        return [s for s in syms if s and s.isascii()]
     except Exception:
-        return NSE_UNIVERSE   # fallback if NSE blocks the request
+        return []
+
+
+def _fetch_live_nse_universe() -> tuple:
+    """Try to download the current official NSE equity list. Returns (symbols, status_message)."""
+    if not HAS_REQUESTS:
+        return [], "the `requests` package isn't available"
+
+    last_err = "unknown error"
+    try:
+        session = _requests.Session()
+        session.headers.update(_NSE_HEADERS)
+        try:
+            # Best-effort cookie warm-up. The static archive host usually doesn't need
+            # it, but NSE's dynamic API endpoints do, so this is cheap insurance in
+            # case the archive endpoint gets the same bot-protection treatment later.
+            session.get("https://www.nseindia.com", timeout=10)
+        except Exception:
+            pass
+
+        for url in _NSE_EQUITY_URLS:
+            for _attempt in range(2):
+                try:
+                    r = session.get(url, timeout=15)
+                    if r.status_code == 200 and len(r.content) > 1000:
+                        syms = _parse_universe_csv_bytes(r.content)
+                        if len(syms) > 500:
+                            host = url.split("/")[2]
+                            return syms, f"Live NSE list ({host})"
+                        last_err = f"{url} → only parsed {len(syms)} symbols"
+                    else:
+                        last_err = f"{url} → HTTP {r.status_code}"
+                except Exception as exc:
+                    last_err = f"{url} → {str(exc)[:80]}"
+                time.sleep(1.2)
+    except Exception as exc:
+        last_err = str(exc)[:150]
+    return [], last_err
+
+
+def _cache_universe_to_supabase(supabase, symbols: list) -> bool:
+    """Best-effort: stash a working universe list in Supabase Storage so a recent
+    real list survives even if NSE blocks the next few attempts. Never raises."""
+    if supabase is None:
+        return False
+    try:
+        payload = json.dumps({
+            "symbols": symbols,
+            "cached_at": datetime.now(timezone.utc).isoformat(),
+        }).encode("utf-8")
+        supabase.storage.from_(_UNIVERSE_CACHE_BUCKET).upload(
+            _UNIVERSE_CACHE_PATH, payload,
+            file_options={"content-type": "application/json", "upsert": "true"})
+        return True
+    except Exception:
+        return False
+
+
+def _load_universe_from_supabase_cache(supabase):
+    """Best-effort read of the cached universe list. Returns (symbols, cached_at) or None."""
+    if supabase is None:
+        return None
+    try:
+        raw = supabase.storage.from_(_UNIVERSE_CACHE_BUCKET).download(_UNIVERSE_CACHE_PATH)
+        data = json.loads(raw.decode("utf-8"))
+        syms = data.get("symbols", [])
+        if syms:
+            return syms, data.get("cached_at", "")
+        return None
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def get_full_nse_universe(_supabase=None) -> dict:
+    """Returns {"symbols": [...], "source": "...", "count": N, "live": bool}.
+    Priority: live NSE fetch -> Supabase cached copy -> tiny hardcoded fallback.
+    (Leading underscore on _supabase tells st.cache_data not to try hashing it.)"""
+    syms, msg = _fetch_live_nse_universe()
+    if syms:
+        _cache_universe_to_supabase(_supabase, syms)   # best effort, ignored if it fails
+        return {"symbols": syms, "source": f"✅ {msg}", "count": len(syms), "live": True}
+
+    cached = _load_universe_from_supabase_cache(_supabase)
+    if cached and len(cached[0]) > 500:
+        syms2, cached_at = cached
+        nice_date = cached_at[:10] if cached_at else "an earlier session"
+        return {"symbols": syms2,
+                "source": f"⚠️ Live NSE fetch failed ({msg}) — using cached list from {nice_date}",
+                "count": len(syms2), "live": False}
+
+    return {"symbols": NSE_UNIVERSE,
+            "source": f"⚠️ Live NSE fetch failed ({msg}) — using the built-in {len(NSE_UNIVERSE)}-stock fallback list",
+            "count": len(NSE_UNIVERSE), "live": False}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -126,27 +347,14 @@ def get_full_nse_universe() -> list:
 # ══════════════════════════════════════════════════════════════════════════════
 
 _PARSE_PROMPT = """You are a trading-rule parser. The user describes a stock setup
-in plain English. Extract any NUMERIC / TECHNICAL conditions into this exact JSON.
-Use defaults when a condition is not mentioned. Return ONLY the JSON, no markdown.
-
-{
-  "price_min": 0,
-  "price_max": 99999,
-  "rsi_min": 0,
-  "rsi_max": 100,
-  "volume_multiplier": 0,
-  "roc_min": -999,
-  "require_above_sma20": false,
-  "require_above_sma50": false,
-  "require_below_sma20": false,
-  "require_breakout": false
-}
+in plain English. Extract any NUMERIC / TECHNICAL conditions mentioned and leave
+everything else at its default.
 
 Mapping hints:
 - "price between 100 and 1000" -> price_min 100, price_max 1000
 - "under 250" / "below 250" -> price_max 250
 - "RSI above 55" -> rsi_min 55 | "RSI below 40 / oversold" -> rsi_max 40
-- "volume spike / high volume / 2x volume" -> volume_multiplier 1.5 (or stated number)
+- "volume spike / high volume / 2x volume" -> volume_multiplier 1.5 (or the stated number)
 - "above 20 SMA / 50 SMA" -> require_above_sma20/50 true
 - "below 20 SMA / in pullback under 20sma" -> require_below_sma20 true
 - "breaking out / closing above previous high / PDH breakout" -> require_breakout true
@@ -165,25 +373,18 @@ def parse_rules_with_ai(text: str, gemini_key: str) -> dict:
         "require_above_sma20": False, "require_above_sma50": False,
         "require_below_sma20": False, "require_breakout": False,
     }
-    if not text.strip() or not HAS_GEMINI or not gemini_key:
+    if not text.strip() or not (HAS_GEMINI and HAS_PYDANTIC) or not gemini_key:
         return defaults
-    try:
-        genai.configure(api_key=gemini_key)
-        model = genai.GenerativeModel(MODEL_NAME)
-        resp  = model.generate_content(_PARSE_PROMPT + text.strip())
-        raw   = resp.text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        parsed = json.loads(raw.strip())
-        out = dict(defaults)
-        for k in defaults:
-            if k in parsed and parsed[k] is not None:
-                out[k] = bool(parsed[k]) if isinstance(defaults[k], bool) else float(parsed[k])
-        return out
-    except Exception:
+    parsed, err = _call_gemini_structured(gemini_key, _PARSE_PROMPT + text.strip(),
+                                          SetupFilters, temperature=0.0)
+    if err is not None or parsed is None:
         return defaults
+    out = dict(defaults)
+    for k in defaults:
+        v = getattr(parsed, k, None)
+        if v is not None:
+            out[k] = bool(v) if isinstance(defaults[k], bool) else float(v)
+    return out
 
 
 def _filters_summary(s: dict) -> str:
@@ -221,14 +422,36 @@ def _load_setups(supabase) -> list:
 
 
 def _save_setup(supabase, data: dict) -> bool:
+    sid = data.pop("id", None)
     try:
-        sid = data.pop("id", None)
         if sid:
             supabase.table("scan_setups").update(data).eq("id", sid).execute()
         else:
             supabase.table("scan_setups").insert(data).execute()
         return True
     except Exception as e:
+        msg = str(e)
+        # Graceful path if the one-time migration hasn't been run yet: save everything
+        # else and tell the person exactly what to run, instead of losing the setup.
+        if "reference_image_b64" in data and (
+            "reference_image_b64" in msg or "42703" in msg or "column" in msg.lower()
+        ):
+            st.warning(
+                "Your `scan_setups` table doesn't have a `reference_image_b64` column yet, "
+                "so the image wasn't saved this time. Run this once in the Supabase SQL "
+                "editor, then re-save this setup:\n\n"
+                "```sql\nalter table scan_setups add column if not exists reference_image_b64 text;\n```"
+            )
+            data.pop("reference_image_b64", None)
+            try:
+                if sid:
+                    supabase.table("scan_setups").update(data).eq("id", sid).execute()
+                else:
+                    supabase.table("scan_setups").insert(data).execute()
+                return True
+            except Exception as e2:
+                st.error(f"Save error: {e2}")
+                return False
         st.error(f"Save error: {e}")
         return False
 
@@ -242,16 +465,36 @@ def _delete_setup(supabase, setup_id) -> bool:
         return False
 
 
-def _upload_image(supabase, file_bytes: bytes, filename: str) -> str:
+# ══════════════════════════════════════════════════════════════════════════════
+# REFERENCE IMAGE HELPERS — stored as base64 on the row, never a fetch-dependent URL
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _prepare_reference_image_b64(file_bytes: bytes, max_dim: int = 1000) -> str:
+    """Resize/compress an uploaded reference image and return base64 PNG text."""
+    if not HAS_PIL:
+        return base64.b64encode(file_bytes).decode("utf-8")
     try:
-        path = f"setups/{filename}"
-        supabase.storage.from_("setup-images").upload(
-            path, file_bytes,
-            file_options={"content-type": "image/png", "upsert": "true"})
-        return supabase.storage.from_("setup-images").get_public_url(path)
-    except Exception as e:
-        st.error(f"Image upload error: {e}")
-        return ""
+        img = PILImage.open(io.BytesIO(file_bytes)).convert("RGB")
+        w, h = img.size
+        if max(w, h) > max_dim:
+            scale = max_dim / float(max(w, h))
+            img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), PILImage.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG", optimize=True)
+        return base64.b64encode(buf.getvalue()).decode("utf-8")
+    except Exception:
+        return base64.b64encode(file_bytes).decode("utf-8")
+
+
+def _decode_reference_image(setup: dict):
+    """Return a PIL.Image for a setup's saved reference image, or None if unavailable."""
+    b64 = (setup or {}).get("reference_image_b64") or ""
+    if not b64 or not HAS_PIL:
+        return None
+    try:
+        return PILImage.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
+    except Exception:
+        return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -274,10 +517,10 @@ def _atr(high, low, close, period=14):
     return tr.rolling(period).mean()
 
 
-# ── ONE-PASS PARALLEL FETCH (fast) ───────────────────────────────────────────
+# ── ONE-PASS PARALLEL FETCH (fast, with a light retry per batch) ────────────
 @st.cache_data(ttl=3600, show_spinner=False)
 def _fetch_bulk(symbols_tuple: tuple, period: str = "60d") -> dict:
-    """Download all symbols in parallel batches. One network pass, no sleeps."""
+    """Download all symbols in parallel batches. One network pass, one retry per batch."""
     symbols = list(symbols_tuple)
     ns_syms = [s + ".NS" for s in symbols]
     results = {}
@@ -290,27 +533,35 @@ def _fetch_bulk(symbols_tuple: tuple, period: str = "60d") -> dict:
         out = {}
         if not batch_ns:
             return out
-        try:
-            raw = yf.download(batch_ns, period=period, interval="1d",
-                              auto_adjust=True, progress=False, threads=True)
-            if raw.empty:
-                return out
-            if isinstance(raw.columns, pd.MultiIndex):
-                available = set(raw.columns.get_level_values(1))
-                for sym, ns in zip(batch_plain, batch_ns):
-                    if ns not in available:
+        for attempt in range(2):
+            try:
+                raw = yf.download(batch_ns, period=period, interval="1d",
+                                  auto_adjust=True, progress=False, threads=True)
+                if raw.empty:
+                    if attempt == 0:
+                        time.sleep(1.0)
                         continue
-                    try:
-                        df = raw.xs(ns, level=1, axis=1).dropna(how="all")
-                        if not df.empty and len(df) >= 20 and "Close" in df.columns:
-                            out[sym] = df
-                    except Exception:
-                        pass
-            else:
-                if not raw.empty and len(raw) >= 20:
-                    out[batch_plain[0]] = raw
-        except Exception:
-            pass
+                    return out
+                if isinstance(raw.columns, pd.MultiIndex):
+                    available = set(raw.columns.get_level_values(1))
+                    for sym, ns in zip(batch_plain, batch_ns):
+                        if ns not in available:
+                            continue
+                        try:
+                            df = raw.xs(ns, level=1, axis=1).dropna(how="all")
+                            if not df.empty and len(df) >= 20 and "Close" in df.columns:
+                                out[sym] = df
+                        except Exception:
+                            pass
+                else:
+                    if not raw.empty and len(raw) >= 20:
+                        out[batch_plain[0]] = raw
+                return out
+            except Exception:
+                if attempt == 0:
+                    time.sleep(1.0)
+                    continue
+                return out
         return out
 
     n_batches = (len(ns_syms) + BATCH - 1) // BATCH
@@ -476,137 +727,122 @@ def _make_chart_image(symbol: str, df: pd.DataFrame) -> bytes:
 # GEMINI VISION — STRICT PATTERN SIMILARITY AUDIT
 # ══════════════════════════════════════════════════════════════════════════════
 
-_PROMPT_TEMPLATE = """You are a STRICT technical-pattern matching judge for NSE Indian equities.
-Your ONLY job is to decide if a live chart truly matches the user's REFERENCE SETUP.
+def _build_audit_prompt(symbol: str, visual_rules: str, has_reference: bool) -> str:
+    rules_txt = visual_rules.strip() or "(No written rules provided — judge purely on visual structure vs the reference image.)"
+    if has_reference:
+        reference_clause = ("A REFERENCE PATTERN IMAGE is attached above — this is the user's ideal "
+                             "setup and your ONLY ground truth for what a match looks like.")
+    else:
+        reference_clause = (
+            "NO REFERENCE IMAGE was provided for this setup — there is nothing to visually compare "
+            "against. Because of that you MUST NOT return STRONG MATCH or PARTIAL MATCH no matter how "
+            "well the written rules check out. Return verdict NO MATCH, similarity between 0 and 3, and "
+            "say plainly in key_finding that there was no reference image to compare against.")
 
-You are given:
-1. A REFERENCE PATTERN IMAGE — the user's ideal setup. THIS IS THE GROUND TRUTH.
-2. The user's written rules describing that same setup.
-3. A live 60-day daily candlestick chart for: {symbol}
-   (Top: candles + SMA-20 blue + SMA-50 purple. Bottom: volume + 20-day avg.)
+    return f"""You are a STRICT technical-pattern matching judge for NSE Indian equities.
+Your ONLY job is to decide if the live chart for {symbol} truly matches the user's setup.
+
+{reference_clause}
 
 USER'S WRITTEN RULES:
-{visual_rules}
+{rules_txt}
+
+The live chart is a 60-day daily candlestick chart (candles + SMA-20 blue + SMA-50 purple on top,
+volume + 20-day average below). The MOST RECENT candles matter most.
 
 HOW TO JUDGE (be harsh — most stocks should FAIL):
-- The live chart must reproduce the SAME visual structure as the reference image:
-  same kind of trend, same base/consolidation shape, same pullback/breakout location,
-  and similar volume behaviour. The MOST RECENT candles matter most.
-- A chart that is only "generally bullish" but does NOT copy the reference structure
-  is a NO MATCH. Looking vaguely similar is NOT enough.
-- Every written rule that you can verify on the chart MUST hold. If a clear rule is
-  broken, it cannot be a STRONG MATCH.
+- The live chart must reproduce the SAME visual structure as the reference image: same kind of
+  trend, same base/consolidation shape, same pullback/breakout location, similar volume behaviour.
+- "Generally bullish" but not a structural match to the reference = NO MATCH. Vague similarity is
+  not enough.
+- Every written rule you can verify on the chart must hold; if a clear rule is broken, it cannot be
+  a STRONG MATCH.
 - Ignore colors, watermarks, timeframe labels, and ticker text.
 
 SCORING (0-10, be strict):
-- 9-10 = nearly identical structure, all rules satisfied (STRONG MATCH)
-- 7-8  = same pattern with minor differences, rules mostly satisfied (STRONG MATCH)
-- 5-6  = related but clearly different in structure or a rule fails (PARTIAL MATCH)
-- 0-4  = different pattern / rules broken (NO MATCH)
+9-10 = nearly identical structure, all rules satisfied (STRONG MATCH)
+7-8  = same pattern with minor differences, rules mostly satisfied (STRONG MATCH)
+5-6  = related but clearly different in structure, or a rule fails (PARTIAL MATCH)
+0-4  = different pattern / rules broken / no reference to compare against (NO MATCH)
 When unsure, score LOWER, not higher.
 
-Respond in EXACTLY this format (one value per line):
-
-VERDICT: STRONG MATCH | PARTIAL MATCH | NO MATCH
-SIMILARITY: [0-10]
-PATTERN: [pattern name you see on the live chart]
-KEY_FINDING: [one sentence — strongest similarity or the rule/structure that fails]
-VISUAL_ANALYSIS: [2-3 sentences comparing the live chart directly to the reference]
-RISK: [main risk visible on the live chart]
-ACTION: [specific note e.g. Entry above X, stop Y — or "No trade"]
-
-Base everything ONLY on the charts. Do not invent data you cannot see."""
+Fill in every field. Base everything ONLY on the image(s) shown above — never invent data you
+cannot see."""
 
 
 def _audit_one(symbol: str, chart_bytes: bytes, visual_rules: str,
-               ref_image_url: str, gemini_key: str) -> dict:
+               ref_image_b64: str, gemini_key: str) -> dict:
+    if not (HAS_GEMINI and HAS_PYDANTIC and HAS_PIL):
+        return {"symbol": symbol, "verdict": "ERROR", "score": 0.0,
+                "key_finding": "google-genai / pydantic / Pillow not available in this environment.",
+                "pattern": "N/A", "visual_analysis": "", "risk": "", "action": "",
+                "has_reference": False}
+
+    ref_img = None
+    has_reference = False
+    if ref_image_b64:
+        try:
+            ref_img = PILImage.open(io.BytesIO(base64.b64decode(ref_image_b64))).convert("RGB")
+            has_reference = True
+        except Exception:
+            ref_img = None
+            has_reference = False
+
     try:
-        genai.configure(api_key=gemini_key)
-        model = genai.GenerativeModel(MODEL_NAME)
-        prompt = _PROMPT_TEMPLATE.format(
-            symbol=symbol,
-            visual_rules=visual_rules.strip() or "(No written rules — match the reference image as closely as possible.)")
-
-        content = []
-        has_reference = False
-        if ref_image_url and HAS_PIL and HAS_REQUESTS:
-            try:
-                r = _requests.get(ref_image_url, timeout=8)
-                if r.status_code == 200:
-                    ref_img = PILImage.open(io.BytesIO(r.content)).convert("RGB")
-                    content.append("REFERENCE PATTERN IMAGE (the user's ideal setup — this is the ground truth):")
-                    content.append(ref_img)
-                    has_reference = True
-            except Exception:
-                pass
-
-        if HAS_PIL:
-            content.append(f"LIVE CHART to judge for {symbol}:")
-            content.append(PILImage.open(io.BytesIO(chart_bytes)).convert("RGB"))
-        else:
-            content.append({"mime_type": "image/png",
-                            "data": base64.b64encode(chart_bytes).decode("utf-8")})
-        content.append(prompt)
-
-        response = model.generate_content(content)
-        parsed = _parse_audit(symbol, response.text.strip())
-        # If there was NO reference image, similarity is less reliable — cap score.
-        if not has_reference and parsed.get("score", 0) > 7:
-            parsed["score"] = 7.0
-        return parsed
+        live_img = PILImage.open(io.BytesIO(chart_bytes)).convert("RGB")
     except Exception as exc:
-        return {"symbol": symbol, "verdict": "ERROR", "score": 0,
-                "key_finding": str(exc)[:120], "pattern": "N/A",
-                "visual_analysis": "", "risk": "", "action": "", "raw": str(exc)}
+        return {"symbol": symbol, "verdict": "ERROR", "score": 0.0,
+                "key_finding": f"Could not read live chart image: {exc}", "pattern": "N/A",
+                "visual_analysis": "", "risk": "", "action": "", "has_reference": False}
 
+    prompt = _build_audit_prompt(symbol, visual_rules, has_reference)
+    contents = []
+    if has_reference:
+        contents += ["REFERENCE PATTERN IMAGE (the user's ideal setup — this is the ground truth):", ref_img]
+    contents += [f"LIVE CHART to judge for {symbol}:", live_img, prompt]
 
-def _parse_audit(symbol: str, text: str) -> dict:
-    result = dict(symbol=symbol, verdict="UNKNOWN", score=0.0,
-                  pattern="N/A", key_finding="", visual_analysis="",
-                  risk="", action="", raw=text)
-    for line in text.strip().splitlines():
-        line = line.strip()
-        if not line or ":" not in line:
-            continue
-        key, _, val = line.partition(":")
-        key, val = key.strip().upper(), val.strip()
-        if key == "VERDICT":
-            v = val.upper()
-            if "STRONG"  in v: result["verdict"] = "STRONG MATCH"
-            elif "PARTIAL" in v: result["verdict"] = "PARTIAL MATCH"
-            elif "NO"    in v: result["verdict"] = "NO MATCH"
-        elif key in ("SIMILARITY", "SCORE"):
-            try: result["score"] = float(val.split("/")[0])
-            except: pass
-        elif key == "PATTERN":         result["pattern"] = val
-        elif key == "KEY_FINDING":     result["key_finding"] = val
-        elif key == "VISUAL_ANALYSIS": result["visual_analysis"] = val
-        elif key == "RISK":            result["risk"] = val
-        elif key == "ACTION":          result["action"] = val
+    parsed, err = _call_gemini_structured(gemini_key, contents, PatternAudit, temperature=0.15)
+    if err is not None or parsed is None:
+        return {"symbol": symbol, "verdict": "ERROR", "score": 0.0,
+                "key_finding": f"Audit failed: {str(err)[:150] if err else 'no response'}",
+                "pattern": "N/A", "visual_analysis": "", "risk": "", "action": "",
+                "has_reference": has_reference}
 
-    # Enforce consistency: low score can never be a STRONG MATCH.
-    if result["score"] < 7 and result["verdict"] == "STRONG MATCH":
-        result["verdict"] = "PARTIAL MATCH"
-    if result["score"] < 5 and result["verdict"] == "PARTIAL MATCH":
-        result["verdict"] = "NO MATCH"
-    return result
+    score = float(parsed.similarity)
+    verdict = parsed.verdict
+    key_finding = parsed.key_finding
+
+    # Hard server-side safety net: a result can NEVER count as a visual match without
+    # a real reference image actually being compared, no matter what the model claims.
+    # This is what stops "matches" that are really just guesses off the text rules.
+    if not has_reference:
+        score = min(score, 4.0)
+        verdict = "NO MATCH" if score < 5 else "PARTIAL MATCH"
+        key_finding = "No reference image on file for this setup — text-only rule check, not a verified visual match. " + key_finding
+
+    return {
+        "symbol": symbol, "verdict": verdict, "score": score,
+        "pattern": parsed.pattern, "key_finding": key_finding,
+        "visual_analysis": parsed.visual_analysis, "risk": parsed.risk,
+        "action": parsed.action, "has_reference": has_reference,
+    }
 
 
 def run_ai_audit(candidates, setup, gemini_key, max_stocks=15, progress_cb=None):
     top = candidates[:max_stocks]
     visual_rules = setup.get("visual_rules", "")
-    ref_url = setup.get("reference_image_url", "") or ""
+    ref_b64 = setup.get("reference_image_b64", "") or ""
     results = []
 
     def _process(candidate):
         sym = candidate["symbol"]
         try:
             chart_bytes = _make_chart_image(sym, candidate["df"])
-            audit = _audit_one(sym, chart_bytes, visual_rules, ref_url, gemini_key)
+            audit = _audit_one(sym, chart_bytes, visual_rules, ref_b64, gemini_key)
         except Exception as exc:
-            audit = {"symbol": sym, "verdict": "ERROR", "score": 0,
+            audit = {"symbol": sym, "verdict": "ERROR", "score": 0.0,
                      "key_finding": str(exc)[:120], "pattern": "N/A",
-                     "visual_analysis": "", "risk": "", "action": "", "raw": ""}
+                     "visual_analysis": "", "risk": "", "action": "", "has_reference": False}
         return {**candidate, **audit}
 
     with ThreadPoolExecutor(max_workers=6) as ex:
@@ -667,8 +903,8 @@ def _render_setup_form(supabase, gemini_key: str, existing: dict = None):
         <div style="font-size:12px;font-weight:700;letter-spacing:1px;color:{BLUE};
              text-transform:uppercase;margin:14px 0 6px;">Reference Chart Image</div>
         <div style="font-size:12px;color:{T2};margin-bottom:8px;">
-            Upload a screenshot of your ideal setup. The AI uses this as the ground
-            truth and only returns charts that truly match this pattern.</div>""",
+            Upload a screenshot of your ideal setup. It's stored directly with this setup
+            (not just a link), so AI matching keeps working even if storage settings change.</div>""",
             unsafe_allow_html=True)
         img_col1, img_col2 = st.columns([2, 1])
         with img_col1:
@@ -677,9 +913,14 @@ def _render_setup_form(supabase, gemini_key: str, existing: dict = None):
                                             key=f"img_{prefix}",
                                             label_visibility="collapsed")
         with img_col2:
-            if is_edit and existing.get("reference_image_url"):
-                st.image(existing["reference_image_url"], width=140)
-                st.caption("Current image")
+            if is_edit:
+                cur_img = _decode_reference_image(existing)
+                if cur_img is not None:
+                    st.image(cur_img, width=140)
+                    st.caption("Current image")
+                elif existing.get("reference_image_url"):
+                    st.image(existing["reference_image_url"], width=140)
+                    st.caption("⚠ Legacy image — re-upload to migrate")
 
         st.markdown(f"""
         <div style="font-size:12px;font-weight:700;letter-spacing:1px;color:{BLUE};
@@ -704,17 +945,15 @@ def _render_setup_form(supabase, gemini_key: str, existing: dict = None):
             if not name.strip():
                 st.error("Setup Name is required.")
                 return
-            if not visual_rules.strip() and not uploaded_img and not (is_edit and existing.get("reference_image_url")):
+            has_existing_image = is_edit and (existing.get("reference_image_b64") or existing.get("reference_image_url"))
+            if not visual_rules.strip() and not uploaded_img and not has_existing_image:
                 st.error("Add a description or a reference image (ideally both).")
                 return
 
-            ref_url = existing.get("reference_image_url", "") if is_edit else ""
+            ref_b64 = existing.get("reference_image_b64", "") if is_edit else ""
             if uploaded_img is not None:
                 img_bytes = uploaded_img.read()
-                filename  = f"{name.strip().replace(' ','_')}_{int(time.time())}.png"
-                new_url   = _upload_image(supabase, img_bytes, filename)
-                if new_url:
-                    ref_url = new_url
+                ref_b64 = _prepare_reference_image_b64(img_bytes)
 
             with st.spinner("AI is reading your rules..."):
                 filters = parse_rules_with_ai(visual_rules, gemini_key)
@@ -722,7 +961,7 @@ def _render_setup_form(supabase, gemini_key: str, existing: dict = None):
             payload = dict(
                 name=name.strip(),
                 description=_filters_summary(filters)[:120],
-                reference_image_url=ref_url,
+                reference_image_b64=ref_b64,
                 visual_rules=visual_rules.strip(),
                 price_min=filters["price_min"], price_max=filters["price_max"],
                 rsi_min=filters["rsi_min"], rsi_max=filters["rsi_max"],
@@ -774,12 +1013,18 @@ def _render_setup_manager(supabase, gemini_key: str):
     _section(f"{len(setups)} Saved Setups")
 
     for setup in setups:
-        with st.expander(f"{setup['name']}  ·  {setup.get('description','')}", expanded=False):
+        ref_img_obj = _decode_reference_image(setup)
+        legacy_only = ref_img_obj is None and bool(setup.get("reference_image_url"))
+        title_extra = "  ·  ⚠ legacy image, please re-upload" if legacy_only else ""
+        with st.expander(f"{setup['name']}  ·  {setup.get('description','')}{title_extra}", expanded=False):
             img_col, form_col = st.columns([1, 3])
             with img_col:
-                if setup.get("reference_image_url"):
-                    st.image(setup["reference_image_url"], use_container_width=True)
+                if ref_img_obj is not None:
+                    st.image(ref_img_obj, use_container_width=True)
                     st.caption("Reference pattern")
+                elif setup.get("reference_image_url"):
+                    st.image(setup["reference_image_url"], use_container_width=True)
+                    st.caption("⚠ Legacy storage — re-upload to enable AI matching")
                 else:
                     st.markdown(f"<div style='background:{DARK3};border:1px dashed {BORDER};border-radius:8px;padding:24px;text-align:center;font-size:11px;color:{T2};'>No image</div>",
                                 unsafe_allow_html=True)
@@ -802,13 +1047,25 @@ def _render_setup_manager(supabase, gemini_key: str):
 def _render_result_card(res: dict, setup: dict):
     verdict = res.get("verdict", "UNKNOWN")
     score   = res.get("score", 0)
+    has_ref = res.get("has_reference", True)
     vc, vbg, vbd = _verdict_colors(verdict)
     chg = res.get("chg_pct", 0)
     cc  = GREEN if chg >= 0 else RED
     arr = "▲" if chg >= 0 else "▼"
 
     label = f"{res['symbol']}  ·  {verdict}  ·  Similarity {score:.0f}/10  ·  {res.get('pattern','')}"
-    with st.expander(label, expanded=(verdict == "STRONG MATCH")):
+    if not has_ref:
+        label += "  ·  ⚠ TEXT-ONLY"
+    with st.expander(label, expanded=(verdict == "STRONG MATCH" and has_ref)):
+        if not has_ref:
+            st.markdown(f"""
+            <div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.35);
+                 border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:12px;color:{IVORY};">
+                ⚠ <strong>No reference image on file</strong> for this setup — this is a text-rule
+                check only, not a verified visual pattern match. Edit the setup and upload a
+                reference chart to enable real AI matching.
+            </div>""", unsafe_allow_html=True)
+
         left, right = st.columns([1, 2])
         with left:
             st.markdown(f"""
@@ -837,10 +1094,14 @@ def _render_result_card(res: dict, setup: dict):
                     f"<div style='font-size:13px;color:{IVORY};line-height:1.6;margin-bottom:2px;'>{body}</div>",
                     unsafe_allow_html=True)
 
-            if setup.get("reference_image_url"):
+            ref_img_obj = _decode_reference_image(setup)
+            if ref_img_obj is not None or setup.get("reference_image_url"):
                 rcol1, rcol2 = st.columns([1, 2])
                 with rcol1:
-                    st.image(setup["reference_image_url"], caption="Your reference", width=130)
+                    if ref_img_obj is not None:
+                        st.image(ref_img_obj, caption="Your reference", width=130)
+                    else:
+                        st.image(setup["reference_image_url"], caption="Your reference", width=130)
                 with rcol2:
                     _row(BLUE, "KEY FINDING", res.get("key_finding", "-"))
                     _row(BLUE, "VISUAL COMPARISON", res.get("visual_analysis", "-"))
@@ -891,7 +1152,10 @@ def _render_scan_page(supabase, gemini_key: str):
             sel_txt = "SELECTED" if is_sel else "TAP TO SELECT"
             sel_col = BLUE if is_sel else T2
 
-            if setup.get("reference_image_url"):
+            ref_img_obj = _decode_reference_image(setup)
+            if ref_img_obj is not None:
+                st.image(ref_img_obj, use_container_width=True)
+            elif setup.get("reference_image_url"):
                 st.image(setup["reference_image_url"], use_container_width=True)
 
             st.markdown(f"""
@@ -1013,6 +1277,36 @@ def _render_scan_page(supabase, gemini_key: str):
         max_ai = st.number_input("Max AI Comparisons", 3, 25, 12, 1, key="scan_max_ai",
                                  help="Top N candidates sent to Gemini Vision after the rules filter")
 
+    if universe_opt.startswith("ALL"):
+        with st.expander("NSE universe source & refresh", expanded=False):
+            st.caption("Tries a live download from NSE first, falls back to a cached copy, then a "
+                       "small built-in list. Upload the CSV yourself if NSE keeps blocking requests.")
+            info = get_full_nse_universe(supabase)
+            st.markdown(f"**Current source:** {info['source']}  ·  **{info['count']} symbols**")
+            ref_col1, ref_col2 = st.columns([1, 1])
+            with ref_col1:
+                if st.button("🔄 Force refresh from NSE", use_container_width=True):
+                    get_full_nse_universe.clear()
+                    st.session_state.pop("manual_universe", None)
+                    st.rerun()
+                if st.session_state.get("manual_universe"):
+                    if st.button("Clear manual upload, use auto source", use_container_width=True):
+                        st.session_state.pop("manual_universe", None)
+                        st.rerun()
+            with ref_col2:
+                uploaded_universe_csv = st.file_uploader(
+                    "Upload EQUITY_L.csv manually", type=["csv"], key="universe_csv_upload",
+                    help="Download nsearchives.nseindia.com/content/equities/EQUITY_L.csv in your "
+                         "own browser if the live fetch above keeps failing, then upload it here.")
+                if uploaded_universe_csv is not None:
+                    parsed_syms = _parse_universe_csv_bytes(uploaded_universe_csv.read())
+                    if len(parsed_syms) > 500:
+                        st.session_state["manual_universe"] = parsed_syms
+                        _cache_universe_to_supabase(supabase, parsed_syms)
+                        st.success(f"Loaded {len(parsed_syms)} symbols from your upload.")
+                    else:
+                        st.error(f"Only found {len(parsed_syms)} symbols in that file — check it's the right CSV.")
+
     # Strictness control: only show matches at/above this score.
     strict_min = st.slider("Match strictness (hide anything below this score)",
                            0, 10, MIN_SIMILARITY_FLOOR, 1, key="strict_min",
@@ -1020,9 +1314,14 @@ def _render_scan_page(supabase, gemini_key: str):
                                 "Set to 0 to see everything.")
 
     if universe_opt.startswith("ALL"):
-        with st.spinner("Loading full NSE stock list..."):
-            universe = get_full_nse_universe()
-        st.caption(f"{len(universe)} NSE stocks loaded · scanned in one fast parallel pass")
+        manual = st.session_state.get("manual_universe")
+        if manual:
+            universe = manual
+            st.caption(f"📄 Using your manually uploaded list · {len(universe)} stocks")
+        else:
+            info = get_full_nse_universe(supabase)
+            universe = info["symbols"]
+            st.caption(f"{info['source']} · {info['count']} stocks · scanned in one fast parallel pass")
     elif universe_opt.startswith("Liquid"):
         universe = NSE_UNIVERSE
     elif universe_opt == "Your Watchlist":
@@ -1039,6 +1338,13 @@ def _render_scan_page(supabase, gemini_key: str):
     if not gemini_key:
         st.warning("GEMINI_KEY not found in secrets — AI vision comparison will be skipped, "
                    "so strict matching cannot run. Results will be rules-only.")
+    elif not (HAS_GEMINI and HAS_PYDANTIC and HAS_PIL):
+        missing = []
+        if not HAS_GEMINI: missing.append("google-genai")
+        if not HAS_PYDANTIC: missing.append("pydantic")
+        if not HAS_PIL: missing.append("Pillow")
+        st.warning(f"Missing package(s) in this environment: {', '.join(missing)} — add them to "
+                   f"requirements.txt to enable strict AI vision matching. Results will be rules-only.")
 
     run_disabled = ov_pmin > ov_pmax
     if st.button("Run Scan", type="primary", use_container_width=True,
@@ -1070,7 +1376,7 @@ def _render_scan_page(supabase, gemini_key: str):
         stat.markdown(f"Rules filter: **{len(shortlist)} candidates** from {len(universe)} scanned")
 
         # ── Strict AI vision comparison ──────────────────────────────────
-        if gemini_key:
+        if gemini_key and HAS_GEMINI and HAS_PYDANTIC and HAS_PIL:
             ai_prog = st.progress(0.0)
             ai_stat = st.empty()
 
@@ -1107,6 +1413,12 @@ def _render_scan_page(supabase, gemini_key: str):
         m4.metric("AI Status", "Skipped")
 
     if ai_results:
+        unverified = sum(1 for r in ai_results if not r.get("has_reference", True))
+        if unverified:
+            st.caption(f"⚠ {unverified} of {len(ai_results)} compared had no reference image on "
+                       f"file, so they were capped low and marked TEXT-ONLY rather than treated "
+                       f"as verified visual matches.")
+
         _section("Pattern Match Results")
 
         fcol1, fcol2, fcol3 = st.columns([1.4, 1.4, 1.4])
