@@ -417,7 +417,14 @@ def compute_ad_line_and_mcclellan(history: pd.DataFrame) -> pd.DataFrame:
 
 # ── Composite strength score ─────────────────────────────────────────
 
-def compute_composite_score(snapshot: dict, history: pd.DataFrame) -> dict:
+def compute_composite_score(snapshot: dict, history: pd.DataFrame = None) -> dict:
+    """
+    Weighted 0-100 composite across four metric families. Returns the
+    score plus a per-family breakdown so the UI can show *why*, not
+    just the number...
+    """
+    if history is None:
+        history = pd.DataFrame()
     """
     Weighted 0-100 composite across four metric families. Returns the
     score plus a per-family breakdown so the UI can show *why*, not
