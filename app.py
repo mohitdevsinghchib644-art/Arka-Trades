@@ -8,6 +8,7 @@ import requests
 from supabase import create_client, Client
 from news_feed import news_panel, get_news_dot, _ensure_news_state
 from arka_ai import render_arka_ai
+from global_indices import GLOBAL_INDEX_TICKERS, get_mmi, mmi_zone_color
 
 # ── Supabase ─────────────────────────────────────────────────
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "https://vpxagxjgtonynblhddwh.supabase.co")
@@ -239,15 +240,25 @@ def get_price(sym):
         return {"price": cur, "chg": ((cur-prev_close)/prev_close)*100, "prev_close": prev_close}
     except: return None
 
-@st.cache_data(ttl=60, show_spinner=False)
-def get_index(sym):
+def _fetch_index_history(sym):
     try:
         h = yf.Ticker(sym).history(period="5d", interval="1d")
-        if h.empty or len(h)<2: return None
-        cur = float(h["Close"].iloc[-1]); pc = float(h["Close"].iloc[-2])
-        return {"price":cur,"chg":((cur-pc)/pc)*100,"pts":cur-pc,
-                "spark":[float(x) for x in h["Close"].tolist()]}
-    except: return None
+        if h.empty or len(h) < 2:
+            return None
+        return h
+    except:
+        return None
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_index(sym, fallback_sym=None):
+    h = _fetch_index_history(sym)
+    if h is None and fallback_sym:
+        h = _fetch_index_history(fallback_sym)
+    if h is None:
+        return None
+    cur = float(h["Close"].iloc[-1]); pc = float(h["Close"].iloc[-2])
+    return {"price":cur,"chg":((cur-pc)/pc)*100,"pts":cur-pc,
+            "spark":[float(x) for x in h["Close"].tolist()]}
 
 def check_alerts(results):
     for s in results:
@@ -618,16 +629,18 @@ with right:
 
     st.markdown(f"<div style='height:1px;background:{BORDER};margin-bottom:12px;'></div>", unsafe_allow_html=True)
 
-    def show_idx(col, label, sym, c):
-        d = get_index(sym)
+    def show_idx(col, label, sym, c, fallback_sym=None, currency=""):
+        d = get_index(sym, fallback_sym)
         with col:
             if d:
                 cc = GREEN if d["chg"]>=0 else RED
+                pts_sign = "+" if d["pts"] >= 0 else ""
                 spark = sparkline(d.get("spark", []), color=cc, w=120, h=26)
                 st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {c};border-radius:12px;padding:14px;margin:4px 2px;">
                     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
                     <span style="font-size:11px;font-weight:700;color:{T2};">{label}</span>{change_pill(d['chg'])}</div>
-                    <div style="font-family:{MONO};font-weight:700;font-size:20px;color:{IVORY};line-height:1;margin-bottom:6px;">{d['price']:,.2f}</div>{spark}</div>""", unsafe_allow_html=True)
+                    <div style="font-family:{MONO};font-weight:700;font-size:20px;color:{IVORY};line-height:1;margin-bottom:4px;">{currency}{d['price']:,.2f}</div>
+                    <div style="font-family:{MONO};font-size:12px;font-weight:600;color:{cc};margin-bottom:6px;">{pts_sign}{d['pts']:,.2f} pts</div>{spark}</div>""", unsafe_allow_html=True)
             else:
                 st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {c};border-radius:12px;padding:14px;margin:4px 2px;opacity:0.5;">
                     <div style="font-size:11px;font-weight:700;color:{T2};margin-bottom:8px;">{label}</div>
@@ -640,9 +653,54 @@ with right:
         show_idx(r1b,"BANK NIFTY","^NSEBANK",CYAN)
         show_idx(r1c,"SENSEX","^BSESN",AMBER)
         r2a,r2b = st.columns(2)
-        show_idx(r2a,"MIDCAP 100","NIFTY_MIDCAP_100.NS",PURPLE)
-        show_idx(r2b,"SMALLCAP 100","^CNXSMALLCAP",PINK)
+        # MIDCAP 100: NIFTY_MIDCAP_100.NS is the primary live Yahoo ticker;
+        # ^CRSMID is an alternate Yahoo listing for the same index, kept as
+        # fallback in case the primary symbol has a data gap on a given day.
+        show_idx(r2a,"MIDCAP 100","NIFTY_MIDCAP_100.NS",PURPLE, fallback_sym="^CRSMID")
+        # SMALLCAP 100: the app previously used "^CNXSMALLCAP", which is not
+        # a valid Yahoo ticker (this was the root cause of it never showing
+        # data). The correct symbol is "^CNXSC" (NIFTY SMLCAP 100).
+        show_idx(r2b,"SMALLCAP 100","^CNXSC",PINK)
         st.markdown(f"<div style='height:1px;background:{BORDER};margin:12px 0 16px;'></div>", unsafe_allow_html=True)
+
+        # ── Global Indexes ──
+        st.markdown(f"""<div style="font-size:11px;font-weight:700;letter-spacing:1.5px;color:{T2};
+            text-transform:uppercase;margin-bottom:8px;">Global Markets</div>""", unsafe_allow_html=True)
+        gi1, gi2, gi3, gi4 = st.columns(4)
+        show_idx(gi1,"GIFT NIFTY", GLOBAL_INDEX_TICKERS["GIFT NIFTY"], INDIGO)
+        show_idx(gi2,"S&P 500", GLOBAL_INDEX_TICKERS["S&P 500"], CYAN, currency="$")
+        show_idx(gi3,"DOW JONES", GLOBAL_INDEX_TICKERS["DOW JONES"], AMBER, currency="$")
+        show_idx(gi4,"GOLD (USD)", GLOBAL_INDEX_TICKERS["GOLD (USD)"], "#FFD700", currency="$")
+
+        # ── Market Mood Index (MMI) ──
+        mmi = get_mmi()
+        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+        if mmi:
+            zc = mmi_zone_color(mmi["zone"])
+            st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};
+                border-top:2px solid {zc};border-radius:12px;padding:16px 18px;margin:4px 2px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;">
+                    <div>
+                        <div style="font-size:11px;font-weight:700;color:{T2};text-transform:uppercase;margin-bottom:6px;">
+                            Market Mood Index (MMI)</div>
+                        <div style="display:flex;align-items:baseline;gap:10px;">
+                            <span style="font-family:{MONO};font-weight:700;font-size:24px;color:{IVORY};">{mmi['score']}</span>
+                            <span style="background:{zc}22;color:{zc};font-size:12px;font-weight:700;
+                                padding:3px 12px;border-radius:20px;border:1px solid {zc}55;">{mmi['zone']}</span>
+                        </div>
+                    </div>
+                    <div style="text-align:right;font-size:11px;color:{T2};">Updated {mmi['fetched_at']}<br>
+                        <span style="opacity:.7;">Source: Tickertape</span></div>
+                </div></div>""", unsafe_allow_html=True)
+        else:
+            st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {T2};
+                border-radius:12px;padding:16px 18px;margin:4px 2px;opacity:0.6;">
+                <div style="font-size:11px;font-weight:700;color:{T2};text-transform:uppercase;margin-bottom:6px;">
+                    Market Mood Index (MMI)</div>
+                <div style="font-size:12px;color:{T2};">Unavailable right now — Tickertape's page couldn't be read.
+                    This updates automatically once it's reachable again.</div></div>""", unsafe_allow_html=True)
+
+        st.markdown(f"<div style='height:1px;background:{BORDER};margin:16px 0 16px;'></div>", unsafe_allow_html=True)
 
     st.markdown('<div style="padding:0 8px 80px;">', unsafe_allow_html=True)
 
