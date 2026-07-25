@@ -143,7 +143,7 @@ def get_nse_universe(force_refresh: bool = False) -> tuple[list, str]:
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def _batch_download(symbols: tuple, period: str = "260d") -> dict:
+def _batch_download(symbols, period: str = "260d") -> dict:
     """
     Batched yf.download across the universe. 260 calendar days covers the
     200-trading-day MA with room for holidays. Returns {symbol: DataFrame}.
@@ -152,7 +152,38 @@ def _batch_download(symbols: tuple, period: str = "260d") -> dict:
     Cloud's RAM/time budget for no real benefit, since daily breadth
     counts don't materially move minute to minute.
     """
-    tickers = [s + ".NS" for s in symbols]
+    # Safe conversion: handle tuple, list, or single items robustly
+    if isinstance(symbols, tuple):
+        symbols = list(symbols)
+    elif not isinstance(symbols, list):
+        symbols = [symbols]
+
+    tickers = [s if str(s).endswith(".NS") else str(s) + ".NS" for s in symbols]
+    result = {}
+    chunk_size = 200
+    for i in range(0, len(tickers), chunk_size):
+        chunk = tickers[i:i + chunk_size]
+        try:
+            data = yf.download(
+                chunk, period=period, interval="1d",
+                group_by="ticker", threads=True, progress=False,
+                auto_adjust=True,
+            )
+        except Exception:
+            continue
+        for t in chunk:
+            sym = t[:-3] if t.endswith(".NS") else t
+            try:
+                if len(chunk) == 1:
+                    df = data
+                else:
+                    df = data[t]
+                df = df.dropna(how="all")
+                if len(df) >= 20:
+                    result[sym] = df
+            except Exception:
+                continue
+    return result
     result = {}
     chunk_size = 200
     for i in range(0, len(tickers), chunk_size):
