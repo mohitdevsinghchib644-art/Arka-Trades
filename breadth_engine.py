@@ -466,3 +466,36 @@ def compute_composite_score(snapshot: dict, history: pd.DataFrame) -> dict:
             },
         },
     }
+def compute_daily_breadth_metrics(data, tickers):
+    """Bridge wrapper for compatibility with breadth_page.py UI."""
+    snapshot = compute_breadth_snapshot(tickers)
+    if "error" in snapshot:
+        # Return fallback zeros if data fetch fails
+        return {
+            "total_scanned": 0, "advances": 0, "declines": 0, "unchanged": 0,
+            "net_advances": 0, "above_20dma": 0, "above_50dma": 0, "above_200dma": 0,
+            "pct_above_20dma": 0.0, "pct_above_50dma": 0.0, "pct_above_200dma": 0.0,
+            "up_5d": 0, "down_5d": 0, "new_52w_hi": 0, "new_52w_lo": 0
+        }
+    
+    total = snapshot.get("total_scanned", 1)
+    adv = snapshot.get("advances", 0)
+    dec = snapshot.get("declines", 0)
+    
+    return {
+        "total_scanned": total,
+        "advances": adv,
+        "declines": dec,
+        "unchanged": snapshot.get("unchanged", 0),
+        "net_advances": adv - dec,
+        "above_20dma": snapshot.get("above_20dma", 0),
+        "above_50dma": snapshot.get("above_50dma", 0),
+        "above_200dma": snapshot.get("above_200dma", 0),
+        "pct_above_20dma": round((snapshot.get("above_20dma", 0) / max(total, 1)) * 100, 1),
+        "pct_above_50dma": round((snapshot.get("above_50dma", 0) / max(total, 1)) * 100, 1),
+        "pct_above_200dma": round((snapshot.get("above_200dma", 0) / max(total, 1)) * 100, 1),
+        "up_5d": snapshot.get("up_5d_pct", 0),
+        "down_5d": snapshot.get("down_5d_pct", 0),
+        "new_52w_hi": snapshot.get("new_hi_5d", 0),
+        "new_52w_lo": snapshot.get("new_lo_5d", 0),
+    }
