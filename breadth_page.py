@@ -102,9 +102,24 @@ def render_market_breadth():
 
     scan_col, info_col = st.columns([1, 3])
     with scan_col:
-        run_scan = st.button("🔄 Scan Market Breadth Now", type="primary", use_container_width=True)
+        run_scan = st.button("🔄 Refresh Now", type="primary", use_container_width=True,
+                              help="Data refreshes automatically once per trading day after "
+                                   "4:00 PM IST. This re-checks for that session — it will not "
+                                   "re-fetch a session you already have.")
+
+    st.caption(
+        "📅 Breadth data updates once per trading session, at/after 4:00 PM IST, Monday–Friday. "
+        "It will not change again until the next session's close."
+    )
 
     # ── Run scan (or reuse last cached snapshot in session_state) ──
+    # This button clears the page's own session_state cache so the UI
+    # recomputes, but the underlying fetch (_load_bhavcopy_history /
+    # _batch_download_yfinance in breadth_engine.py) is cached by
+    # Streamlit with ttl=None, keyed on the resolved trading-session
+    # date. Pressing this before 4pm IST re-renders but correctly
+    # returns the SAME prior session's data rather than re-fetching,
+    # since the session key hasn't rolled over yet — that's intentional.
     if run_scan:
         st.session_state.pop("breadth_snapshot", None)
         st.session_state.pop("breadth_composite", None)
@@ -133,8 +148,11 @@ def render_market_breadth():
     composite = st.session_state["breadth_composite"]
 
     with info_col:
+        source_label = snapshot.get("source", "unknown") if "error" not in snapshot else "—"
+        source_color = GREEN if "Bhavcopy" in source_label else (AMBER if "fallback" in source_label else T2)
         st.markdown(f"""<div style="font-size:11px;color:{T2};padding-top:10px;">
-            Universe: {universe_source}
+            Universe: {universe_source}<br>
+            Data source: <span style="color:{source_color};font-weight:600;">{source_label}</span>
         </div>""", unsafe_allow_html=True)
 
     # ── Surface errors immediately instead of rendering fake zeros ──
