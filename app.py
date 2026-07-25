@@ -5,10 +5,12 @@ import pandas as pd
 from datetime import datetime, timezone, timedelta
 import time
 import requests
+import re
+import json
+from pathlib import Path
 from supabase import create_client, Client
 from news_feed import news_panel, get_news_dot, _ensure_news_state
 from arka_ai import render_arka_ai
-from global_indices import GLOBAL_INDEX_TICKERS, get_mmi, mmi_zone_color
 
 # ── Supabase ─────────────────────────────────────────────────
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "https://vpxagxjgtonynblhddwh.supabase.co")
@@ -303,6 +305,174 @@ def checkline(text, c=None):
     return (f'<div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:12px;">'
             f'<span style="flex-shrink:0;margin-top:2px;">{icon("check", 16, c or GREEN)}</span>'
             f'<span style="font-size:14px;color:{IVORY};line-height:1.6;">{text}</span></div>')
+
+# ════════════════════════════════════════════════════════════
+# GLOBAL INDICES + MARKET MOOD INDEX (MMI)
+# ════════════════════════════════════════════════════════════
+# Merged into app.py directly per request — previously this lived in a
+# separate global_indices.py, but keeping everything in one file avoids
+# the import ever silently drifting out of sync with what's deployed.
+#
+# Tickers below were verified against live Yahoo Finance listings
+# before use (not guessed):
+#   GIFT NIFTY : IN-Z22.SI   (Yahoo's listing for the GIFT Nifty /
+#                 SGX Nifty 50 Index Futures contract)
+#   S&P 500    : ^GSPC
+#   DOW JONES  : ^DJI
+#   GOLD (USD) : GC=F         (COMEX Gold Futures)
+#   MIDCAP 100 : NIFTY_MIDCAP_100.NS  (primary) / ^CRSMID (fallback)
+#   SMALLCAP100: ^CNXSC       (the app previously used the invalid
+#                 "^CNXSMALLCAP", which is why it never showed data)
+#
+# MMI (Market Mood Index) is Tickertape's own proprietary Indian-market
+# fear/greed indicator — there is no public API for it (confirmed: no
+# developer API, no MCP, closed data surface). This scrapes the live
+# page's server-rendered HTML with plain `requests` (no Selenium/
+# headless Chrome, since that can't run on Streamlit Community Cloud).
+# If the live scrape fails, the LAST successfully-fetched value is
+# read back from a local JSON cache file and shown with a visible
+# "stale" warning and a "last updated" timestamp, rather than hiding
+# the card or showing nothing.
+
+GLOBAL_INDEX_TICKERS = {
+    "GIFT NIFTY":  "IN-Z22.SI",
+    "S&P 500":     "^GSPC",
+    "DOW JONES":   "^DJI",
+    "GOLD (USD)":  "GC=F",
+}
+
+_MMI_URL = "https://www.tickertape.in/market-mood-index"
+_MMI_CACHE_DIR = Path(".cache")
+_MMI_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+_MMI_CACHE_FILE = _MMI_CACHE_DIR / "mmi_last_known.json"
+_MMI_ZONES = [
+    (0, 30, "Extreme Fear"),
+    (30, 50, "Fear"),
+    (50, 70, "Greed"),
+    (70, 100.0001, "Extreme Greed"),
+]
+
+def _mmi_zone_for_score(score: float) -> str:
+    for lo, hi, label in _MMI_ZONES:
+        if lo <= score < hi:
+            return label
+    return "Unknown"
+
+def mmi_zone_color(zone: str) -> str:
+    return {
+        "Extreme Fear":  "#EF4444",
+        "Fear":          "#F59E0B",
+        "Greed":         "#84CC16",
+        "Extreme Greed": "#22C55E",
+    }.get(zone, "#8C97A8")
+
+def _mmi_parse_next_data(html: str):
+    """Structured path: locate __NEXT_DATA__ JSON and search recursively
+    for a numeric 0-100 leaf under an MMI/mood/sentiment-related key."""
+    try:
+        m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+        if not m:
+            return None
+        data = json.loads(m.group(1))
+        candidates = []
+        def walk(node, key_hint=""):
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    walk(v, k.lower())
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item, key_hint)
+            elif isinstance(node, (int, float)):
+                if ("mmi" in key_hint or "mood" in key_hint or "sentiment" in key_hint) and 0 <= float(node) <= 100:
+                    candidates.append(float(node))
+        walk(data)
+        return candidates[0] if candidates else None
+    except Exception:
+        return None
+
+def _mmi_parse_visible_text(html: str):
+    """Fallback: the score sits as bare text immediately before an
+    'Updated ... ago' string in the server-rendered page."""
+    try:
+        m = re.search(r'(\d{1,3}\.\d{1,2})\s*(?:</[^>]+>\s*)*Updated', html)
+        if m:
+            val = float(m.group(1))
+            if 0 <= val <= 100:
+                return val
+        m2 = re.search(r'(\d{1,3}\.\d{1,2})', html)
+        if m2:
+            val = float(m2.group(1))
+            if 0 <= val <= 100:
+                return val
+        return None
+    except Exception:
+        return None
+
+def _mmi_save_last_known(score: float, zone: str):
+    try:
+        _MMI_CACHE_FILE.write_text(json.dumps({
+            "score": score, "zone": zone,
+            "fetched_at_utc": datetime.now(timezone.utc).isoformat(),
+        }))
+    except Exception:
+        pass
+
+def _mmi_load_last_known():
+    if not _MMI_CACHE_FILE.exists():
+        return None
+    try:
+        d = json.loads(_MMI_CACHE_FILE.read_text())
+        fetched = datetime.fromisoformat(d["fetched_at_utc"])
+        age = datetime.now(timezone.utc) - fetched
+        return {"score": d["score"], "zone": d["zone"], "age": age,
+                "fetched_at_ist": fetched.astimezone(timezone(timedelta(hours=5, minutes=30)))}
+    except Exception:
+        return None
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _mmi_fetch_live():
+    """Live scrape only — returns {"score","zone"} or None. Cached 30min
+    since MMI is an end-of-day-ish composite, not a live tick."""
+    try:
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml",
+        })
+        resp = session.get(_MMI_URL, timeout=10)
+        if resp.status_code != 200:
+            return None
+        html = resp.text
+        score = _mmi_parse_next_data(html)
+        if score is None:
+            score = _mmi_parse_visible_text(html)
+        if score is None:
+            return None
+        zone = _mmi_zone_for_score(score)
+        return {"score": round(score, 2), "zone": zone}
+    except Exception:
+        return None
+
+def get_mmi():
+    """
+    Returns a dict describing the MMI card state:
+      {"status": "live", "score", "zone", "fetched_at_ist"}      — fresh
+      {"status": "stale", "score", "zone", "age", "fetched_at_ist"} — cached fallback
+      {"status": "unavailable"}                                   — no live data, no cache either
+    Never raises.
+    """
+    IST = timezone(timedelta(hours=5, minutes=30))
+    live = _mmi_fetch_live()
+    if live:
+        _mmi_save_last_known(live["score"], live["zone"])
+        return {"status": "live", "score": live["score"], "zone": live["zone"],
+                "fetched_at_ist": datetime.now(IST)}
+    cached = _mmi_load_last_known()
+    if cached:
+        return {"status": "stale", "score": cached["score"], "zone": cached["zone"],
+                "age": cached["age"], "fetched_at_ist": cached["fetched_at_ist"]}
+    return {"status": "unavailable"}
 
 # ════════════════════════════════════════════════════════════
 # LANDING PAGE — green hero theme, seamless on scroll
@@ -675,7 +845,8 @@ with right:
         # ── Market Mood Index (MMI) ──
         mmi = get_mmi()
         st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
-        if mmi:
+
+        if mmi["status"] == "live":
             zc = mmi_zone_color(mmi["zone"])
             st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};
                 border-top:2px solid {zc};border-radius:12px;padding:16px 18px;margin:4px 2px;">
@@ -689,16 +860,42 @@ with right:
                                 padding:3px 12px;border-radius:20px;border:1px solid {zc}55;">{mmi['zone']}</span>
                         </div>
                     </div>
-                    <div style="text-align:right;font-size:11px;color:{T2};">Updated {mmi['fetched_at']}<br>
+                    <div style="text-align:right;font-size:11px;color:{T2};">Updated {mmi['fetched_at_ist'].strftime('%d %b %Y, %I:%M%p')}<br>
                         <span style="opacity:.7;">Source: Tickertape</span></div>
                 </div></div>""", unsafe_allow_html=True)
+
+        elif mmi["status"] == "stale":
+            zc = mmi_zone_color(mmi["zone"])
+            age = mmi["age"]
+            hrs = int(age.total_seconds() // 3600)
+            age_label = f"{hrs}h ago" if hrs < 48 else f"{hrs // 24}d ago"
+            st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {AMBER}55;
+                border-top:2px solid {AMBER};border-radius:12px;padding:16px 18px;margin:4px 2px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;">
+                    <div>
+                        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                            <span style="font-size:11px;font-weight:700;color:{T2};text-transform:uppercase;">
+                                Market Mood Index (MMI)</span>
+                            <span style="background:{AMBER}22;color:{AMBER};font-size:10px;font-weight:700;
+                                padding:2px 8px;border-radius:20px;border:1px solid {AMBER}55;">⚠ STALE DATA</span>
+                        </div>
+                        <div style="display:flex;align-items:baseline;gap:10px;">
+                            <span style="font-family:{MONO};font-weight:700;font-size:24px;color:{IVORY};opacity:.75;">{mmi['score']}</span>
+                            <span style="background:{zc}22;color:{zc};font-size:12px;font-weight:700;
+                                padding:3px 12px;border-radius:20px;border:1px solid {zc}55;opacity:.85;">{mmi['zone']}</span>
+                        </div>
+                    </div>
+                    <div style="text-align:right;font-size:11px;color:{AMBER};">Live fetch failed<br>
+                        <span style="opacity:.8;">Last known value · {age_label}</span></div>
+                </div></div>""", unsafe_allow_html=True)
+
         else:
             st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {T2};
                 border-radius:12px;padding:16px 18px;margin:4px 2px;opacity:0.6;">
                 <div style="font-size:11px;font-weight:700;color:{T2};text-transform:uppercase;margin-bottom:6px;">
                     Market Mood Index (MMI)</div>
-                <div style="font-size:12px;color:{T2};">Unavailable right now — Tickertape's page couldn't be read.
-                    This updates automatically once it's reachable again.</div></div>""", unsafe_allow_html=True)
+                <div style="font-size:12px;color:{T2};">Unavailable — Tickertape's page couldn't be read and no
+                    cached value exists yet. This will populate automatically once a scan succeeds.</div></div>""", unsafe_allow_html=True)
 
         st.markdown(f"<div style='height:1px;background:{BORDER};margin:16px 0 16px;'></div>", unsafe_allow_html=True)
 
