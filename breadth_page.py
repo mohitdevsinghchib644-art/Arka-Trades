@@ -1,26 +1,22 @@
 """
 breadth_page.py — UI layer for Market Breadth & Health Analysis.
 
-Rewritten to call breadth_engine's real functions directly instead of
-the lossy compute_daily_breadth_metrics bridge wrapper (which silently
-collapsed any snapshot error into an all-zero metrics dict via
-`.get("total_scanned", 1)` — a key that snapshot never actually sets —
-and was the root cause of the "everything shows 0" bug).
+Two changes in this revision, matching breadth_engine.py's fixes:
 
-This page now:
-  1. Calls compute_breadth_snapshot() directly and reads its real keys
-     (total_stocks, up_5d_pct, new_hi_5d, etc).
-  2. Surfaces snapshot["error"] with st.error() the moment it appears,
-     instead of rendering a wall of zeros with no explanation.
-  3. Persists every successful scan via append_history() and rebuilds
-     the A/D Line + McClellan series from load_history() each render,
-     so those indicators (and the HMM regime detector, which needs
-     >= 15 real trading days) actually have data to work with instead
-     of a synthetic 1-row frame that can never satisfy the model's
-     minimum-history floor.
-  4. Caches the last snapshot/composite in session_state so pressing
-     "Generate AI Market Narrative" doesn't force a full universe
-     re-download.
+1. Added a "Backfill History" button (separate from the daily "Refresh
+   Now" scan) that calls backfill_history_from_bhavcopy() once to pull
+   15-20 days of real history immediately, instead of waiting three-plus
+   weeks of daily scans to accumulate enough for the A/D Line, McClellan
+   Oscillator, and HMM regime detector (which needs >=15 days) to have
+   anything to work with. This directly addresses "I don't have previous
+   data to see whether the environment is improving."
+
+2. MA percentage displays (the g1 column and the top metric cards) now
+   read snapshot["above_Xdma_denom"] as the denominator instead of
+   snapshot["total_stocks"], matching the fix in compute_composite_score.
+   Falls back to total_stocks if an older snapshot shape is somehow
+   still in session_state (defensive only — a fresh scan always has the
+   _denom fields).
 """
 
 import streamlit as st
@@ -33,10 +29,10 @@ from breadth_engine import (
     compute_ad_line_and_mcclellan,
     append_history,
     load_history,
+    backfill_history_from_bhavcopy,
 )
 from breadth_ai import get_hmm_regime, generate_breadth_ai_narrative
 
-# ── Local styling constants (mirrors app.py's dark terminal palette) ──
 DARK2  = "#11161D"
 BORDER = "#242D3A"
 IVORY  = "#E8ECF2"
@@ -90,6 +86,25 @@ def _score_color(score):
     return RED
 
 
+def _pct_above(snapshot, ma_key):
+    """
+    Returns (percentage, above_count, denom) for a given MA key
+    ('20', '50', or '200'), using the metric-specific denominator
+    (above_Xdma_denom) instead of total_stocks. This is the display-
+    side half of the same fix in compute_composite_score — both must
+    use the same denominator or the score breakdown and the raw
+    percentages shown elsewhere on the page would silently disagree
+    with each other again.
+    """
+    above = snapshot.get(f"above_{ma_key}dma", 0)
+    denom = snapshot.get(f"above_{ma_key}dma_denom")
+    if not denom:
+        below = snapshot.get(f"below_{ma_key}dma", 0)
+        denom = above + below if (above + below) else snapshot.get("total_stocks", 1)
+    pct = (above / denom * 100) if denom else 0.0
+    return pct, above, denom
+
+
 def render_market_breadth():
     st.markdown(f"""
     <div style="font-size:24px;font-weight:800;color:{IVORY};margin-bottom:4px;">
@@ -100,30 +115,50 @@ def render_market_breadth():
         Markov regime clustering, and AI executive summaries — computed from real NSE data.
     </div>""", unsafe_allow_html=True)
 
-    scan_col, info_col = st.columns([1, 3])
+    scan_col, backfill_col, info_col = st.columns([1, 1, 2])
     with scan_col:
         run_scan = st.button("🔄 Refresh Now", type="primary", use_container_width=True,
                               help="Data refreshes automatically once per trading day after "
                                    "4:00 PM IST. This re-checks for that session — it will not "
                                    "re-fetch a session you already have.")
+    with backfill_col:
+        run_backfill = st.button("📜 Backfill 20 Days", use_container_width=True,
+                                  help="Reconstructs the last 20 trading days of breadth history "
+                                       "in one go, using price data already on file — no extra "
+                                       "network cost. Run this once now (or any time history looks "
+                                       "thin, e.g. right after a redeploy) instead of waiting three "
+                                       "weeks of daily scans for the A/D Line, McClellan Oscillator, "
+                                       "and regime detector to have enough to work with.")
 
     st.caption(
         "📅 Breadth data updates once per trading session, at/after 4:00 PM IST, Monday–Friday. "
         "It will not change again until the next session's close."
     )
 
-    # ── Run scan (or reuse last cached snapshot in session_state) ──
-    # This button clears the page's own session_state cache so the UI
-    # recomputes, but the underlying fetch (_load_bhavcopy_history /
-    # _batch_download_yfinance in breadth_engine.py) is cached by
-    # Streamlit with ttl=None, keyed on the resolved trading-session
-    # date. Pressing this before 4pm IST re-renders but correctly
-    # returns the SAME prior session's data rather than re-fetching,
-    # since the session key hasn't rolled over yet — that's intentional.
     if run_scan:
         st.session_state.pop("breadth_snapshot", None)
         st.session_state.pop("breadth_composite", None)
         st.session_state.pop("breadth_narrative", None)
+
+    if run_backfill:
+        with st.spinner("Backfilling 20 trading days of history from price data already on file..."):
+            tickers, _ = get_nse_universe()
+            summary = backfill_history_from_bhavcopy(tickers, days=20)
+        if summary.get("days_written", 0) > 0:
+            oldest, newest = summary["date_range"]
+            st.success(f"Backfilled {summary['days_written']} trading days ({oldest} → {newest}). "
+                       "A/D Line, McClellan, and regime detection below now have real history to work with.")
+        else:
+            st.error(f"Backfill couldn't write any days: {summary.get('error', 'unknown reason')}")
+        # Force recompute of history-dependent state below, without
+        # forcing a full re-scan of today's snapshot (that's a separate
+        # concern from "Refresh Now" and shouldn't trigger on backfill).
+        st.session_state.pop("breadth_composite", None)
+        st.session_state["breadth_history"] = compute_ad_line_and_mcclellan(load_history())
+        if "breadth_snapshot" in st.session_state and "error" not in st.session_state["breadth_snapshot"]:
+            st.session_state["breadth_composite"] = compute_composite_score(
+                st.session_state["breadth_snapshot"], st.session_state["breadth_history"]
+            )
 
     if "breadth_snapshot" not in st.session_state:
         with st.spinner("Fetching NSE universe and computing breadth..."):
@@ -155,21 +190,34 @@ def render_market_breadth():
             Data source: <span style="color:{source_color};font-weight:600;">{source_label}</span>
         </div>""", unsafe_allow_html=True)
 
-    # ── Surface errors immediately instead of rendering fake zeros ──
     if "error" in snapshot:
         st.error(f"Breadth computation failed: {snapshot['error']}")
         st.caption(
-            "This usually means the batched yfinance download returned no usable data "
+            "This usually means the batched download returned no usable data "
             "(rate limit, network blip, or a stale universe list). Try scanning again "
-            "in a minute, or check that _batch_download isn't being throttled."
+            "in a minute."
         )
         return
+
+    # If history is thin, nudge toward the backfill button rather than
+    # let the A/D Line / McClellan / regime sections render as empty
+    # with no explanation of why or what to do about it.
+    if len(history) < 15:
+        st.info(
+            f"📜 Only **{len(history)}** trading day(s) of history on file. "
+            "Click **Backfill 20 Days** above to reconstruct recent history immediately "
+            "(uses price data already fetched — no extra cost), or keep scanning daily "
+            "and it'll build up on its own over the next few weeks."
+        )
 
     # ════════════════ Top composite banner ════════════════
     score = composite.get("score")
     score_display = f"{score} / 100" if score is not None else "N/A"
     label = composite.get("label", "N/A")
     accent = _score_color(score)
+
+    pct20, above20, denom20 = _pct_above(snapshot, "20")
+    pct200, above200, denom200 = _pct_above(snapshot, "200")
 
     b1, b2, b3, b4 = st.columns(4)
     with b1:
@@ -182,13 +230,12 @@ def render_market_breadth():
             accent=GREEN if snapshot['advances'] >= snapshot['declines'] else RED,
         )
     with b3:
-        pct20 = snapshot['above_20dma'] / snapshot['total_stocks'] * 100 if snapshot['total_stocks'] else 0
-        _metric_card("Above 20 DMA", f"{pct20:.1f}%", f"{snapshot['above_20dma']} of {snapshot['total_stocks']} stocks", accent=CYAN)
+        _metric_card("Above 20 DMA", f"{pct20:.1f}%", f"{above20} of {denom20} stocks with 20d+ history", accent=CYAN)
     with b4:
-        pct200 = snapshot['above_200dma'] / snapshot['total_stocks'] * 100 if snapshot['total_stocks'] else 0
-        _metric_card("Above 200 DMA", f"{pct200:.1f}%", f"{snapshot['above_200dma']} of {snapshot['total_stocks']} stocks", accent=PURPLE)
+        _metric_card("Above 200 DMA", f"{pct200:.1f}%", f"{above200} of {denom200} stocks with 200d+ history", accent=PURPLE)
 
-    st.caption(f"Snapshot as of {snapshot['date']} · {snapshot['total_stocks']} stocks with sufficient history")
+    st.caption(f"Snapshot as of {snapshot['date']} · {snapshot['total_stocks']} stocks fetched total "
+               f"({denom200} had enough history for a 200DMA reading)")
 
     # ════════════════ Key breadth indicators ════════════════
     _section_header("📌 Key Breadth Indicators", CYAN)
@@ -196,14 +243,10 @@ def render_market_breadth():
 
     with g1:
         st.markdown(f"**Moving Average Participation**")
-        total = snapshot['total_stocks'] or 1
-        for label_, above, below in [
-            ("20 DMA", snapshot['above_20dma'], snapshot['below_20dma']),
-            ("50 DMA", snapshot['above_50dma'], snapshot['below_50dma']),
-            ("200 DMA", snapshot['above_200dma'], snapshot['below_200dma']),
-        ]:
-            pct = above / total * 100
-            st.write(f"• Above {label_}: **{pct:.1f}%** ({above} stocks) · Below: {below}")
+        for label_, ma_key in [("20 DMA", "20"), ("50 DMA", "50"), ("200 DMA", "200")]:
+            pct, above, denom = _pct_above(snapshot, ma_key)
+            below = denom - above
+            st.write(f"• Above {label_}: **{pct:.1f}%** ({above} of {denom}) · Below: {below}")
 
     with g2:
         thresh = snapshot.get("thresholds", {})
@@ -216,7 +259,7 @@ def render_market_breadth():
 
     with g3:
         st.markdown(f"**Session Breakdown**")
-        st.write(f"• Total stocks analyzed: **{snapshot['total_stocks']}**")
+        st.write(f"• Total stocks fetched: **{snapshot['total_stocks']}**")
         st.write(f"• Unchanged stocks: **{snapshot['unchanged']}**")
         ad_ratio = snapshot['advances'] / snapshot['declines'] if snapshot['declines'] else float('inf')
         ad_ratio_display = f"{ad_ratio:.2f}" if ad_ratio != float('inf') else "∞"
@@ -250,9 +293,9 @@ def render_market_breadth():
     _section_header("📈 A/D Line & McClellan Oscillator", PINK)
     if history.empty or len(history) < 2:
         st.info(
-            f"Only {len(history)} day(s) of history on file. Run this scan daily to build "
-            "the A/D Line and McClellan series — both need multiple sessions to plot a trend. "
-            "History accumulates automatically each time you scan."
+            f"Only {len(history)} day(s) of history on file. Click **Backfill 20 Days** above "
+            "the scan buttons to get a real trend immediately, or run this scan daily to build "
+            "it up on its own."
         )
     else:
         chart_df = history.set_index("date")[["ad_line"]].rename(columns={"ad_line": "A/D Line"})
@@ -288,8 +331,7 @@ def render_market_breadth():
         have = len(history)
         st.info(
             f"Markov regime detection needs at least {needed} days of history "
-            f"(have {have}). Scan daily to accumulate enough sessions — this happens "
-            "automatically, there's nothing else to configure."
+            f"(have {have}). Click **Backfill 20 Days** above to get there immediately."
         )
 
     if st.button("💡 Generate AI Market Narrative"):
