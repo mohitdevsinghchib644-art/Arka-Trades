@@ -30,6 +30,7 @@ from breadth_engine import (
     append_history,
     load_history,
     backfill_history_from_bhavcopy,
+    _eod_cache_key,
 )
 from breadth_ai import get_hmm_regime, generate_breadth_ai_narrative
 
@@ -139,6 +140,7 @@ def render_market_breadth():
         st.session_state.pop("breadth_snapshot", None)
         st.session_state.pop("breadth_composite", None)
         st.session_state.pop("breadth_narrative", None)
+        st.session_state.pop("breadth_session_key", None)
 
     if run_backfill:
         with st.spinner("Backfilling 20 trading days of history from price data already on file..."):
@@ -160,6 +162,29 @@ def render_market_breadth():
                 st.session_state["breadth_snapshot"], st.session_state["breadth_history"]
             )
 
+    # Auto re-sync on the trading-session boundary, not just on a button
+    # press. _eod_cache_key() resolves to a string that only changes
+    # once, right at 4:00 PM IST on a trading day (see breadth_engine's
+    # _resolve_eod_session_date) — the same key breadth_engine.py's own
+    # @st.cache_data(ttl=None) fetch layer is keyed on. Previously this
+    # page only checked "does a snapshot exist in session_state", which
+    # meant that once a snapshot was stored, NOTHING re-fetched it short
+    # of a manual click — even after a new session's data was already
+    # sitting ready in the engine's own cache. Comparing the stored
+    # session key against the CURRENT one means a plain page reload (no
+    # button, no click) picks up the new session automatically the
+    # moment it rolls over, while still doing nothing extra the other
+    # ~23.5 hours of the day, since the key genuinely hasn't changed and
+    # the underlying fetch is already cached by breadth_engine.py either
+    # way — this only removes the page's own redundant, unaware gate.
+    current_session_key = _eod_cache_key()
+    stored_session_key = st.session_state.get("breadth_session_key")
+    if stored_session_key is not None and stored_session_key != current_session_key:
+        st.session_state.pop("breadth_snapshot", None)
+        st.session_state.pop("breadth_composite", None)
+        st.session_state.pop("breadth_narrative", None)
+        st.toast(f"New trading session detected ({current_session_key}) — refreshing breadth automatically.")
+
     if "breadth_snapshot" not in st.session_state:
         with st.spinner("Fetching NSE universe and computing breadth..."):
             tickers, universe_source = get_nse_universe()
@@ -176,6 +201,7 @@ def render_market_breadth():
             st.session_state["breadth_universe_source"] = universe_source
             st.session_state["breadth_history"] = history
             st.session_state["breadth_composite"] = composite
+            st.session_state["breadth_session_key"] = current_session_key
 
     snapshot  = st.session_state["breadth_snapshot"]
     universe_source = st.session_state.get("breadth_universe_source", "unknown")
