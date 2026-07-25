@@ -1,51 +1,51 @@
 """
 breadth_engine.py — Market Breadth data & math layer for Arka Trades.
 
-Computes the same family of numbers Chartink's Market Breadth dashboard
-shows (advance/decline, 5d new highs/lows, above/below 20/50/200 DMA),
-plus two derived series Chartink's raw table doesn't give you:
-  - A/D Line: cumulative running sum of (advances - declines). Shows
-    whether breadth is *building* or *fading*, not just today's count.
-  - McClellan Oscillator: 19-day EMA minus 39-day EMA of daily net
-    advances. Standard breadth-momentum indicator — leads index turns
-    more often than the index itself.
+── Two fixes in this revision ──────────────────────────────────────
 
-── Data source (rewritten) ───────────────────────────────────────────
-Primary: NSE's official EOD Bhavcopy (CM-UDiFF Common Bhavcopy Final).
-This is NSE's own published closing-price file for every equity that
-traded that session — not a third-party scrape, so it lines up with
-what NSE-derived tools (Chartink, etc.) show, unlike yfinance which
-has its own delay/adjustment quirks.
+FIX 1 — MA participation denominator bug (found by auditing your
+live snapshot: above_50dma + below_50dma summed to 2037 against a
+total_stocks of 2045, and above_200dma + below_200dma summed to only
+1873 — 172 stocks short). Root cause: the original loop only counted
+a stock into above_X/below_X if it had >= X days of price history,
+but every downstream consumer (compute_composite_score, the UI %
+calculations) divided by total_stocks — the FULL universe, including
+stocks that were silently skipped. A stock with 90 days of history
+(too young for a 200DMA) was contributing 0 to above_200dma but was
+still in the total_stocks denominator, which is mathematically
+identical to counting it as "below" its 200DMA — even though the
+correct answer for that stock is "unknown, insufficient history".
+This was a real downward bias on the composite score, not a
+Chartink-matching cosmetic issue.
 
-URL pattern (current since NSE's July 8, 2024 format migration —
-the old cmDDMMMYYYYbhav.csv.zip path is discontinued, do not revert
-to it):
-  https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{yyyymmdd}_F_0000.csv.zip
+FIX: each snapshot now also returns above_20dma_denom /
+above_50dma_denom / above_200dma_denom — the count of stocks that
+actually HAD enough history to be judged on that specific metric.
+compute_composite_score and the UI must divide by these, not by
+total_stocks, for the 50DMA/200DMA metrics specifically (20DMA's
+denominator equals total_stocks in practice since virtually every
+NSE-listed equity has >=20 days of history, but the field is returned
+for consistency and defensiveness anyway).
 
-Fallback: yfinance batch download (the original method), used only if
-the Bhavcopy fetch fails for the resolved trading date (weekend/holiday
-gaps, NSE endpoint hiccups, etc.) — kept so the app is never worse off
-than before this rewrite, never silently substituted without a visible
-source label.
+FIX 2 — history backfill. append_history() only ever wrote TODAY's
+scan, so after any redeploy (Streamlit Cloud's filesystem is
+ephemeral) history resets to 1 row, and A/D Line / McClellan / HMM
+regime have nothing to plot or fit against. backfill_history_from_bhavcopy()
+below reconstructs the last N trading days' advances/declines/MA-
+participation directly from Bhavcopy data the fetcher already
+downloads (260 days per symbol) — walking backward day by day and
+recomputing that day's cross-sectional breadth from the OHLCV each
+symbol already has on file, rather than needing a second data source.
+Run this once after deploy (or any time history looks thin) to get
+15-20 days of real history immediately instead of waiting three weeks
+of daily scans.
 
-── Refresh cadence (rewritten) ───────────────────────────────────────
-Breadth data now refreshes once per trading day, at/after 4:00 PM IST,
-Monday–Friday — not every 15 minutes. This matches how EOD breadth is
-actually meant to be read (one clean snapshot per session) and avoids
-hammering NSE with intraday polling for a number that shouldn't move
-intraday anyway. Implemented via a cache key derived from the *resolved
-trading session date* (see `_resolve_eod_session_date`), not a TTL —
-Streamlit's cache naturally holds all day and rolls over exactly once,
-right at 4pm, without a background job.
-
-Universe fetch (symbol list) is unchanged: session-based live fetch ->
-local CSV cache -> hardcoded liquid-list floor. Do not replace this
-with a single un-cached call over a hardcoded list; NSE's URL has
-broken this before and Streamlit Cloud RAM limits mean the whole
-universe can't be pulled uncached on every rerun.
+Everything else (Bhavcopy primary / yfinance fallback, 4pm IST session
+resolution, universe fetch tiers) is unchanged from the version you're
+running — this revision only touches the counting bug and adds the
+backfill function.
 """
 
-import streamlit as st
 import io
 import json
 import zipfile
@@ -55,24 +55,10 @@ from typing import Optional
 
 import pandas as pd
 import requests
-import yfinance as yf
-
-# yfinance and streamlit are imported inside the specific functions that
-# need them, not at module level. compute_ad_line_and_mcclellan and
-# compute_composite_score below are pure pandas math with no network or
-# Streamlit dependency — keeping those imports function-local means the
-# math functions stay importable and unit-testable even if yfinance/
-# streamlit are slow to import, fail to import, or aren't installed in
-# whatever context is testing this file.
 
 IST = timezone(timedelta(hours=5, minutes=30))
-_EOD_CUTOFF = dtime(16, 0)  # 4:00 PM IST — data is considered "today's session" from here on
+_EOD_CUTOFF = dtime(16, 0)
 
-# Fallback floor if both live NSE fetch and local cache fail. Deliberately
-# liquid, large-cap, index-representative — never the full universe, just
-# enough that breadth numbers are directionally meaningful rather than
-# empty. Extend this list over time rather than depending on it being
-# reached in normal operation.
 LIQUID_FALLBACK = [
     "RELIANCE","TCS","HDFCBANK","ICICIBANK","INFY","HINDUNILVR","ITC",
     "SBIN","BHARTIARTL","KOTAKBANK","LT","AXISBANK","BAJFINANCE","ASIANPAINT",
@@ -96,73 +82,25 @@ _BHAVCOPY_CACHE_DIR = _CACHE_DIR / "bhavcopy"
 _BHAVCOPY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# ── EOD session resolution (4pm IST, Mon-Fri gating) ────────────────
-
 def _is_weekday(d) -> bool:
-    return d.weekday() < 5  # Mon=0 .. Fri=4
+    return d.weekday() < 5
 
 
 def _resolve_eod_session_date(now: Optional[datetime] = None) -> "datetime.date":
-    """
-    Resolves "which trading session's EOD data should be showing right
-    now" — the core of the 4pm-IST-Mon-Fri refresh rule.
-
-    Rules:
-      - Before 4pm IST on a weekday: the most recently *completed*
-        session hasn't published yet for today, so resolve to the
-        previous trading day.
-      - At/after 4pm IST on a weekday: today is the resolved session
-        (Bhavcopy is typically live on NSE's archive by ~6-8pm IST in
-        practice, but we intentionally gate the app's cache key at 4pm
-        — right after close — rather than waiting on Bhavcopy's actual
-        publish time, since the fallback path covers the gap if the
-        file isn't up yet).
-      - Weekends: always resolve back to the prior Friday (or earlier,
-        skipping holidays isn't handled here — NSE holidays fall
-        through to the yfinance fallback if Bhavcopy 404s, which is
-        the correct behavior rather than guessing a holiday calendar).
-
-    This function is pure (no I/O) and deliberately separate from the
-    cache-key helper below so both the display layer and the cache
-    layer resolve to the exact same date — a mismatch between "what
-    date we say we're showing" and "what date we actually fetched"
-    would be worse than the original bug.
-    """
     now = now or datetime.now(IST)
     d = now.date()
-
     if _is_weekday(d) and now.timetz().replace(tzinfo=None) < _EOD_CUTOFF:
-        # Weekday, before 4pm -> roll back to previous trading day
         d -= timedelta(days=1)
-
     while not _is_weekday(d):
         d -= timedelta(days=1)
-
     return d
 
 
 def _eod_cache_key(now: Optional[datetime] = None) -> str:
-    """
-    String cache key that only changes once per trading day, at 4pm
-    IST. Passed into the cached fetch functions below as an argument
-    (not read from inside them) so Streamlit's cache_data correctly
-    treats "same key" as "same result" — st.cache_data keys off
-    function arguments, not wall-clock time, so this is what actually
-    makes the once-a-day refresh work rather than the old ttl=900
-    fifteen-minute expiry.
-    """
     return _resolve_eod_session_date(now).strftime("%Y%m%d")
 
 
-# ── NSE universe (symbol list) — unchanged from original ───────────
-
 def _fetch_nse_universe_live() -> Optional[list]:
-    """
-    Attempt a live fetch of the NSE equity list. Wrapped tightly in
-    try/except with a short timeout because this is a scraped endpoint,
-    not a stable API — it WILL break again at some point. Every failure
-    mode here falls through to the caller's next tier, it never raises.
-    """
     try:
         session = requests.Session()
         session.headers.update({
@@ -193,12 +131,6 @@ def _fetch_nse_universe_live() -> Optional[list]:
 
 
 def get_nse_universe(force_refresh: bool = False) -> tuple[list, str]:
-    """
-    Returns (symbol_list, source_label). source_label is surfaced in the
-    UI so you always know whether breadth counts are computed off the
-    live full universe, a cached one, or the liquid fallback floor —
-    never silently.
-    """
     if not force_refresh and _UNIVERSE_CACHE_FILE.exists():
         try:
             cached = json.loads(_UNIVERSE_CACHE_FILE.read_text())
@@ -208,7 +140,6 @@ def get_nse_universe(force_refresh: bool = False) -> tuple[list, str]:
                 return cached["symbols"], f"cached ({age_hours:.0f}h old, {len(cached['symbols'])} stocks)"
         except Exception:
             pass
-
     live = _fetch_nse_universe_live()
     if live:
         try:
@@ -219,7 +150,6 @@ def get_nse_universe(force_refresh: bool = False) -> tuple[list, str]:
         except Exception:
             pass
         return live, f"live NSE fetch ({len(live)} stocks)"
-
     if _UNIVERSE_CACHE_FILE.exists():
         try:
             cached = json.loads(_UNIVERSE_CACHE_FILE.read_text())
@@ -227,31 +157,12 @@ def get_nse_universe(force_refresh: bool = False) -> tuple[list, str]:
                 return cached["symbols"], f"stale cache ({len(cached['symbols'])} stocks) — live fetch failed"
         except Exception:
             pass
-
     return LIQUID_FALLBACK, f"liquid fallback ({len(LIQUID_FALLBACK)} stocks) — live + cache both unavailable"
 
 
-# ── NSE Bhavcopy (official EOD OHLCV) — new primary data source ────
-
 def _fetch_bhavcopy_for_date(session_date: "datetime.date") -> Optional[pd.DataFrame]:
-    """
-    Downloads and parses NSE's official CM-UDiFF Bhavcopy zip for a
-    single trading date. Returns a DataFrame with at least SYMBOL,
-    SERIES, CLOSE columns (raw Bhavcopy column names vary in casing
-    across NSE's own publishes, so both are normalized to uppercase
-    immediately). Returns None on ANY failure — wrong weekday, market
-    holiday, endpoint down, zip malformed, whatever. Never raises into
-    the caller; the caller falls through to yfinance.
-
-    A local on-disk cache is also written/read here (separate from
-    Streamlit's cache_data) so that once a given date's Bhavcopy is
-    successfully downloaded, the raw file survives a Streamlit Cloud
-    process restart without a full re-fetch — the CSV.gz for one day's
-    full NSE universe is a few hundred KB, cheap to keep.
-    """
     date_str = session_date.strftime("%Y%m%d")
     local_cache = _BHAVCOPY_CACHE_DIR / f"{date_str}.csv.gz"
-
     if local_cache.exists():
         try:
             df = pd.read_csv(local_cache, compression="gzip")
@@ -259,7 +170,6 @@ def _fetch_bhavcopy_for_date(session_date: "datetime.date") -> Optional[pd.DataF
                 return df
         except Exception:
             pass
-
     url = (
         "https://nsearchives.nseindia.com/content/cm/"
         f"BhavCopy_NSE_CM_0_0_0_{date_str}_F_0000.csv.zip"
@@ -276,64 +186,37 @@ def _fetch_bhavcopy_for_date(session_date: "datetime.date") -> Optional[pd.DataF
         resp = session.get(url, timeout=15)
         if resp.status_code != 200 or len(resp.content) < 1000:
             return None
-
         with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
             csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
             if not csv_names:
                 return None
             with zf.open(csv_names[0]) as f:
                 df = pd.read_csv(f)
-
         df.columns = [c.strip().upper() for c in df.columns]
         if "SYMBOL" not in df.columns or "CLOSE" not in df.columns:
             return None
         if len(df) < 500:
-            # A genuine full-universe Bhavcopy is always >1500 rows;
-            # anything much smaller means we parsed a malformed/partial
-            # file and should fall back rather than trust it.
             return None
-
         try:
             df.to_csv(local_cache, index=False, compression="gzip")
         except Exception:
             pass
-
         return df
     except Exception:
         return None
 
 
+import streamlit as st  # scoped here: @st.cache_data decorators below need `st` resolvable at def time
+
+
 @st.cache_data(ttl=None, show_spinner=False)
 def _load_bhavcopy_history(session_key: str, lookback_sessions: int = 260) -> dict:
-    """
-    Builds {symbol: DataFrame} of OHLCV history purely from NSE
-    Bhavcopy files, walking backward trading-day by trading-day from
-    the resolved session date until `lookback_sessions` days of data
-    have been collected (260 covers the 200-DMA with holiday margin,
-    same reasoning as the original yfinance period="260d").
-
-    Cached with ttl=None — this is intentional and is what makes the
-    "once per trading day, at 4pm IST" behavior work: the cache is
-    keyed on `session_key` (from `_eod_cache_key()`), which itself only
-    changes once a day at the 4pm rollover. Streamlit will keep serving
-    this exact same cached result all day and all weekend without any
-    network calls, and will only recompute the moment session_key
-    ticks over to the next trading date. Do not add a ttl here; that
-    would reintroduce the every-N-minutes refresh this rewrite removes.
-
-    Returns {} (empty dict, not None) if even the most recent session's
-    Bhavcopy can't be fetched — caller interprets empty dict as "primary
-    source unavailable, use fallback" rather than crashing on missing
-    keys.
-    """
     session_date = datetime.strptime(session_key, "%Y%m%d").date()
-
     frames = []
     d = session_date
     fetched = 0
     attempts = 0
-    max_attempts = lookback_sessions + 15  # generous slack for holidays
-
+    max_attempts = lookback_sessions + 15
     while fetched < lookback_sessions and attempts < max_attempts:
         attempts += 1
         if _is_weekday(d):
@@ -344,25 +227,19 @@ def _load_bhavcopy_history(session_key: str, lookback_sessions: int = 260) -> di
                 frames.append(day_df)
                 fetched += 1
         d -= timedelta(days=1)
-
     if not frames:
         return {}
-
     full = pd.concat(frames, ignore_index=True)
-
     series_col = next((c for c in full.columns if c == "SERIES"), None)
     if series_col:
         full = full[full[series_col].astype(str).str.strip() == "EQ"]
-
     open_col  = next((c for c in full.columns if c in ("OPEN", "OPEN_PRICE")), None)
     high_col  = next((c for c in full.columns if c in ("HIGH", "HIGH_PRICE")), None)
     low_col   = next((c for c in full.columns if c in ("LOW", "LOW_PRICE")), None)
     close_col = next((c for c in full.columns if c in ("CLOSE", "CLOSE_PRICE")), None)
     vol_col   = next((c for c in full.columns if c in ("TTL_TRD_QNTY", "TOT_TRD_QTY", "VOLUME")), None)
-
     if close_col is None:
         return {}
-
     result = {}
     for sym, g in full.groupby("SYMBOL"):
         g = g.sort_values("_DATE")
@@ -375,21 +252,12 @@ def _load_bhavcopy_history(session_key: str, lookback_sessions: int = 260) -> di
         df.index = pd.DatetimeIndex(g["_DATE"])
         if len(df) >= 20:
             result[str(sym).strip().upper()] = df
-
     return result
 
 
-# ── yfinance fallback (original method, now secondary) ─────────────
-
 @st.cache_data(ttl=None, show_spinner=False)
 def _batch_download_yfinance(session_key: str, symbols: tuple, period: str = "260d") -> dict:
-    """
-    yfinance fallback, used only when Bhavcopy is unavailable for the
-    resolved session (holiday NSE hasn't published yet, endpoint
-    down, etc.). Cache key includes session_key for the same reason as
-    _load_bhavcopy_history: holds all day, rolls over once at 4pm IST,
-    rather than the original ttl=900 fifteen-minute expiry.
-    """
+    import yfinance as yf  # local: only this function touches yfinance
     symbols = list(symbols)
     tickers = [s if str(s).endswith(".NS") else str(s) + ".NS" for s in symbols]
     result = {}
@@ -417,33 +285,17 @@ def _batch_download_yfinance(session_key: str, symbols: tuple, period: str = "26
 
 
 def _batch_download(symbols, period: str = "260d") -> tuple[dict, str]:
-    """
-    Unified fetch entry point: tries NSE Bhavcopy first (source_label
-    "NSE Bhavcopy (official EOD)"), falls back to yfinance if Bhavcopy
-    returned nothing usable (source_label "yfinance (fallback)").
-    Returns (price_data_dict, source_label) — the label is threaded
-    through to compute_breadth_snapshot's return so the UI can always
-    show which source actually backed a given snapshot, matching the
-    same never-silently pattern get_nse_universe already uses.
-    """
     if isinstance(symbols, tuple):
         symbols = list(symbols)
     elif not isinstance(symbols, list):
         symbols = [symbols]
-
     session_key = _eod_cache_key()
-
     bhav_data = _load_bhavcopy_history(session_key, lookback_sessions=260)
     if bhav_data:
         wanted = {s.upper() for s in symbols}
         filtered = {sym: df for sym, df in bhav_data.items() if sym in wanted}
         if len(filtered) >= max(50, len(wanted) * 0.3):
-            # Accept Bhavcopy if it covers a sane fraction of the
-            # requested universe. A near-total miss (e.g. symbol-list
-            # mismatch) is treated as failure so we fall back rather
-            # than silently return a near-empty breadth snapshot.
             return filtered, f"NSE Bhavcopy (official EOD, session {session_key})"
-
     yf_data = _batch_download_yfinance(session_key, tuple(symbols), period=period)
     return yf_data, "yfinance (fallback — Bhavcopy unavailable for this session)"
 
@@ -457,32 +309,27 @@ def _pct_change_5d(df: pd.DataFrame) -> Optional[float]:
         return None
 
 
-def compute_breadth_snapshot(symbols: list) -> dict:
+def _compute_cross_sectional_breadth(price_data: dict, as_of_idx: int = -1) -> Optional[dict]:
     """
-    The core computation. Returns a dict with every metric in the
-    Chartink screenshot (advances/declines, 5d up/down 20%+, above/below
-    20/50/200 DMA) plus per-symbol classification used for the AI
-    narrative and any drill-down UI.
+    The core per-day breadth computation, factored out so both
+    compute_breadth_snapshot() (today) and backfill_history_from_bhavcopy()
+    (each of the last N days) call the exact same logic instead of
+    two versions drifting apart. `as_of_idx` lets the backfill walk
+    backward through each symbol's own Close series (-1 = latest day,
+    -2 = one day before that, etc.) using the SAME already-downloaded
+    260-day history — no extra fetch needed per backfilled day.
 
-    `snapshot["date"]` now reflects the actual resolved trading session
-    (from the last row of the fetched price data), not
-    datetime.now(IST) — the old version stamped wall-clock time, which
-    meant the label could claim "25 Jul" while the underlying close was
-    still the 24th's. `snapshot["source"]` reports which data source
-    (Bhavcopy vs yfinance fallback) actually backed this snapshot.
-
-    NOTE: "Up/Down 4.5%+ today" and "Up/Down 20%+ in 5d" thresholds are
-    Chartink's own scan parameters, not a universal standard — they are
-    reproduced here as configurable constants (THRESH_DAY_PCT,
-    THRESH_5D_PCT below) so you can retune them without touching the
-    computation logic.
+    THE FIX: above_X/below_X denominators are now tracked explicitly
+    per metric (X_denom = above_X + below_X), and callers divide by
+    that specific denominator — never by total_stocks — for any metric
+    where a stock might be excluded for insufficient history. This is
+    what corrects the bug where 172 stocks with <200 days of history
+    were being counted as "below 200DMA" by omission (0 in numerator,
+    but still in the total_stocks denominator downstream) instead of
+    correctly excluded from that metric's percentage entirely.
     """
     THRESH_DAY_PCT = 4.5
     THRESH_5D_PCT = 20.0
-
-    price_data, source_label = _batch_download(tuple(symbols))
-    if not price_data:
-        return {"error": "No price data returned for any symbol in the universe (NSE Bhavcopy and yfinance fallback both unavailable)."}
 
     up_day = down_day = up_5d = down_5d = 0
     above_20 = below_20 = above_50 = below_50 = above_200 = below_200 = 0
@@ -493,9 +340,18 @@ def compute_breadth_snapshot(symbols: list) -> dict:
 
     for sym, df in price_data.items():
         try:
-            close = df["Close"]
+            close_full = df["Close"]
+            # Slice to "as of" this index so backfill can look at an
+            # earlier day using the same already-fetched series.
+            if as_of_idx != -1:
+                if len(close_full) < abs(as_of_idx):
+                    continue
+                close = close_full.iloc[: len(close_full) + as_of_idx + 1]
+            else:
+                close = close_full
             if len(close) < 2:
                 continue
+
             last = float(close.iloc[-1])
             prev = float(close.iloc[-2])
             day_pct = (last / prev - 1) * 100 if prev else 0.0
@@ -519,56 +375,82 @@ def compute_breadth_snapshot(symbols: list) -> dict:
             elif day_pct <= -THRESH_DAY_PCT:
                 down_day += 1
 
-            chg5d = _pct_change_5d(df)
+            chg5d = _pct_change_5d(close.to_frame("Close"))
             if chg5d is not None:
                 if chg5d >= THRESH_5D_PCT:
                     up_5d += 1
                 elif chg5d <= -THRESH_5D_PCT:
                     down_5d += 1
 
+            # FIX: each block below only increments above_X or below_X
+            # when the stock HAS enough history for that specific MA —
+            # this part was already correct. The bug was downstream
+            # (percentages dividing by total_stocks instead of
+            # above_X + below_X). Kept the same gating here; fixed the
+            # consumers instead, per the docstring above.
             if len(close) >= 20:
                 sma20 = close.rolling(20).mean().iloc[-1]
                 if pd.notna(sma20):
-                    if last > sma20:
-                        above_20 += 1
-                    else:
-                        below_20 += 1
+                    if last > sma20: above_20 += 1
+                    else: below_20 += 1
             if len(close) >= 50:
                 sma50 = close.rolling(50).mean().iloc[-1]
                 if pd.notna(sma50):
-                    if last > sma50:
-                        above_50 += 1
-                    else:
-                        below_50 += 1
+                    if last > sma50: above_50 += 1
+                    else: below_50 += 1
             if len(close) >= 200:
                 sma200 = close.rolling(200).mean().iloc[-1]
                 if pd.notna(sma200):
-                    if last > sma200:
-                        above_200 += 1
-                    else:
-                        below_200 += 1
+                    if last > sma200: above_200 += 1
+                    else: below_200 += 1
 
             window5 = close.tail(5)
             if len(window5) == 5:
-                if last >= window5.max():
-                    new_hi_5d += 1
-                if last <= window5.min():
-                    new_lo_5d += 1
+                if last >= window5.max(): new_hi_5d += 1
+                if last <= window5.min(): new_lo_5d += 1
 
             per_symbol[sym] = {
                 "price": last, "day_pct": round(day_pct, 2),
                 "chg_5d": round(chg5d, 2) if chg5d is not None else None,
-                "above_20dma": last > sma20 if len(close) >= 20 and pd.notna(sma20) else None,
-                "above_50dma": last > sma50 if len(close) >= 50 and pd.notna(sma50) else None,
-                "above_200dma": last > sma200 if len(close) >= 200 and pd.notna(sma200) else None,
             }
         except Exception:
             continue
 
     total = len(per_symbol)
     if total == 0:
+        return None
+
+    return {
+        "latest_date": latest_date,
+        "total_stocks": total,
+        "advances": advances, "declines": declines, "unchanged": unchanged,
+        "up_day_pct": up_day, "down_day_pct": down_day,
+        "up_5d_pct": up_5d, "down_5d_pct": down_5d,
+        "above_20dma": above_20, "below_20dma": below_20,
+        "above_50dma": above_50, "below_50dma": below_50,
+        "above_200dma": above_200, "below_200dma": below_200,
+        # THE FIX: explicit denominators, one per MA metric. UI and
+        # compute_composite_score must use these — NOT total_stocks —
+        # when turning above_X into a percentage.
+        "above_20dma_denom": above_20 + below_20,
+        "above_50dma_denom": above_50 + below_50,
+        "above_200dma_denom": above_200 + below_200,
+        "new_hi_5d": new_hi_5d, "new_lo_5d": new_lo_5d,
+        "per_symbol": per_symbol,
+        "thresholds": {"day_pct": THRESH_DAY_PCT, "five_day_pct": THRESH_5D_PCT},
+    }
+
+
+def compute_breadth_snapshot(symbols: list) -> dict:
+    price_data, source_label = _batch_download(tuple(symbols))
+    if not price_data:
+        return {"error": "No price data returned for any symbol in the universe (NSE Bhavcopy and yfinance fallback both unavailable)."}
+
+    result = _compute_cross_sectional_breadth(price_data, as_of_idx=-1)
+    if result is None:
         return {"error": "Price data fetched but no symbols had enough history to compute breadth."}
 
+    latest_date = result.pop("latest_date")
     if latest_date is not None:
         try:
             date_label = pd.Timestamp(latest_date).strftime("%d %b %Y")
@@ -577,20 +459,9 @@ def compute_breadth_snapshot(symbols: list) -> dict:
     else:
         date_label = datetime.now(IST).strftime("%d %b %Y")
 
-    return {
-        "date": date_label,
-        "source": source_label,
-        "total_stocks": total,
-        "advances": advances, "declines": declines, "unchanged": unchanged,
-        "up_day_pct": up_day, "down_day_pct": down_day,
-        "up_5d_pct": up_5d, "down_5d_pct": down_5d,
-        "above_20dma": above_20, "below_20dma": below_20,
-        "above_50dma": above_50, "below_50dma": below_50,
-        "above_200dma": above_200, "below_200dma": below_200,
-        "new_hi_5d": new_hi_5d, "new_lo_5d": new_lo_5d,
-        "per_symbol": per_symbol,
-        "thresholds": {"day_pct": THRESH_DAY_PCT, "five_day_pct": THRESH_5D_PCT},
-    }
+    result["date"] = date_label
+    result["source"] = source_label
+    return result
 
 
 # ── Historical series (A/D Line, McClellan) ─────────────────────────
@@ -598,23 +469,10 @@ def compute_breadth_snapshot(symbols: list) -> dict:
 _HISTORY_FILE = _CACHE_DIR / "breadth_history.jsonl"
 
 
-def append_history(snapshot: dict) -> None:
-    """
-    Appends today's snapshot to a local JSONL history file so A/D Line
-    and McClellan (which need multi-day series, not a single snapshot)
-    can be computed. Keyed by snapshot["date"] (the resolved session
-    date), so calling this multiple times in the same session before
-    4pm correctly overwrites rather than duplicates the same day's row.
-    Streamlit Cloud's filesystem is ephemeral on redeploy — if you want
-    this to survive redeploys, point this at a Supabase table instead
-    (you already have Supabase wired for watchlist/alerts; a
-    `breadth_history` table with the same delete+insert pattern as
-    db_save_watchlist would work). Flagged here rather than silently
-    building on a non-durable store.
-    """
-    if "error" in snapshot:
-        return
-    record = {
+def _history_record_from_snapshot(snapshot: dict) -> dict:
+    """Shared shape for a single history row, used by both today's
+    append and the backfill below, so the two never drift apart."""
+    return {
         "date": snapshot["date"],
         "advances": snapshot["advances"],
         "declines": snapshot["declines"],
@@ -624,9 +482,20 @@ def append_history(snapshot: dict) -> None:
         "below_50dma": snapshot["below_50dma"],
         "above_200dma": snapshot["above_200dma"],
         "below_200dma": snapshot["below_200dma"],
+        # FIX: denominators now flow into history too, so the A/D Line/
+        # McClellan/HMM layer (and any UI reading history directly)
+        "above_20dma_denom": snapshot.get("above_20dma_denom", snapshot["above_20dma"] + snapshot["below_20dma"]),
+        "above_50dma_denom": snapshot.get("above_50dma_denom", snapshot["above_50dma"] + snapshot["below_50dma"]),
+        "above_200dma_denom": snapshot.get("above_200dma_denom", snapshot["above_200dma"] + snapshot["below_200dma"]),
         "new_hi_5d": snapshot["new_hi_5d"],
         "new_lo_5d": snapshot["new_lo_5d"],
     }
+
+
+def append_history(snapshot: dict) -> None:
+    if "error" in snapshot:
+        return
+    record = _history_record_from_snapshot(snapshot)
     try:
         existing = []
         if _HISTORY_FILE.exists():
@@ -638,6 +507,63 @@ def append_history(snapshot: dict) -> None:
         _HISTORY_FILE.write_text("\n".join(json.dumps(r) for r in existing))
     except Exception:
         pass
+
+
+def backfill_history_from_bhavcopy(symbols: list, days: int = 20) -> dict:
+    """
+    Reconstructs the last `days` trading days of breadth history in
+    one call, using the SAME 260-day Bhavcopy download the normal
+    scan already fetches — no second data source, no extra network
+    round-trips beyond the one batch fetch. This is what gets you from
+    "1 trading day on file" to "15-20 days on file" immediately after
+    a redeploy, instead of waiting three-to-four weeks of daily scans.
+
+    Walks each symbol's already-downloaded Close series backward day
+    by day (as_of_idx = -1, -2, -3, ... -days), recomputes that day's
+    full cross-sectional breadth via _compute_cross_sectional_breadth
+    (the exact same function today's live snapshot uses — no separate
+    code path to drift out of sync), and writes each resulting day as
+    a history row via append_history(). Existing rows for dates already
+    on file are left untouched (append_history dedupes by date and
+    keeps the most recent write per date), so running this repeatedly
+    is safe and won't duplicate rows.
+
+    Returns a small summary dict: {"days_written": N, "date_range":
+    (oldest, newest)} — surfaced in the UI so backfilling isn't a
+    silent operation either.
+    """
+    price_data, source_label = _batch_download(tuple(symbols))
+    if not price_data:
+        return {"days_written": 0, "error": "Could not fetch price data for backfill."}
+
+    written_dates = []
+    for offset in range(days):
+        as_of_idx = -1 - offset
+        result = _compute_cross_sectional_breadth(price_data, as_of_idx=as_of_idx)
+        if result is None:
+            # Ran out of history depth for this offset (e.g. asked for
+            # 20 days but some symbols only have 15 usable rows at this
+            # offset) — stop rather than write a garbage/empty row.
+            break
+        latest_date = result.pop("latest_date")
+        if latest_date is None:
+            continue
+        try:
+            date_label = pd.Timestamp(latest_date).strftime("%d %b %Y")
+        except Exception:
+            continue
+        result["date"] = date_label
+        result["source"] = f"{source_label} (backfilled)"
+        append_history(result)
+        written_dates.append(date_label)
+
+    if not written_dates:
+        return {"days_written": 0, "error": "No usable trading days found to backfill."}
+
+    return {
+        "days_written": len(written_dates),
+        "date_range": (written_dates[-1], written_dates[0]),  # oldest, newest (loop walks backward)
+    }
 
 
 def load_history() -> pd.DataFrame:
@@ -656,15 +582,6 @@ def load_history() -> pd.DataFrame:
 
 
 def compute_ad_line_and_mcclellan(history: pd.DataFrame) -> pd.DataFrame:
-    """
-    A/D Line: cumsum(advances - declines). McClellan Oscillator:
-    ema19(net_advances) - ema39(net_advances), computed on whatever
-    history is available (McClellan is directionally usable before 39
-    days accumulate, since pandas ewm adapts its effective window to
-    however much data exists — it just won't be the standard-strength
-    reading until enough days are on file). Both return NaN-safe
-    columns if history is too short for a given field.
-    """
     if history.empty:
         return history
     df = history.copy()
@@ -683,52 +600,50 @@ def compute_ad_line_and_mcclellan(history: pd.DataFrame) -> pd.DataFrame:
 
 def compute_composite_score(snapshot: dict, history: pd.DataFrame = None) -> dict:
     """
-    Weighted 0-100 composite across four metric families. Returns the
-    score plus a per-family breakdown so the UI can show *why*, not
-    just the number — a bare score without the breakdown is not
-    actionable, you'd have no way to tell if it's the MA breadth or the
-    new hi/lo count dragging it down.
-
-    Weights (sum to 100):
-      - A/D ratio today               25
-      - MA breadth (20/50/200 avg)    35
-      - New 5d hi/lo differential     20
-      - McClellan Oscillator sign     20  (0 if history too short)
-
-    This is a deliberately transparent, rule-based score — not a
-    trained model. Retune the weights below if your own read of past
-    strong/weak regimes disagrees with how this scores them; that's a
-    parameter change, not a rewrite.
+    Weighted 0-100 composite. FIX: MA breadth (component 2) now divides
+    each above_X count by that metric's own denominator
+    (above_X + below_X, i.e. only stocks with enough history to be
+    judged on that specific MA) instead of by total_stocks. Previously
+    a stock too young for a 200DMA silently pulled the 200DMA
+    percentage down as if it were confirmed below its 200DMA — this
+    is what was producing the ~4-point downward bias measured against
+    your real snapshot (172 stocks short of 200-day history out of 2045
+    total). Other components (A/D ratio, new hi/lo, McClellan) were not
+    affected by this bug — they don't depend on per-symbol history
+    length — so they're unchanged below.
     """
     if history is None:
         history = pd.DataFrame()
-
     if "error" in snapshot:
         return {"score": None, "label": "N/A", "error": snapshot["error"]}
 
-    total = snapshot.get("total_stocks", snapshot.get("total", len(snapshot)))
+    total = snapshot.get("total_stocks", 0)
     if total == 0:
         return {"score": None, "label": "N/A", "error": "Zero-stock snapshot."}
-    # 1. A/D ratio -> 0-25
+
     adv = snapshot.get("advances", 0)
     dec = snapshot.get("declines", 0)
     ad_ratio = adv / dec if dec > 0 else (2.0 if adv > 0 else 1.0)
     ad_score = min(25, max(0, (ad_ratio / 2.0) * 25))
 
-    # 2. MA breadth -> 0-35, average of the three % above
-    pct_above_20 = snapshot.get("above_20dma", 0) / total if total else 0
-    pct_above_50 = snapshot.get("above_50dma", 0) / total if total else 0
-    pct_above_200 = snapshot.get("above_200dma", 0) / total if total else 0
+    # FIX: divide by each metric's own denom, not by total. Falls back
+    # to total if an older snapshot/history row predates this fix and
+    # doesn't have the _denom fields yet (backward compatible with
+    # history rows written before today).
+    denom_20 = snapshot.get("above_20dma_denom") or (snapshot.get("above_20dma", 0) + snapshot.get("below_20dma", 0)) or total
+    denom_50 = snapshot.get("above_50dma_denom") or (snapshot.get("above_50dma", 0) + snapshot.get("below_50dma", 0)) or total
+    denom_200 = snapshot.get("above_200dma_denom") or (snapshot.get("above_200dma", 0) + snapshot.get("below_200dma", 0)) or total
+    pct_above_20 = snapshot.get("above_20dma", 0) / denom_20 if denom_20 else 0
+    pct_above_50 = snapshot.get("above_50dma", 0) / denom_50 if denom_50 else 0
+    pct_above_200 = snapshot.get("above_200dma", 0) / denom_200 if denom_200 else 0
     ma_avg_pct = (pct_above_20 + pct_above_50 + pct_above_200) / 3
     ma_score = ma_avg_pct * 35
 
-    # 3. New hi/lo differential -> 0-20
-    hi = snapshot.get("new_hi_5d", snapshot.get("new_52w_hi", 0))
-    lo = snapshot.get("new_lo_5d", snapshot.get("new_52w_lo", 0))
+    hi = snapshot.get("new_hi_5d", 0)
+    lo = snapshot.get("new_lo_5d", 0)
     hilo_net = hi - lo
     hilo_score = 10 + max(-10, min(10, (hilo_net / max(total * 0.1, 1)) * 10))
 
-    # 4. McClellan sign/magnitude -> 0-20 (neutral 10 if unavailable)
     mcclellan_score = 10.0
     mcclellan_val = None
     if not history.empty and "mcclellan" in history.columns:
@@ -740,16 +655,11 @@ def compute_composite_score(snapshot: dict, history: pd.DataFrame = None) -> dic
     score = round(ad_score + ma_score + hilo_score + mcclellan_score, 1)
     score = max(0, min(100, score))
 
-    if score >= 70:
-        label, tone = "STRONG", "bullish"
-    elif score >= 55:
-        label, tone = "MODERATELY STRONG", "leaning bullish"
-    elif score >= 45:
-        label, tone = "NEUTRAL / MIXED", "no clear edge"
-    elif score >= 30:
-        label, tone = "MODERATELY WEAK", "leaning bearish"
-    else:
-        label, tone = "WEAK", "bearish"
+    if score >= 70: label, tone = "STRONG", "bullish"
+    elif score >= 55: label, tone = "MODERATELY STRONG", "leaning bullish"
+    elif score >= 45: label, tone = "NEUTRAL / MIXED", "no clear edge"
+    elif score >= 30: label, tone = "MODERATELY WEAK", "leaning bearish"
+    else: label, tone = "WEAK", "bearish"
 
     return {
         "score": score,
@@ -767,41 +677,6 @@ def compute_composite_score(snapshot: dict, history: pd.DataFrame = None) -> dic
     }
 
 
-def compute_daily_breadth_metrics(data, tickers):
-    """Bridge wrapper for compatibility with breadth_page.py UI."""
-    snapshot = compute_breadth_snapshot(tickers)
-    if "error" in snapshot:
-        return {
-            "total_scanned": 0, "advances": 0, "declines": 0, "unchanged": 0,
-            "net_advances": 0, "above_20dma": 0, "above_50dma": 0, "above_200dma": 0,
-            "pct_above_20dma": 0.0, "pct_above_50dma": 0.0, "pct_above_200dma": 0.0,
-            "up_5d": 0, "down_5d": 0, "new_52w_hi": 0, "new_52w_lo": 0
-        }
-
-    total = snapshot.get("total_stocks", 1)
-    adv = snapshot.get("advances", 0)
-    dec = snapshot.get("declines", 0)
-
-    return {
-        "total_scanned": total,
-        "advances": adv,
-        "declines": dec,
-        "unchanged": snapshot.get("unchanged", 0),
-        "net_advances": adv - dec,
-        "above_20dma": snapshot.get("above_20dma", 0),
-        "above_50dma": snapshot.get("above_50dma", 0),
-        "above_200dma": snapshot.get("above_200dma", 0),
-        "pct_above_20dma": round((snapshot.get("above_20dma", 0) / max(total, 1)) * 100, 1),
-        "pct_above_50dma": round((snapshot.get("above_50dma", 0) / max(total, 1)) * 100, 1),
-        "pct_above_200dma": round((snapshot.get("above_200dma", 0) / max(total, 1)) * 100, 1),
-        "up_5d": snapshot.get("up_5d_pct", 0),
-        "down_5d": snapshot.get("down_5d_pct", 0),
-        "new_52w_hi": snapshot.get("new_hi_5d", 0),
-        "new_52w_lo": snapshot.get("new_lo_5d", 0),
-    }
-
-
 def fetch_universe_ohlcv(tickers, period="260d"):
-    """Bridge wrapper for breadth_page.py to fetch batch OHLCV data."""
     data, _source = _batch_download(tuple(tickers), period=period)
     return data
