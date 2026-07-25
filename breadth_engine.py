@@ -60,7 +60,7 @@ LIQUID_FALLBACK = [
     "SRF","TATAPOWER","TORNTPHARM","TRENT","TVSMOTOR","ZOMATO",
 ]
 
-_CACHE_DIR = Path("/home/claude/arka/.cache")
+_CACHE_DIR = Path(".cache")
 _CACHE_DIR.mkdir(parents=True, exist_ok=True)
 _UNIVERSE_CACHE_FILE = _CACHE_DIR / "nse_universe.json"
 _UNIVERSE_CACHE_TTL_HOURS = 24
