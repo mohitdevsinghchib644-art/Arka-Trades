@@ -466,7 +466,9 @@ def compute_composite_score(snapshot: dict, history: pd.DataFrame) -> dict:
             },
         },
     }
-def compute_daily_breadth_metrics(data, tickers):
+def fetch_universe_ohlcv(tickers, period="260d"):
+    """Bridge wrapper for breadth_page.py to fetch batch OHLCV data."""
+    return _batch_download(tuple(tickers), period=period)
     """Bridge wrapper for compatibility with breadth_page.py UI."""
     snapshot = compute_breadth_snapshot(tickers)
     if "error" in snapshot:
