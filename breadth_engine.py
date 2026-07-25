@@ -1,5 +1,4 @@
 """
-import streamlit as st
 breadth_engine.py — Market Breadth data & math layer for Arka Trades.
 
 Computes the same family of numbers Chartink's Market Breadth dashboard
@@ -19,6 +18,7 @@ before (see arka-trades memory) and Streamlit Cloud RAM limits mean the
 whole universe can't be pulled uncached on every rerun.
 """
 
+import streamlit as st
 import io
 import json
 from datetime import datetime, timedelta, timezone
