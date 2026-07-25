@@ -154,3 +154,6 @@ def get_hmm_regime(history: pd.DataFrame) -> Optional[dict]:
         }
     except Exception:
         return None
+def generate_breadth_ai_narrative(*args, **kwargs):
+    """Bridge wrapper for breadth_page.py compatibility."""
+    return generate_ai_narrative(*args, **kwargs)
