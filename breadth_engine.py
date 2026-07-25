@@ -450,19 +450,21 @@ def compute_composite_score(snapshot: dict, history: pd.DataFrame = None) -> dic
     if total == 0:
         return {"score": None, "label": "N/A", "error": "Zero-stock snapshot."}
     # 1. A/D ratio -> 0-25
-    adv, dec = snapshot["advances"], snapshot["declines"]
+    adv = snapshot.get("advances", 0)
+    dec = snapshot.get("declines", 0)
     ad_ratio = adv / dec if dec > 0 else (2.0 if adv > 0 else 1.0)
     ad_score = min(25, max(0, (ad_ratio / 2.0) * 25))
 
     # 2. MA breadth -> 0-35, average of the three % above
-    pct_above_20 = snapshot["above_20dma"] / total if total else 0
-    pct_above_50 = snapshot["above_50dma"] / total if total else 0
-    pct_above_200 = snapshot["above_200dma"] / total if total else 0
+    pct_above_20 = snapshot.get("above_20dma", 0) / total if total else 0
+    pct_above_50 = snapshot.get("above_50dma", 0) / total if total else 0
+    pct_above_200 = snapshot.get("above_200dma", 0) / total if total else 0
     ma_avg_pct = (pct_above_20 + pct_above_50 + pct_above_200) / 3
     ma_score = ma_avg_pct * 35
 
     # 3. New hi/lo differential -> 0-20
-    hi, lo = snapshot["new_hi_5d"], snapshot["new_lo_5d"]
+    hi = snapshot.get("new_hi_5d", snapshot.get("new_52w_hi", 0))
+    lo = snapshot.get("new_lo_5d", snapshot.get("new_52w_lo", 0))
     hilo_net = hi - lo
     hilo_score = 10 + max(-10, min(10, (hilo_net / max(total * 0.1, 1)) * 10))
 
