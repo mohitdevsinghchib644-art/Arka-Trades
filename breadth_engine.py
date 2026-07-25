@@ -27,6 +27,7 @@ from typing import Optional
 
 import pandas as pd
 import requests
+import yfinance as yf
 
 # yfinance and streamlit are imported inside the specific functions that
 # need them (_batch_download, get_nse_universe's cache), not at module
