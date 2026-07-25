@@ -445,8 +445,7 @@ def compute_composite_score(snapshot: dict, history: pd.DataFrame = None) -> dic
     """
     if "error" in snapshot:
         return {"score": None, "label": "N/A", "error": snapshot["error"]}
-
-    # Change this:
+# Change this:
 # total = snapshot["total_stocks"]
 
 # To this safe version:
