@@ -446,7 +446,7 @@ def compute_composite_score(snapshot: dict, history: pd.DataFrame = None) -> dic
     if "error" in snapshot:
             return {"score": None, "label": "N/A", "error": snapshot["error"]}
 
-        total = snapshot.get("total_stocks", snapshot.get("total", len(snapshot)))
+    total = snapshot.get("total_stocks", snapshot.get("total", len(snapshot)))
         if total == 0:
             return {"score": None, "label": "N/A", "error": "Zero-stock snapshot."}
     # 1. A/D ratio -> 0-25
