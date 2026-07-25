@@ -466,13 +466,10 @@ def compute_composite_score(snapshot: dict, history: pd.DataFrame) -> dict:
             },
         },
     }
-def fetch_universe_ohlcv(tickers, period="260d"):
-    """Bridge wrapper for breadth_page.py to fetch batch OHLCV data."""
-    return _batch_download(tuple(tickers), period=period)
+def compute_daily_breadth_metrics(data, tickers):
     """Bridge wrapper for compatibility with breadth_page.py UI."""
     snapshot = compute_breadth_snapshot(tickers)
     if "error" in snapshot:
-        # Return fallback zeros if data fetch fails
         return {
             "total_scanned": 0, "advances": 0, "declines": 0, "unchanged": 0,
             "net_advances": 0, "above_20dma": 0, "above_50dma": 0, "above_200dma": 0,
@@ -501,3 +498,7 @@ def fetch_universe_ohlcv(tickers, period="260d"):
         "new_52w_hi": snapshot.get("new_hi_5d", 0),
         "new_52w_lo": snapshot.get("new_lo_5d", 0),
     }
+
+def fetch_universe_ohlcv(tickers, period="260d"):
+    """Bridge wrapper for breadth_page.py to fetch batch OHLCV data."""
+    return _batch_download(tuple(tickers), period=period)
