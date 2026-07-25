@@ -444,15 +444,11 @@ def compute_composite_score(snapshot: dict, history: pd.DataFrame = None) -> dic
     parameter change, not a rewrite.
     """
     if "error" in snapshot:
-        return {"score": None, "label": "N/A", "error": snapshot["error"]}
-# Change this:
-# total = snapshot["total_stocks"]
+            return {"score": None, "label": "N/A", "error": snapshot["error"]}
 
-# To this safe version:
-total = snapshot.get("total_stocks", snapshot.get("total", len(snapshot)))
-    if total == 0:
-        return {"score": None, "label": "N/A", "error": "Zero-stock snapshot."}
-
+        total = snapshot.get("total_stocks", snapshot.get("total", len(snapshot)))
+        if total == 0:
+            return {"score": None, "label": "N/A", "error": "Zero-stock snapshot."}
     # 1. A/D ratio -> 0-25
     adv, dec = snapshot["advances"], snapshot["declines"]
     ad_ratio = adv / dec if dec > 0 else (2.0 if adv > 0 else 1.0)
