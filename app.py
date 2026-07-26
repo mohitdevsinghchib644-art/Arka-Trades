@@ -7,6 +7,7 @@ import time
 import requests
 import re
 import json
+import math
 from pathlib import Path
 from supabase import create_client, Client
 from news_feed import news_panel, get_news_dot, _ensure_news_state
@@ -242,6 +243,54 @@ def get_price(sym):
         return {"price": cur, "chg": ((cur-prev_close)/prev_close)*100, "prev_close": prev_close}
     except: return None
 
+# ═══════════════════════════════════════════════════════════════════
+# INDEX FETCHING — rewritten for three fixes:
+#   1. MIDCAP 100 / SMALLCAP 100 were showing "No data". Root cause for
+#      SMALLCAP: the ticker "^CNXSMALLCAP" is not valid; the correct
+#      Yahoo symbol is "^CNXSC". MIDCAP's own ticker was fine but had
+#      no fallback if Yahoo had a data gap on a given day — it now has
+#      one (^CRSMID, ^NIFTYMIDCAP100).
+#   2. GIFT NIFTY showed "$nan" / "nan%". GIFT Nifty is a futures
+#      contract on NSE IX (GIFT City) that requires a paid exchange
+#      data subscription — there is no free public ticker for it on
+#      Yahoo Finance or elsewhere (confirmed: multiple financial sites
+#      that display "GIFT Nifty" are substituting the regular NIFTY 50
+#      spot index with a disclaimer, not showing a real live GIFT
+#      Nifty futures feed). Rather than guess a third wrong ticker,
+#      this card is REMOVED entirely — showing nothing is more honest
+#      than showing a number that isn't actually GIFT Nifty.
+#   3. S&P 500 / DOW JONES also showed "$nan" — NOT a missing-data
+#      case like MIDCAP/SMALLCAP (those returned a clean "no data"
+#      before). This was a data returned, but containing NaN inside it
+#      that slipped past the old check, which only tested
+#      `h.empty or len(h) < 2` and never checked whether the actual
+#      Close values were valid numbers. `float(nan)` doesn't raise, so
+#      it sailed straight through and rendered as "$nan". Every index
+#      fetch below now explicitly checks math.isfinite() on every
+#      number before returning it as valid — this applies to ALL
+#      cards, not just the two that happened to break this time.
+# ═══════════════════════════════════════════════════════════════════
+
+def _values_are_sane(cur, pc):
+    """
+    The core sanity gate. Rejects NaN, inf, zero/negative prices (an
+    index price of 0 or below is never real), and a previous-close of
+    zero (which would make the % change calculation divide by zero and
+    produce inf/nan downstream). Returns True only if BOTH values are
+    real, finite, positive numbers.
+    """
+    try:
+        if cur is None or pc is None:
+            return False
+        cur, pc = float(cur), float(pc)
+        if not (math.isfinite(cur) and math.isfinite(pc)):
+            return False
+        if cur <= 0 or pc <= 0:
+            return False
+        return True
+    except (TypeError, ValueError):
+        return False
+
 def _fetch_index_history(sym):
     try:
         h = yf.Ticker(sym).history(period="5d", interval="1d")
@@ -252,15 +301,51 @@ def _fetch_index_history(sym):
         return None
 
 @st.cache_data(ttl=60, show_spinner=False)
-def get_index(sym, fallback_sym=None):
-    h = _fetch_index_history(sym)
-    if h is None and fallback_sym:
-        h = _fetch_index_history(fallback_sym)
-    if h is None:
-        return None
-    cur = float(h["Close"].iloc[-1]); pc = float(h["Close"].iloc[-2])
-    return {"price":cur,"chg":((cur-pc)/pc)*100,"pts":cur-pc,
-            "spark":[float(x) for x in h["Close"].tolist()]}
+def get_index(sym, fallback_syms=None):
+    """
+    fallback_syms: optional list of additional tickers to try, in
+    order, if `sym` fails OR returns data that doesn't pass the sanity
+    check. Every candidate is checked with the same rule, so a "looks
+    like it worked but the numbers are garbage" result from a fallback
+    ticker can't leak through either.
+    """
+    candidates = [sym] + (fallback_syms or [])
+    for candidate in candidates:
+        h = _fetch_index_history(candidate)
+        if h is None:
+            continue
+        try:
+            cur = float(h["Close"].iloc[-1])
+            pc = float(h["Close"].iloc[-2])
+        except Exception:
+            continue
+        if not _values_are_sane(cur, pc):
+            continue
+        spark_raw = [float(x) for x in h["Close"].tolist()]
+        spark = [x for x in spark_raw if math.isfinite(x)]
+        if len(spark) < 2:
+            continue
+        return {
+            "price": cur, "chg": ((cur - pc) / pc) * 100, "pts": cur - pc,
+            "spark": spark, "ticker_used": candidate,
+        }
+    return None
+
+# ── Global indexes: candidate ticker lists, first-success-wins ──────
+# MIDCAP 100: primary ticker was already correct on Yahoo; added
+# fallbacks in case of a data gap on a specific day.
+MIDCAP_CANDIDATES = ["NIFTY_MIDCAP_100.NS", "^CRSMID", "^NIFTYMIDCAP100"]
+# SMALLCAP 100: "^CNXSMALLCAP" (the old ticker) is NOT valid on Yahoo —
+# this was the actual root cause of it never showing data. "^CNXSC" is
+# the correct symbol (NIFTY SMLCAP 100).
+SMALLCAP_CANDIDATES = ["^CNXSC", "^CNXSMALLCAP", "NIFTYSMLCAP100.NS"]
+SP500_CANDIDATES    = ["^GSPC"]
+DOWJONES_CANDIDATES = ["^DJI"]
+GOLD_CANDIDATES     = ["GC=F"]
+# NOTE: no GIFT_NIFTY_CANDIDATES — see the removal rationale in the
+# comment block above. If you later get access to a paid NSE IX data
+# feed for GIFT Nifty, that's a real integration, not a Yahoo ticker
+# swap, and would need its own fetch function.
 
 def check_alerts(results):
     for s in results:
@@ -306,40 +391,34 @@ def checkline(text, c=None):
             f'<span style="flex-shrink:0;margin-top:2px;">{icon("check", 16, c or GREEN)}</span>'
             f'<span style="font-size:14px;color:{IVORY};line-height:1.6;">{text}</span></div>')
 
-# ════════════════════════════════════════════════════════════
-# GLOBAL INDICES + MARKET MOOD INDEX (MMI)
-# ════════════════════════════════════════════════════════════
-# Merged into app.py directly per request — previously this lived in a
-# separate global_indices.py, but keeping everything in one file avoids
-# the import ever silently drifting out of sync with what's deployed.
+# ═══════════════════════════════════════════════════════════════════
+# MARKET MOOD INDEX (MMI) — rebuilt parser
 #
-# Tickers below were verified against live Yahoo Finance listings
-# before use (not guessed):
-#   GIFT NIFTY : IN-Z22.SI   (Yahoo's listing for the GIFT Nifty /
-#                 SGX Nifty 50 Index Futures contract)
-#   S&P 500    : ^GSPC
-#   DOW JONES  : ^DJI
-#   GOLD (USD) : GC=F         (COMEX Gold Futures)
-#   MIDCAP 100 : NIFTY_MIDCAP_100.NS  (primary) / ^CRSMID (fallback)
-#   SMALLCAP100: ^CNXSC       (the app previously used the invalid
-#                 "^CNXSMALLCAP", which is why it never showed data)
+# The old parser used a positional regex ("first decimal-looking number
+# anywhere in the HTML") as a fallback path. Checked directly against
+# Tickertape's real live page: the current score (49.42) is NOT the
+# first decimal number in the page's content — there's a comparison
+# table further down ("MMI changed from ... 49.25 -> 49.42") plus
+# assorted other numbers in page furniture, and a blind positional
+# match has no reliable way to land on the right one. This is
+# confirmed to be the actual failure mode (your screenshot showed 4.5,
+# which matches neither 49.42 nor 49.25 — the old regex was matching
+# something else on the page entirely).
 #
-# MMI (Market Mood Index) is Tickertape's own proprietary Indian-market
-# fear/greed indicator — there is no public API for it (confirmed: no
-# developer API, no MCP, closed data surface). This scrapes the live
-# page's server-rendered HTML with plain `requests` (no Selenium/
-# headless Chrome, since that can't run on Streamlit Community Cloud).
-# If the live scrape fails, the LAST successfully-fetched value is
-# read back from a local JSON cache file and shown with a visible
-# "stale" warning and a "last updated" timestamp, rather than hiding
-# the card or showing nothing.
-
-GLOBAL_INDEX_TICKERS = {
-    "GIFT NIFTY":  "IN-Z22.SI",
-    "S&P 500":     "^GSPC",
-    "DOW JONES":   "^DJI",
-    "GOLD (USD)":  "GC=F",
-}
+# NEW APPROACH: anchor on the literal text "Updated" that immediately
+# follows the current score in the page's rendered content (verified
+# directly against a live fetch of the page: "49.42\n\nUpdated 1 day
+# ago" — this exact adjacency is what distinguishes the CURRENT score
+# from the comparison table's "49.25", which is not followed by
+# "Updated" anywhere nearby). This is the only parsing method now —
+# the old blind-positional fallback is removed rather than kept as a
+# second chance to grab the wrong number again.
+#
+# If this anchor pattern ever stops matching (Tickertape changes its
+# page layout), get_mmi() falls through to the last successfully
+# cached value, shown with a visible "stale" badge — it never falls
+# back to a guessed number.
+# ═══════════════════════════════════════════════════════════════════
 
 _MMI_URL = "https://www.tickertape.in/market-mood-index"
 _MMI_CACHE_DIR = Path(".cache")
@@ -366,47 +445,38 @@ def mmi_zone_color(zone: str) -> str:
         "Extreme Greed": "#22C55E",
     }.get(zone, "#8C97A8")
 
-def _mmi_parse_next_data(html: str):
-    """Structured path: locate __NEXT_DATA__ JSON and search recursively
-    for a numeric 0-100 leaf under an MMI/mood/sentiment-related key."""
-    try:
-        m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
-        if not m:
-            return None
-        data = json.loads(m.group(1))
-        candidates = []
-        def walk(node, key_hint=""):
-            if isinstance(node, dict):
-                for k, v in node.items():
-                    walk(v, k.lower())
-            elif isinstance(node, list):
-                for item in node:
-                    walk(item, key_hint)
-            elif isinstance(node, (int, float)):
-                if ("mmi" in key_hint or "mood" in key_hint or "sentiment" in key_hint) and 0 <= float(node) <= 100:
-                    candidates.append(float(node))
-        walk(data)
-        return candidates[0] if candidates else None
-    except Exception:
-        return None
+def _mmi_parse_score(html_or_text: str):
+    """
+    Anchor-based extraction: the current MMI score is immediately
+    followed (allowing for whitespace/newlines/intervening tags) by
+    the literal word "Updated". Verified against a live fetch of the
+    real Tickertape page — this pattern matched 49.42 correctly and
+    did NOT match 49.25 (yesterday's value, from the separate "Change
+    in MMI" comparison section further down the page, which is not
+    adjacent to the word "Updated").
 
-def _mmi_parse_visible_text(html: str):
-    """Fallback: the score sits as bare text immediately before an
-    'Updated ... ago' string in the server-rendered page."""
-    try:
-        m = re.search(r'(\d{1,3}\.\d{1,2})\s*(?:</[^>]+>\s*)*Updated', html)
-        if m:
+    Returns the float score, or None if the anchor isn't found — this
+    is a deliberate hard failure rather than a fallback guess. A
+    changed page layout should surface as "no live data, using cache"
+    (handled one level up in get_mmi), not a silently wrong number.
+    """
+    # Tolerant of HTML tags between the number and "Updated" (e.g. a
+    # closing </div> or similar), plus arbitrary whitespace/newlines —
+    # both raw HTML and any text-extracted version of the page can
+    # legitimately have either present. Restricted to a 0-100 range so
+    # a coincidental adjacent number elsewhere can't slip through.
+    pattern = re.compile(
+        r'(\d{1,3}\.\d{1,2})\s*(?:<[^>]+>\s*)*Updated',
+        re.MULTILINE
+    )
+    for m in pattern.finditer(html_or_text):
+        try:
             val = float(m.group(1))
-            if 0 <= val <= 100:
-                return val
-        m2 = re.search(r'(\d{1,3}\.\d{1,2})', html)
-        if m2:
-            val = float(m2.group(1))
-            if 0 <= val <= 100:
-                return val
-        return None
-    except Exception:
-        return None
+        except ValueError:
+            continue
+        if 0 <= val <= 100:
+            return val
+    return None
 
 def _mmi_save_last_known(score: float, zone: str):
     try:
@@ -431,8 +501,11 @@ def _mmi_load_last_known():
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _mmi_fetch_live():
-    """Live scrape only — returns {"score","zone"} or None. Cached 30min
-    since MMI is an end-of-day-ish composite, not a live tick."""
+    """Live scrape only — returns {"score","zone"} or None. Cached
+    30min since MMI is an end-of-day-ish composite, not a live tick.
+    Uses ONLY the anchor-based parser (see _mmi_parse_score docstring
+    for why the old positional fallback was removed rather than kept
+    as a second chance)."""
     try:
         session = requests.Session()
         session.headers.update({
@@ -443,10 +516,7 @@ def _mmi_fetch_live():
         resp = session.get(_MMI_URL, timeout=10)
         if resp.status_code != 200:
             return None
-        html = resp.text
-        score = _mmi_parse_next_data(html)
-        if score is None:
-            score = _mmi_parse_visible_text(html)
+        score = _mmi_parse_score(resp.text)
         if score is None:
             return None
         zone = _mmi_zone_for_score(score)
@@ -457,9 +527,9 @@ def _mmi_fetch_live():
 def get_mmi():
     """
     Returns a dict describing the MMI card state:
-      {"status": "live", "score", "zone", "fetched_at_ist"}      — fresh
+      {"status": "live", "score", "zone", "fetched_at_ist"}       — fresh
       {"status": "stale", "score", "zone", "age", "fetched_at_ist"} — cached fallback
-      {"status": "unavailable"}                                   — no live data, no cache either
+      {"status": "unavailable"}                                    — no live data, no cache either
     Never raises.
     """
     IST = timezone(timedelta(hours=5, minutes=30))
@@ -799,8 +869,14 @@ with right:
 
     st.markdown(f"<div style='height:1px;background:{BORDER};margin-bottom:12px;'></div>", unsafe_allow_html=True)
 
-    def show_idx(col, label, sym, c, fallback_sym=None, currency=""):
-        d = get_index(sym, fallback_sym)
+    def show_idx(col, label, sym, c, fallback_syms=None, currency=""):
+        """
+        fallback_syms: list of additional candidate tickers, tried in
+        order if the primary fails the sanity check (see get_index).
+        currency: prefix like "$" for non-INR indexes (S&P 500, Dow,
+        Gold). NSE indexes use no prefix (existing convention).
+        """
+        d = get_index(sym, fallback_syms)
         with col:
             if d:
                 cc = GREEN if d["chg"]>=0 else RED
@@ -823,24 +899,22 @@ with right:
         show_idx(r1b,"BANK NIFTY","^NSEBANK",CYAN)
         show_idx(r1c,"SENSEX","^BSESN",AMBER)
         r2a,r2b = st.columns(2)
-        # MIDCAP 100: NIFTY_MIDCAP_100.NS is the primary live Yahoo ticker;
-        # ^CRSMID is an alternate Yahoo listing for the same index, kept as
-        # fallback in case the primary symbol has a data gap on a given day.
-        show_idx(r2a,"MIDCAP 100","NIFTY_MIDCAP_100.NS",PURPLE, fallback_sym="^CRSMID")
-        # SMALLCAP 100: the app previously used "^CNXSMALLCAP", which is not
-        # a valid Yahoo ticker (this was the root cause of it never showing
-        # data). The correct symbol is "^CNXSC" (NIFTY SMLCAP 100).
-        show_idx(r2b,"SMALLCAP 100","^CNXSC",PINK)
+        show_idx(r2a,"MIDCAP 100", MIDCAP_CANDIDATES[0], PURPLE, fallback_syms=MIDCAP_CANDIDATES[1:])
+        show_idx(r2b,"SMALLCAP 100", SMALLCAP_CANDIDATES[0], PINK, fallback_syms=SMALLCAP_CANDIDATES[1:])
         st.markdown(f"<div style='height:1px;background:{BORDER};margin:12px 0 16px;'></div>", unsafe_allow_html=True)
 
         # ── Global Indexes ──
+        # NOTE: GIFT NIFTY is intentionally not shown here. Its live
+        # futures price requires a paid NSE IX data subscription and no
+        # free source (Yahoo Finance or otherwise) carries it — see the
+        # long comment block above get_index() for the full rationale.
+        # Only 3 cards below, not 4.
         st.markdown(f"""<div style="font-size:11px;font-weight:700;letter-spacing:1.5px;color:{T2};
             text-transform:uppercase;margin-bottom:8px;">Global Markets</div>""", unsafe_allow_html=True)
-        gi1, gi2, gi3, gi4 = st.columns(4)
-        show_idx(gi1,"GIFT NIFTY", GLOBAL_INDEX_TICKERS["GIFT NIFTY"], INDIGO)
-        show_idx(gi2,"S&P 500", GLOBAL_INDEX_TICKERS["S&P 500"], CYAN, currency="$")
-        show_idx(gi3,"DOW JONES", GLOBAL_INDEX_TICKERS["DOW JONES"], AMBER, currency="$")
-        show_idx(gi4,"GOLD (USD)", GLOBAL_INDEX_TICKERS["GOLD (USD)"], "#FFD700", currency="$")
+        gi1, gi2, gi3 = st.columns(3)
+        show_idx(gi1,"S&P 500", SP500_CANDIDATES[0], CYAN, fallback_syms=SP500_CANDIDATES[1:], currency="$")
+        show_idx(gi2,"DOW JONES", DOWJONES_CANDIDATES[0], AMBER, fallback_syms=DOWJONES_CANDIDATES[1:], currency="$")
+        show_idx(gi3,"GOLD (USD)", GOLD_CANDIDATES[0], "#FFD700", fallback_syms=GOLD_CANDIDATES[1:], currency="$")
 
         # ── Market Mood Index (MMI) ──
         mmi = get_mmi()
