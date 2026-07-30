@@ -28,8 +28,16 @@ def db_save_watchlist(symbols: list):
         supabase.table("watchlist").delete().neq("id", 0).execute()
         rows = [{"symbol": s} for s in symbols]
         if rows: supabase.table("watchlist").insert(rows).execute()
+        # FIX: session_state is the source of truth for this run and every
+        # run until the next explicit reload. We do NOT flip db_loaded to
+        # False here anymore — doing so used to force an immediate Supabase
+        # re-fetch on the very next rerun (e.g. right after clicking "Run
+        # Scan"), and if that SELECT raced the INSERT above and returned
+        # before Supabase had committed it, it would silently overwrite the
+        # watchlist we just saved with the old/empty one. Since we already
+        # set st.session_state.watchlist directly below, there is nothing
+        # left to "sync" from the DB right away.
         st.session_state.watchlist = symbols
-        st.session_state.db_loaded = False
         return True
     except Exception as e:
         st.error(f"Save error: {e}"); return False
@@ -66,6 +74,8 @@ def db_save_admin_watchlist(symbols: list):
         supabase.table("admin_watchlist").delete().neq("id", 0).execute()
         rows = [{"symbol": s} for s in symbols]
         if rows: supabase.table("admin_watchlist").insert(rows).execute()
+        # FIX: same reasoning as db_save_watchlist above — set state directly,
+        # don't force a racy reload flag.
         st.session_state.admin_watchlist = symbols
         return True
     except Exception as e:
@@ -332,20 +342,11 @@ def get_index(sym, fallback_syms=None):
     return None
 
 # ── Global indexes: candidate ticker lists, first-success-wins ──────
-# MIDCAP 100: primary ticker was already correct on Yahoo; added
-# fallbacks in case of a data gap on a specific day.
 MIDCAP_CANDIDATES = ["NIFTY_MIDCAP_100.NS", "^CRSMID", "^NIFTYMIDCAP100"]
-# SMALLCAP 100: "^CNXSMALLCAP" (the old ticker) is NOT valid on Yahoo —
-# this was the actual root cause of it never showing data. "^CNXSC" is
-# the correct symbol (NIFTY SMLCAP 100).
 SMALLCAP_CANDIDATES = ["^CNXSC", "^CNXSMALLCAP", "NIFTYSMLCAP100.NS"]
 SP500_CANDIDATES    = ["^GSPC"]
 DOWJONES_CANDIDATES = ["^DJI"]
 GOLD_CANDIDATES     = ["GC=F"]
-# NOTE: no GIFT_NIFTY_CANDIDATES — see the removal rationale in the
-# comment block above. If you later get access to a paid NSE IX data
-# feed for GIFT Nifty, that's a real integration, not a Yahoo ticker
-# swap, and would need its own fetch function.
 
 def check_alerts(results):
     for s in results:
@@ -392,32 +393,7 @@ def checkline(text, c=None):
             f'<span style="font-size:14px;color:{IVORY};line-height:1.6;">{text}</span></div>')
 
 # ═══════════════════════════════════════════════════════════════════
-# MARKET MOOD INDEX (MMI) — rebuilt parser
-#
-# The old parser used a positional regex ("first decimal-looking number
-# anywhere in the HTML") as a fallback path. Checked directly against
-# Tickertape's real live page: the current score (49.42) is NOT the
-# first decimal number in the page's content — there's a comparison
-# table further down ("MMI changed from ... 49.25 -> 49.42") plus
-# assorted other numbers in page furniture, and a blind positional
-# match has no reliable way to land on the right one. This is
-# confirmed to be the actual failure mode (your screenshot showed 4.5,
-# which matches neither 49.42 nor 49.25 — the old regex was matching
-# something else on the page entirely).
-#
-# NEW APPROACH: anchor on the literal text "Updated" that immediately
-# follows the current score in the page's rendered content (verified
-# directly against a live fetch of the page: "49.42\n\nUpdated 1 day
-# ago" — this exact adjacency is what distinguishes the CURRENT score
-# from the comparison table's "49.25", which is not followed by
-# "Updated" anywhere nearby). This is the only parsing method now —
-# the old blind-positional fallback is removed rather than kept as a
-# second chance to grab the wrong number again.
-#
-# If this anchor pattern ever stops matching (Tickertape changes its
-# page layout), get_mmi() falls through to the last successfully
-# cached value, shown with a visible "stale" badge — it never falls
-# back to a guessed number.
+# MARKET MOOD INDEX (MMI)
 # ═══════════════════════════════════════════════════════════════════
 
 _MMI_URL = "https://www.tickertape.in/market-mood-index"
@@ -446,25 +422,6 @@ def mmi_zone_color(zone: str) -> str:
     }.get(zone, "#8C97A8")
 
 def _mmi_parse_score(html_or_text: str):
-    """
-    Anchor-based extraction: the current MMI score is immediately
-    followed (allowing for whitespace/newlines/intervening tags) by
-    the literal word "Updated". Verified against a live fetch of the
-    real Tickertape page — this pattern matched 49.42 correctly and
-    did NOT match 49.25 (yesterday's value, from the separate "Change
-    in MMI" comparison section further down the page, which is not
-    adjacent to the word "Updated").
-
-    Returns the float score, or None if the anchor isn't found — this
-    is a deliberate hard failure rather than a fallback guess. A
-    changed page layout should surface as "no live data, using cache"
-    (handled one level up in get_mmi), not a silently wrong number.
-    """
-    # Tolerant of HTML tags between the number and "Updated" (e.g. a
-    # closing </div> or similar), plus arbitrary whitespace/newlines —
-    # both raw HTML and any text-extracted version of the page can
-    # legitimately have either present. Restricted to a 0-100 range so
-    # a coincidental adjacent number elsewhere can't slip through.
     pattern = re.compile(
         r'(\d{1,3}\.\d{1,2})\s*(?:<[^>]+>\s*)*Updated',
         re.MULTILINE
@@ -501,11 +458,6 @@ def _mmi_load_last_known():
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _mmi_fetch_live():
-    """Live scrape only — returns {"score","zone"} or None. Cached
-    30min since MMI is an end-of-day-ish composite, not a live tick.
-    Uses ONLY the anchor-based parser (see _mmi_parse_score docstring
-    for why the old positional fallback was removed rather than kept
-    as a second chance)."""
     try:
         session = requests.Session()
         session.headers.update({
@@ -525,13 +477,6 @@ def _mmi_fetch_live():
         return None
 
 def get_mmi():
-    """
-    Returns a dict describing the MMI card state:
-      {"status": "live", "score", "zone", "fetched_at_ist"}       — fresh
-      {"status": "stale", "score", "zone", "age", "fetched_at_ist"} — cached fallback
-      {"status": "unavailable"}                                    — no live data, no cache either
-    Never raises.
-    """
     IST = timezone(timedelta(hours=5, minutes=30))
     live = _mmi_fetch_live()
     if live:
@@ -549,7 +494,6 @@ def get_mmi():
 # ════════════════════════════════════════════════════════════
 if not st.session_state.logged_in:
 
-    # Landing palette overrides (safe: landing ends with st.stop())
     DARK="#070b0a"; DARK2="#0d1512"; DARK3="#13201b"; BORDER="#1d2f27"
     IVORY="#e9f5ef"; T2="#8aa79a"
     INDIGO="#5ed29c"; CYAN="#2dd4bf"; GREEN="#34d399"; PURPLE="#7dd3c0"; PINK="#5eead4"
@@ -571,7 +515,6 @@ if not st.session_state.logged_in:
     div[class*="st-key-cta_main"] button{{padding:14px 44px !important;text-transform:uppercase !important;font-size:13px !important;}}
     </style>""", unsafe_allow_html=True)
 
-    # ─── LOGIN VIEW ───
     if st.session_state.show_login:
         st.markdown(f"""
         <div style="text-align:center;padding:70px 0 10px;">
@@ -606,7 +549,6 @@ if not st.session_state.logged_in:
                 st.session_state.show_login = False; st.rerun()
         st.stop()
 
-    # ─── HERO (video, no CTA inside — real button overlaid below) ───
     hero_html = """
 <!DOCTYPE html><html><head>
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -675,12 +617,10 @@ else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=s;}
 """
     components.html(hero_html, height=720, scrolling=False)
 
-    # Real working CTA (native button overlaid into hero bottom)
     if st.button("Get Started →", type="primary", key="cta_main"):
         st.session_state.show_login = True
         st.rerun()
 
-    # ─── Stats Strip ───
     st.markdown("<div style='height:40px;'></div>", unsafe_allow_html=True)
     s1, s2, s3, s4 = st.columns(4)
     for col, num, label, c in [(s1,"2000+","NSE stocks covered",CYAN),(s2,"<90s","Scan time after pre-filter",INDIGO),
@@ -690,7 +630,6 @@ else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=s;}
                 <div style="font-family:{MONO};font-size:26px;font-weight:700;color:{c};margin-bottom:4px;">{num}</div>
                 <div style="font-size:12px;color:{T2};font-weight:600;">{label}</div></div>""", unsafe_allow_html=True)
 
-    # ─── Feature 1 ───
     st.markdown("<div style='height:56px;'></div>", unsafe_allow_html=True)
     fa1, fa2 = st.columns([1, 1])
     with fa1:
@@ -713,7 +652,6 @@ else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=s;}
                 <span style="color:{RED};">- Flagged:</span> Overhead supply at 2,980 level</div>
             <div style="font-size:12px;color:{T2};margin-top:12px;line-height:1.7;">"Structure is clean. Entry valid above 2,941 with stop at 2,896."</div></div>""", unsafe_allow_html=True)
 
-    # ─── Feature 2 ───
     st.markdown("<div style='height:48px;'></div>", unsafe_allow_html=True)
     fb1, fb2 = st.columns([1, 1])
     with fb1:
@@ -734,7 +672,6 @@ else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=s;}
             {checkline("Gemini Vision compares charts against your reference image")}
             {checkline("Ranked similarity verdicts with entry and risk notes")}</div>""", unsafe_allow_html=True)
 
-    # ─── Trading styles ───
     st.markdown("<div style='height:56px;'></div>", unsafe_allow_html=True)
     st.markdown(f"""<div style="text-align:center;margin-bottom:28px;">
         <div style="font-size:12px;font-weight:700;letter-spacing:2px;color:{CYAN};text-transform:uppercase;margin-bottom:8px;">Built for your style</div>
@@ -749,7 +686,6 @@ else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=s;}
             st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {ic_c};border-radius:14px;padding:26px;min-height:300px;">
                 {icon_box(ic, ic_c)}<div style="font-size:16px;font-weight:800;color:{IVORY};margin-bottom:16px;">{title}</div>{checks}</div>""", unsafe_allow_html=True)
 
-    # ─── Roadmap ───
     st.markdown("<div style='height:56px;'></div>", unsafe_allow_html=True)
     st.markdown(f"""<div style="text-align:center;margin-bottom:28px;">
         <div style="font-size:12px;font-weight:700;letter-spacing:2px;color:{CYAN};text-transform:uppercase;margin-bottom:8px;">Onboarding roadmap</div>
@@ -870,12 +806,6 @@ with right:
     st.markdown(f"<div style='height:1px;background:{BORDER};margin-bottom:12px;'></div>", unsafe_allow_html=True)
 
     def show_idx(col, label, sym, c, fallback_syms=None, currency=""):
-        """
-        fallback_syms: list of additional candidate tickers, tried in
-        order if the primary fails the sanity check (see get_index).
-        currency: prefix like "$" for non-INR indexes (S&P 500, Dow,
-        Gold). NSE indexes use no prefix (existing convention).
-        """
         d = get_index(sym, fallback_syms)
         with col:
             if d:
@@ -903,12 +833,6 @@ with right:
         show_idx(r2b,"SMALLCAP 100", SMALLCAP_CANDIDATES[0], PINK, fallback_syms=SMALLCAP_CANDIDATES[1:])
         st.markdown(f"<div style='height:1px;background:{BORDER};margin:12px 0 16px;'></div>", unsafe_allow_html=True)
 
-        # ── Global Indexes ──
-        # NOTE: GIFT NIFTY is intentionally not shown here. Its live
-        # futures price requires a paid NSE IX data subscription and no
-        # free source (Yahoo Finance or otherwise) carries it — see the
-        # long comment block above get_index() for the full rationale.
-        # Only 3 cards below, not 4.
         st.markdown(f"""<div style="font-size:11px;font-weight:700;letter-spacing:1.5px;color:{T2};
             text-transform:uppercase;margin-bottom:8px;">Global Markets</div>""", unsafe_allow_html=True)
         gi1, gi2, gi3 = st.columns(3)
@@ -916,7 +840,6 @@ with right:
         show_idx(gi2,"DOW JONES", DOWJONES_CANDIDATES[0], AMBER, fallback_syms=DOWJONES_CANDIDATES[1:], currency="$")
         show_idx(gi3,"GOLD (USD)", GOLD_CANDIDATES[0], "#FFD700", fallback_syms=GOLD_CANDIDATES[1:], currency="$")
 
-        # ── Market Mood Index (MMI) ──
         mmi = get_mmi()
         st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
@@ -1014,6 +937,22 @@ with right:
                     st.session_state.page = target; st.rerun()
 
     elif pg == "scanner":
+        # NOTE: we intentionally do NOT snapshot admin_watchlist / watchlist
+        # into local variables before the uploader blocks run below. That
+        # ordering was the root cause of both reported bugs:
+        #   - Admin tab: "no Scan option after adding a new watchlist"
+        #   - Your tab: "Scan Now appears, but scanning finds no stocks"
+        # A Streamlit script reruns top-to-bottom on every interaction
+        # (including a file upload). If we read st.session_state into a
+        # local variable BEFORE the uploader block, and the uploader block
+        # then updates st.session_state a few lines later in that SAME
+        # run, the local variable is left pointing at the stale value —
+        # the part of the script that decides what to render (the "not
+        # watchlist" check and the call into render_scan_results) never
+        # sees the fresh upload until a second, unrelated rerun happens.
+        # The fix is simple: read st.session_state.<key> fresh, at the
+        # exact point of use, AFTER the upload block has had a chance to
+        # update it in this same run.
         if not st.session_state.admin_watchlist:
             awl = db_load_admin_watchlist()
             if awl: st.session_state.admin_watchlist = awl
@@ -1084,10 +1023,10 @@ with right:
         st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
         tab1, tab2 = st.tabs(["Arka Watchlist", "Your Watchlist"])
         with tab1:
-            admin_syms = st.session_state.admin_watchlist
-            st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-left:3px solid {CYAN};border-radius:12px;padding:16px 24px;margin:16px 0;">
-                <div style="font-size:15px;font-weight:800;color:{IVORY};margin-bottom:4px;">Arka Watchlist</div>
-                <div style="font-size:12px;color:{T2};">{f"{len(admin_syms)} stocks · Curated by the Arka Trades desk" if admin_syms else "No curated watchlist published yet"}</div></div>""", unsafe_allow_html=True)
+            # FIX: read admin_watchlist AFTER the uploader has had a chance
+            # to run and update session_state in this same rerun — not
+            # before it, which is what caused "no Scan option after
+            # uploading" on the Admin tab.
             if IS_ADMIN:
                 uploaded_admin = st.file_uploader("Upload Arka Watchlist", type=["csv","txt"], key="admin_upload")
                 if uploaded_admin:
@@ -1095,24 +1034,38 @@ with right:
                     if not syms: st.error("No symbols found.")
                     elif db_save_admin_watchlist(syms):
                         st.success(f"Arka Watchlist updated — {len(syms)} stocks.")
-                        st.session_state.admin_watchlist = syms; st.rerun()
+                        # db_save_admin_watchlist already set session_state
+                        # directly, no rerun needed to see it below.
+            admin_syms = st.session_state.admin_watchlist
+            st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-left:3px solid {CYAN};border-radius:12px;padding:16px 24px;margin:16px 0;">
+                <div style="font-size:15px;font-weight:800;color:{IVORY};margin-bottom:4px;">Arka Watchlist</div>
+                <div style="font-size:12px;color:{T2};">{f"{len(admin_syms)} stocks · Curated by the Arka Trades desk" if admin_syms else "No curated watchlist published yet"}</div></div>""", unsafe_allow_html=True)
             if not admin_syms:
                 st.info("Arka Watchlist not available yet.")
             else:
                 render_scan_results(admin_syms, key_prefix="admin")
                 _ensure_news_state(); news_panel(admin_syms)
         with tab2:
-            your_syms = st.session_state.watchlist
-            st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-left:3px solid {GREEN};border-radius:12px;padding:16px 24px;margin:16px 0;">
-                <div style="font-size:15px;font-weight:800;color:{IVORY};margin-bottom:4px;">Your Watchlist</div>
-                <div style="font-size:12px;color:{T2};">{f"{len(your_syms)} stocks · Synced to cloud" if your_syms else "No watchlist uploaded yet"}</div></div>""", unsafe_allow_html=True)
+            # FIX: same pattern — the uploader block runs FIRST (updating
+            # session_state directly), then we read watchlist fresh from
+            # session_state for both the "no watchlist" check and the
+            # render_scan_results call. Previously `your_syms` was captured
+            # before this block ran, so right after an upload the scanner
+            # was being built from the OLD list, and db_save_watchlist's
+            # old `db_loaded = False` flag could additionally overwrite the
+            # freshly-saved list with a stale Supabase read on the next
+            # rerun (that flag has been removed — see db_save_watchlist).
             uploaded_yours = st.file_uploader("Upload Your Watchlist (CSV or TXT)", type=["csv","txt"], key="your_upload")
             if uploaded_yours:
                 syms = parse_csv(uploaded_yours)
                 if not syms: st.error("No symbols found.")
                 elif db_save_watchlist(syms):
                     st.success(f"{len(syms)} stocks loaded and saved.")
-                    st.session_state.watchlist = syms
+                    # db_save_watchlist already set session_state directly.
+            your_syms = st.session_state.watchlist
+            st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-left:3px solid {GREEN};border-radius:12px;padding:16px 24px;margin:16px 0;">
+                <div style="font-size:15px;font-weight:800;color:{IVORY};margin-bottom:4px;">Your Watchlist</div>
+                <div style="font-size:12px;color:{T2};">{f"{len(your_syms)} stocks · Synced to cloud" if your_syms else "No watchlist uploaded yet"}</div></div>""", unsafe_allow_html=True)
             if not your_syms:
                 st.info("Upload your TradingView watchlist above to start scanning.")
             else:
