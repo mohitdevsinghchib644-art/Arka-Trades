@@ -10,7 +10,6 @@ import json
 import math
 from pathlib import Path
 from supabase import create_client, Client
-from news_feed import news_panel, get_news_dot, _ensure_news_state, refresh_news, _fetch_news_for_stock
 from arka_ai import render_arka_ai
 from research_page import render_research_page
 
