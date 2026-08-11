@@ -1,16 +1,29 @@
 import streamlit as st
 import streamlit.components.v1 as components
-import yfinance as yf
 import pandas as pd
 from datetime import datetime, timezone, timedelta
 import time
 import requests
 import re
 import json
-import math
 from pathlib import Path
 from supabase import create_client, Client
-from news_feed import news_panel, get_news_dot, _ensure_news_state
+
+# CHANGED: data layer now lives in nse_data.py — nsepythonserver
+# primary, yfinance automatic fallback on any failure. See that
+# file's module docstring for the full reasoning. Same function
+# names/shapes as before, so nothing downstream here changed except
+# this import line and the two get_index() calls that now pass
+# index_label to enable the NSE-first path (see show_idx below).
+from nse_data import (
+    get_static, get_price, get_index,
+    MIDCAP_CANDIDATES, SMALLCAP_CANDIDATES,
+    SP500_CANDIDATES, DOWJONES_CANDIDATES, GOLD_CANDIDATES,
+)
+# CHANGED: news_panel (per-symbol tabs) replaced with news_box (one
+# combined persistent feed). get_news_dot kept — still used by
+# Scanner result cards for the per-stock amber dot marker.
+from news_feed import news_box, get_news_dot, _ensure_news_state
 from arka_ai import render_arka_ai
 
 # ── Supabase ─────────────────────────────────────────────────
@@ -28,15 +41,6 @@ def db_save_watchlist(symbols: list):
         supabase.table("watchlist").delete().neq("id", 0).execute()
         rows = [{"symbol": s} for s in symbols]
         if rows: supabase.table("watchlist").insert(rows).execute()
-        # FIX: session_state is the source of truth for this run and every
-        # run until the next explicit reload. We do NOT flip db_loaded to
-        # False here anymore — doing so used to force an immediate Supabase
-        # re-fetch on the very next rerun (e.g. right after clicking "Run
-        # Scan"), and if that SELECT raced the INSERT above and returned
-        # before Supabase had committed it, it would silently overwrite the
-        # watchlist we just saved with the old/empty one. Since we already
-        # set st.session_state.watchlist directly below, there is nothing
-        # left to "sync" from the DB right away.
         st.session_state.watchlist = symbols
         return True
     except Exception as e:
@@ -74,8 +78,6 @@ def db_save_admin_watchlist(symbols: list):
         supabase.table("admin_watchlist").delete().neq("id", 0).execute()
         rows = [{"symbol": s} for s in symbols]
         if rows: supabase.table("admin_watchlist").insert(rows).execute()
-        # FIX: same reasoning as db_save_watchlist above — set state directly,
-        # don't force a racy reload flag.
         st.session_state.admin_watchlist = symbols
         return True
     except Exception as e:
@@ -98,29 +100,37 @@ def send_telegram(msg):
             data={"chat_id":CHAT_ID,"text":msg,"parse_mode":"HTML"}, timeout=5)
     except: pass
 
-# ════════════════ DESIGN SYSTEM (app interior: professional slate/blue) ═══
-DARK   = "#0B0F14"
-DARK2  = "#11161D"
-DARK3  = "#1A212B"
-BORDER = "#242D3A"
-IVORY  = "#E8ECF2"
-T2     = "#8C97A8"
-NAVY   = "#0E141C"
+# ════════════════ DESIGN SYSTEM — BLOOMBERG TERMINAL PASS ═════════
+# CHANGED: full re-skin toward the reference desk photo — true black
+# base (not slate), amber/orange as primary accent (Bloomberg's
+# signature color) alongside the functional green/red for price
+# direction, tighter borders, monospace-forward data display,
+# reduced border-radius (terminals are square-cornered, not rounded
+# cards), a solid black top bar. Page routing/logic below is
+# unchanged from before — this section only touches color tokens and
+# global CSS.
+DARK   = "#000000"
+DARK2  = "#0A0A0A"
+DARK3  = "#141414"
+BORDER = "#2A2A2A"
+IVORY  = "#E8E8E8"
+T2     = "#8A8A8A"
+NAVY   = "#050505"
 
-INDIGO = "#3B82F6"
-CYAN   = "#06B6D4"
-GREEN  = "#22C55E"
-RED    = "#EF4444"
-AMBER  = "#F59E0B"
-PURPLE = "#8B5CF6"
-PINK   = "#EC4899"
+AMBER  = "#FF9500"   # primary Bloomberg accent — replaces INDIGO as the dominant brand color
+INDIGO = "#5B8FD9"   # demoted to a secondary/info accent, kept for continuity in existing calls
+CYAN   = "#4DD0E1"
+GREEN  = "#00C853"
+RED    = "#FF3B30"
+PURPLE = "#B388FF"
+PINK   = "#FF6FA5"
 
 BLUE   = INDIGO
-GOLD   = INDIGO
+GOLD   = AMBER
 
-GRAD_BRAND = f"linear-gradient(135deg,{INDIGO},{CYAN})"
+GRAD_BRAND = f"linear-gradient(135deg,{AMBER},#FFB347)"
 GRAD_AI    = f"linear-gradient(135deg,{PURPLE},{INDIGO})"
-GRAD_TEXT  = f"linear-gradient(90deg,{CYAN},{INDIGO},{PURPLE})"
+GRAD_TEXT  = f"linear-gradient(90deg,{AMBER},{CYAN},{PURPLE})"
 
 FONT = "'Plus Jakarta Sans','Inter',sans-serif"
 MONO = "'JetBrains Mono',monospace"
@@ -143,14 +153,16 @@ _ICON_PATHS = {
 }
 
 def icon(name, size=18, color=None):
-    c = color or INDIGO
+    c = color or AMBER
     return (f'<svg width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="{c}" '
             f'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" '
             f'style="vertical-align:middle;">{_ICON_PATHS.get(name,"")}</svg>')
 
 def icon_box(name, color=None, size=38):
-    c = color or INDIGO
-    return (f'<div style="width:{size}px;height:{size}px;border-radius:10px;background:{c}1C;'
+    c = color or AMBER
+    # CHANGED: border-radius reduced 10px -> 4px across icon_box and
+    # most cards below — terminal panels are square, not rounded.
+    return (f'<div style="width:{size}px;height:{size}px;border-radius:4px;background:{c}1C;'
             f'border:1px solid {c}38;display:flex;align-items:center;justify-content:center;'
             f'margin-bottom:12px;">{icon(name, 19, c)}</div>')
 
@@ -172,7 +184,7 @@ name    = st.session_state.profile.get("name","Trader") or "Trader"
 initial = name[0].upper()
 IS_ADMIN = st.session_state.get("is_admin", False)
 
-# ── Global CSS ───────────────────────────────────────────────
+# ── Global CSS — Bloomberg terminal pass ────────────────────────
 st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap');
@@ -181,33 +193,45 @@ html,body,.stApp{{background:{DARK} !important;color:{IVORY} !important;font-fam
 header[data-testid="stHeader"]{{display:none !important;}}
 [data-testid="stSidebarCollapsedControl"]{{display:none !important;}}
 section[data-testid="stSidebar"]{{display:none !important;}}
-.block-container{{padding:0 16px !important;max-width:1500px !important;}}
-.stTextInput input,.stNumberInput input{{background:{DARK3} !important;color:{IVORY} !important;border:1px solid {BORDER} !important;border-radius:10px !important;font-family:{FONT} !important;font-size:14px !important;}}
-.stTextInput input:focus{{border-color:{INDIGO} !important;box-shadow:0 0 0 3px rgba(59,130,246,0.18) !important;}}
-.stTextInput label,.stTextArea label,.stNumberInput label{{color:{T2} !important;font-size:12px !important;font-weight:600 !important;}}
-.stTextArea textarea{{background:{DARK3} !important;color:{IVORY} !important;border:1px solid {BORDER} !important;border-radius:10px !important;}}
-[data-testid="stForm"]{{background:{DARK2} !important;border:1px solid {BORDER} !important;border-radius:16px !important;padding:24px !important;}}
-[data-testid="metric-container"]{{background:{DARK2} !important;border:1px solid {BORDER} !important;border-radius:12px !important;padding:16px !important;}}
-[data-testid="stMetricLabel"] p{{font-size:12px !important;font-weight:600 !important;color:{T2} !important;}}
-[data-testid="stMetricValue"]{{font-family:{MONO} !important;font-size:20px !important;color:{IVORY} !important;}}
-.stButton>button{{background:{DARK3} !important;color:{IVORY} !important;border:1px solid {BORDER} !important;border-radius:10px !important;font-family:{FONT} !important;font-weight:600 !important;font-size:14px !important;transition:all .15s ease !important;}}
-.stButton>button:hover{{border-color:{INDIGO} !important;color:{INDIGO} !important;transform:translateY(-1px);}}
-.stButton>button[kind="primary"],.stFormSubmitButton>button[kind="primary"]{{background:{GRAD_BRAND} !important;color:#fff !important;border:none !important;}}
-.stButton>button[kind="primary"]:hover{{filter:brightness(1.12);color:#fff !important;}}
-.stTabs [data-baseweb="tab-list"]{{background:{DARK2};border:1px solid {BORDER};border-radius:12px;padding:4px;gap:4px;}}
-.stTabs [data-baseweb="tab"]{{color:{T2};font-weight:600;border-radius:8px;}}
-.stTabs [aria-selected="true"]{{background:{DARK3} !important;color:{INDIGO} !important;}}
+/* CHANGED: right margin reserved for the persistent news box column
+   built into the page layout below — content no longer runs full-
+   width on the interior pages so the news panel has a fixed home. */
+.block-container{{padding:0 16px !important;max-width:1600px !important;}}
+.stTextInput input,.stNumberInput input{{background:{DARK3} !important;color:{IVORY} !important;border:1px solid {BORDER} !important;border-radius:2px !important;font-family:{MONO} !important;font-size:13px !important;}}
+.stTextInput input:focus{{border-color:{AMBER} !important;box-shadow:0 0 0 2px rgba(255,149,0,0.18) !important;}}
+.stTextInput label,.stTextArea label,.stNumberInput label{{color:{T2} !important;font-size:11px !important;font-weight:600 !important;text-transform:uppercase !important;letter-spacing:0.5px !important;}}
+.stTextArea textarea{{background:{DARK3} !important;color:{IVORY} !important;border:1px solid {BORDER} !important;border-radius:2px !important;}}
+[data-testid="stForm"]{{background:{DARK2} !important;border:1px solid {BORDER} !important;border-radius:4px !important;padding:24px !important;}}
+[data-testid="metric-container"]{{background:{DARK2} !important;border:1px solid {BORDER} !important;border-radius:2px !important;padding:14px !important;}}
+[data-testid="stMetricLabel"] p{{font-size:10px !important;font-weight:700 !important;color:{T2} !important;text-transform:uppercase !important;letter-spacing:0.5px !important;}}
+[data-testid="stMetricValue"]{{font-family:{MONO} !important;font-size:19px !important;color:{IVORY} !important;}}
+.stButton>button{{background:{DARK3} !important;color:{IVORY} !important;border:1px solid {BORDER} !important;border-radius:2px !important;font-family:{FONT} !important;font-weight:600 !important;font-size:13px !important;transition:all .12s ease !important;}}
+.stButton>button:hover{{border-color:{AMBER} !important;color:{AMBER} !important;}}
+.stButton>button[kind="primary"],.stFormSubmitButton>button[kind="primary"]{{background:{AMBER} !important;color:#000 !important;border:none !important;font-weight:800 !important;}}
+.stButton>button[kind="primary"]:hover{{filter:brightness(1.1);color:#000 !important;}}
+.stTabs [data-baseweb="tab-list"]{{background:{DARK2};border:1px solid {BORDER};border-radius:2px;padding:3px;gap:3px;}}
+.stTabs [data-baseweb="tab"]{{color:{T2};font-weight:700;border-radius:2px;font-size:12px;text-transform:uppercase;letter-spacing:0.5px;}}
+.stTabs [aria-selected="true"]{{background:{DARK3} !important;color:{AMBER} !important;}}
 .stCheckbox label,.stRadio label{{color:{IVORY} !important;}}
-[data-testid="stSelectbox"]>div>div{{background:{DARK3} !important;border:1px solid {BORDER} !important;color:{IVORY} !important;border-radius:10px !important;}}
+[data-testid="stSelectbox"]>div>div{{background:{DARK3} !important;border:1px solid {BORDER} !important;color:{IVORY} !important;border-radius:2px !important;}}
 hr{{border-color:{BORDER} !important;}}
-.stProgress>div>div{{background:{GRAD_BRAND} !important;}}
-.nav-btn .stButton>button{{width:100% !important;text-align:left !important;background:transparent !important;color:{T2} !important;border:none !important;border-radius:10px !important;font-size:14px !important;font-weight:600 !important;padding:9px 14px !important;margin-bottom:2px !important;}}
-.nav-btn .stButton>button:hover{{background:{DARK3} !important;color:{IVORY} !important;transform:none;}}
-.nav-btn-active .stButton>button{{background:rgba(59,130,246,0.12) !important;color:{INDIGO} !important;border-left:3px solid {INDIGO} !important;border-radius:0 10px 10px 0 !important;}}
-@keyframes pulse{{0%,100%{{box-shadow:0 0 0 0 rgba(34,197,94,.4);}}50%{{box-shadow:0 0 0 6px rgba(34,197,94,0);}}}}
+.stProgress>div>div{{background:{AMBER} !important;}}
+.nav-btn .stButton>button{{width:100% !important;text-align:left !important;background:transparent !important;color:{T2} !important;border:none !important;border-radius:0 !important;font-size:13px !important;font-weight:600 !important;padding:8px 14px !important;margin-bottom:1px !important;}}
+.nav-btn .stButton>button:hover{{background:{DARK3} !important;color:{IVORY} !important;}}
+.nav-btn-active .stButton>button{{background:rgba(255,149,0,0.12) !important;color:{AMBER} !important;border-left:3px solid {AMBER} !important;border-radius:0 !important;}}
+@keyframes pulse{{0%,100%{{box-shadow:0 0 0 0 rgba(0,200,83,.4);}}50%{{box-shadow:0 0 0 6px rgba(0,200,83,0);}}}}
 .pulse-dot{{width:8px;height:8px;border-radius:50%;background:{GREEN};display:inline-block;animation:pulse 2s infinite;}}
-@keyframes fadeUp{{from{{opacity:0;transform:translateY(12px);}}to{{opacity:1;transform:none;}}}}
-.fade-up{{animation:fadeUp .5s ease both;}}
+@keyframes fadeUp{{from{{opacity:0;transform:translateY(8px);}}to{{opacity:1;transform:none;}}}}
+.fade-up{{animation:fadeUp .35s ease both;}}
+/* CHANGED: sticky bottom-left news box wrapper — fixed positioning,
+   persistent across all interior pages regardless of nav selection.
+   Width tuned to sit comfortably alongside the left nav rail without
+   overlapping main content on typical desktop viewports. */
+#arka-news-fixed{{position:fixed;bottom:0;left:0;width:340px;height:280px;
+    z-index:999;padding:10px;background:{DARK};border-top:1px solid {BORDER};
+    border-right:1px solid {BORDER};}}
+#arka-news-scroll::-webkit-scrollbar{{width:4px;}}
+#arka-news-scroll::-webkit-scrollbar-thumb{{background:{BORDER};border-radius:2px;}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -222,131 +246,6 @@ def parse_csv(file):
         v = v.split(',')[0].strip()
         if v and v.lower() != 'nan': syms.append(v.upper())
     return list(dict.fromkeys(syms))
-
-def calc_rsi(close, period=14):
-    d = close.diff(); g = d.clip(lower=0).rolling(period).mean()
-    l = (-d.clip(upper=0)).rolling(period).mean()
-    rs = g / l.replace(0, float('nan'))
-    v = (100 - 100/(1+rs)).iloc[-1]
-    return int(v) if pd.notna(v) else 0
-
-@st.cache_data(ttl=14400, show_spinner=False)
-def get_static(sym):
-    try:
-        h = yf.Ticker(sym+".NS").history(period="30d", interval="1d")
-        if len(h) < 16: return None
-        prev = h.iloc[-2]
-        return {"pdh": float(prev["High"]), "pdl": float(prev["Low"]),
-                "prev_close": float(prev["Close"]), "rsi": calc_rsi(h["Close"]),
-                "spark": [float(x) for x in h["Close"].tail(12).tolist()]}
-    except: return None
-
-@st.cache_data(ttl=10, show_spinner=False)
-def get_price(sym):
-    try:
-        intra = yf.Ticker(sym+".NS").history(period="1d", interval="1m")
-        if intra.empty: return None
-        cur = float(intra["Close"].iloc[-1])
-        daily = yf.Ticker(sym+".NS").history(period="5d", interval="1d")
-        if len(daily) < 2: return None
-        prev_close = float(daily["Close"].iloc[-2])
-        return {"price": cur, "chg": ((cur-prev_close)/prev_close)*100, "prev_close": prev_close}
-    except: return None
-
-# ═══════════════════════════════════════════════════════════════════
-# INDEX FETCHING — rewritten for three fixes:
-#   1. MIDCAP 100 / SMALLCAP 100 were showing "No data". Root cause for
-#      SMALLCAP: the ticker "^CNXSMALLCAP" is not valid; the correct
-#      Yahoo symbol is "^CNXSC". MIDCAP's own ticker was fine but had
-#      no fallback if Yahoo had a data gap on a given day — it now has
-#      one (^CRSMID, ^NIFTYMIDCAP100).
-#   2. GIFT NIFTY showed "$nan" / "nan%". GIFT Nifty is a futures
-#      contract on NSE IX (GIFT City) that requires a paid exchange
-#      data subscription — there is no free public ticker for it on
-#      Yahoo Finance or elsewhere (confirmed: multiple financial sites
-#      that display "GIFT Nifty" are substituting the regular NIFTY 50
-#      spot index with a disclaimer, not showing a real live GIFT
-#      Nifty futures feed). Rather than guess a third wrong ticker,
-#      this card is REMOVED entirely — showing nothing is more honest
-#      than showing a number that isn't actually GIFT Nifty.
-#   3. S&P 500 / DOW JONES also showed "$nan" — NOT a missing-data
-#      case like MIDCAP/SMALLCAP (those returned a clean "no data"
-#      before). This was a data returned, but containing NaN inside it
-#      that slipped past the old check, which only tested
-#      `h.empty or len(h) < 2` and never checked whether the actual
-#      Close values were valid numbers. `float(nan)` doesn't raise, so
-#      it sailed straight through and rendered as "$nan". Every index
-#      fetch below now explicitly checks math.isfinite() on every
-#      number before returning it as valid — this applies to ALL
-#      cards, not just the two that happened to break this time.
-# ═══════════════════════════════════════════════════════════════════
-
-def _values_are_sane(cur, pc):
-    """
-    The core sanity gate. Rejects NaN, inf, zero/negative prices (an
-    index price of 0 or below is never real), and a previous-close of
-    zero (which would make the % change calculation divide by zero and
-    produce inf/nan downstream). Returns True only if BOTH values are
-    real, finite, positive numbers.
-    """
-    try:
-        if cur is None or pc is None:
-            return False
-        cur, pc = float(cur), float(pc)
-        if not (math.isfinite(cur) and math.isfinite(pc)):
-            return False
-        if cur <= 0 or pc <= 0:
-            return False
-        return True
-    except (TypeError, ValueError):
-        return False
-
-def _fetch_index_history(sym):
-    try:
-        h = yf.Ticker(sym).history(period="5d", interval="1d")
-        if h.empty or len(h) < 2:
-            return None
-        return h
-    except:
-        return None
-
-@st.cache_data(ttl=60, show_spinner=False)
-def get_index(sym, fallback_syms=None):
-    """
-    fallback_syms: optional list of additional tickers to try, in
-    order, if `sym` fails OR returns data that doesn't pass the sanity
-    check. Every candidate is checked with the same rule, so a "looks
-    like it worked but the numbers are garbage" result from a fallback
-    ticker can't leak through either.
-    """
-    candidates = [sym] + (fallback_syms or [])
-    for candidate in candidates:
-        h = _fetch_index_history(candidate)
-        if h is None:
-            continue
-        try:
-            cur = float(h["Close"].iloc[-1])
-            pc = float(h["Close"].iloc[-2])
-        except Exception:
-            continue
-        if not _values_are_sane(cur, pc):
-            continue
-        spark_raw = [float(x) for x in h["Close"].tolist()]
-        spark = [x for x in spark_raw if math.isfinite(x)]
-        if len(spark) < 2:
-            continue
-        return {
-            "price": cur, "chg": ((cur - pc) / pc) * 100, "pts": cur - pc,
-            "spark": spark, "ticker_used": candidate,
-        }
-    return None
-
-# ── Global indexes: candidate ticker lists, first-success-wins ──────
-MIDCAP_CANDIDATES = ["NIFTY_MIDCAP_100.NS", "^CRSMID", "^NIFTYMIDCAP100"]
-SMALLCAP_CANDIDATES = ["^CNXSC", "^CNXSMALLCAP", "NIFTYSMLCAP100.NS"]
-SP500_CANDIDATES    = ["^GSPC"]
-DOWJONES_CANDIDATES = ["^DJI"]
-GOLD_CANDIDATES     = ["GC=F"]
 
 def check_alerts(results):
     for s in results:
@@ -365,17 +264,17 @@ def check_alerts(results):
             st.session_state.alert_fired.add(sym)
 
 def section(title, accent=None):
-    a = accent or INDIGO
-    st.markdown(f"""<div style="display:flex;align-items:center;gap:14px;margin:36px 0 18px;">
-        <div style="width:4px;height:18px;border-radius:2px;background:{a};"></div>
-        <div style="font-family:{FONT};font-size:18px;font-weight:800;color:{IVORY};white-space:nowrap;">{title}</div>
+    a = accent or AMBER
+    st.markdown(f"""<div style="display:flex;align-items:center;gap:14px;margin:30px 0 14px;">
+        <div style="width:4px;height:16px;border-radius:0;background:{a};"></div>
+        <div style="font-family:{FONT};font-size:15px;font-weight:800;color:{IVORY};white-space:nowrap;text-transform:uppercase;letter-spacing:0.5px;">{title}</div>
         <div style="flex:1;height:1px;background:{BORDER};"></div></div>""", unsafe_allow_html=True)
 
 def change_pill(chg):
-    c, bg = (GREEN, "rgba(34,197,94,.12)") if chg >= 0 else (RED, "rgba(239,68,68,.12)")
+    c, bg = (GREEN, "rgba(0,200,83,.12)") if chg >= 0 else (RED, "rgba(255,59,48,.12)")
     arrow = "▲" if chg >= 0 else "▼"
     return (f'<span style="background:{bg};color:{c};font-family:{MONO};font-size:11px;font-weight:700;'
-            f'padding:2px 9px;border-radius:20px;border:1px solid {c}33;">{arrow} {abs(chg):.2f}%</span>')
+            f'padding:2px 8px;border-radius:0;border:1px solid {c}33;">{arrow} {abs(chg):.2f}%</span>')
 
 def sparkline(values, color=None, w=110, h=30):
     if not values or len(values) < 2: return ""
@@ -384,7 +283,7 @@ def sparkline(values, color=None, w=110, h=30):
     rng = (hi - lo) or 1
     pts = " ".join(f"{i/(len(values)-1)*w:.1f},{h-2-((v-lo)/rng)*(h-6):.1f}" for i, v in enumerate(values))
     return (f'<svg width="{w}" height="{h}" style="display:block;margin:0 auto;">'
-            f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="1.8" '
+            f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="1.6" '
             f'stroke-linejoin="round" stroke-linecap="round"/></svg>')
 
 def checkline(text, c=None):
@@ -393,7 +292,8 @@ def checkline(text, c=None):
             f'<span style="font-size:14px;color:{IVORY};line-height:1.6;">{text}</span></div>')
 
 # ═══════════════════════════════════════════════════════════════════
-# MARKET MOOD INDEX (MMI)
+# MARKET MOOD INDEX (MMI) — unchanged from original, no data-source
+# or layout changes requested for this section.
 # ═══════════════════════════════════════════════════════════════════
 
 _MMI_URL = "https://www.tickertape.in/market-mood-index"
@@ -415,17 +315,14 @@ def _mmi_zone_for_score(score: float) -> str:
 
 def mmi_zone_color(zone: str) -> str:
     return {
-        "Extreme Fear":  "#EF4444",
-        "Fear":          "#F59E0B",
+        "Extreme Fear":  RED,
+        "Fear":          AMBER,
         "Greed":         "#84CC16",
-        "Extreme Greed": "#22C55E",
-    }.get(zone, "#8C97A8")
+        "Extreme Greed": GREEN,
+    }.get(zone, T2)
 
 def _mmi_parse_score(html_or_text: str):
-    pattern = re.compile(
-        r'(\d{1,3}\.\d{1,2})\s*(?:<[^>]+>\s*)*Updated',
-        re.MULTILINE
-    )
+    pattern = re.compile(r'(\d{1,3}\.\d{1,2})\s*(?:<[^>]+>\s*)*Updated', re.MULTILINE)
     for m in pattern.finditer(html_or_text):
         try:
             val = float(m.group(1))
@@ -490,15 +387,19 @@ def get_mmi():
     return {"status": "unavailable"}
 
 # ════════════════════════════════════════════════════════════
-# LANDING PAGE — green hero theme, seamless on scroll
+# LANDING PAGE
+# NOTE: left as-is intentionally. The redesign request was scoped to
+# the app's interior (post-login) interface to match the Bloomberg
+# terminal reference — the marketing landing page has its own
+# separate green hero theme that wasn't part of what was asked to
+# change. Flag if this should also move to the amber/black system.
 # ════════════════════════════════════════════════════════════
 if not st.session_state.logged_in:
 
-    DARK="#070b0a"; DARK2="#0d1512"; DARK3="#13201b"; BORDER="#1d2f27"
-    IVORY="#e9f5ef"; T2="#8aa79a"
-    INDIGO="#5ed29c"; CYAN="#2dd4bf"; GREEN="#34d399"; PURPLE="#7dd3c0"; PINK="#5eead4"
-    GRAD_BRAND=f"linear-gradient(135deg,{INDIGO},{CYAN})"
-    GRAD_TEXT=f"linear-gradient(90deg,{INDIGO},{CYAN},{PURPLE})"
+    _DARK="#070b0a"; _DARK2="#0d1512"; _DARK3="#13201b"; _BORDER="#1d2f27"
+    _IVORY="#e9f5ef"; _T2="#8aa79a"
+    _INDIGO="#5ed29c"; _CYAN="#2dd4bf"; _GREEN="#34d399"; _PURPLE="#7dd3c0"; _PINK="#5eead4"
+    _GRAD_BRAND=f"linear-gradient(135deg,{_INDIGO},{_CYAN})"
 
     if st.query_params.get("login") == "1":
         st.session_state.show_login = True
@@ -519,10 +420,10 @@ if not st.session_state.logged_in:
         st.markdown(f"""
         <div style="text-align:center;padding:70px 0 10px;">
             <div style="display:inline-flex;align-items:center;gap:10px;">
-                <div style="width:38px;height:38px;border-radius:10px;background:{GRAD_BRAND};display:flex;align-items:center;justify-content:center;">{icon("trend", 19, "#070b0a")}</div>
+                <div style="width:38px;height:38px;border-radius:10px;background:{_GRAD_BRAND};display:flex;align-items:center;justify-content:center;">{icon("trend", 19, "#070b0a")}</div>
                 <div style="text-align:left;">
-                    <div style="font-size:18px;font-weight:800;color:{IVORY};letter-spacing:1px;">ARKA TRADES</div>
-                    <div style="font-size:9px;letter-spacing:2px;color:{T2};text-transform:uppercase;">Market Analytics Platform</div>
+                    <div style="font-size:18px;font-weight:800;color:{_IVORY};letter-spacing:1px;">ARKA TRADES</div>
+                    <div style="font-size:9px;letter-spacing:2px;color:{_T2};text-transform:uppercase;">Market Analytics Platform</div>
                 </div>
             </div>
         </div>""", unsafe_allow_html=True)
@@ -530,8 +431,8 @@ if not st.session_state.logged_in:
         with login_col:
             with st.form("lf"):
                 st.markdown(f"""<div style="margin-bottom:14px;text-align:center;">
-                    <div style="font-size:20px;font-weight:800;color:{IVORY};">Member Login</div>
-                    <div style="font-size:12px;color:{T2};margin-top:4px;">Sign in to access your terminal</div></div>""", unsafe_allow_html=True)
+                    <div style="font-size:20px;font-weight:800;color:{_IVORY};">Member Login</div>
+                    <div style="font-size:12px;color:{_T2};margin-top:4px;">Sign in to access your terminal</div></div>""", unsafe_allow_html=True)
                 u = st.text_input("Username", placeholder="Enter username")
                 p = st.text_input("Password", placeholder="Enter password", type="password")
                 ok = st.form_submit_button("Sign In", use_container_width=True, type="primary")
@@ -623,50 +524,50 @@ else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=s;}
 
     st.markdown("<div style='height:40px;'></div>", unsafe_allow_html=True)
     s1, s2, s3, s4 = st.columns(4)
-    for col, num, label, c in [(s1,"2000+","NSE stocks covered",CYAN),(s2,"<90s","Scan time after pre-filter",INDIGO),
-        (s3,"10s","Live price refresh",GREEN),(s4,"24/7","AI memory of your setups",PURPLE)]:
+    for col, num, label, c in [(s1,"2000+","NSE stocks covered",_CYAN),(s2,"<90s","Scan time after pre-filter",_INDIGO),
+        (s3,"30s","Live price refresh",_GREEN),(s4,"24/7","AI memory of your setups",_PURPLE)]:
         with col:
-            st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {c};border-radius:12px;padding:20px;text-align:center;">
+            st.markdown(f"""<div class="fade-up" style="background:{_DARK2};border:1px solid {_BORDER};border-top:2px solid {c};border-radius:12px;padding:20px;text-align:center;">
                 <div style="font-family:{MONO};font-size:26px;font-weight:700;color:{c};margin-bottom:4px;">{num}</div>
-                <div style="font-size:12px;color:{T2};font-weight:600;">{label}</div></div>""", unsafe_allow_html=True)
+                <div style="font-size:12px;color:{_T2};font-weight:600;">{label}</div></div>""", unsafe_allow_html=True)
 
     st.markdown("<div style='height:56px;'></div>", unsafe_allow_html=True)
     fa1, fa2 = st.columns([1, 1])
     with fa1:
-        st.markdown(f"""<div class="fade-up" style="padding:24px 8px;">{icon_box("brain", PURPLE)}
-            <div style="font-size:12px;font-weight:700;letter-spacing:2px;color:{PURPLE};text-transform:uppercase;margin-bottom:10px;">AI Chart Analysis</div>
-            <div style="font-size:28px;font-weight:800;color:{IVORY};letter-spacing:-0.5px;line-height:1.25;margin-bottom:16px;">Teach the AI your setups.<br>It never forgets.</div>
+        st.markdown(f"""<div class="fade-up" style="padding:24px 8px;">{icon_box("brain", _PURPLE)}
+            <div style="font-size:12px;font-weight:700;letter-spacing:2px;color:{_PURPLE};text-transform:uppercase;margin-bottom:10px;">AI Chart Analysis</div>
+            <div style="font-size:28px;font-weight:800;color:{_IVORY};letter-spacing:-0.5px;line-height:1.25;margin-bottom:16px;">Teach the AI your setups.<br>It never forgets.</div>
             {checkline("Save your personal trading rules, entry conditions and reference charts once")}
             {checkline("Gemini-powered vision analyzes any chart against <strong>your</strong> rules")}
             {checkline("Get a verdict, score and rule-by-rule breakdown in seconds")}
             {checkline("Vector memory stores every setup permanently")}</div>""", unsafe_allow_html=True)
     with fa2:
-        st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {PURPLE};border-radius:16px;padding:24px;margin-top:24px;">
+        st.markdown(f"""<div class="fade-up" style="background:{_DARK2};border:1px solid {_BORDER};border-top:2px solid {_PURPLE};border-radius:16px;padding:24px;margin-top:24px;">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
-                <span style="font-size:13px;font-weight:700;color:{IVORY};">RELIANCE · Daily</span>
-                <span style="background:rgba(52,211,153,.12);color:{GREEN};font-size:11px;font-weight:700;padding:4px 12px;border-radius:20px;border:1px solid {GREEN}33;">VALID · 8/10</span></div>
-            <div style="background:{DARK3};border-radius:10px;padding:16px;font-family:{MONO};font-size:12px;color:{T2};line-height:2;">
-                <span style="color:{GREEN};">+ Rule matched:</span> Close above PDH on breakout candle<br>
-                <span style="color:{GREEN};">+ Rule matched:</span> Volume 1.8x vs 20-day average<br>
-                <span style="color:{GREEN};">+ Rule matched:</span> RSI 61 — within momentum zone<br>
+                <span style="font-size:13px;font-weight:700;color:{_IVORY};">RELIANCE · Daily</span>
+                <span style="background:rgba(52,211,153,.12);color:{_GREEN};font-size:11px;font-weight:700;padding:4px 12px;border-radius:20px;border:1px solid {_GREEN}33;">VALID · 8/10</span></div>
+            <div style="background:{_DARK3};border-radius:10px;padding:16px;font-family:{MONO};font-size:12px;color:{_T2};line-height:2;">
+                <span style="color:{_GREEN};">+ Rule matched:</span> Close above PDH on breakout candle<br>
+                <span style="color:{_GREEN};">+ Rule matched:</span> Volume 1.8x vs 20-day average<br>
+                <span style="color:{_GREEN};">+ Rule matched:</span> RSI 61 — within momentum zone<br>
                 <span style="color:{RED};">- Flagged:</span> Overhead supply at 2,980 level</div>
-            <div style="font-size:12px;color:{T2};margin-top:12px;line-height:1.7;">"Structure is clean. Entry valid above 2,941 with stop at 2,896."</div></div>""", unsafe_allow_html=True)
+            <div style="font-size:12px;color:{_T2};margin-top:12px;line-height:1.7;">"Structure is clean. Entry valid above 2,941 with stop at 2,896."</div></div>""", unsafe_allow_html=True)
 
     st.markdown("<div style='height:48px;'></div>", unsafe_allow_html=True)
     fb1, fb2 = st.columns([1, 1])
     with fb1:
-        st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {GREEN};border-radius:16px;padding:24px;margin-top:24px;">
-            <div style="font-size:13px;font-weight:700;color:{IVORY};margin-bottom:14px;">Scan: "Bull Flag + Volume Surge" · Full NSE</div>
+        st.markdown(f"""<div class="fade-up" style="background:{_DARK2};border:1px solid {_BORDER};border-top:2px solid {_GREEN};border-radius:16px;padding:24px;margin-top:24px;">
+            <div style="font-size:13px;font-weight:700;color:{_IVORY};margin-bottom:14px;">Scan: "Bull Flag + Volume Surge" · Full NSE</div>
             <table style="width:100%;border-collapse:collapse;font-size:12px;">
-                <tr style="color:{T2};text-align:left;"><th style="padding:6px 8px;">Symbol</th><th style="padding:6px 8px;">Price</th><th style="padding:6px 8px;">Signal</th><th style="padding:6px 8px;">Score</th></tr>
-                <tr><td style="padding:8px;color:{IVORY};font-weight:700;border-top:1px solid {BORDER};">TATAMOTORS</td><td style="padding:8px;font-family:{MONO};color:{IVORY};border-top:1px solid {BORDER};">1,024.50</td><td style="padding:8px;border-top:1px solid {BORDER};"><span style="color:{GREEN};font-weight:700;">STRONG MATCH</span></td><td style="padding:8px;font-family:{MONO};color:{GREEN};border-top:1px solid {BORDER};">9/10</td></tr>
-                <tr><td style="padding:8px;color:{IVORY};font-weight:700;border-top:1px solid {BORDER};">CHOLAFIN</td><td style="padding:8px;font-family:{MONO};color:{IVORY};border-top:1px solid {BORDER};">1,388.20</td><td style="padding:8px;border-top:1px solid {BORDER};"><span style="color:{GREEN};font-weight:700;">STRONG MATCH</span></td><td style="padding:8px;font-family:{MONO};color:{GREEN};border-top:1px solid {BORDER};">8/10</td></tr>
-                <tr><td style="padding:8px;color:{IVORY};font-weight:700;border-top:1px solid {BORDER};">PERSISTENT</td><td style="padding:8px;font-family:{MONO};color:{IVORY};border-top:1px solid {BORDER};">4,832.00</td><td style="padding:8px;border-top:1px solid {BORDER};"><span style="color:{CYAN};font-weight:700;">PARTIAL</span></td><td style="padding:8px;font-family:{MONO};color:{CYAN};border-top:1px solid {BORDER};">7/10</td></tr>
+                <tr style="color:{_T2};text-align:left;"><th style="padding:6px 8px;">Symbol</th><th style="padding:6px 8px;">Price</th><th style="padding:6px 8px;">Signal</th><th style="padding:6px 8px;">Score</th></tr>
+                <tr><td style="padding:8px;color:{_IVORY};font-weight:700;border-top:1px solid {_BORDER};">TATAMOTORS</td><td style="padding:8px;font-family:{MONO};color:{_IVORY};border-top:1px solid {_BORDER};">1,024.50</td><td style="padding:8px;border-top:1px solid {_BORDER};"><span style="color:{_GREEN};font-weight:700;">STRONG MATCH</span></td><td style="padding:8px;font-family:{MONO};color:{_GREEN};border-top:1px solid {_BORDER};">9/10</td></tr>
+                <tr><td style="padding:8px;color:{_IVORY};font-weight:700;border-top:1px solid {_BORDER};">CHOLAFIN</td><td style="padding:8px;font-family:{MONO};color:{_IVORY};border-top:1px solid {_BORDER};">1,388.20</td><td style="padding:8px;border-top:1px solid {_BORDER};"><span style="color:{_GREEN};font-weight:700;">STRONG MATCH</span></td><td style="padding:8px;font-family:{MONO};color:{_GREEN};border-top:1px solid {_BORDER};">8/10</td></tr>
+                <tr><td style="padding:8px;color:{_IVORY};font-weight:700;border-top:1px solid {_BORDER};">PERSISTENT</td><td style="padding:8px;font-family:{MONO};color:{_IVORY};border-top:1px solid {_BORDER};">4,832.00</td><td style="padding:8px;border-top:1px solid {_BORDER};"><span style="color:{_CYAN};font-weight:700;">PARTIAL</span></td><td style="padding:8px;font-family:{MONO};color:{_CYAN};border-top:1px solid {_BORDER};">7/10</td></tr>
             </table></div>""", unsafe_allow_html=True)
     with fb2:
-        st.markdown(f"""<div class="fade-up" style="padding:24px 8px;">{icon_box("search", GREEN)}
-            <div style="font-size:12px;font-weight:700;letter-spacing:2px;color:{GREEN};text-transform:uppercase;margin-bottom:10px;">AI Smart Scanner</div>
-            <div style="font-size:28px;font-weight:800;color:{IVORY};letter-spacing:-0.5px;line-height:1.25;margin-bottom:16px;">Your setups, scanned across<br>the entire market.</div>
+        st.markdown(f"""<div class="fade-up" style="padding:24px 8px;">{icon_box("search", _GREEN)}
+            <div style="font-size:12px;font-weight:700;letter-spacing:2px;color:{_GREEN};text-transform:uppercase;margin-bottom:10px;">AI Smart Scanner</div>
+            <div style="font-size:28px;font-weight:800;color:{_IVORY};letter-spacing:-0.5px;line-height:1.25;margin-bottom:16px;">Your setups, scanned across<br>the entire market.</div>
             {checkline("Describe your setup in plain English — AI extracts the rules")}
             {checkline("Price pre-filter across all ~2000 NSE stocks, then deep scan")}
             {checkline("Gemini Vision compares charts against your reference image")}
@@ -674,36 +575,36 @@ else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=s;}
 
     st.markdown("<div style='height:56px;'></div>", unsafe_allow_html=True)
     st.markdown(f"""<div style="text-align:center;margin-bottom:28px;">
-        <div style="font-size:12px;font-weight:700;letter-spacing:2px;color:{CYAN};text-transform:uppercase;margin-bottom:8px;">Built for your style</div>
-        <div style="font-size:28px;font-weight:800;color:{IVORY};">Momentum. Swing. Positional.</div></div>""", unsafe_allow_html=True)
+        <div style="font-size:12px;font-weight:700;letter-spacing:2px;color:{_CYAN};text-transform:uppercase;margin-bottom:8px;">Built for your style</div>
+        <div style="font-size:28px;font-weight:800;color:{_IVORY};">Momentum. Swing. Positional.</div></div>""", unsafe_allow_html=True)
     t1, t2, t3 = st.columns(3)
     for col, ic, ic_c, title, items in [
-        (t1,"zap",AMBER,"Momentum Traders",["PDH / PDL breakout detection in real time","10-second live price refresh","Volume spike flags vs 20-day average","Instant Telegram push when levels break"]),
-        (t2,"trend",CYAN,"Swing Traders",["Multi-day setup scanning: flags, bases, ranges","RSI and ROC filters across your watchlist","AI pattern matching vs saved reference charts","Daily structure analysis with SMA 20/50"]),
-        (t3,"layers",PURPLE,"Positional Traders",["Curated Arka Watchlist maintained by the desk","Today-only news feed per stock","Live index dashboard for market breadth","Cloud-synced watchlists on any device"])]:
+        (t1,"zap",AMBER,"Momentum Traders",["PDH / PDL breakout detection in real time","30-second live price refresh","Volume spike flags vs 20-day average","Instant Telegram push when levels break"]),
+        (t2,"trend",_CYAN,"Swing Traders",["Multi-day setup scanning: flags, bases, ranges","RSI and ROC filters across your watchlist","AI pattern matching vs saved reference charts","Daily structure analysis with SMA 20/50"]),
+        (t3,"layers",_PURPLE,"Positional Traders",["Curated Arka Watchlist maintained by the desk","Persistent combined news feed","Live index dashboard for market breadth","Cloud-synced watchlists on any device"])]:
         with col:
             checks = "".join(checkline(i, ic_c) for i in items)
-            st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {ic_c};border-radius:14px;padding:26px;min-height:300px;">
-                {icon_box(ic, ic_c)}<div style="font-size:16px;font-weight:800;color:{IVORY};margin-bottom:16px;">{title}</div>{checks}</div>""", unsafe_allow_html=True)
+            st.markdown(f"""<div class="fade-up" style="background:{_DARK2};border:1px solid {_BORDER};border-top:2px solid {ic_c};border-radius:14px;padding:26px;min-height:300px;">
+                {icon_box(ic, ic_c)}<div style="font-size:16px;font-weight:800;color:{_IVORY};margin-bottom:16px;">{title}</div>{checks}</div>""", unsafe_allow_html=True)
 
     st.markdown("<div style='height:56px;'></div>", unsafe_allow_html=True)
     st.markdown(f"""<div style="text-align:center;margin-bottom:28px;">
-        <div style="font-size:12px;font-weight:700;letter-spacing:2px;color:{CYAN};text-transform:uppercase;margin-bottom:8px;">Onboarding roadmap</div>
-        <div style="font-size:28px;font-weight:800;color:{IVORY};">Live in two weeks.</div></div>""", unsafe_allow_html=True)
+        <div style="font-size:12px;font-weight:700;letter-spacing:2px;color:{_CYAN};text-transform:uppercase;margin-bottom:8px;">Onboarding roadmap</div>
+        <div style="font-size:28px;font-weight:800;color:{_IVORY};">Live in two weeks.</div></div>""", unsafe_allow_html=True)
     rm1, rm2, rm3 = st.columns(3)
     for col,(day,title,desc,c) in zip([rm1,rm2,rm3],[
-        ("DAY 1","Connection & Import","Sign in and upload your TradingView watchlist. Cloud sync is instant.",CYAN),
-        ("DAY 7","AI Strategy Training","Teach Arka AI your setups, rules and reference charts.",PURPLE),
-        ("DAY 14","Automated Scans Live","Full-universe scans and Telegram alerts on your exact conditions.",GREEN)]):
+        ("DAY 1","Connection & Import","Sign in and upload your TradingView watchlist. Cloud sync is instant.",_CYAN),
+        ("DAY 7","AI Strategy Training","Teach Arka AI your setups, rules and reference charts.",_PURPLE),
+        ("DAY 14","Automated Scans Live","Full-universe scans and Telegram alerts on your exact conditions.",_GREEN)]):
         with col:
-            st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {c};border-radius:14px;padding:24px;">
+            st.markdown(f"""<div class="fade-up" style="background:{_DARK2};border:1px solid {_BORDER};border-top:2px solid {c};border-radius:14px;padding:24px;">
                 <div style="font-family:{MONO};font-size:11px;font-weight:700;color:{c};letter-spacing:2px;margin-bottom:10px;">{day}</div>
-                <div style="font-size:15px;font-weight:800;color:{IVORY};margin-bottom:8px;">{title}</div>
-                <div style="font-size:13px;color:{T2};line-height:1.7;">{desc}</div></div>""", unsafe_allow_html=True)
+                <div style="font-size:15px;font-weight:800;color:{_IVORY};margin-bottom:8px;">{title}</div>
+                <div style="font-size:13px;color:{_T2};line-height:1.7;">{desc}</div></div>""", unsafe_allow_html=True)
 
     st.markdown(f"""<div style="text-align:center;padding:56px 0 40px;">
-        <div style="font-size:13px;color:{T2};margin-bottom:6px;">Arka Trades · Finance &amp; Market Education</div>
-        <div style="font-size:11px;color:{T2};opacity:.6;">Not SEBI registered. All content is for educational purposes only.
+        <div style="font-size:13px;color:{_T2};margin-bottom:6px;">Arka Trades · Finance &amp; Market Education</div>
+        <div style="font-size:11px;color:{_T2};opacity:.6;">Not SEBI registered. All content is for educational purposes only.
         Trading involves risk — decisions and outcomes are entirely your own.</div></div>""", unsafe_allow_html=True)
     st.stop()
 
@@ -714,12 +615,12 @@ if not st.session_state.disclaimer_done:
         st.markdown(f"""<div style="padding:48px 0 20px;text-align:center;">
             <div style="font-size:30px;font-weight:800;color:{IVORY};">Disclaimer &amp; Terms</div>
             <div style="font-size:13px;color:{T2};margin-top:6px;margin-bottom:24px;">Read all terms carefully before continuing</div></div>
-        <div style="background:{DARK2};border:1px solid {BORDER};border-radius:16px;padding:28px;font-size:13px;color:{T2};line-height:2;max-height:260px;overflow-y:auto;margin-bottom:20px;">
-            <strong style="color:{INDIGO}">1. No Financial Advice</strong><br>Arka Trades does not provide financial or investment advice. Educational only.<br><br>
-            <strong style="color:{INDIGO}">2. Not SEBI Registered</strong><br>We are not registered with SEBI as investment advisor or research analyst.<br><br>
-            <strong style="color:{INDIGO}">3. Personal Responsibility</strong><br>All trading decisions are yours. You bear full responsibility for profits or losses.<br><br>
-            <strong style="color:{INDIGO}">4. Data Accuracy</strong><br>Market data may be delayed. We do not guarantee accuracy of any data shown.<br><br>
-            <strong style="color:{INDIGO}">5. Personal Use Only</strong><br>For personal educational use only. Not for commercial distribution.</div>""", unsafe_allow_html=True)
+        <div style="background:{DARK2};border:1px solid {BORDER};border-radius:4px;padding:28px;font-size:13px;color:{T2};line-height:2;max-height:260px;overflow-y:auto;margin-bottom:20px;">
+            <strong style="color:{AMBER}">1. No Financial Advice</strong><br>Arka Trades does not provide financial or investment advice. Educational only.<br><br>
+            <strong style="color:{AMBER}">2. Not SEBI Registered</strong><br>We are not registered with SEBI as investment advisor or research analyst.<br><br>
+            <strong style="color:{AMBER}">3. Personal Responsibility</strong><br>All trading decisions are yours. You bear full responsibility for profits or losses.<br><br>
+            <strong style="color:{AMBER}">4. Data Accuracy</strong><br>Market data may be delayed. We do not guarantee accuracy of any data shown.<br><br>
+            <strong style="color:{AMBER}">5. Personal Use Only</strong><br>For personal educational use only. Not for commercial distribution.</div>""", unsafe_allow_html=True)
         t1 = st.checkbox("I understand this platform is for educational use only")
         t2 = st.checkbox("I acknowledge Arka Trades is not SEBI registered")
         t3 = st.checkbox("I accept full responsibility for my own trading decisions")
@@ -739,13 +640,16 @@ if not st.session_state.disclaimer_done:
 
 # ════════════════ MAIN APP ═══════════════════════════════════
 left, right = st.columns([1, 4])
-PAGE_ACCENTS = {"home":INDIGO,"scanner":CYAN,"alerts":AMBER,"news":RED,"analysis":PURPLE,
-    "smart_scan":GREEN,"breadth":PINK,"heatmap":T2,"autoalert":T2,"profile":INDIGO,
-    "settings":INDIGO,"contact":CYAN}
+PAGE_ACCENTS = {"home":AMBER,"scanner":CYAN,"alerts":AMBER,"analysis":PURPLE,
+    "smart_scan":GREEN,"breadth":PINK,"heatmap":T2,"autoalert":T2,"profile":AMBER,
+    "settings":AMBER,"contact":CYAN}
+# NOTE: "news" removed from PAGE_ACCENTS and the nav list below — the
+# standalone News Terminal page is gone per the request to remove the
+# separate news sub-group; news now lives only in the persistent box.
 
 with left:
     st.markdown(f"""<div style="display:flex;align-items:center;gap:10px;padding:20px 12px 14px;border-bottom:1px solid {BORDER};">
-        <div style="width:32px;height:32px;border-radius:8px;background:{GRAD_BRAND};display:flex;align-items:center;justify-content:center;">{icon("trend", 16, "#fff")}</div>
+        <div style="width:32px;height:32px;border-radius:4px;background:{GRAD_BRAND};display:flex;align-items:center;justify-content:center;">{icon("trend", 16, "#000")}</div>
         <div><div style="font-size:15px;font-weight:800;color:{IVORY};line-height:1;">ARKA TRADES</div>
         <div style="font-size:8px;letter-spacing:2px;color:{T2};text-transform:uppercase;margin-top:3px;">Analytics Platform</div></div></div>""", unsafe_allow_html=True)
 
@@ -754,12 +658,12 @@ with left:
         st.image(photo, width=70)
     else:
         st.markdown(f"""<div style="display:flex;align-items:center;gap:10px;padding:14px 12px;">
-            <div style="width:40px;height:40px;border-radius:10px;background:{GRAD_AI};display:flex;align-items:center;justify-content:center;font-weight:800;font-size:16px;color:#fff;">{initial}</div>
+            <div style="width:40px;height:40px;border-radius:4px;background:{GRAD_AI};display:flex;align-items:center;justify-content:center;font-weight:800;font-size:16px;color:#fff;">{initial}</div>
             <div><div style="font-size:11px;color:{T2};">Signed in as</div>
             <div style="font-weight:800;font-size:14px;color:{IVORY};">{name}</div></div></div>
         <div style="height:1px;background:{BORDER};"></div>""", unsafe_allow_html=True)
 
-    st.markdown(f"<div style='padding:14px 12px 4px;font-size:10px;font-weight:700;letter-spacing:2px;color:{INDIGO};text-transform:uppercase;'>Product Suite</div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='padding:14px 12px 4px;font-size:10px;font-weight:700;letter-spacing:2px;color:{AMBER};text-transform:uppercase;'>Product Suite</div>", unsafe_allow_html=True)
     pg = st.session_state.page
 
     def nav_btn(label, key):
@@ -770,8 +674,10 @@ with left:
             st.session_state.page = key; st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
+    # CHANGED: "News Terminal" nav entry removed — persistent box
+    # replaces the standalone page.
     nav_btn("Dashboard","home"); nav_btn("Scanner","scanner"); nav_btn("Alerts","alerts")
-    nav_btn("News Terminal","news"); nav_btn("Arka AI","analysis")
+    nav_btn("Arka AI","analysis")
     nav_btn("Smart Screener","smart_scan"); nav_btn("Market Breadth","breadth")
     st.markdown(f"<div style='padding:14px 12px 4px;font-size:10px;font-weight:700;letter-spacing:2px;color:{AMBER};text-transform:uppercase;'>Coming Soon</div>", unsafe_allow_html=True)
     nav_btn("Heatmap","heatmap"); nav_btn("Auto Alerts","autoalert")
@@ -785,52 +691,71 @@ with left:
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
+    # CHANGED: persistent news box lives here, at the bottom of the
+    # left nav column — this places it visually bottom-left of the
+    # whole app frame, present regardless of which page is selected.
+    # It's called exactly once per script run (not per-page), so it
+    # doesn't reset or duplicate state when switching pages.
+    st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
+    _ensure_news_state()
+    # Combine both watchlists so the box reflects everything the
+    # person actually tracks, not just one list.
+    _combined_watchlist = list(dict.fromkeys(
+        st.session_state.get("watchlist", []) + st.session_state.get("admin_watchlist", [])
+    ))
+    news_box(_combined_watchlist)
+
 with right:
     pg = st.session_state.page
-    accent = PAGE_ACCENTS.get(pg, INDIGO)
+    accent = PAGE_ACCENTS.get(pg, AMBER)
     page_titles = {"home":"Dashboard","scanner":"Watchlist Scanner","alerts":"Alerts Manager",
-        "news":"News Terminal","analysis":"Arka AI","smart_scan":"Smart Screener",
+        "analysis":"Arka AI","smart_scan":"Smart Screener",
         "breadth":"Market Breadth","heatmap":"Heatmap","autoalert":"Auto Alerts",
         "profile":"Profile","settings":"Settings","contact":"Contact"}
 
     n1, n2 = st.columns([5,1])
     with n1:
         st.markdown(f"""<div style="display:flex;align-items:center;gap:12px;padding:16px 0 10px;">
-            <div style="width:5px;height:34px;border-radius:3px;background:{accent};"></div>
+            <div style="width:5px;height:34px;border-radius:0;background:{accent};"></div>
             <div><div style="font-size:21px;font-weight:800;color:{IVORY};">{page_titles.get(pg,"Dashboard")}</div>
             <div style="font-size:12px;color:{T2};margin-top:2px;">Arka Trades · Market Analytics Platform</div></div></div>""", unsafe_allow_html=True)
     with n2:
         st.markdown(f"""<div style="display:flex;align-items:center;justify-content:flex-end;height:60px;padding-right:8px;">
-            <div style="display:inline-flex;align-items:center;gap:7px;font-weight:700;font-size:11px;letter-spacing:1px;color:{GREEN};border:1px solid rgba(34,197,94,0.35);padding:5px 12px;border-radius:20px;background:rgba(34,197,94,0.08);"><span class="pulse-dot"></span>LIVE</div></div>""", unsafe_allow_html=True)
+            <div style="display:inline-flex;align-items:center;gap:7px;font-weight:700;font-size:11px;letter-spacing:1px;color:{GREEN};border:1px solid rgba(0,200,83,0.35);padding:5px 12px;border-radius:2px;background:rgba(0,200,83,0.08);"><span class="pulse-dot"></span>LIVE</div></div>""", unsafe_allow_html=True)
 
     st.markdown(f"<div style='height:1px;background:{BORDER};margin-bottom:12px;'></div>", unsafe_allow_html=True)
 
-    def show_idx(col, label, sym, c, fallback_syms=None, currency=""):
-        d = get_index(sym, fallback_syms)
+    def show_idx(col, label, sym, c, fallback_syms=None, currency="", index_label=None):
+        # CHANGED: index_label passed through to get_index() so
+        # NSE-domestic indices (NIFTY 50, BANK NIFTY, MIDCAP,
+        # SMALLCAP) try nsepythonserver first. Indices without a
+        # matching index_label (SENSEX, S&P 500, DOW, GOLD) go
+        # straight to the yfinance path exactly as before.
+        d = get_index(sym, fallback_syms, index_label=index_label)
         with col:
             if d:
                 cc = GREEN if d["chg"]>=0 else RED
                 pts_sign = "+" if d["pts"] >= 0 else ""
                 spark = sparkline(d.get("spark", []), color=cc, w=120, h=26)
-                st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {c};border-radius:12px;padding:14px;margin:4px 2px;">
+                st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {c};border-radius:2px;padding:14px;margin:4px 2px;">
                     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-                    <span style="font-size:11px;font-weight:700;color:{T2};">{label}</span>{change_pill(d['chg'])}</div>
+                    <span style="font-size:11px;font-weight:700;color:{T2};text-transform:uppercase;letter-spacing:0.5px;">{label}</span>{change_pill(d['chg'])}</div>
                     <div style="font-family:{MONO};font-weight:700;font-size:20px;color:{IVORY};line-height:1;margin-bottom:4px;">{currency}{d['price']:,.2f}</div>
                     <div style="font-family:{MONO};font-size:12px;font-weight:600;color:{cc};margin-bottom:6px;">{pts_sign}{d['pts']:,.2f} pts</div>{spark}</div>""", unsafe_allow_html=True)
             else:
-                st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {c};border-radius:12px;padding:14px;margin:4px 2px;opacity:0.5;">
-                    <div style="font-size:11px;font-weight:700;color:{T2};margin-bottom:8px;">{label}</div>
+                st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {c};border-radius:2px;padding:14px;margin:4px 2px;opacity:0.5;">
+                    <div style="font-size:11px;font-weight:700;color:{T2};margin-bottom:8px;text-transform:uppercase;">{label}</div>
                     <div style="font-family:{MONO};font-size:20px;color:{T2};">--</div>
                     <div style="font-size:11px;color:{T2};margin-top:4px;">No data</div></div>""", unsafe_allow_html=True)
 
     if pg == "home":
         r1a,r1b,r1c = st.columns(3)
-        show_idx(r1a,"NIFTY 50","^NSEI",INDIGO)
-        show_idx(r1b,"BANK NIFTY","^NSEBANK",CYAN)
-        show_idx(r1c,"SENSEX","^BSESN",AMBER)
+        show_idx(r1a,"NIFTY 50","^NSEI",AMBER, index_label="NIFTY 50")
+        show_idx(r1b,"BANK NIFTY","^NSEBANK",CYAN, index_label="BANK NIFTY")
+        show_idx(r1c,"SENSEX","^BSESN",AMBER)  # BSE index — no NSE path, unchanged
         r2a,r2b = st.columns(2)
-        show_idx(r2a,"MIDCAP 100", MIDCAP_CANDIDATES[0], PURPLE, fallback_syms=MIDCAP_CANDIDATES[1:])
-        show_idx(r2b,"SMALLCAP 100", SMALLCAP_CANDIDATES[0], PINK, fallback_syms=SMALLCAP_CANDIDATES[1:])
+        show_idx(r2a,"MIDCAP 100", MIDCAP_CANDIDATES[0], PURPLE, fallback_syms=MIDCAP_CANDIDATES[1:], index_label="MIDCAP 100")
+        show_idx(r2b,"SMALLCAP 100", SMALLCAP_CANDIDATES[0], PINK, fallback_syms=SMALLCAP_CANDIDATES[1:], index_label="SMALLCAP 100")
         st.markdown(f"<div style='height:1px;background:{BORDER};margin:12px 0 16px;'></div>", unsafe_allow_html=True)
 
         st.markdown(f"""<div style="font-size:11px;font-weight:700;letter-spacing:1.5px;color:{T2};
@@ -846,7 +771,7 @@ with right:
         if mmi["status"] == "live":
             zc = mmi_zone_color(mmi["zone"])
             st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};
-                border-top:2px solid {zc};border-radius:12px;padding:16px 18px;margin:4px 2px;">
+                border-top:2px solid {zc};border-radius:2px;padding:16px 18px;margin:4px 2px;">
                 <div style="display:flex;justify-content:space-between;align-items:center;">
                     <div>
                         <div style="font-size:11px;font-weight:700;color:{T2};text-transform:uppercase;margin-bottom:6px;">
@@ -854,7 +779,7 @@ with right:
                         <div style="display:flex;align-items:baseline;gap:10px;">
                             <span style="font-family:{MONO};font-weight:700;font-size:24px;color:{IVORY};">{mmi['score']}</span>
                             <span style="background:{zc}22;color:{zc};font-size:12px;font-weight:700;
-                                padding:3px 12px;border-radius:20px;border:1px solid {zc}55;">{mmi['zone']}</span>
+                                padding:3px 12px;border-radius:2px;border:1px solid {zc}55;">{mmi['zone']}</span>
                         </div>
                     </div>
                     <div style="text-align:right;font-size:11px;color:{T2};">Updated {mmi['fetched_at_ist'].strftime('%d %b %Y, %I:%M%p')}<br>
@@ -867,19 +792,19 @@ with right:
             hrs = int(age.total_seconds() // 3600)
             age_label = f"{hrs}h ago" if hrs < 48 else f"{hrs // 24}d ago"
             st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {AMBER}55;
-                border-top:2px solid {AMBER};border-radius:12px;padding:16px 18px;margin:4px 2px;">
+                border-top:2px solid {AMBER};border-radius:2px;padding:16px 18px;margin:4px 2px;">
                 <div style="display:flex;justify-content:space-between;align-items:center;">
                     <div>
                         <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
                             <span style="font-size:11px;font-weight:700;color:{T2};text-transform:uppercase;">
                                 Market Mood Index (MMI)</span>
                             <span style="background:{AMBER}22;color:{AMBER};font-size:10px;font-weight:700;
-                                padding:2px 8px;border-radius:20px;border:1px solid {AMBER}55;">⚠ STALE DATA</span>
+                                padding:2px 8px;border-radius:2px;border:1px solid {AMBER}55;">⚠ STALE DATA</span>
                         </div>
                         <div style="display:flex;align-items:baseline;gap:10px;">
                             <span style="font-family:{MONO};font-weight:700;font-size:24px;color:{IVORY};opacity:.75;">{mmi['score']}</span>
                             <span style="background:{zc}22;color:{zc};font-size:12px;font-weight:700;
-                                padding:3px 12px;border-radius:20px;border:1px solid {zc}55;opacity:.85;">{mmi['zone']}</span>
+                                padding:3px 12px;border-radius:2px;border:1px solid {zc}55;opacity:.85;">{mmi['zone']}</span>
                         </div>
                     </div>
                     <div style="text-align:right;font-size:11px;color:{AMBER};">Live fetch failed<br>
@@ -888,7 +813,7 @@ with right:
 
         else:
             st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {T2};
-                border-radius:12px;padding:16px 18px;margin:4px 2px;opacity:0.6;">
+                border-radius:2px;padding:16px 18px;margin:4px 2px;opacity:0.6;">
                 <div style="font-size:11px;font-weight:700;color:{T2};text-transform:uppercase;margin-bottom:6px;">
                     Market Mood Index (MMI)</div>
                 <div style="font-size:12px;color:{T2};">Unavailable — Tickertape's page couldn't be read and no
@@ -896,7 +821,13 @@ with right:
 
         st.markdown(f"<div style='height:1px;background:{BORDER};margin:16px 0 16px;'></div>", unsafe_allow_html=True)
 
-    st.markdown('<div style="padding:0 8px 80px;">', unsafe_allow_html=True)
+    # CHANGED: bottom padding reduced from 80px to a value that
+    # accounts for the fixed news box height (280px) so page content
+    # doesn't hide behind it. This is a rough clearance, not a
+    # precise calculation — verify visually and adjust
+    # #arka-news-fixed's height or this padding if content still
+    # gets covered near the bottom of a long page.
+    st.markdown('<div style="padding:0 8px 300px;">', unsafe_allow_html=True)
 
     if pg == "home":
         IST = timezone(timedelta(hours=5, minutes=30))
@@ -906,23 +837,23 @@ with right:
         mkt_label = "MARKET OPEN" if mkt else "MARKET CLOSED"
         g1,g2,g3 = st.columns([1.2, 1, 1])
         with g1:
-            st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};border-radius:14px;padding:24px;min-height:130px;">
-                <div style="display:inline-flex;align-items:center;gap:8px;background:{mkt_color}14;border:1px solid {mkt_color}33;border-radius:20px;padding:5px 14px;margin-bottom:14px;">
+            st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};border-radius:2px;padding:24px;min-height:130px;">
+                <div style="display:inline-flex;align-items:center;gap:8px;background:{mkt_color}14;border:1px solid {mkt_color}33;border-radius:2px;padding:5px 14px;margin-bottom:14px;">
                 <span style="width:7px;height:7px;border-radius:50%;background:{mkt_color};display:inline-block;"></span>
                 <span style="font-size:11px;font-weight:700;letter-spacing:1px;color:{mkt_color};">{mkt_label}</span></div>
                 <div style="font-size:13px;color:{T2};">NSE trading hours · 09:15 to 15:30 IST</div>
                 <div style="font-family:{MONO};font-size:13px;color:{IVORY};margin-top:6px;">{now.strftime("%d %b %Y · %H:%M:%S IST")}</div></div>""", unsafe_allow_html=True)
         with g2:
-            st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};border-radius:14px;padding:24px;min-height:130px;">
+            st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};border-radius:2px;padding:24px;min-height:130px;">
                 {icon_box("layers", CYAN, 34)}<div style="font-family:{MONO};font-size:22px;font-weight:700;color:{IVORY};">{len(st.session_state.watchlist)}</div>
                 <div style="font-size:12px;color:{T2};">Stocks in your watchlist</div></div>""", unsafe_allow_html=True)
         with g3:
             active_alerts = sum(1 for a in st.session_state.alerts.values() if a.get("active"))
-            st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};border-radius:14px;padding:24px;min-height:130px;">
+            st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};border-radius:2px;padding:24px;min-height:130px;">
                 {icon_box("bell", AMBER, 34)}<div style="font-family:{MONO};font-size:22px;font-weight:700;color:{IVORY};">{active_alerts}</div>
                 <div style="font-size:12px;color:{T2};">Active price alerts</div></div>""", unsafe_allow_html=True)
 
-        section("Platform Modules", INDIGO)
+        section("Platform Modules", AMBER)
         w1,w2,w3,w4 = st.columns(4)
         for col,ic,c,title,desc,target in [
             (w1,"brain",PURPLE,"AI Chart Analysis","Arka AI checks any chart against your saved rules and returns a scored verdict.","analysis"),
@@ -930,29 +861,13 @@ with right:
             (w3,"trend",PINK,"Market Breadth","See how many NSE stocks are actually confirming the move — not just the index.","breadth"),
             (w4,"bell",AMBER,"Breakout Alerts","PDH, PDL and custom price alerts delivered to Telegram instantly.","alerts")]:
             with col:
-                st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {c};border-radius:14px;padding:22px;min-height:195px;margin-bottom:8px;">
+                st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {c};border-radius:2px;padding:22px;min-height:195px;margin-bottom:8px;">
                     {icon_box(ic, c)}<div style="font-size:13px;font-weight:800;color:{IVORY};margin-bottom:8px;">{title}</div>
                     <div style="font-size:12px;color:{T2};line-height:1.7;">{desc}</div></div>""", unsafe_allow_html=True)
                 if st.button("Open module", key=f"go_{target}", use_container_width=True):
                     st.session_state.page = target; st.rerun()
 
     elif pg == "scanner":
-        # NOTE: we intentionally do NOT snapshot admin_watchlist / watchlist
-        # into local variables before the uploader blocks run below. That
-        # ordering was the root cause of both reported bugs:
-        #   - Admin tab: "no Scan option after adding a new watchlist"
-        #   - Your tab: "Scan Now appears, but scanning finds no stocks"
-        # A Streamlit script reruns top-to-bottom on every interaction
-        # (including a file upload). If we read st.session_state into a
-        # local variable BEFORE the uploader block, and the uploader block
-        # then updates st.session_state a few lines later in that SAME
-        # run, the local variable is left pointing at the stale value —
-        # the part of the script that decides what to render (the "not
-        # watchlist" check and the call into render_scan_results) never
-        # sees the fresh upload until a second, unrelated rerun happens.
-        # The fix is simple: read st.session_state.<key> fresh, at the
-        # exact point of use, AFTER the upload block has had a chance to
-        # update it in this same run.
         if not st.session_state.admin_watchlist:
             awl = db_load_admin_watchlist()
             if awl: st.session_state.admin_watchlist = awl
@@ -963,7 +878,11 @@ with right:
         def render_scan_results(syms, key_prefix=""):
             sc1,sc2,sc3,sc4 = st.columns([1,1,1,2])
             filt = sc1.selectbox("Show",["All","Above PDH","Below PDL","In Range"], key=f"filt_{key_prefix}")
-            l10  = sc2.checkbox("10s Live", key=f"l10_{key_prefix}")
+            # CHANGED: label updated from "10s Live" to "30s Live" to
+            # match the new cache floor in nse_data.py — the checkbox
+            # still triggers the same sleep-then-rerun loop, just at
+            # the safer interval.
+            l30  = sc2.checkbox("30s Live", key=f"l30_{key_prefix}")
             l60  = sc3.checkbox("60s Auto", key=f"l60_{key_prefix}")
             scanbtn = sc4.button("Run Scan", use_container_width=True, type="primary", key=f"scan_{key_prefix}")
             if scanbtn:
@@ -997,8 +916,8 @@ with right:
                 section("Results", CYAN)
                 cols7 = st.columns(5)
                 for i, s in enumerate(filtered):
-                    if s["cls"]=="g":   bd="rgba(34,197,94,0.4)"; top=GREEN
-                    elif s["cls"]=="r": bd="rgba(239,68,68,0.4)"; top=RED
+                    if s["cls"]=="g":   bd="rgba(0,200,83,0.4)"; top=GREEN
+                    elif s["cls"]=="r": bd="rgba(255,59,48,0.4)"; top=RED
                     else:               bd=BORDER; top=BORDER
                     cc = GREEN if s["chg"] >= 0 else RED
                     rc = GREEN if s["rsi"] < 35 else RED if s["rsi"] > 65 else T2
@@ -1007,7 +926,7 @@ with right:
                     dot = f'<span style="color:{AMBER};font-size:9px;margin:0 2px;">&#9679;</span>' if nd else ""
                     bell = icon("bell", 12, AMBER) if ha else ""
                     spark = sparkline(s.get("spark", []), color=cc, w=95, h=24)
-                    card = (f'<div style="background:{DARK2};border:1px solid {bd};border-top:2px solid {top};border-radius:12px;padding:12px 8px 10px;text-align:center;margin-bottom:6px;">'
+                    card = (f'<div style="background:{DARK2};border:1px solid {bd};border-top:2px solid {top};border-radius:2px;padding:12px 8px 10px;text-align:center;margin-bottom:6px;">'
                         f'<div style="display:flex;align-items:center;justify-content:center;gap:4px;margin-bottom:4px;">'
                         f'<span style="font-weight:800;font-size:13px;color:{IVORY};white-space:nowrap;">{s["sym"]}</span>{dot}{bell}</div>'
                         f'<div style="margin-bottom:5px;">{change_pill(s["chg"])}</div>'
@@ -1016,17 +935,13 @@ with right:
                     with cols7[i % 5]:
                         st.markdown(card, unsafe_allow_html=True)
                 IST = timezone(timedelta(hours=5, minutes=30))
-                st.caption(f"Scanned: {datetime.now(IST).strftime('%d %b %Y  %H:%M:%S')}  ·  % vs prev close  ·  Price: 10s cache")
-                if l10: time.sleep(10); st.cache_data.clear(); st.rerun()
+                st.caption(f"Scanned: {datetime.now(IST).strftime('%d %b %Y  %H:%M:%S')}  ·  % vs prev close  ·  Price: 30s cache")
+                if l30: time.sleep(30); st.cache_data.clear(); st.rerun()
                 elif l60: time.sleep(60); st.cache_data.clear(); st.rerun()
 
         st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
         tab1, tab2 = st.tabs(["Arka Watchlist", "Your Watchlist"])
         with tab1:
-            # FIX: read admin_watchlist AFTER the uploader has had a chance
-            # to run and update session_state in this same rerun — not
-            # before it, which is what caused "no Scan option after
-            # uploading" on the Admin tab.
             if IS_ADMIN:
                 uploaded_admin = st.file_uploader("Upload Arka Watchlist", type=["csv","txt"], key="admin_upload")
                 if uploaded_admin:
@@ -1034,43 +949,34 @@ with right:
                     if not syms: st.error("No symbols found.")
                     elif db_save_admin_watchlist(syms):
                         st.success(f"Arka Watchlist updated — {len(syms)} stocks.")
-                        # db_save_admin_watchlist already set session_state
-                        # directly, no rerun needed to see it below.
             admin_syms = st.session_state.admin_watchlist
-            st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-left:3px solid {CYAN};border-radius:12px;padding:16px 24px;margin:16px 0;">
+            st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-left:3px solid {CYAN};border-radius:2px;padding:16px 24px;margin:16px 0;">
                 <div style="font-size:15px;font-weight:800;color:{IVORY};margin-bottom:4px;">Arka Watchlist</div>
                 <div style="font-size:12px;color:{T2};">{f"{len(admin_syms)} stocks · Curated by the Arka Trades desk" if admin_syms else "No curated watchlist published yet"}</div></div>""", unsafe_allow_html=True)
             if not admin_syms:
                 st.info("Arka Watchlist not available yet.")
             else:
                 render_scan_results(admin_syms, key_prefix="admin")
-                _ensure_news_state(); news_panel(admin_syms)
+                # CHANGED: news_panel(admin_syms) call removed — the
+                # persistent news_box in the left column already
+                # covers this watchlist as part of the combined feed.
         with tab2:
-            # FIX: same pattern — the uploader block runs FIRST (updating
-            # session_state directly), then we read watchlist fresh from
-            # session_state for both the "no watchlist" check and the
-            # render_scan_results call. Previously `your_syms` was captured
-            # before this block ran, so right after an upload the scanner
-            # was being built from the OLD list, and db_save_watchlist's
-            # old `db_loaded = False` flag could additionally overwrite the
-            # freshly-saved list with a stale Supabase read on the next
-            # rerun (that flag has been removed — see db_save_watchlist).
             uploaded_yours = st.file_uploader("Upload Your Watchlist (CSV or TXT)", type=["csv","txt"], key="your_upload")
             if uploaded_yours:
                 syms = parse_csv(uploaded_yours)
                 if not syms: st.error("No symbols found.")
                 elif db_save_watchlist(syms):
                     st.success(f"{len(syms)} stocks loaded and saved.")
-                    # db_save_watchlist already set session_state directly.
             your_syms = st.session_state.watchlist
-            st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-left:3px solid {GREEN};border-radius:12px;padding:16px 24px;margin:16px 0;">
+            st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-left:3px solid {GREEN};border-radius:2px;padding:16px 24px;margin:16px 0;">
                 <div style="font-size:15px;font-weight:800;color:{IVORY};margin-bottom:4px;">Your Watchlist</div>
                 <div style="font-size:12px;color:{T2};">{f"{len(your_syms)} stocks · Synced to cloud" if your_syms else "No watchlist uploaded yet"}</div></div>""", unsafe_allow_html=True)
             if not your_syms:
                 st.info("Upload your TradingView watchlist above to start scanning.")
             else:
                 render_scan_results(your_syms, key_prefix="yours")
-                _ensure_news_state(); news_panel(your_syms)
+                # CHANGED: news_panel(your_syms) call removed — same
+                # reasoning as the admin tab above.
 
     elif pg == "alerts":
         active_alerts = {s: a for s, a in st.session_state.alerts.items() if a.get("active")}
@@ -1078,7 +984,7 @@ with right:
         a1.metric("Active Alerts", len(active_alerts))
         a2.metric("Triggered Today", len(st.session_state.alert_fired))
         a3.metric("Delivery Channel", "Telegram")
-        st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-left:3px solid {AMBER};border-radius:12px;padding:14px 20px;margin:16px 0 8px;">
+        st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-left:3px solid {AMBER};border-radius:2px;padding:14px 20px;margin:16px 0 8px;">
             <div style="font-size:13px;color:{T2};line-height:1.7;">Create conditional alerts on any stock in your watchlists. When the price crosses your level, a notification is pushed to Telegram instantly.</div></div>""", unsafe_allow_html=True)
 
         def render_alert_rows(watchlist, key_suffix=""):
@@ -1090,12 +996,12 @@ with right:
                 cond  = a.get("type", "").upper() if has_alert else "—"
                 level = f"Rs {a['price']:,.2f}" if has_alert else "—"
                 if has_alert:
-                    status = (f'<span style="display:inline-flex;align-items:center;gap:6px;background:rgba(245,158,11,.12);color:{AMBER};font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px;border:1px solid {AMBER}33;"><span class="pulse-dot" style="background:{AMBER};"></span>ACTIVE</span>')
+                    status = (f'<span style="display:inline-flex;align-items:center;gap:6px;background:rgba(255,149,0,.12);color:{AMBER};font-size:11px;font-weight:700;padding:3px 10px;border-radius:2px;border:1px solid {AMBER}33;"><span class="pulse-dot" style="background:{AMBER};"></span>ACTIVE</span>')
                 else:
-                    status = (f'<span style="background:{DARK3};color:{T2};font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px;border:1px solid {BORDER};">INACTIVE</span>')
+                    status = (f'<span style="background:{DARK3};color:{T2};font-size:11px;font-weight:700;padding:3px 10px;border-radius:2px;border:1px solid {BORDER};">INACTIVE</span>')
                 rc1, rc2 = st.columns([4, 1.4])
                 with rc1:
-                    st.markdown(f"""<div style="display:grid;grid-template-columns:2fr 1.2fr 1.5fr 1.2fr;gap:8px;align-items:center;background:{DARK2};border:1px solid {BORDER};border-radius:10px;padding:12px 16px;margin-bottom:6px;">
+                    st.markdown(f"""<div style="display:grid;grid-template-columns:2fr 1.2fr 1.5fr 1.2fr;gap:8px;align-items:center;background:{DARK2};border:1px solid {BORDER};border-radius:2px;padding:12px 16px;margin-bottom:6px;">
                         <span style="font-weight:800;font-size:13px;color:{IVORY};">{sym}</span><span>{status}</span>
                         <span style="font-family:{MONO};font-size:12px;color:{T2};">{cond}</span>
                         <span style="font-family:{MONO};font-size:12px;color:{IVORY};">{level}</span></div>""", unsafe_allow_html=True)
@@ -1113,7 +1019,7 @@ with right:
                                     st.session_state.alert_fired.remove(sym)
                                 st.rerun()
                 if st.session_state.get(f"open_{sym}_{key_suffix}"):
-                    st.markdown(f"""<div style="background:{DARK3};border:1px solid {BORDER};border-radius:10px;padding:4px 16px;margin-bottom:8px;">
+                    st.markdown(f"""<div style="background:{DARK3};border:1px solid {BORDER};border-radius:2px;padding:4px 16px;margin-bottom:8px;">
                         <div style="font-size:12px;font-weight:700;color:{AMBER};padding:8px 0 0;">Configure alert · {sym}</div></div>""", unsafe_allow_html=True)
                     alert_type = st.radio("Condition", ["PDH","PDL","Custom"], key=f"at_{sym}_{key_suffix}", horizontal=True)
                     cp = 0.0
@@ -1157,19 +1063,15 @@ with right:
             if not watchlist: st.warning("Upload your watchlist in Scanner first.")
             else: render_alert_rows(watchlist, key_suffix="yours")
 
-    elif pg == "news":
-        watchlist = st.session_state.get("watchlist", [])
-        if not watchlist:
-            st.warning("Go to Scanner first and upload your watchlist.")
-        else:
-            _ensure_news_state(); news_panel(watchlist)
+    # CHANGED: `elif pg == "news":` standalone page block removed
+    # entirely — persistent news_box replaces it.
 
     elif pg in ["analysis","heatmap","autoalert"]:
         if pg == "analysis":
             render_arka_ai()
         else:
             labels = {"heatmap":"Market Heatmap","autoalert":"Auto Smart Alerts"}
-            st.markdown(f"""<div style="background:{DARK2};border:1px dashed {BORDER};border-radius:16px;padding:100px 20px;text-align:center;margin:20px 0;">
+            st.markdown(f"""<div style="background:{DARK2};border:1px dashed {BORDER};border-radius:2px;padding:100px 20px;text-align:center;margin:20px 0;">
                 <div style="margin-bottom:16px;">{icon("clock", 32, T2)}</div>
                 <div style="font-size:26px;font-weight:800;color:{T2};margin-bottom:10px;">{labels.get(pg,'Coming Soon')}</div>
                 <div style="font-size:14px;color:{T2};opacity:.6;">This module is under development</div></div>""", unsafe_allow_html=True)
@@ -1194,7 +1096,7 @@ with right:
             if photo:
                 st.image(photo,width=120); st.caption(name)
             else:
-                st.markdown(f"""<div style="width:96px;height:96px;border-radius:16px;background:{GRAD_AI};display:flex;align-items:center;justify-content:center;font-weight:800;font-size:36px;color:#fff;margin-bottom:12px;">{initial}</div>
+                st.markdown(f"""<div style="width:96px;height:96px;border-radius:4px;background:{GRAD_AI};display:flex;align-items:center;justify-content:center;font-weight:800;font-size:36px;color:#fff;margin-bottom:12px;">{initial}</div>
                 <div style="font-size:20px;font-weight:800;color:{IVORY};">{name}</div>
                 <div style="font-size:11px;color:{T2};letter-spacing:1px;text-transform:uppercase;margin-top:4px;">Arka Trades Member</div>""", unsafe_allow_html=True)
         with p2:
@@ -1213,12 +1115,12 @@ with right:
         st.markdown(f"<div style='font-size:15px;font-weight:800;color:{IVORY};margin:8px 0 10px;'>Appearance</div>", unsafe_allow_html=True)
         t1,t2=st.columns(2)
         with t1:
-            st.markdown(f"""<div style="background:{DARK2};border:2px solid {INDIGO};border-radius:14px;padding:20px;text-align:center;">
-                <div style="margin-bottom:10px;">{icon("shield", 24, INDIGO)}</div>
-                <div style="font-weight:800;font-size:14px;color:{INDIGO};">DARK MODE</div>
+            st.markdown(f"""<div style="background:{DARK2};border:2px solid {AMBER};border-radius:2px;padding:20px;text-align:center;">
+                <div style="margin-bottom:10px;">{icon("shield", 24, AMBER)}</div>
+                <div style="font-weight:800;font-size:14px;color:{AMBER};">DARK MODE</div>
                 <div style="font-size:12px;color:{T2};margin-top:4px;">Currently active</div></div>""", unsafe_allow_html=True)
         with t2:
-            st.markdown(f"""<div style="background:{DARK3};border:1px solid {BORDER};border-radius:14px;padding:20px;text-align:center;opacity:.6;">
+            st.markdown(f"""<div style="background:{DARK3};border:1px solid {BORDER};border-radius:2px;padding:20px;text-align:center;opacity:.6;">
                 <div style="margin-bottom:10px;">{icon("clock", 24, T2)}</div>
                 <div style="font-weight:800;font-size:14px;color:{T2};">LIGHT MODE</div>
                 <div style="font-size:12px;color:{T2};margin-top:4px;">Coming soon</div></div>""", unsafe_allow_html=True)
@@ -1234,7 +1136,7 @@ with right:
     elif pg == "contact":
         c1,c2=st.columns([1,1])
         with c1:
-            st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-left:3px solid {CYAN};border-radius:14px;padding:28px;">
+            st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-left:3px solid {CYAN};border-radius:2px;padding:28px;">
                 <div style="margin-bottom:12px;">{icon("mail", 24, CYAN)}</div>
                 <div style="font-weight:800;font-size:13px;letter-spacing:1px;color:{CYAN};text-transform:uppercase;margin-bottom:14px;">Get in Touch</div>
                 <div style="font-size:14px;color:{T2};line-height:2;margin-bottom:18px;">Questions, feedback or suggestions?<br>We would love to hear from you.</div>
