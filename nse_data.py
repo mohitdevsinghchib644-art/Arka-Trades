@@ -213,14 +213,7 @@ def _get_price_yf(sym: str):
         return None
 
 
-@st.cache_data(ttl=30, show_spinner=False)
-def get_price(sym: str):
-    """
-    30s cache floor (was 10s). NSE's own docs warn that tight polling
-    loops risk the exchange reinforcing its firewall against the
-    caller — 30s is a meaningfully safer floor while still being
-    close to live for a manual "Run Scan" workflow.
-    """
+def _get_price_uncached(sym: str):
     if _NSE_AVAILABLE:
         result = _get_price_nse(sym)
         if result:
@@ -230,6 +223,48 @@ def get_price(sym: str):
     else:
         _debug_note("yfinance (fallback)", f"nsepythonserver not available: {_NSE_IMPORT_ERROR}")
     return _get_price_yf(sym)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _get_price_cached_success(sym: str):
+    """Only ever called after a successful uncached fetch — see
+    get_price() below. Same bug-fix pattern as
+    _get_index_cached_success(): a failure is never cached, so it
+    can't get permanently frozen for the TTL window."""
+    return _get_price_uncached(sym)
+
+
+def get_price(sym: str):
+    """
+    30s cache floor (was 10s). NSE's own docs warn that tight polling
+    loops risk the exchange reinforcing its firewall against the
+    caller — 30s is a meaningfully safer floor while still being
+    close to live for a manual "Run Scan" workflow.
+
+    IMPORTANT — cache persistence bug fix, two parts:
+
+    1. st.cache_data on Streamlit Cloud is process-level, not
+       per-session. It survives a browser refresh. A person hitting
+       refresh does NOT force a new fetch on its own — they get
+       whatever was cached from ANY earlier run. force_refresh_all()
+       below (wired to a manual button in app.py) is the real fix for
+       "I refreshed and it's still stuck" — it calls
+       st.cache_data.clear() directly.
+
+    2. Separately (and this was the actual cause of "stuck
+       immediately, even right after refresh"): the previous version
+       decorated the fetch-and-maybe-fail function directly, so a
+       single failed fetch got its None result cached for the full
+       30s and re-served on every call inside that window — which,
+       combined with #1, could look permanently stuck rather than
+       just "stale by up to 30s". Only successful fetches are cached
+       now; a failure always retries live on the next call.
+    """
+    result = _get_price_uncached(sym)
+    if result:
+        _get_price_cached_success(sym)
+        return result
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -309,21 +344,9 @@ def _get_index_yf(sym, fallback_syms=None):
     return None
 
 
-@st.cache_data(ttl=30, show_spinner=False)
-def get_index(sym, fallback_syms=None, index_label=None):
-    """
-    index_label: the NSE-style display name ("NIFTY 50", "BANK NIFTY",
-    etc.) used to look up the NSE path. If provided and it's an
-    NSE-domestic index, tries nsepythonserver first, then yfinance
-    with the original ticker/fallback chain. If not provided (or the
-    index isn't NSE-domestic, e.g. S&P 500 / DOW / GOLD), goes
-    straight to the yfinance path — unchanged from before.
-
-    Cache TTL: 30s, matching get_price's new floor for consistency
-    (was 60s before — tightened slightly since indices are lower-risk
-    to poll than individual equities, but kept aligned with the
-    price cache rather than introducing a third TTL value).
-    """
+def _get_index_uncached(sym, fallback_syms=None, index_label=None):
+    """The actual fetch logic, kept separate from the cache wrapper
+    below — see get_index()'s docstring for why."""
     if index_label:
         result = _get_index_nse(index_label)
         if result:
@@ -333,9 +356,70 @@ def get_index(sym, fallback_syms=None, index_label=None):
     return _get_index_yf(sym, fallback_syms)
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def _get_index_cached_success(sym, fallback_syms=None, index_label=None):
+    """
+    IMPORTANT BUG FIX: this is only ever called when the uncached
+    fetch already succeeded (see get_index() below) — so this cache
+    only ever stores real data, never a failure. The earlier version
+    decorated the fetch-and-maybe-fail function directly, which meant
+    a single bad fetch (NSE hiccup, yfinance rate limit, anything
+    transient) got its `None` result cached for the full TTL and
+    re-served on every rerun that landed inside that window — this is
+    exactly why MIDCAP 100 / SMALLCAP 100 showed "No data" persistently
+    instead of recovering on the next successful fetch, and why prices
+    could look frozen immediately even right after a browser refresh
+    (Streamlit Cloud's cache is process-level, not per-session, so a
+    refresh doesn't clear it — see force_refresh_all() below for the
+    manual override).
+    """
+    return _get_index_uncached(sym, fallback_syms, index_label)
+
+
+def get_index(sym, fallback_syms=None, index_label=None):
+    """
+    index_label: the NSE-style display name ("NIFTY 50", "BANK NIFTY",
+    etc.) used to look up the NSE path. If provided and it's an
+    NSE-domestic index, tries nsepythonserver first, then yfinance
+    with the original ticker/fallback chain. If not provided (or the
+    index isn't NSE-domestic, e.g. S&P 500 / DOW / GOLD), goes
+    straight to the yfinance path — unchanged from before.
+
+    Only successful fetches are cached (see
+    _get_index_cached_success's docstring) — a failure always retries
+    on the very next call instead of being frozen in place for the
+    TTL window. This costs one extra live attempt on every call that
+    would otherwise have hit a cached failure, which is the correct
+    trade: an index card that's occasionally a bit slower to recover
+    beats one that's permanently stuck.
+    """
+    result = _get_index_uncached(sym, fallback_syms, index_label)
+    if result:
+        # Backfill the success into the cache so the NEXT call within
+        # 30s gets the fast cached path — we still get caching's
+        # benefit, just never for a None.
+        _get_index_cached_success(sym, fallback_syms, index_label)
+        return result
+    return None
+
+
 # ── Ticker candidate lists — unchanged from original app.py ────────
 MIDCAP_CANDIDATES = ["NIFTY_MIDCAP_100.NS", "^CRSMID", "^NIFTYMIDCAP100"]
 SMALLCAP_CANDIDATES = ["^CNXSC", "^CNXSMALLCAP", "NIFTYSMLCAP100.NS"]
 SP500_CANDIDATES = ["^GSPC"]
 DOWJONES_CANDIDATES = ["^DJI"]
 GOLD_CANDIDATES = ["GC=F"]
+
+
+def force_refresh_all():
+    """
+    Manually clear every st.cache_data-backed function in this
+    module. Wired to a button in app.py's top bar. This is the real
+    fix for "prices are stuck" — a browser refresh does NOT clear
+    st.cache_data on Streamlit Cloud (it's process-level, not
+    per-session), so the only way to guarantee a genuinely fresh
+    fetch is to call this explicitly.
+    """
+    get_static.clear()
+    get_price.clear()
+    get_index.clear()
