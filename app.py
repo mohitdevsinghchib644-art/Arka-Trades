@@ -6,6 +6,10 @@ import time
 import requests
 import re
 import json
+import math  # RE-ADDED: needed for the MMI gauge's trig (radians/cos/sin) —
+             # was dropped in the previous rewrite when sanity-check
+             # logic moved to nse_data.py, but render_mmi_gauge() below
+             # needs it directly in this file.
 from pathlib import Path
 from supabase import create_client, Client
 
@@ -19,6 +23,7 @@ from nse_data import (
     get_static, get_price, get_index,
     MIDCAP_CANDIDATES, SMALLCAP_CANDIDATES,
     SP500_CANDIDATES, DOWJONES_CANDIDATES, GOLD_CANDIDATES,
+    force_refresh_all,  # NEW: manual cache-clear, see top bar wiring below
 )
 # CHANGED: news_panel (per-symbol tabs) replaced with news_box (one
 # combined persistent feed). get_news_dot kept — still used by
@@ -223,13 +228,12 @@ hr{{border-color:{BORDER} !important;}}
 .pulse-dot{{width:8px;height:8px;border-radius:50%;background:{GREEN};display:inline-block;animation:pulse 2s infinite;}}
 @keyframes fadeUp{{from{{opacity:0;transform:translateY(8px);}}to{{opacity:1;transform:none;}}}}
 .fade-up{{animation:fadeUp .35s ease both;}}
-/* CHANGED: sticky bottom-left news box wrapper — fixed positioning,
-   persistent across all interior pages regardless of nav selection.
-   Width tuned to sit comfortably alongside the left nav rail without
-   overlapping main content on typical desktop viewports. */
-#arka-news-fixed{{position:fixed;bottom:0;left:0;width:340px;height:280px;
-    z-index:999;padding:10px;background:{DARK};border-top:1px solid {BORDER};
-    border-right:1px solid {BORDER};}}
+/* CHANGED: news box moved from bottom-left to top-right per request,
+   and enlarged (was 340x280, now 400x520). Fixed positioning,
+   persistent across all interior pages regardless of nav selection. */
+#arka-news-fixed{{position:fixed;top:0;right:0;width:400px;height:520px;
+    z-index:999;padding:10px;background:{DARK};border-bottom:1px solid {BORDER};
+    border-left:1px solid {BORDER};}}
 #arka-news-scroll::-webkit-scrollbar{{width:4px;}}
 #arka-news-scroll::-webkit-scrollbar-thumb{{background:{BORDER};border-radius:2px;}}
 </style>
@@ -314,12 +318,71 @@ def _mmi_zone_for_score(score: float) -> str:
     return "Unknown"
 
 def mmi_zone_color(zone: str) -> str:
+    # FIXED: colors were backwards from the standard convention (and
+    # from the reference gauge image) — Extreme Fear should be green
+    # (calm), Extreme Greed should be red (danger). Previous version
+    # had these swapped.
     return {
-        "Extreme Fear":  RED,
-        "Fear":          AMBER,
-        "Greed":         "#84CC16",
-        "Extreme Greed": GREEN,
+        "Extreme Fear":  GREEN,
+        "Fear":          "#84CC16",
+        "Greed":         AMBER,
+        "Extreme Greed": RED,
     }.get(zone, T2)
+
+
+def render_mmi_gauge(score: float, zone: str, size: int = 200) -> str:
+    """
+    Renders the MMI as a half-circle arc gauge matching the reference
+    image: four colored zone arcs (Extreme Fear -> green through
+    Extreme Greed -> red), a needle pointing at the current score, and
+    the numeric score below. Pure SVG, no external charting library.
+
+    size: gauge diameter in px. Reference used ~200 for a compact
+    card — this replaces the old flat pill-style MMI card entirely.
+    """
+    cx, cy = size / 2, size / 2
+    r_outer = size * 0.42
+    r_inner = size * 0.34
+    r_needle = size * 0.30
+
+    def polar(r, angle_deg):
+        a = math.radians(angle_deg)
+        return cx + r * math.cos(a), cy + r * math.sin(a)
+
+    def arc_path(r, start_angle, end_angle):
+        x1, y1 = polar(r, start_angle)
+        x2, y2 = polar(r, end_angle)
+        large = 1 if (end_angle - start_angle) > 180 else 0
+        return f"M {x1:.1f} {y1:.1f} A {r:.1f} {r:.1f} 0 {large} 1 {x2:.1f} {y2:.1f}"
+
+    # Zone boundaries: score 0-100 maps to angle 180 (left) -> 360 (right)
+    zone_bounds = [
+        (0, 30, GREEN),        # Extreme Fear
+        (30, 50, "#84CC16"),   # Fear
+        (50, 70, AMBER),       # Greed
+        (70, 100, RED),        # Extreme Greed
+    ]
+    band_width = r_outer - r_inner
+    r_band = (r_outer + r_inner) / 2
+
+    zone_arcs = ""
+    for lo, hi, color in zone_bounds:
+        a_start = 180 + (lo / 100) * 180
+        a_end = 180 + (hi / 100) * 180
+        zone_arcs += (f'<path d="{arc_path(r_band, a_start, a_end)}" '
+                      f'stroke="{color}" stroke-width="{band_width:.1f}" fill="none" '
+                      f'stroke-linecap="butt"/>')
+
+    # Needle
+    needle_angle = 180 + (max(0, min(100, score)) / 100) * 180
+    needle_color = mmi_zone_color(zone)
+    nx, ny = polar(r_needle, needle_angle)
+    zone_arcs += (f'<line x1="{cx}" y1="{cy}" x2="{nx:.1f}" y2="{ny:.1f}" '
+                  f'stroke="{needle_color}" stroke-width="4" stroke-linecap="round"/>')
+    zone_arcs += f'<circle cx="{cx}" cy="{cy}" r="5" fill="{needle_color}"/>'
+
+    svg_h = size * 0.62  # half-circle doesn't need full height
+    return f"""<svg width="{size}" height="{svg_h:.0f}" viewBox="0 0 {size} {svg_h:.0f}">{zone_arcs}</svg>"""
 
 def _mmi_parse_score(html_or_text: str):
     pattern = re.compile(r'(\d{1,3}\.\d{1,2})\s*(?:<[^>]+>\s*)*Updated', re.MULTILINE)
@@ -691,19 +754,26 @@ with left:
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # CHANGED: persistent news box lives here, at the bottom of the
-    # left nav column — this places it visually bottom-left of the
-    # whole app frame, present regardless of which page is selected.
-    # It's called exactly once per script run (not per-page), so it
-    # doesn't reset or duplicate state when switching pages.
-    st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
+    # BUG FIX: the #arka-news-fixed CSS rule (position:fixed, top-right)
+    # was defined in the stylesheet but never actually applied to
+    # anything — news_box() renders its own inner div directly, with
+    # no wrapper carrying that ID, so the box was just sitting in
+    # normal document flow inside this left column all along, not
+    # actually pinned anywhere. Wrapping the call in a real div with
+    # that ID fixes this. Because position:fixed removes the element
+    # from normal layout, WHERE this call happens in the Python code
+    # no longer determines where it visually appears — it'll render
+    # top-right per the CSS regardless of being called here in the
+    # left-column block. Called exactly once per script run (not
+    # per-page), so it doesn't reset or duplicate state when switching
+    # pages.
     _ensure_news_state()
-    # Combine both watchlists so the box reflects everything the
-    # person actually tracks, not just one list.
     _combined_watchlist = list(dict.fromkeys(
         st.session_state.get("watchlist", []) + st.session_state.get("admin_watchlist", [])
     ))
+    st.markdown('<div id="arka-news-fixed">', unsafe_allow_html=True)
     news_box(_combined_watchlist)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 with right:
     pg = st.session_state.page
@@ -713,7 +783,14 @@ with right:
         "breadth":"Market Breadth","heatmap":"Heatmap","autoalert":"Auto Alerts",
         "profile":"Profile","settings":"Settings","contact":"Contact"}
 
-    n1, n2 = st.columns([5,1])
+    # CHANGED: added a third column for a manual "Force Refresh"
+    # button — real fix for prices/indices looking stuck. A browser
+    # refresh does NOT clear st.cache_data on Streamlit Cloud (it's
+    # process-level, not per-session — see nse_data.py's
+    # force_refresh_all() docstring), so this button is the only
+    # guaranteed way to force every price/index card to re-fetch live
+    # right now instead of serving whatever's cached.
+    n1, n2, n3 = st.columns([5,1,1.2])
     with n1:
         st.markdown(f"""<div style="display:flex;align-items:center;gap:12px;padding:16px 0 10px;">
             <div style="width:5px;height:34px;border-radius:0;background:{accent};"></div>
@@ -722,6 +799,13 @@ with right:
     with n2:
         st.markdown(f"""<div style="display:flex;align-items:center;justify-content:flex-end;height:60px;padding-right:8px;">
             <div style="display:inline-flex;align-items:center;gap:7px;font-weight:700;font-size:11px;letter-spacing:1px;color:{GREEN};border:1px solid rgba(0,200,83,0.35);padding:5px 12px;border-radius:2px;background:rgba(0,200,83,0.08);"><span class="pulse-dot"></span>LIVE</div></div>""", unsafe_allow_html=True)
+    with n3:
+        st.markdown('<div style="padding-top:16px;">', unsafe_allow_html=True)
+        if st.button("↻ Refresh", key="force_refresh_btn", use_container_width=True):
+            force_refresh_all()
+            st.toast("Cache cleared — fetching live data.")
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown(f"<div style='height:1px;background:{BORDER};margin-bottom:12px;'></div>", unsafe_allow_html=True)
 
@@ -768,66 +852,67 @@ with right:
         mmi = get_mmi()
         st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
-        if mmi["status"] == "live":
-            zc = mmi_zone_color(mmi["zone"])
-            st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};
-                border-top:2px solid {zc};border-radius:2px;padding:16px 18px;margin:4px 2px;">
-                <div style="display:flex;justify-content:space-between;align-items:center;">
-                    <div>
-                        <div style="font-size:11px;font-weight:700;color:{T2};text-transform:uppercase;margin-bottom:6px;">
-                            Market Mood Index (MMI)</div>
-                        <div style="display:flex;align-items:baseline;gap:10px;">
-                            <span style="font-family:{MONO};font-weight:700;font-size:24px;color:{IVORY};">{mmi['score']}</span>
-                            <span style="background:{zc}22;color:{zc};font-size:12px;font-weight:700;
-                                padding:3px 12px;border-radius:2px;border:1px solid {zc}55;">{mmi['zone']}</span>
-                        </div>
-                    </div>
-                    <div style="text-align:right;font-size:11px;color:{T2};">Updated {mmi['fetched_at_ist'].strftime('%d %b %Y, %I:%M%p')}<br>
-                        <span style="opacity:.7;">Source: Tickertape</span></div>
-                </div></div>""", unsafe_allow_html=True)
+        # CHANGED: MMI redesigned as a compact arc gauge matching the
+        # reference image (half-circle, 4 colored zones, needle),
+        # replacing the old flat pill-style card. Fixed width, small
+        # footprint — sits in a narrow column rather than a full-width
+        # banner like before.
+        mmi_col, _mmi_spacer = st.columns([1, 2.2])
+        with mmi_col:
+            if mmi["status"] == "live":
+                zc = mmi_zone_color(mmi["zone"])
+                gauge_svg = render_mmi_gauge(mmi["score"], mmi["zone"], size=180)
+                st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};
+                    border-top:2px solid {zc};border-radius:2px;padding:12px;text-align:center;">
+                    <div style="font-size:10px;font-weight:700;color:{T2};text-transform:uppercase;
+                        letter-spacing:0.5px;margin-bottom:4px;">Market Mood Index</div>
+                    {gauge_svg}
+                    <div style="font-family:{MONO};font-weight:800;font-size:22px;color:{zc};margin-top:-6px;">{mmi['score']}</div>
+                    <div style="font-size:11px;color:{zc};font-weight:700;margin-top:2px;">{mmi['zone']}</div>
+                    <div style="font-size:9px;color:{T2};margin-top:4px;">Updated {mmi['fetched_at_ist'].strftime('%I:%M%p')}</div>
+                    </div>""", unsafe_allow_html=True)
 
-        elif mmi["status"] == "stale":
-            zc = mmi_zone_color(mmi["zone"])
-            age = mmi["age"]
-            hrs = int(age.total_seconds() // 3600)
-            age_label = f"{hrs}h ago" if hrs < 48 else f"{hrs // 24}d ago"
-            st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {AMBER}55;
-                border-top:2px solid {AMBER};border-radius:2px;padding:16px 18px;margin:4px 2px;">
-                <div style="display:flex;justify-content:space-between;align-items:center;">
-                    <div>
-                        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-                            <span style="font-size:11px;font-weight:700;color:{T2};text-transform:uppercase;">
-                                Market Mood Index (MMI)</span>
-                            <span style="background:{AMBER}22;color:{AMBER};font-size:10px;font-weight:700;
-                                padding:2px 8px;border-radius:2px;border:1px solid {AMBER}55;">⚠ STALE DATA</span>
-                        </div>
-                        <div style="display:flex;align-items:baseline;gap:10px;">
-                            <span style="font-family:{MONO};font-weight:700;font-size:24px;color:{IVORY};opacity:.75;">{mmi['score']}</span>
-                            <span style="background:{zc}22;color:{zc};font-size:12px;font-weight:700;
-                                padding:3px 12px;border-radius:2px;border:1px solid {zc}55;opacity:.85;">{mmi['zone']}</span>
-                        </div>
-                    </div>
-                    <div style="text-align:right;font-size:11px;color:{AMBER};">Live fetch failed<br>
-                        <span style="opacity:.8;">Last known value · {age_label}</span></div>
-                </div></div>""", unsafe_allow_html=True)
+            elif mmi["status"] == "stale":
+                zc = mmi_zone_color(mmi["zone"])
+                age = mmi["age"]
+                hrs = int(age.total_seconds() // 3600)
+                age_label = f"{hrs}h ago" if hrs < 48 else f"{hrs // 24}d ago"
+                gauge_svg = render_mmi_gauge(mmi["score"], mmi["zone"], size=180)
+                st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {AMBER}55;
+                    border-top:2px solid {AMBER};border-radius:2px;padding:12px;text-align:center;opacity:0.75;">
+                    <div style="font-size:10px;font-weight:700;color:{T2};text-transform:uppercase;
+                        letter-spacing:0.5px;margin-bottom:4px;">Market Mood Index
+                        <span style="color:{AMBER};">· STALE</span></div>
+                    {gauge_svg}
+                    <div style="font-family:{MONO};font-weight:800;font-size:22px;color:{zc};margin-top:-6px;">{mmi['score']}</div>
+                    <div style="font-size:11px;color:{zc};font-weight:700;margin-top:2px;">{mmi['zone']}</div>
+                    <div style="font-size:9px;color:{AMBER};margin-top:4px;">{age_label}</div>
+                    </div>""", unsafe_allow_html=True)
 
-        else:
-            st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {T2};
-                border-radius:2px;padding:16px 18px;margin:4px 2px;opacity:0.6;">
-                <div style="font-size:11px;font-weight:700;color:{T2};text-transform:uppercase;margin-bottom:6px;">
-                    Market Mood Index (MMI)</div>
-                <div style="font-size:12px;color:{T2};">Unavailable — Tickertape's page couldn't be read and no
-                    cached value exists yet. This will populate automatically once a scan succeeds.</div></div>""", unsafe_allow_html=True)
+            else:
+                # FIXED: this branch was left at the wrong indentation
+                # level after the gauge redesign nested the live/stale
+                # cases under `with mmi_col:` — it needs to be inside
+                # that same block so it also renders in the narrow
+                # gauge column instead of falling back to full width.
+                st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {T2};
+                    border-radius:2px;padding:12px;opacity:0.6;">
+                    <div style="font-size:10px;font-weight:700;color:{T2};text-transform:uppercase;margin-bottom:6px;">
+                        Market Mood Index</div>
+                    <div style="font-size:11px;color:{T2};">Unavailable — checking again shortly.</div></div>""", unsafe_allow_html=True)
 
         st.markdown(f"<div style='height:1px;background:{BORDER};margin:16px 0 16px;'></div>", unsafe_allow_html=True)
 
-    # CHANGED: bottom padding reduced from 80px to a value that
-    # accounts for the fixed news box height (280px) so page content
-    # doesn't hide behind it. This is a rough clearance, not a
-    # precise calculation — verify visually and adjust
-    # #arka-news-fixed's height or this padding if content still
-    # gets covered near the bottom of a long page.
-    st.markdown('<div style="padding:0 8px 300px;">', unsafe_allow_html=True)
+    # CHANGED: news box moved bottom-left -> top-right, so the
+    # clearance page content needs also moved: from bottom padding to
+    # top padding, and only meaningfully matters on the right/main
+    # column since the box now overlaps that area's top-right corner,
+    # not the left nav. 300px top padding is a rough estimate matching
+    # the box's ~520px height minus its rough vertical overlap with
+    # the top bar — verify visually and adjust #arka-news-fixed's
+    # width/height or this padding if page content (esp. the NIFTY/
+    # BANK NIFTY/SENSEX cards) still renders underneath the box.
+    st.markdown('<div style="padding:0 420px 40px 8px;">', unsafe_allow_html=True)
 
     if pg == "home":
         IST = timezone(timedelta(hours=5, minutes=30))
