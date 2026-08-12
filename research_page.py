@@ -1,24 +1,46 @@
 """
-research_page.py — Arka Trades Research Terminal
-Stock lookup: search a symbol, get summary + quarterly/yearly
-results + shareholding + sector classification from Screener.in.
+research_page.py — Arka Trades Research Terminal (v2 — dense multi-panel grid)
 
-VISUAL LANGUAGE (terminal reskin, matches app.py's TERM_* tokens):
-  - Flat panels, 1-2px hairline borders, no rounded-corner cards
-  - Dense padding, tight line-height
-  - Single accent color (amber) + green/red for price/delta only
-  - Monospace for ALL data values and table cells, not just prices
-  - Data as row-based tables with alternating shading, not card grids
-
-Peer comparison and sector P/E are NOT implemented — see
-screener_scraper.py docstring for why. This page shows a clearly
-labeled placeholder for both rather than hiding them or faking data.
+CHANGED FROM v1:
+  - Layout: was a single-column vertical scroll (header -> sector ->
+    quarterly -> yearly -> shareholding -> peers placeholder -> news
+    -> footer, one section after another). Now a dense grid: a price
+    chart panel, a factors panel, and a news panel sit side-by-side
+    near the top, with financial tables below — closer to a real
+    terminal screen where multiple panels are visible without
+    scrolling between them, per direct request.
+  - NEW: price chart panel, sourced from yfinance (this page
+    previously never touched yfinance at all — it was 100%
+    Screener-scraped). Reuses the exact yf.Ticker(sym+".NS").history()
+    pattern already proven in app.py's get_static/get_price, so this
+    isn't a new, unverified way of talking to yfinance.
+  - NEW: factors panel (screener_scraper.get_factors) — directional
+    deltas only (ROCE/ROE/P-E latest reading, promoter holding
+    change, Sales/Net Profit QoQ change). Deliberately does NOT say
+    whether a change is good or bad — see get_factors()'s docstring
+    in screener_scraper.py for why that line is drawn there.
+  - NEW: earnings-date panel (screener_scraper.get_earnings_date) —
+    best-effort via yfinance. NSE tickers do not reliably carry this
+    field in yfinance's data; when it's empty, this shows an honest
+    "Not available" state, same pattern as the peer-comparison
+    section already used for a real, confirmed data gap.
+  - FIXED: news section now goes through news_feed.py's shared
+    refresh_news()/_news_cache instead of calling the raw
+    _fetch_news_for_stock() fetcher directly on every rerun. The
+    previous version bypassed news_feed.py's 20-minute cache
+    entirely, meaning every page interaction fired a fresh live RSS
+    request — this now shares the exact same cache used everywhere
+    else news is shown in the app, filtered to just this symbol.
+  - UNCHANGED: quarterly/yearly/shareholding tables, sector
+    classification, peer-comparison honest placeholder, "symbol not
+    found" state, and the overall Screener-scraped data source for
+    all of those — none of that was broken, so none of it changed.
 """
 
 import streamlit as st
 from datetime import datetime, timezone, timedelta
 
-from screener_scraper import get_full_research
+from screener_scraper import get_full_research, get_factors, get_earnings_date
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -40,6 +62,8 @@ def _status_tag(status: str, age_seconds: float = None, T=None) -> str:
     elif status == "stale":
         age = _age_label(age_seconds) if age_seconds is not None else "?"
         return f'<span style="color:{T["amber"]};font-size:10px;font-weight:700;letter-spacing:1px;">◐ CACHED · {age}</span>'
+    elif status == "partial":
+        return f'<span style="color:{T["amber"]};font-size:10px;font-weight:700;letter-spacing:1px;">◐ PARTIAL</span>'
     else:
         return f'<span style="color:{T["t3"]};font-size:10px;font-weight:700;letter-spacing:1px;">✕ N/A</span>'
 
@@ -92,14 +116,168 @@ def _render_data_table(periods, rows, T, highlight_labels=None):
     </div>""", unsafe_allow_html=True)
 
 
+# ── NEW: price chart panel ──────────────────────────────────────
+
+def _fetch_chart_data(symbol: str, period: str = "6mo"):
+    """
+    Fetches OHLC history via yfinance, same call shape already proven
+    in app.py's get_static/get_price (yf.Ticker(sym+'.NS').history()).
+    Returns the raw DataFrame or None on any failure — chart panel
+    below shows an honest 'unavailable' state rather than an empty
+    or broken chart if this returns None.
+    """
+    try:
+        import yfinance as yf
+        h = yf.Ticker(symbol.upper().strip() + ".NS").history(period=period, interval="1d")
+        if h is None or h.empty or len(h) < 2:
+            return None
+        return h
+    except Exception:
+        return None
+
+
+def _render_chart_panel(symbol: str, T: dict):
+    st.markdown(f"""<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+        <div style="font-family:{T['mono']};font-size:11px;font-weight:700;color:{T['t2']};letter-spacing:1px;">PRICE CHART</div>
+    </div>""", unsafe_allow_html=True)
+
+    period_key = f"research_chart_period_{symbol}"
+    period_choice = st.radio(
+        "Range", ["1mo", "3mo", "6mo", "1y"], index=2, horizontal=True,
+        key=period_key, label_visibility="collapsed",
+    )
+
+    hist = _fetch_chart_data(symbol, period=period_choice)
+    if hist is None:
+        st.markdown(f"""<div style="border:1px dashed {T['border']};padding:40px 16px;text-align:center;">
+            <div style="font-size:11px;color:{T['t3']};">Chart unavailable — could not fetch price history for {symbol} from yfinance.</div>
+        </div>""", unsafe_allow_html=True)
+        return
+
+    try:
+        import plotly.graph_objects as go
+        up_color = T["green"]
+        down_color = T["red"]
+        fig = go.Figure(data=[go.Candlestick(
+            x=hist.index, open=hist["Open"], high=hist["High"],
+            low=hist["Low"], close=hist["Close"],
+            increasing_line_color=up_color, decreasing_line_color=down_color,
+            increasing_fillcolor=up_color, decreasing_fillcolor=down_color,
+        )])
+        fig.update_layout(
+            height=340, margin=dict(l=8, r=8, t=8, b=8),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color=T["t2"], size=10),
+            xaxis=dict(gridcolor=T["border"], rangeslider_visible=False, showgrid=False),
+            yaxis=dict(gridcolor=T["border"], side="right"),
+            showlegend=False,
+        )
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    except ImportError:
+        # Fallback if plotly isn't installed in this deployment —
+        # degrade to a plain closing-price line via Streamlit's
+        # built-in chart rather than crashing the whole page over a
+        # missing optional dependency.
+        st.line_chart(hist["Close"], height=340)
+        st.caption("Install plotly for candlestick view — showing closing price line instead.")
+
+
+# ── NEW: factors panel (macro + micro) ──────────────────────────
+
+def _render_factors_panel(symbol: str, full_research: dict, T: dict):
+    st.markdown(f"""<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+        <div style="font-family:{T['mono']};font-size:11px;font-weight:700;color:{T['t2']};letter-spacing:1px;">FACTORS</div>
+    </div>""", unsafe_allow_html=True)
+
+    factors = get_factors(symbol, full_research=full_research)
+
+    if factors["status"] == "unavailable" or not factors["items"]:
+        st.markdown(f"""<div style="border:1px dashed {T['border']};padding:20px 16px;text-align:center;">
+            <div style="font-size:11px;color:{T['t3']};">Not enough underlying data to compute factor deltas for {symbol}.</div>
+        </div>""", unsafe_allow_html=True)
+    else:
+        rows_html = []
+        for item in factors["items"]:
+            latest_str = f'{item["latest"]:,.2f}{item["unit"]}'
+            if item["previous"] is not None:
+                delta = item["latest"] - item["previous"]
+                arrow = "▲" if delta > 0 else ("▼" if delta < 0 else "—")
+                dc = T["green"] if delta > 0 else (T["red"] if delta < 0 else T["t3"])
+                delta_str = f'<span style="color:{dc};font-family:{T["mono"]};font-size:10px;">{arrow} {abs(delta):,.2f}{item["unit"]}</span>'
+            else:
+                delta_str = f'<span style="color:{T["t3"]};font-size:10px;">—</span>'
+            rows_html.append(f"""
+            <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid {T['border']};">
+                <span style="font-size:11px;color:{T['t2']};">{item['label']}</span>
+                <div style="text-align:right;">
+                    <span style="font-family:{T['mono']};font-size:12px;color:{T['ivory']};font-weight:700;">{latest_str}</span>
+                    <span style="margin-left:8px;">{delta_str}</span>
+                </div>
+            </div>""")
+        st.markdown(f'<div style="border:1px solid {T["border"]};padding:4px 12px;">{"".join(rows_html)}</div>',
+                     unsafe_allow_html=True)
+        if factors["status"] == "partial":
+            st.markdown(f'<div style="font-size:9.5px;color:{T["t3"]};margin-top:4px;">Some factors unavailable — showing what could be computed.</div>',
+                         unsafe_allow_html=True)
+
+    # Macro factors — reuses the same national/international feed
+    # already fetched for the news dock elsewhere in the app, filtered
+    # to display here as short factor-style lines rather than full
+    # article cards (news panel below already shows the full macro
+    # feed with links; this is a compact restating for the factors
+    # context specifically).
+    st.markdown(f"""<div style="margin-top:14px;font-family:{T['mono']};font-size:10px;font-weight:700;color:{T['t3']};letter-spacing:1px;">MACRO CONTEXT</div>""",
+                unsafe_allow_html=True)
+    try:
+        from news_feed import _ensure_news_state, refresh_news
+        _ensure_news_state()
+        refresh_news([])  # empty watchlist still refreshes the macro feed
+        macro_items = st.session_state.get("_news_cache", {}).get("_MACRO_", [])
+    except Exception:
+        macro_items = []
+
+    if not macro_items:
+        st.markdown(f'<div style="font-size:11px;color:{T["t3"]};margin-top:4px;">No macro headlines available right now.</div>',
+                     unsafe_allow_html=True)
+    else:
+        for art in macro_items[:4]:
+            st.markdown(f"""<div style="padding:5px 0;border-bottom:1px solid {T['border']};">
+                <a href="{art.get('link','#')}" target="_blank" style="font-size:11px;color:{T['ivory']};text-decoration:none;line-height:1.4;">{art.get('title','')}</a>
+                <div style="font-size:9.5px;color:{T['t3']};margin-top:2px;">{art.get('time_str','')}</div>
+            </div>""", unsafe_allow_html=True)
+
+
+# ── NEW: earnings date panel ─────────────────────────────────────
+
+def _render_earnings_panel(symbol: str, T: dict):
+    st.markdown(f"""<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+        <div style="font-family:{T['mono']};font-size:11px;font-weight:700;color:{T['t2']};letter-spacing:1px;">NEXT EARNINGS</div>
+    </div>""", unsafe_allow_html=True)
+
+    result = get_earnings_date(symbol)
+    if result["status"] == "live" and result.get("date"):
+        st.markdown(f"""<div style="border:1px solid {T['border']};border-top:2px solid {T['amber']};padding:14px 16px;">
+            <div style="font-family:{T['mono']};font-size:16px;font-weight:700;color:{T['ivory']};">{result['date']}</div>
+            <div style="font-size:9.5px;color:{T['t3']};margin-top:4px;">Source: {result.get('source','yfinance')}</div>
+        </div>""", unsafe_allow_html=True)
+    else:
+        st.markdown(f"""<div style="border:1px dashed {T['border']};padding:16px;text-align:center;">
+            <div style="font-size:11px;color:{T['t3']};line-height:1.6;">Not available — yfinance does not reliably publish forward earnings
+            dates for NSE-listed stocks. Check the company's investor relations page or NSE announcements directly for the confirmed date.</div>
+        </div>""", unsafe_allow_html=True)
+
+
 def render_research_page(T: dict, news_fetch_fn=None):
     """
-    T: dict of terminal design tokens from app.py (colors, fonts) so
-    this page stays visually consistent with the rest of the reskin
-    without duplicating the token definitions in two files.
-    news_fetch_fn: optional callable(symbol) -> list[article dicts],
-    reusing app.py's existing news_feed.py fetcher rather than
-    building a second news path. If None, news section is skipped.
+    T: dict of terminal design tokens from app.py.
+    news_fetch_fn: kept for backward-compatible call signature, but no
+    longer used directly — the news section below now always goes
+    through news_feed.py's shared cache (_ensure_news_state,
+    refresh_news, _news_cache) instead of accepting a raw fetch
+    callable, so a bad or missing argument here can no longer break
+    this page. If news_feed.py itself is unavailable for some reason,
+    the section fails to the same honest 'unavailable' pattern used
+    everywhere else on this page.
     """
     st.markdown(f"""
     <div style="display:flex;align-items:center;gap:10px;padding:4px 0 14px;">
@@ -117,7 +295,7 @@ def render_research_page(T: dict, news_fetch_fn=None):
 
     if not (search or st.session_state.get("research_last_query")):
         st.markdown(f"""<div style="padding:60px 20px;text-align:center;color:{T['t3']};font-size:12px;">
-            Enter an NSE symbol above to pull fundamentals, results, and shareholding data.</div>""",
+            Enter an NSE symbol above to pull fundamentals, chart, factors, and shareholding data.</div>""",
             unsafe_allow_html=True)
         return
 
@@ -181,23 +359,49 @@ def render_research_page(T: dict, news_fetch_fn=None):
         st.markdown(f'<div style="padding:10px;color:{T["t3"]};font-size:11px;border:1px solid {T["border"]};border-top:none;">Key stats unavailable.</div>',
                      unsafe_allow_html=True)
 
-    # ── Sector classification ────────────────────────────────────
-    sector = data["sector"]
-    sfields2 = sector.get("data") or {}
-    st.markdown(f"""<div style="margin-top:18px;display:flex;align-items:center;gap:10px;">
-        <div style="font-family:{T['mono']};font-size:11px;font-weight:700;color:{T['t2']};letter-spacing:1px;">SECTOR</div>
-        {_status_tag(sector['status'], sector.get('age_seconds'), T)}</div>""", unsafe_allow_html=True)
-    if sfields2:
-        chain = " → ".join(
-            sfields2.get(k, "") for k in ("Broad Sector", "Sector", "Broad Industry", "Industry") if sfields2.get(k)
-        )
-        st.markdown(f'<div style="font-size:12px;color:{T["ivory"]};margin-top:4px;">{chain}</div>', unsafe_allow_html=True)
-    else:
-        st.markdown(f'<div style="font-size:11px;color:{T["t3"]};margin-top:4px;">Classification unavailable.</div>', unsafe_allow_html=True)
+    # ── Grid row 1: Chart (wide) + Factors (narrow) ──────────────
+    st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
+    grid_a, grid_b = st.columns([2, 1])
+    with grid_a:
+        _render_chart_panel(data["symbol"], T)
+    with grid_b:
+        _render_factors_panel(data["symbol"], data, T)
+
+    # ── Grid row 2: Earnings date (narrow) + Sector (wide) ───────
+    st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
+    grid_c, grid_d = st.columns([1, 2])
+    with grid_c:
+        _render_earnings_panel(data["symbol"], T)
+    with grid_d:
+        sector = data["sector"]
+        sfields2 = sector.get("data") or {}
+        st.markdown(f"""<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+            <div style="font-family:{T['mono']};font-size:11px;font-weight:700;color:{T['t2']};letter-spacing:1px;">SECTOR</div>
+            {_status_tag(sector['status'], sector.get('age_seconds'), T)}</div>""", unsafe_allow_html=True)
+        if sfields2:
+            chain = " → ".join(
+                sfields2.get(k, "") for k in ("Broad Sector", "Sector", "Broad Industry", "Industry") if sfields2.get(k)
+            )
+            st.markdown(f'<div style="font-size:12px;color:{T["ivory"]};border:1px solid {T["border"]};padding:12px 14px;">{chain}</div>', unsafe_allow_html=True)
+        else:
+            st.markdown(f'<div style="font-size:11px;color:{T["t3"]};border:1px dashed {T["border"]};padding:12px 14px;">Classification unavailable.</div>', unsafe_allow_html=True)
+
+        # ── Peer Comparison — explicitly unavailable, same honest
+        # placeholder as before; left as-is per direct instruction.
+        st.markdown(f"""<div style="margin-top:14px;display:flex;align-items:center;gap:10px;">
+            <div style="font-family:{T['mono']};font-size:11px;font-weight:700;color:{T['t2']};letter-spacing:1px;">PEER COMPARISON</div>
+            {_status_tag('not_implemented', None, T)}</div>
+        <div style="border:1px dashed {T['border']};padding:14px 16px;margin-top:6px;">
+            <div style="font-size:11px;color:{T['t3']};line-height:1.7;">
+                Not available yet — Screener loads this table via a background request after
+                the page loads, which a direct page fetch can't see. Sector P/E as a standalone
+                figure is also not published on this page.</div>
+        </div>""", unsafe_allow_html=True)
 
     # ── Quarterly Results ────────────────────────────────────────
+    st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
     q = data["quarterly"]
-    st.markdown(f"""<div style="margin-top:22px;display:flex;align-items:center;gap:10px;">
+    st.markdown(f"""<div style="display:flex;align-items:center;gap:10px;">
         <div style="font-family:{T['mono']};font-size:11px;font-weight:700;color:{T['t2']};letter-spacing:1px;">QUARTERLY RESULTS (STANDALONE)</div>
         {_status_tag(q['status'], q.get('age_seconds'), T)}</div>""", unsafe_allow_html=True)
     qdata = q.get("data") or {}
@@ -222,39 +426,35 @@ def render_research_page(T: dict, news_fetch_fn=None):
     _render_data_table(shdata.get("periods", []), shdata.get("rows", []), T,
                         highlight_labels=["Promoters"])
 
-    # ── Peer Comparison — explicitly unavailable ──────────────────
+    # ── News — FIXED: now goes through news_feed.py's shared cache
+    # (_ensure_news_state / refresh_news / _news_cache) instead of
+    # calling a raw fetch function directly. Filtered to this
+    # symbol only, per direct instruction that this section should
+    # be stock-specific (the FACTORS panel above is where the macro
+    # feed shows up on this page).
     st.markdown(f"""<div style="margin-top:22px;display:flex;align-items:center;gap:10px;">
-        <div style="font-family:{T['mono']};font-size:11px;font-weight:700;color:{T['t2']};letter-spacing:1px;">PEER COMPARISON</div>
-        {_status_tag('not_implemented', None, T)}</div>
-    <div style="border:1px dashed {T['border']};padding:14px 16px;margin-top:6px;">
-        <div style="font-size:11px;color:{T['t3']};line-height:1.7;">
-            Not available yet — Screener loads this table via a background request after
-            the page loads, which a direct page fetch can't see. Sector P/E as a standalone
-            figure is also not published on this page. Both need a different fetch method
-            than the rest of this page uses.</div>
+        <div style="font-family:{T['mono']};font-size:11px;font-weight:700;color:{T['t2']};letter-spacing:1px;">RECENT NEWS — {data['symbol']}</div>
     </div>""", unsafe_allow_html=True)
+    try:
+        from news_feed import _ensure_news_state, refresh_news
+        _ensure_news_state()
+        refresh_news([data["symbol"]])
+        articles = st.session_state.get("_news_cache", {}).get(data["symbol"], [])
+    except Exception:
+        articles = []
 
-    # ── News (reuses existing news_feed.py fetcher if provided) ───
-    if news_fetch_fn:
-        st.markdown(f"""<div style="margin-top:22px;display:flex;align-items:center;gap:10px;">
-            <div style="font-family:{T['mono']};font-size:11px;font-weight:700;color:{T['t2']};letter-spacing:1px;">RECENT NEWS</div>
-        </div>""", unsafe_allow_html=True)
-        try:
-            articles = news_fetch_fn(data["symbol"])
-        except Exception:
-            articles = []
-        if not articles:
-            st.markdown(f'<div style="font-size:11px;color:{T["t3"]};margin-top:6px;">No news today for {data["symbol"]}.</div>',
-                         unsafe_allow_html=True)
-        else:
-            for art in articles[:8]:
-                st.markdown(f"""
-                <div style="border-bottom:1px solid {T['border']};padding:7px 2px;display:flex;justify-content:space-between;gap:10px;">
-                    <a href="{art.get('link','#')}" target="_blank" style="font-size:12px;color:{T['ivory']};
-                       text-decoration:none;flex:1;">{art.get('title','')}</a>
-                    <span style="font-family:{T['mono']};font-size:10px;color:{T['t3']};white-space:nowrap;">{art.get('time_str','')}</span>
-                </div>""", unsafe_allow_html=True)
+    if not articles:
+        st.markdown(f'<div style="font-size:11px;color:{T["t3"]};margin-top:6px;">No news today for {data["symbol"]}.</div>',
+                     unsafe_allow_html=True)
+    else:
+        for art in articles[:8]:
+            st.markdown(f"""
+            <div style="border-bottom:1px solid {T['border']};padding:7px 2px;display:flex;justify-content:space-between;gap:10px;">
+                <a href="{art.get('link','#')}" target="_blank" style="font-size:12px;color:{T['ivory']};
+                   text-decoration:none;flex:1;">{art.get('title','')}</a>
+                <span style="font-family:{T['mono']};font-size:10px;color:{T['t3']};white-space:nowrap;">{art.get('time_str','')}</span>
+            </div>""", unsafe_allow_html=True)
 
     st.markdown(f"""<div style="margin-top:24px;font-size:10px;color:{T['t3']};">
-        Source: Screener.in (unauthenticated) · Data provided by C-MOTS Internet Technologies ·
+        Source: Screener.in (unauthenticated) · yfinance · Data provided by C-MOTS Internet Technologies ·
         Fetched via {data['url']}</div>""", unsafe_allow_html=True)
