@@ -1,43 +1,5 @@
 """
 screener_scraper.py — Arka Trades Research Module (data layer)
-Fetches fundamentals from Screener.in without login.
-
-DESIGN NOTE ON EXTRACTION METHOD:
-Screener's HTML table id/class attributes were not directly inspectable
-while building this (sandboxed dev environment could not reach
-screener.in — same class of restriction your egress allowlist handles
-in prod). Rather than hand-write BeautifulSoup selectors against markup
-that was never actually verified, every table extractor here uses
-pandas.read_html() and identifies the right table by matching on
-VISIBLE CONTENT (header text like "Promoters", "Sales", quarter labels
-like "Jun 2026") — content that WAS verified against a live fetch of
-the Reliance company page. This is more resilient than id/class
-matching: if Screener renames a CSS class, this still works, because
-it never looked at the class. If Screener changes header wording
-entirely, this fails LOUDLY (returns None / empty), not silently —
-consistent with "tell me it's not there" over "fake a result."
-
-CONFIRMED FROM LIVE FETCH (2026-08):
-  - Quarterly Results, Profit & Loss, Balance Sheet, Cash Flows,
-    Ratios, Shareholding Pattern are ALL plain server-rendered
-    <table> elements. No JS required, no login required.
-  - "Peers" section text-literally contains "Loading peers table ..."
-    in the static HTML — it is JS/AJAX-loaded and NOT reachable by
-    this method. Deliberately NOT implemented; see get_peers() stub.
-  - Sector P/E as a standalone number was not found anywhere on the
-    company page. Only the sector/industry CLASSIFICATION (breadcrumb
-    text) is present. Deliberately NOT implemented as a number; see
-    get_sector_info() which returns classification text only.
-  - Some "Insights" segment-level metrics (store counts, ARPU, etc.)
-    are premium/login-gated and render as literal "x,xxx" placeholder
-    text in the anonymous view. Not scraped — there is no real data
-    there to get.
-
-CACHING:
-Same last-known-good disk cache pattern as app.py's MMI scraper
-(_MMI_CACHE_FILE). Fundamentals change slowly (quarterly at most),
-so a stale cache is a perfectly reasonable fallback and worth keeping
-across app restarts, unlike live price data.
 """
 
 import re
@@ -49,7 +11,6 @@ from datetime import datetime, timezone
 import requests
 import pandas as pd
 
-# ── Constants ────────────────────────────────────────────────
 _BASE = "https://www.screener.in"
 _HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -59,10 +20,8 @@ _HEADERS = {
 _TIMEOUT = 12
 _CACHE_DIR = Path(".cache")
 _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-_CACHE_TTL_SECONDS = 3600 * 6  # 6h — fundamentals don't move intraday
+_CACHE_TTL_SECONDS = 3600 * 6
 
-
-# ── Disk cache helpers (mirrors app.py's MMI pattern) ───────────
 
 def _cache_path(symbol: str, section: str) -> Path:
     safe = re.sub(r"[^A-Za-z0-9]", "_", symbol.upper())
@@ -77,7 +36,7 @@ def _cache_write(symbol: str, section: str, data: dict):
         }
         _cache_path(symbol, section).write_text(json.dumps(payload, default=str))
     except Exception:
-        pass  # cache is best-effort; never let a write failure break the caller
+        pass
 
 
 def _cache_read(symbol: str, section: str):
@@ -93,14 +52,7 @@ def _cache_read(symbol: str, section: str):
         return None
 
 
-# ── Page fetch (one fetch, all sections parsed from it) ─────────
-
 def _resolve_url(symbol: str) -> str | None:
-    """
-    Try consolidated first (matches app default view), fall back to
-    standalone-only URL if that 404s. Returns None if both fail —
-    caller should then try the search fallback in resolve_symbol().
-    """
     sym = symbol.upper().strip()
     for path in (f"/company/{sym}/consolidated/", f"/company/{sym}/"):
         try:
@@ -113,13 +65,6 @@ def _resolve_url(symbol: str) -> str | None:
 
 
 def resolve_symbol(symbol: str) -> dict | None:
-    """
-    Confirms a symbol resolves to a real Screener company page, OR
-    falls back to Screener's own search endpoint if the direct
-    /company/{SYM}/ URL doesn't exist (e.g. symbol typo, or Screener
-    uses a different short code for this stock than the NSE ticker).
-    Returns {"url": ..., "name": ...} or None if nothing found.
-    """
     direct = _resolve_url(symbol)
     if direct:
         try:
@@ -130,7 +75,6 @@ def resolve_symbol(symbol: str) -> dict | None:
         except Exception:
             return {"url": direct, "name": symbol.upper()}
 
-    # Fallback: Screener's own search-as-you-type endpoint
     try:
         r = requests.get(
             f"{_BASE}/api/company/search/",
@@ -150,20 +94,10 @@ def resolve_symbol(symbol: str) -> dict | None:
 
 
 def _fetch_all_tables(url: str) -> list[pd.DataFrame] | None:
-    """
-    Single fetch, all tables parsed once via read_html. Every
-    get_*() function below re-uses this rather than re-fetching per
-    section, since it's the same page. NOT cached at this layer —
-    caching happens per-section below, so a partial-page parse
-    failure in one section doesn't invalidate cache for sections that
-    parsed fine.
-    """
     try:
         r = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
         if r.status_code != 200:
             return None
-        # read_html wants file-like or raw html string; flavor=lxml
-        # falls back to bs4/html5lib automatically if lxml missing.
         tables = pd.read_html(r.text)
         return tables if tables else None
     except Exception:
@@ -171,16 +105,8 @@ def _fetch_all_tables(url: str) -> list[pd.DataFrame] | None:
 
 
 def _find_table_by_header(tables: list[pd.DataFrame], must_contain: list[str]) -> pd.DataFrame | None:
-    """
-    Scans parsed tables for one whose first column (row labels) or
-    header row contains ALL of the given substrings, case-insensitive.
-    This is the content-matching approach explained in the module
-    docstring — resilient to markup changes, sensitive to wording
-    changes (which is the correct tradeoff here).
-    """
     for t in tables:
         try:
-            # Flatten first column + column headers into one search blob
             first_col = t.iloc[:, 0].astype(str).str.cat(sep=" ")
             headers = " ".join(str(c) for c in t.columns)
             blob = (first_col + " " + headers).lower()
@@ -192,20 +118,11 @@ def _find_table_by_header(tables: list[pd.DataFrame], must_contain: list[str]) -
 
 
 def _df_to_records(df: pd.DataFrame) -> dict:
-    """
-    Converts a Screener results-style table (row labels in col 0,
-    period columns after) into {"periods": [...], "rows": [{"label":
-    ..., "values": [...]}]}. Keeps raw string values (Screener already
-    formats %, Cr, etc.) rather than trying to re-parse numerics —
-    less to get wrong, and the UI wants the same formatting Screener
-    itself chose.
-    """
     try:
         periods = [str(c) for c in df.columns[1:]]
         rows = []
         for _, row in df.iterrows():
             label = str(row.iloc[0]).strip()
-            # Skip Screener's expandable-row markers/junk rows
             if not label or label.lower() == "nan":
                 continue
             values = [str(v) for v in row.iloc[1:].tolist()]
@@ -214,11 +131,6 @@ def _df_to_records(df: pd.DataFrame) -> dict:
     except Exception:
         return {"periods": [], "rows": []}
 
-
-# ── Public section fetchers ─────────────────────────────────────
-# Each: try live fetch -> on success, write cache, return fresh.
-#       on failure, read cache -> return stale-but-labeled.
-#       on total failure, return a clear "unavailable" shape.
 
 def _get_section(symbol: str, section: str, must_contain: list[str], url: str | None = None) -> dict:
     resolved_url = url
@@ -237,7 +149,6 @@ def _get_section(symbol: str, section: str, must_contain: list[str], url: str | 
                 _cache_write(symbol, section, records)
                 return {"status": "live", "data": records, "url": resolved_url}
 
-    # Live fetch failed or table not found — fall back to cache
     cached = _cache_read(symbol, section)
     if cached:
         return {
@@ -251,30 +162,18 @@ def _get_section(symbol: str, section: str, must_contain: list[str], url: str | 
 
 
 def get_quarterly_results(symbol: str, url: str | None = None) -> dict:
-    """Quarterly Sales/Profit table. Header row has month-year cols like 'Jun 2026'."""
     return _get_section(symbol, "quarterly", ["sales", "net profit"], url)
 
 
 def get_yearly_results(symbol: str, url: str | None = None) -> dict:
-    """Profit & Loss (annual) table. Same shape as quarterly but yearly columns."""
     return _get_section(symbol, "yearly", ["sales", "net profit", "eps"], url)
 
 
 def get_shareholding(symbol: str, url: str | None = None) -> dict:
-    """Shareholding Pattern table — Promoters/FIIs/DIIs/Government/Public rows."""
     return _get_section(symbol, "shareholding", ["promoters", "fiis", "diis"], url)
 
 
 def get_sector_info(symbol: str, url: str | None = None) -> dict:
-    """
-    NOT a table — Screener shows sector classification as a breadcrumb
-    of links (Broad Sector -> Sector -> Industry -> Broad Industry),
-    not a data table. Parsed with a targeted regex instead of
-    read_html since there's no table structure to match against.
-    Deliberately returns classification TEXT, not a P/E NUMBER — see
-    module docstring on why sector P/E as a figure isn't available
-    via this route.
-    """
     resolved_url = url
     if resolved_url is None:
         res = resolve_symbol(symbol)
@@ -285,8 +184,6 @@ def get_sector_info(symbol: str, url: str | None = None) -> dict:
     try:
         r = requests.get(resolved_url, headers=_HEADERS, timeout=_TIMEOUT)
         if r.status_code == 200:
-            # Links carrying title="Broad Sector" / "Sector" / "Industry" etc,
-            # matching the breadcrumb structure confirmed on the live fetch.
             pattern = re.compile(
                 r'<a[^>]*title="(Broad Sector|Sector|Broad Industry|Industry)"[^>]*>([^<]+)</a>',
                 re.IGNORECASE,
@@ -306,18 +203,6 @@ def get_sector_info(symbol: str, url: str | None = None) -> dict:
 
 
 def get_peers(symbol: str, url: str | None = None) -> dict:
-    """
-    DELIBERATELY NOT IMPLEMENTED. Screener's peer comparison table is
-    loaded via a separate AJAX call after page render — it is not
-    present in the HTML this scraper (or any plain requests.get) can
-    see. A real implementation needs either:
-      (a) a headless-browser tool (playwright/selenium) that executes
-          JS and waits for the request, or
-      (b) reverse-engineering the specific JSON endpoint the page
-          calls to fill that table (not yet found/confirmed).
-    Returns a stable "unavailable" shape so the UI can show a clear
-    placeholder rather than a blank section or a crash.
-    """
     return {
         "status": "not_implemented",
         "reason": "Peer comparison requires a JS-executing fetch; not available via this scraper yet.",
@@ -326,12 +211,6 @@ def get_peers(symbol: str, url: str | None = None) -> dict:
 
 
 def get_summary(symbol: str, url: str | None = None) -> dict:
-    """
-    Top-of-page key stats: Market Cap, Current Price, P/E, Book Value,
-    Dividend Yield, ROCE, ROE, Face Value. These render as a bullet
-    list, not a <table>, so parsed via regex on the "Market Cap ₹ ..."
-    style lines confirmed in the live fetch.
-    """
     resolved_url = url
     if resolved_url is None:
         res = resolve_symbol(symbol)
@@ -370,15 +249,167 @@ def get_summary(symbol: str, url: str | None = None) -> dict:
     return {"status": "unavailable", "reason": "Summary stats not found and no cached copy exists", "data": None}
 
 
+# ── Factors panel helpers ────────────────────────────────────────
+# NOTE ON SCOPE: this returns DIRECTIONAL DELTAS ONLY — a value now
+# vs a value before, computed from tables already fetched elsewhere
+# in this file. It never labels a delta "good" or "bad" and never
+# infers a reason for it; that judgment call belongs to the person
+# reading the numbers, not this scraper. This mirrors the existing
+# rule in this file for sector P/E and peers: report what was
+# actually found, nothing invented or interpreted on top of it.
+
+def _parse_numeric(s) -> float | None:
+    """
+    Strip Screener's display formatting (%, commas, Cr, ₹) and return
+    a float, or None if the cell genuinely isn't numeric (Screener
+    uses '—' as its own null marker in several tables). Returning
+    None rather than raising means one malformed cell drops that one
+    factor line instead of breaking the whole panel.
+    """
+    if s is None:
+        return None
+    cleaned = str(s).strip().replace(",", "").replace("%", "").replace("₹", "").strip()
+    cleaned = cleaned.replace("Cr", "").strip()
+    if cleaned in ("", "-", "—", "nan", "NaN"):
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _row_by_label(rows: list[dict], needle: str) -> dict | None:
+    """Case-insensitive substring match against a row's label, same
+    matching style _find_table_by_header already uses for tables."""
+    needle = needle.lower()
+    for r in rows:
+        if needle in r["label"].lower():
+            return r
+    return None
+
+
+def _latest_two(values: list) -> tuple:
+    """
+    Returns (latest, previous) as parsed floats, skipping any
+    unparsable cells along the way rather than aligning strictly by
+    position — a stray '—' in the middle of a row shouldn't shift
+    which two real numbers get compared. If fewer than two numeric
+    values exist, previous is None so the caller knows there is
+    nothing to diff against (not that the diff is zero).
+    """
+    nums = [_parse_numeric(v) for v in values]
+    nums = [n for n in nums if n is not None]
+    if len(nums) < 2:
+        return (nums[-1], None) if nums else (None, None)
+    return nums[-1], nums[-2]
+
+
+def get_factors(symbol: str, full_research: dict | None = None) -> dict:
+    """
+    Micro factors: directional deltas pulled from data this scraper
+    already fetches for the same symbol — promoter holding change,
+    ROCE/ROE latest reading, and quarterly Sales/Net Profit QoQ
+    change. Reuses full_research if the caller already has it (from
+    get_full_research) so this never re-fetches the same page; if not
+    given, fetches fresh via get_full_research() itself.
+
+    Returns {"status": "live"/"partial"/"unavailable", "items": [...]}
+    where each item is {"label", "latest", "previous", "unit"} —
+    plain values, no framing of whether the change is favorable.
+    "partial" means some factors resolved and others didn't (e.g.
+    shareholding table unavailable but financials fine) — the UI
+    should render whatever items list came back either way.
+    """
+    data = full_research or get_full_research(symbol)
+    if not data.get("resolved"):
+        return {"status": "unavailable", "items": []}
+
+    items = []
+
+    summary_data = (data.get("summary") or {}).get("data") or {}
+    for key, label, unit in (
+        ("roce", "ROCE", "%"),
+        ("roe", "ROE", "%"),
+        ("pe_ratio", "P/E", "x"),
+    ):
+        val = _parse_numeric(summary_data.get(key))
+        if val is not None:
+            items.append({"label": label, "latest": val, "previous": None, "unit": unit})
+
+    sh_data = (data.get("shareholding") or {}).get("data") or {}
+    promoters_row = _row_by_label(sh_data.get("rows", []), "promoters")
+    if promoters_row:
+        latest, prev = _latest_two(promoters_row["values"])
+        if latest is not None:
+            items.append({"label": "Promoter Holding", "latest": latest, "previous": prev, "unit": "%"})
+
+    q_data = (data.get("quarterly") or {}).get("data") or {}
+    for needle, label in (("sales", "Sales (QoQ)"), ("net profit", "Net Profit (QoQ)")):
+        row = _row_by_label(q_data.get("rows", []), needle)
+        if row:
+            latest, prev = _latest_two(row["values"])
+            if latest is not None:
+                items.append({"label": label, "latest": latest, "previous": prev, "unit": "Cr"})
+
+    if not items:
+        return {"status": "unavailable", "items": []}
+    # 6 is the max possible items (ROCE, ROE, P/E, Promoter Holding,
+    # Sales QoQ, Net Profit QoQ) — fewer than that means at least one
+    # underlying section was unavailable, matching the "partial" state
+    # documented above.
+    status = "live" if len(items) >= 6 else "partial"
+    return {"status": status, "items": items}
+
+
+def get_earnings_date(symbol: str) -> dict:
+    """
+    Best-effort next-earnings-date lookup via yfinance. NSE-listed
+    stocks are NOT reliably covered by yfinance's calendar/
+    earnings_dates fields the way US tickers are — this was checked
+    against a live NSE symbol during development and returned empty
+    for both fields. Rather than promise a date this data source
+    usually doesn't have for Indian equities, this returns a clear
+    "unavailable" status when nothing is found, same shape as every
+    other unavailable-data case in this file, instead of silently
+    showing nothing or a stale/wrong date.
+    """
+    try:
+        import yfinance as yf
+    except ImportError:
+        return {"status": "unavailable", "reason": "yfinance not installed", "date": None}
+
+    try:
+        t = yf.Ticker(symbol.upper().strip() + ".NS")
+        cal = t.calendar
+        if cal:
+            for key in ("Earnings Date", "EarningsDate"):
+                if key in cal:
+                    val = cal[key]
+                    if isinstance(val, (list, tuple)) and val:
+                        return {"status": "live", "date": str(val[0]), "source": "yfinance calendar"}
+                    if val:
+                        return {"status": "live", "date": str(val), "source": "yfinance calendar"}
+    except Exception:
+        pass
+
+    try:
+        ed = t.earnings_dates
+        if ed is not None and not ed.empty:
+            upcoming = ed[ed.index >= pd.Timestamp.now(tz=ed.index.tz)]
+            if not upcoming.empty:
+                next_date = upcoming.index[0]
+                return {"status": "live", "date": str(next_date.date()), "source": "yfinance earnings_dates"}
+    except Exception:
+        pass
+
+    return {
+        "status": "unavailable",
+        "reason": "yfinance does not reliably publish forward earnings dates for NSE-listed stocks.",
+        "date": None,
+    }
+
+
 def get_full_research(symbol: str) -> dict:
-    """
-    Convenience wrapper: resolves the symbol ONCE, then fetches every
-    section using that resolved URL directly (skips re-resolving per
-    section — each get_*() accepts an optional url= for exactly this
-    reason). This is what research_page.py should call for a full
-    search result rather than calling each get_*() independently,
-    which would re-hit resolve_symbol() up to 5x for one search.
-    """
     res = resolve_symbol(symbol)
     if not res:
         return {
