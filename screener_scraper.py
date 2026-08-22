@@ -20,7 +20,7 @@ _HEADERS = {
 _TIMEOUT = 12
 _CACHE_DIR = Path(".cache")
 _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-_CACHE_TTL_SECONDS = 3600 * 6
+_CACHE_TTL_SECONDS = 0  # Temporarily 0 to clear out the stale cache
 
 
 def _cache_path(symbol: str, section: str) -> Path:
@@ -47,6 +47,11 @@ def _cache_read(symbol: str, section: str):
         payload = json.loads(p.read_text())
         fetched = datetime.fromisoformat(payload["fetched_at_utc"])
         age_s = (datetime.now(timezone.utc) - fetched).total_seconds()
+        
+        # FIX: Actually enforce the cache expiration time
+        if age_s > _CACHE_TTL_SECONDS:
+            return None
+            
         return {"data": payload["data"], "age_seconds": age_s, "fetched_at_utc": fetched}
     except Exception:
         return None
@@ -223,16 +228,16 @@ def get_summary(symbol: str, url: str | None = None) -> dict:
         if r.status_code == 200:
             text = r.text
             fields = {}
-            # Updated robust pattern matching for Screener top ratio cards
+            # FIX: Updated bulletproof pattern matching targeting the 'number' class directly
             label_patterns = {
-                "market_cap":     r"Market Cap.*?<span>\s*₹\s*([\d,]+)\s*</span>",
-                "current_price":  r"Current Price.*?<span>\s*₹\s*([\d,]+\.?\d*)\s*</span>",
-                "pe_ratio":       r"Stock P/E.*?>([\d,]+\.?\d*)<",
-                "book_value":     r"Book Value.*?₹\s*([\d,]+\.?\d*)",
-                "dividend_yield": r"Dividend Yield.*?([\d.]+)\s*%",
-                "roce":           r"ROCE.*?([\d.]+)\s*%",
-                "roe":            r"ROE.*?([\d.]+)\s*%",
-                "face_value":     r"Face Value.*?₹\s*([\d.]+)",
+                "market_cap":     r"Market Cap.*?<span class=\"number\">([\d,\.]+)</span>",
+                "current_price":  r"Current Price.*?<span class=\"number\">([\d,\.]+)</span>",
+                "pe_ratio":       r"Stock P/E.*?<span class=\"number\">([\d,\.]+)</span>",
+                "book_value":     r"Book Value.*?<span class=\"number\">([\d,\.]+)</span>",
+                "dividend_yield": r"Dividend Yield.*?<span class=\"number\">([\d,\.]+)</span>",
+                "roce":           r"ROCE.*?<span class=\"number\">([\d,\.]+)</span>",
+                "roe":            r"ROE.*?<span class=\"number\">([\d,\.]+)</span>",
+                "face_value":     r"Face Value.*?<span class=\"number\">([\d,\.]+)</span>",
             }
             for key, pat in label_patterns.items():
                 m = re.search(pat, text, re.DOTALL | re.IGNORECASE)
