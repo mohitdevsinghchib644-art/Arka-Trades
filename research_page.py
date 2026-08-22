@@ -92,7 +92,6 @@ def _fetch_chart_data(symbol: str, period: str = "6mo"):
 
 
 def _render_tv_chart(symbol: str, current_price: str, price_change: str):
-    # Timeframe selection matching TV style
     period_key = f"research_chart_period_{symbol}"
     period_choice = st.radio(
         "Range", ["1mo", "3mo", "6mo", "1y", "2y"], index=2, horizontal=True,
@@ -109,7 +108,6 @@ def _render_tv_chart(symbol: str, current_price: str, price_change: str):
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
 
-        # TradingView exact hex colors
         up_color = '#089981'
         down_color = '#F23645'
         bg_color = '#131722'
@@ -121,7 +119,6 @@ def _render_tv_chart(symbol: str, current_price: str, price_change: str):
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
                             vertical_spacing=0, row_heights=[0.8, 0.2])
 
-        # Candlestick
         fig.add_trace(go.Candlestick(
             x=hist.index, open=hist["Open"], high=hist["High"],
             low=hist["Low"], close=hist["Close"],
@@ -130,14 +127,12 @@ def _render_tv_chart(symbol: str, current_price: str, price_change: str):
             name="Price"
         ), row=1, col=1)
 
-        # Volume
         fig.add_trace(go.Bar(
             x=hist.index, y=hist['Volume'],
             marker_color=colors,
             name="Volume"
         ), row=2, col=1)
 
-        # Layout mimicking TradingView
         fig.update_layout(
             height=500, margin=dict(l=0, r=50, t=10, b=0),
             paper_bgcolor=bg_color, plot_bgcolor=bg_color,
@@ -150,7 +145,6 @@ def _render_tv_chart(symbol: str, current_price: str, price_change: str):
             hovermode="x unified"
         )
         
-        # Hide weekend gaps
         fig.update_xaxes(nticks=10, row=2, col=1)
 
         st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
@@ -196,7 +190,6 @@ def _render_factors_panel(symbol: str, full_research: dict, T: dict):
 # ── MAIN RENDER ───────────────────────────────────────────────
 
 def render_research_page(T: dict, news_fetch_fn=None):
-    # ── Search & Quick Picks ──
     st.markdown(f"<div style='font-size:11px; color:{T['t3']}; margin-bottom:4px;'>Enter Exact NSE Symbol</div>", unsafe_allow_html=True)
     
     query = st.text_input("Search symbol", placeholder="e.g. RELIANCE, HDFCBANK", label_visibility="collapsed", key="research_query_input")
@@ -205,7 +198,6 @@ def render_research_page(T: dict, news_fetch_fn=None):
     cols = st.columns(8)
     picks = ["NIFTY50", "BANKNIFTY", "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "SBIN"]
     
-    # Handle quick pick buttons to update session state
     for i, col in enumerate(cols):
         with col:
             if st.button(picks[i], use_container_width=True, key=f"qp_{picks[i]}"):
@@ -227,7 +219,6 @@ def render_research_page(T: dict, news_fetch_fn=None):
             unsafe_allow_html=True)
         return
 
-    # Fetch Data
     if "research_data" not in st.session_state:
         with st.spinner(f"Pulling institutional data for {active_query.upper()}..."):
             st.session_state["research_data"] = get_full_research(active_query)
@@ -243,11 +234,9 @@ def render_research_page(T: dict, news_fetch_fn=None):
     
     current_price = sfields.get("current_price", "—")
     
-    # ── Main Layout: Chart (Left) + AI Panel (Right) ──
     chart_col, ai_col = st.columns([2.5, 1])
 
     with chart_col:
-        # Header for chart
         st.markdown(f"""
             <div style='display:flex; align-items:baseline; gap:12px; margin-bottom:10px;'>
                 <h2 style='margin:0; color:#4E8BFF; font-weight:800;'>{data['symbol'].upper()}</h2>
@@ -263,7 +252,6 @@ def render_research_page(T: dict, news_fetch_fn=None):
         st.markdown(f"""<div style="font-family:{T['mono']};font-size:13px;font-weight:700;color:{T['amber']};margin-bottom:12px;letter-spacing:1px;">
             ARKA AI ANALYSIS</div>""", unsafe_allow_html=True)
         
-        # Render factors in the right column above AI input
         _render_factors_panel(data["symbol"], data, T)
 
         st.markdown("<h4 style='color:#ddd; font-size:12px; margin-bottom:4px;'>Add context (optional)</h4>", unsafe_allow_html=True)
@@ -272,8 +260,6 @@ def render_research_page(T: dict, news_fetch_fn=None):
         st.toggle("Auto-speak analysis", key="ai_voice_toggle")
         st.button("Analyze Technical Setup", type="primary", use_container_width=True, key="ai_analyze_btn")
 
-
-    # ── Custom Option Menu Tabs ──
     st.markdown("<div style='height:30px;'></div>", unsafe_allow_html=True)
     
     selected_tab = option_menu(
@@ -360,8 +346,6 @@ def render_research_page(T: dict, news_fetch_fn=None):
         shdata = sh.get("data") or {}
         _render_data_table(shdata.get("periods", []), shdata.get("rows", []), T, highlight_labels=["Promoters", "FIIs", "DIIs"])
 
-
-    # ── News Feed ──
     st.markdown("<div style='height:40px;'></div>", unsafe_allow_html=True)
     st.markdown(f"""<div style="display:flex;align-items:center;gap:10px;border-bottom:1px solid {T['border']};padding-bottom:8px;margin-bottom:12px;">
         <div style="font-family:{T['mono']};font-size:12px;font-weight:700;color:{T['amber']};letter-spacing:1px;">COMPANY NEWS FEED</div>
