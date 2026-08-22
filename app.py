@@ -10,8 +10,31 @@ import json
 import math
 from pathlib import Path
 from supabase import create_client, Client
+from news_feed import news_panel, get_news_dot, _ensure_news_state, refresh_news, _fetch_news_for_stock
 from arka_ai import render_arka_ai
 from research_page import render_research_page
+
+# ═══════════════════════════════════════════════════════════════════
+# FIX APPLIED (this file vs. the version that crashed):
+# The import line above --
+#   from news_feed import news_panel, get_news_dot, _ensure_news_state,
+#                          refresh_news, _fetch_news_for_stock
+# -- was MISSING entirely in the version that crashed. The rest of
+# this file calls all five of those names (get_news_dot in the
+# scanner's result cards, _ensure_news_state/refresh_news in the fixed
+# news dock fragment at the bottom, _fetch_news_for_stock passed into
+# render_research_page, and news_panel kept available for
+# compatibility). Without the import, every one of those was an
+# undefined name -- Python doesn't catch this at startup, only the
+# instant each line actually executes, which is why the app loaded and
+# the page header rendered fine right up until the exact moment it
+# needed one of these names. The crash in the traceback (NameError:
+# name '_fetch_news_for_stock' is not defined at app.py:1252) was the
+# FIRST of four places this would have broken; the same missing
+# import would have crashed get_news_dot on the next scan and
+# _ensure_news_state/refresh_news on the next 10-second news dock
+# tick. This one-line fix resolves all four at once.
+# ═══════════════════════════════════════════════════════════════════
 
 # ── Supabase ─────────────────────────────────────────────────
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "https://vpxagxjgtonynblhddwh.supabase.co")
@@ -28,15 +51,6 @@ def db_save_watchlist(symbols: list):
         supabase.table("watchlist").delete().neq("id", 0).execute()
         rows = [{"symbol": s} for s in symbols]
         if rows: supabase.table("watchlist").insert(rows).execute()
-        # FIX: session_state is the source of truth for this run and every
-        # run until the next explicit reload. We do NOT flip db_loaded to
-        # False here anymore — doing so used to force an immediate Supabase
-        # re-fetch on the very next rerun (e.g. right after clicking "Run
-        # Scan"), and if that SELECT raced the INSERT above and returned
-        # before Supabase had committed it, it would silently overwrite the
-        # watchlist we just saved with the old/empty one. Since we already
-        # set st.session_state.watchlist directly below, there is nothing
-        # left to "sync" from the DB right away.
         st.session_state.watchlist = symbols
         return True
     except Exception as e:
@@ -74,8 +88,6 @@ def db_save_admin_watchlist(symbols: list):
         supabase.table("admin_watchlist").delete().neq("id", 0).execute()
         rows = [{"symbol": s} for s in symbols]
         if rows: supabase.table("admin_watchlist").insert(rows).execute()
-        # FIX: same reasoning as db_save_watchlist above — set state directly,
-        # don't force a racy reload flag.
         st.session_state.admin_watchlist = symbols
         return True
     except Exception as e:
@@ -99,14 +111,6 @@ def send_telegram(msg):
     except: pass
 
 # ════════════════ DESIGN SYSTEM — TERMINAL RESKIN ═══════════════════
-# Reskinned from the prior rounded-card / gradient system to a dense,
-# flat, Bloomberg-style language:
-#   - corners: 12-16px -> 0-2px (flat panels, not cards)
-#   - padding: generous -> dense
-#   - accents: multi-gradient -> single amber + functional green/red
-#   - badges: rounded pills -> square tags, text-only where possible
-# Landing page below (pre-login) intentionally keeps its own separate
-# green theme — that page was never part of this reskin request.
 DARK   = "#000000"
 DARK2  = "#0A0A0A"
 DARK3  = "#111111"
@@ -116,11 +120,11 @@ T2     = "#8A8A8A"
 T3     = "#5A5A5A"
 NAVY   = "#0A0A0A"
 
-AMBER  = "#FF9F0A"   # primary terminal accent (replaces INDIGO as the "brand" color)
+AMBER  = "#FF9F0A"
 CYAN   = "#5AC8FA"
 GREEN  = "#30D158"
 RED    = "#FF453A"
-INDIGO = "#5E8CFF"   # kept for compatibility with any external module still passing this in
+INDIGO = "#5E8CFF"
 PURPLE = "#BF5AF2"
 PINK   = "#FF6482"
 
@@ -134,8 +138,6 @@ GRAD_TEXT  = f"linear-gradient(90deg,{CYAN},{AMBER},{PURPLE})"
 FONT = "'Plus Jakarta Sans','Inter',sans-serif"
 MONO = "'JetBrains Mono',monospace"
 
-# Shared design-token dict handed to research_page.py so both files
-# draw from one palette instead of maintaining two copies of it.
 TERM_TOKENS = {
     "dark": DARK, "panel": DARK2, "panel2": DARK3, "border": BORDER,
     "ivory": IVORY, "t2": T2, "t3": T3, "row_alt": "#0F0F0F",
@@ -168,7 +170,6 @@ def icon(name, size=18, color=None):
             f'style="vertical-align:middle;">{_ICON_PATHS.get(name,"")}</svg>')
 
 def icon_box(name, color=None, size=32):
-    # Square, not rounded — terminal language drops the soft icon chip.
     c = color or AMBER
     return (f'<div style="width:{size}px;height:{size}px;border-radius:2px;background:{c}14;'
             f'border:1px solid {c}33;display:flex;align-items:center;justify-content:center;'
@@ -244,7 +245,7 @@ hr{{border-color:{BORDER} !important;}}
 #term-news-dock .dock-body::-webkit-scrollbar{{ width:5px; }}
 #term-news-dock .dock-body::-webkit-scrollbar-thumb{{ background:{BORDER}; }}
 @media (max-width: 900px){{
-    #term-news-dock{{ display:none; }} /* avoid covering nav on narrow/mobile layouts */
+    #term-news-dock{{ display:none; }}
 }}
 </style>
 """, unsafe_allow_html=True)
@@ -252,17 +253,11 @@ hr{{border-color:{BORDER} !important;}}
 # ── Helpers ──────────────────────────────────────────────────
 def parse_csv(file):
     """
-    Parses an uploaded watchlist file (CSV or newline TXT) into bare
-    NSE symbols.
-
-    FIX: previously this kept whatever exchange suffix the export
-    already had (e.g. TradingView-style "ARKADE.NS"), then every
-    downstream price call appended its OWN ".NS" on top
-    (yf.Ticker(sym+".NS")), producing "ARKADE.NS.NS" — not a real
-    ticker, so every single row failed silently and the scanner
-    returned zero results with no visible error. This strip step
-    normalizes to a bare symbol so downstream ".NS"-appending code
-    works exactly as it already assumes.
+    FIX (kept from earlier): strips trailing exchange suffixes
+    (.NS/.BO/.NSE/.BSE) so TradingView-style exports don't get
+    double-suffixed downstream (e.g. "ARKADE.NS" + ".NS" appended by
+    get_static/get_price would become "ARKADE.NS.NS", which is not a
+    valid ticker and fails silently for every row).
     """
     try: df = pd.read_csv(file, header=None)
     except: return []
@@ -310,42 +305,7 @@ def get_price(sym):
         return {"price": cur, "chg": ((cur-prev_close)/prev_close)*100, "prev_close": prev_close}
     except: return None
 
-# ═══════════════════════════════════════════════════════════════════
-# INDEX FETCHING — rewritten for three fixes:
-#   1. MIDCAP 100 / SMALLCAP 100 were showing "No data". Root cause for
-#      SMALLCAP: the ticker "^CNXSMALLCAP" is not valid; the correct
-#      Yahoo symbol is "^CNXSC". MIDCAP's own ticker was fine but had
-#      no fallback if Yahoo had a data gap on a given day — it now has
-#      one (^CRSMID, ^NIFTYMIDCAP100).
-#   2. GIFT NIFTY showed "$nan" / "nan%". GIFT Nifty is a futures
-#      contract on NSE IX (GIFT City) that requires a paid exchange
-#      data subscription — there is no free public ticker for it on
-#      Yahoo Finance or elsewhere (confirmed: multiple financial sites
-#      that display "GIFT Nifty" are substituting the regular NIFTY 50
-#      spot index with a disclaimer, not showing a real live GIFT
-#      Nifty futures feed). Rather than guess a third wrong ticker,
-#      this card is REMOVED entirely — showing nothing is more honest
-#      than showing a number that isn't actually GIFT Nifty.
-#   3. S&P 500 / DOW JONES also showed "$nan" — NOT a missing-data
-#      case like MIDCAP/SMALLCAP (those returned a clean "no data"
-#      before). This was a data returned, but containing NaN inside it
-#      that slipped past the old check, which only tested
-#      `h.empty or len(h) < 2` and never checked whether the actual
-#      Close values were valid numbers. `float(nan)` doesn't raise, so
-#      it sailed straight through and rendered as "$nan". Every index
-#      fetch below now explicitly checks math.isfinite() on every
-#      number before returning it as valid — this applies to ALL
-#      cards, not just the two that happened to break this time.
-# ═══════════════════════════════════════════════════════════════════
-
 def _values_are_sane(cur, pc):
-    """
-    The core sanity gate. Rejects NaN, inf, zero/negative prices (an
-    index price of 0 or below is never real), and a previous-close of
-    zero (which would make the % change calculation divide by zero and
-    produce inf/nan downstream). Returns True only if BOTH values are
-    real, finite, positive numbers.
-    """
     try:
         if cur is None or pc is None:
             return False
@@ -369,13 +329,6 @@ def _fetch_index_history(sym):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_index(sym, fallback_syms=None):
-    """
-    fallback_syms: optional list of additional tickers to try, in
-    order, if `sym` fails OR returns data that doesn't pass the sanity
-    check. Every candidate is checked with the same rule, so a "looks
-    like it worked but the numbers are garbage" result from a fallback
-    ticker can't leak through either.
-    """
     candidates = [sym] + (fallback_syms or [])
     for candidate in candidates:
         h = _fetch_index_history(candidate)
@@ -398,7 +351,6 @@ def get_index(sym, fallback_syms=None):
         }
     return None
 
-# ── Global indexes: candidate ticker lists, first-success-wins ──────
 MIDCAP_CANDIDATES = ["NIFTY_MIDCAP_100.NS", "^CRSMID", "^NIFTYMIDCAP100"]
 SMALLCAP_CANDIDATES = ["^CNXSC", "^CNXSMALLCAP", "NIFTYSMLCAP100.NS"]
 SP500_CANDIDATES    = ["^GSPC"]
@@ -429,7 +381,6 @@ def section(title, accent=None):
         <div style="flex:1;height:1px;background:{BORDER};"></div></div>""", unsafe_allow_html=True)
 
 def change_pill(chg):
-    # Square tag, not rounded pill — text-forward, minimal chrome.
     c = GREEN if chg >= 0 else RED
     arrow = "▲" if chg >= 0 else "▼"
     return (f'<span style="color:{c};font-family:{MONO};font-size:11px;font-weight:700;'
@@ -830,9 +781,6 @@ with left:
             st.session_state.page = key; st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # NOTE: "News Terminal" nav item REMOVED — news now lives in the
-    # fixed bottom-left dock (rendered once, globally, further below)
-    # instead of being its own page. "Research" is new.
     nav_btn("Dashboard","home"); nav_btn("Scanner","scanner"); nav_btn("Alerts","alerts")
     nav_btn("Research","research"); nav_btn("Arka AI","analysis")
     nav_btn("Smart Screener","smart_scan"); nav_btn("Market Breadth","breadth")
@@ -903,7 +851,6 @@ with right:
         show_idx(gi2,"DOW JONES", DOWJONES_CANDIDATES[0], AMBER, fallback_syms=DOWJONES_CANDIDATES[1:], currency="$")
         show_idx(gi3,"GOLD (USD)", GOLD_CANDIDATES[0], "#FFD700", fallback_syms=GOLD_CANDIDATES[1:], currency="$")
 
-        # ── Stock Search (new — quick jump into Research Terminal) ──
         st.markdown(f"<div style='height:1px;background:{BORDER};margin:14px 0 14px;'></div>", unsafe_allow_html=True)
         st.markdown(f"""<div style="font-size:10px;font-weight:700;letter-spacing:1.5px;color:{T2};
             text-transform:uppercase;margin-bottom:7px;">Stock Research</div>""", unsafe_allow_html=True)
@@ -1016,22 +963,6 @@ with right:
                     st.session_state.page = target; st.rerun()
 
     elif pg == "scanner":
-        # NOTE: we intentionally do NOT snapshot admin_watchlist / watchlist
-        # into local variables before the uploader blocks run below. That
-        # ordering was the root cause of both reported bugs:
-        #   - Admin tab: "no Scan option after adding a new watchlist"
-        #   - Your tab: "Scan Now appears, but scanning finds no stocks"
-        # A Streamlit script reruns top-to-bottom on every interaction
-        # (including a file upload). If we read st.session_state into a
-        # local variable BEFORE the uploader block, and the uploader block
-        # then updates st.session_state a few lines later in that SAME
-        # run, the local variable is left pointing at the stale value —
-        # the part of the script that decides what to render (the "not
-        # watchlist" check and the call into render_scan_results) never
-        # sees the fresh upload until a second, unrelated rerun happens.
-        # The fix is simple: read st.session_state.<key> fresh, at the
-        # exact point of use, AFTER the upload block has had a chance to
-        # update it in this same run.
         if not st.session_state.admin_watchlist:
             awl = db_load_admin_watchlist()
             if awl: st.session_state.admin_watchlist = awl
@@ -1046,8 +977,6 @@ with right:
             l60  = sc3.checkbox("60s Auto", key=f"l60_{key_prefix}")
             scanbtn = sc4.button("Run Scan", use_container_width=True, type="primary", key=f"scan_{key_prefix}")
             if scanbtn:
-                # Mark this watchlist as the active source for the fixed
-                # news dock, so the dock reflects whatever was last scanned.
                 st.session_state["active_news_source"] = key_prefix
                 results,failed = [],[]
                 bar = st.progress(0, text="Scanning...")
@@ -1105,10 +1034,6 @@ with right:
         st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
         tab1, tab2 = st.tabs(["Arka Watchlist", "Your Watchlist"])
         with tab1:
-            # FIX: read admin_watchlist AFTER the uploader has had a chance
-            # to run and update session_state in this same rerun — not
-            # before it, which is what caused "no Scan option after
-            # uploading" on the Admin tab.
             if IS_ADMIN:
                 uploaded_admin = st.file_uploader("Upload Arka Watchlist", type=["csv","txt"], key="admin_upload")
                 if uploaded_admin:
@@ -1116,8 +1041,6 @@ with right:
                     if not syms: st.error("No symbols found.")
                     elif db_save_admin_watchlist(syms):
                         st.success(f"Arka Watchlist updated — {len(syms)} stocks.")
-                        # db_save_admin_watchlist already set session_state
-                        # directly, no rerun needed to see it below.
             admin_syms = st.session_state.admin_watchlist
             st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-left:2px solid {CYAN};padding:14px 20px;margin:14px 0;">
                 <div style="font-size:13px;font-weight:800;color:{IVORY};margin-bottom:3px;">Arka Watchlist</div>
@@ -1127,22 +1050,12 @@ with right:
             else:
                 render_scan_results(admin_syms, key_prefix="admin")
         with tab2:
-            # FIX: same pattern — the uploader block runs FIRST (updating
-            # session_state directly), then we read watchlist fresh from
-            # session_state for both the "no watchlist" check and the
-            # render_scan_results call. Previously `your_syms` was captured
-            # before this block ran, so right after an upload the scanner
-            # was being built from the OLD list, and db_save_watchlist's
-            # old `db_loaded = False` flag could additionally overwrite the
-            # freshly-saved list with a stale Supabase read on the next
-            # rerun (that flag has been removed — see db_save_watchlist).
             uploaded_yours = st.file_uploader("Upload Your Watchlist (CSV or TXT)", type=["csv","txt"], key="your_upload")
             if uploaded_yours:
                 syms = parse_csv(uploaded_yours)
                 if not syms: st.error("No symbols found.")
                 elif db_save_watchlist(syms):
                     st.success(f"{len(syms)} stocks loaded and saved.")
-                    # db_save_watchlist already set session_state directly.
             your_syms = st.session_state.watchlist
             st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-left:2px solid {GREEN};padding:14px 20px;margin:14px 0;">
                 <div style="font-size:13px;font-weight:800;color:{IVORY};margin-bottom:3px;">Your Watchlist</div>
@@ -1151,12 +1064,6 @@ with right:
                 st.info("Upload your TradingView watchlist above to start scanning.")
             else:
                 render_scan_results(your_syms, key_prefix="yours")
-
-        # NOTE: news_panel(...) calls REMOVED from both tabs above — news
-        # is no longer rendered inline per-tab. It now lives once, globally,
-        # in the fixed bottom-left dock (see TERMINAL NEWS DOCK section
-        # near the end of this file), driven by st.session_state
-        # ["active_news_source"], which "Run Scan" above updates.
 
     elif pg == "alerts":
         active_alerts = {s: a for s, a in st.session_state.alerts.items() if a.get("active")}
@@ -1244,11 +1151,6 @@ with right:
             else: render_alert_rows(watchlist, key_suffix="yours")
 
     elif pg == "research":
-        # New: Bloomberg-style single-security research page (news,
-        # quarterly/yearly results, shareholding, sector classification
-        # from Screener.in; peer comparison / sector P/E clearly marked
-        # as unavailable — see research_page.py / screener_scraper.py
-        # docstrings for why).
         render_research_page(TERM_TOKENS, news_fetch_fn=_fetch_news_for_stock)
 
     elif pg in ["analysis","heatmap","autoalert"]:
@@ -1341,23 +1243,6 @@ with right:
 # ═══════════════════════════════════════════════════════════════════
 # TERMINAL NEWS DOCK — fixed bottom-left panel, rendered once globally
 # ═══════════════════════════════════════════════════════════════════
-# Replaces the old per-tab news_panel() calls and the standalone "News
-# Terminal" page. Always visible (desktop widths — see the CSS media
-# query above that hides it under 900px so it doesn't cover the nav on
-# narrow layouts). Driven by st.session_state["active_news_source"],
-# which "Run Scan" in the Scanner page sets to "admin" or "yours" —
-# defaults to "admin" so the dock has content even before any scan.
-#
-# NOTE ON THE @st.fragment APPROACH: news_feed.py's news_panel() is a
-# full tabbed UI built for a wide inline area (up to 15 st.tabs, each a
-# full column-based article layout) — it isn't shaped for a 320px-wide
-# fixed box. Rather than force that tabbed layout into a cramped corner
-# (which the earlier conversation flagged as a real fit problem), this
-# renders a flat reverse-chronological list instead, reusing the same
-# underlying fetch/cache functions from news_feed.py (_ensure_news_state,
-# refresh_news, the _news_cache session-state dict) so there is exactly
-# ONE fetch/cache layer for news in the whole app — this block only
-# changes how that cached data is DISPLAYED, not how it's fetched.
 @st.fragment(run_every=10)
 def _render_news_dock():
     _ensure_news_state()
@@ -1365,8 +1250,6 @@ def _render_news_dock():
     watchlist = st.session_state.get(
         "admin_watchlist" if source_key == "admin" else "watchlist", []
     )
-    # Fall back to admin list if the "active" one is empty (e.g. user
-    # hasn't uploaded their own watchlist yet).
     if not watchlist:
         watchlist = st.session_state.get("admin_watchlist", [])
 
@@ -1386,9 +1269,6 @@ def _render_news_dock():
     refresh_news(watchlist)
     cache = st.session_state.get("_news_cache", {})
 
-    # Flatten all articles across the watchlist into one reverse-
-    # chronological list — this is the "flat list, not tabs" decision
-    # for the cramped fixed-box context.
     flat = []
     for sym in watchlist:
         for art in cache.get(sym, []):
