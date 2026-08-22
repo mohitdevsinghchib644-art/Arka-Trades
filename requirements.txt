@@ -19,4 +19,4 @@ arch>=6.3.0
 seaborn
 lxml>=4.9.0
 html5lib>=1.1
-streamlit-option-menu>=0.3.6
+
