@@ -17,3 +17,5 @@ statsmodels
 scipy>=1.11.0
 arch>=6.3.0
 seaborn
+lxml>=4.9.0
+html5lib>=1.1
