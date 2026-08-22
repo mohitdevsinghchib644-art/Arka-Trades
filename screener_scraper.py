@@ -223,18 +223,19 @@ def get_summary(symbol: str, url: str | None = None) -> dict:
         if r.status_code == 200:
             text = r.text
             fields = {}
+            # Updated robust pattern matching for Screener top ratio cards
             label_patterns = {
-                "market_cap":     r"Market Cap[^\d₹]*₹\s*([\d,]+)",
-                "current_price":  r"Current Price[^\d₹]*₹\s*([\d,]+\.?\d*)",
-                "pe_ratio":       r"Stock P/E[^\d]*([\d,]+\.?\d*)",
-                "book_value":     r"Book Value[^\d₹]*₹\s*([\d,]+\.?\d*)",
-                "dividend_yield": r"Dividend Yield[^\d]*([\d.]+)\s*%",
-                "roce":           r"ROCE[^\d]*([\d.]+)\s*%",
-                "roe":            r"ROE[^\d]*([\d.]+)\s*%",
-                "face_value":     r"Face Value[^\d₹]*₹\s*([\d.]+)",
+                "market_cap":     r"Market Cap.*?<span>\s*₹\s*([\d,]+)\s*</span>",
+                "current_price":  r"Current Price.*?<span>\s*₹\s*([\d,]+\.?\d*)\s*</span>",
+                "pe_ratio":       r"Stock P/E.*?>([\d,]+\.?\d*)<",
+                "book_value":     r"Book Value.*?₹\s*([\d,]+\.?\d*)",
+                "dividend_yield": r"Dividend Yield.*?([\d.]+)\s*%",
+                "roce":           r"ROCE.*?([\d.]+)\s*%",
+                "roe":            r"ROE.*?([\d.]+)\s*%",
+                "face_value":     r"Face Value.*?₹\s*([\d.]+)",
             }
             for key, pat in label_patterns.items():
-                m = re.search(pat, text)
+                m = re.search(pat, text, re.DOTALL | re.IGNORECASE)
                 if m:
                     fields[key] = m.group(1).strip()
             if fields:
@@ -250,22 +251,8 @@ def get_summary(symbol: str, url: str | None = None) -> dict:
 
 
 # ── Factors panel helpers ────────────────────────────────────────
-# NOTE ON SCOPE: this returns DIRECTIONAL DELTAS ONLY — a value now
-# vs a value before, computed from tables already fetched elsewhere
-# in this file. It never labels a delta "good" or "bad" and never
-# infers a reason for it; that judgment call belongs to the person
-# reading the numbers, not this scraper. This mirrors the existing
-# rule in this file for sector P/E and peers: report what was
-# actually found, nothing invented or interpreted on top of it.
 
 def _parse_numeric(s) -> float | None:
-    """
-    Strip Screener's display formatting (%, commas, Cr, ₹) and return
-    a float, or None if the cell genuinely isn't numeric (Screener
-    uses '—' as its own null marker in several tables). Returning
-    None rather than raising means one malformed cell drops that one
-    factor line instead of breaking the whole panel.
-    """
     if s is None:
         return None
     cleaned = str(s).strip().replace(",", "").replace("%", "").replace("₹", "").strip()
@@ -279,8 +266,6 @@ def _parse_numeric(s) -> float | None:
 
 
 def _row_by_label(rows: list[dict], needle: str) -> dict | None:
-    """Case-insensitive substring match against a row's label, same
-    matching style _find_table_by_header already uses for tables."""
     needle = needle.lower()
     for r in rows:
         if needle in r["label"].lower():
@@ -289,14 +274,6 @@ def _row_by_label(rows: list[dict], needle: str) -> dict | None:
 
 
 def _latest_two(values: list) -> tuple:
-    """
-    Returns (latest, previous) as parsed floats, skipping any
-    unparsable cells along the way rather than aligning strictly by
-    position — a stray '—' in the middle of a row shouldn't shift
-    which two real numbers get compared. If fewer than two numeric
-    values exist, previous is None so the caller knows there is
-    nothing to diff against (not that the diff is zero).
-    """
     nums = [_parse_numeric(v) for v in values]
     nums = [n for n in nums if n is not None]
     if len(nums) < 2:
@@ -305,21 +282,6 @@ def _latest_two(values: list) -> tuple:
 
 
 def get_factors(symbol: str, full_research: dict | None = None) -> dict:
-    """
-    Micro factors: directional deltas pulled from data this scraper
-    already fetches for the same symbol — promoter holding change,
-    ROCE/ROE latest reading, and quarterly Sales/Net Profit QoQ
-    change. Reuses full_research if the caller already has it (from
-    get_full_research) so this never re-fetches the same page; if not
-    given, fetches fresh via get_full_research() itself.
-
-    Returns {"status": "live"/"partial"/"unavailable", "items": [...]}
-    where each item is {"label", "latest", "previous", "unit"} —
-    plain values, no framing of whether the change is favorable.
-    "partial" means some factors resolved and others didn't (e.g.
-    shareholding table unavailable but financials fine) — the UI
-    should render whatever items list came back either way.
-    """
     data = full_research or get_full_research(symbol)
     if not data.get("resolved"):
         return {"status": "unavailable", "items": []}
@@ -353,26 +315,12 @@ def get_factors(symbol: str, full_research: dict | None = None) -> dict:
 
     if not items:
         return {"status": "unavailable", "items": []}
-    # 6 is the max possible items (ROCE, ROE, P/E, Promoter Holding,
-    # Sales QoQ, Net Profit QoQ) — fewer than that means at least one
-    # underlying section was unavailable, matching the "partial" state
-    # documented above.
+    
     status = "live" if len(items) >= 6 else "partial"
     return {"status": status, "items": items}
 
 
 def get_earnings_date(symbol: str) -> dict:
-    """
-    Best-effort next-earnings-date lookup via yfinance. NSE-listed
-    stocks are NOT reliably covered by yfinance's calendar/
-    earnings_dates fields the way US tickers are — this was checked
-    against a live NSE symbol during development and returned empty
-    for both fields. Rather than promise a date this data source
-    usually doesn't have for Indian equities, this returns a clear
-    "unavailable" status when nothing is found, same shape as every
-    other unavailable-data case in this file, instead of silently
-    showing nothing or a stale/wrong date.
-    """
     try:
         import yfinance as yf
     except ImportError:
