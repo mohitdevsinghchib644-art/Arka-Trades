@@ -5,6 +5,7 @@ screener_scraper.py — Arka Trades Research Module (data layer)
 import re
 import json
 import time
+import io
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -20,7 +21,9 @@ _HEADERS = {
 _TIMEOUT = 12
 _CACHE_DIR = Path(".cache")
 _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-_CACHE_TTL_SECONDS = 0  # Temporarily 0 to clear out the stale cache
+
+# FIXED: Set to 12 hours (43200s). 0 was preventing the stale cache fallback from working.
+_CACHE_TTL_SECONDS = 43200  
 
 
 def _cache_path(symbol: str, section: str) -> Path:
@@ -48,7 +51,7 @@ def _cache_read(symbol: str, section: str):
         fetched = datetime.fromisoformat(payload["fetched_at_utc"])
         age_s = (datetime.now(timezone.utc) - fetched).total_seconds()
         
-        # FIX: Actually enforce the cache expiration time
+        # Enforce the cache expiration time
         if age_s > _CACHE_TTL_SECONDS:
             return None
             
@@ -103,18 +106,23 @@ def _fetch_all_tables(url: str) -> list[pd.DataFrame] | None:
         r = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
         if r.status_code != 200:
             return None
-        tables = pd.read_html(r.text)
+        # FIXED: Wrap in io.StringIO to prevent Pandas FutureWarnings/TypeErrors from breaking the parse
+        tables = pd.read_html(io.StringIO(r.text))
         return tables if tables else None
-    except Exception:
+    except Exception as e:
+        # Logs to Streamlit console in case lxml/html5lib is missing
+        print(f"Pandas read_html failed: {e}") 
         return None
 
 
 def _find_table_by_header(tables: list[pd.DataFrame], must_contain: list[str]) -> pd.DataFrame | None:
     for t in tables:
         try:
-            first_col = t.iloc[:, 0].astype(str).str.cat(sep=" ")
-            headers = " ".join(str(c) for c in t.columns)
-            blob = (first_col + " " + headers).lower()
+            # FIXED: Bulletproof flattening. Avoids NaN crashes from .str.cat()
+            all_text = " ".join(t.astype(str).values.flatten())
+            cols_text = " ".join(str(c) for c in t.columns)
+            blob = (all_text + " " + cols_text).lower()
+            
             if all(needle.lower() in blob for needle in must_contain):
                 return t
         except Exception:
@@ -124,13 +132,30 @@ def _find_table_by_header(tables: list[pd.DataFrame], must_contain: list[str]) -
 
 def _df_to_records(df: pd.DataFrame) -> dict:
     try:
+        # FIXED: Safely handle multi-index headers if Screener changes layout
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [str(c[-1]) for c in df.columns]
+        else:
+            df.columns = [str(c) for c in df.columns]
+
         periods = [str(c) for c in df.columns[1:]]
         rows = []
         for _, row in df.iterrows():
             label = str(row.iloc[0]).strip()
-            if not label or label.lower() == "nan":
+            
+            # Clean out interactive UI buttons appended to text
+            label = label.replace("+", "").strip() 
+            
+            if not label or label.lower() in ("nan", "none", ""):
                 continue
-            values = [str(v) for v in row.iloc[1:].tolist()]
+                
+            values = []
+            for v in row.iloc[1:]:
+                v_str = str(v).strip()
+                if v_str.lower() in ("nan", "none"):
+                    v_str = "—"
+                values.append(v_str)
+                
             rows.append({"label": label, "values": values})
         return {"periods": periods, "rows": rows}
     except Exception:
@@ -228,7 +253,6 @@ def get_summary(symbol: str, url: str | None = None) -> dict:
         if r.status_code == 200:
             text = r.text
             fields = {}
-            # FIX: Updated bulletproof pattern matching targeting the 'number' class directly
             label_patterns = {
                 "market_cap":     r"Market Cap.*?<span class=\"number\">([\d,\.]+)</span>",
                 "current_price":  r"Current Price.*?<span class=\"number\">([\d,\.]+)</span>",
