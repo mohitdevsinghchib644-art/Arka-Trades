@@ -2,11 +2,9 @@
 research_page.py — Arka Trades Research Terminal (v5 — matches AI Studio
 reference layout, built on real confirmed-working data sources)
 
-This patch makes the module resilient when the optional
-`streamlit_option_menu` package is unavailable in the runtime by
-providing a lightweight fallback implementation of `option_menu` using
-Streamlit's built-in widgets. This avoids a ModuleNotFoundError on
-deployments that do not have that extra dependency installed.
+This patch fixes an f-string quoting bug introduced in the previous
+update that caused a TypeError while rendering the stat cells. It
+also preserves the earlier resilience improvements.
 """
 
 import re
@@ -35,8 +33,7 @@ except Exception:
             return None
         # Ensure default_index in bounds
         idx = default_index if 0 <= default_index < len(options) else 0
-        # Use radio for a simple horizontal/vertical fallback (radio is vertical
-        # by default, but functionally acceptable when the styled menu is missing)
+        # Use radio for a simple horizontal/vertical fallback
         return st.radio(menu_title if menu_title else "", options, index=idx, key=key)
 
 
@@ -85,7 +82,7 @@ def _render_data_table(periods, rows, T, highlight_labels=None):
 
     header_cells = "".join(
         f'<th style="text-align:right;padding:5px 8px;font-size:10px;color:{T["t3"]};'
-        f'font-weight:600;white-space:nowrap;min-width:{col_w}px;'">{p}</th>"
+        f'font-weight:600;white-space:nowrap;min-width:{col_w}px">{p}</th>'
         for p in periods
     )
     body_rows = ""
@@ -100,9 +97,9 @@ def _render_data_table(periods, rows, T, highlight_labels=None):
             for v in row["values"]
         )
         body_rows += (
-            f'<tr style="background:{bg};border-bottom:1px solid {T["border"]};'>
+            f'<tr style="background:{bg};border-bottom:1px solid {T["border"]};">'
             f'<td style="padding:5px 8px;font-size:11.5px;color:{label_color};'
-            f'font-weight:{label_weight};white-space:nowrap;">{row["label"]}</td>{cells}</tr>'
+            f'font-weight:{label_weight};white-space:nowrap;">{row["label"]}</td>' + cells + '</tr>'
         )
 
     st.markdown(f"""
@@ -114,7 +111,8 @@ def _render_data_table(periods, rows, T, highlight_labels=None):
             </tr></thead>
             <tbody>{body_rows}</tbody>
         </table>
-    </div>""", unsafe_allow_html=True)
+    </div>
+    """, unsafe_allow_html=True)
 
 
 # ── NEW: Hot Tickers strip ────────────────────────────────────
@@ -133,7 +131,7 @@ def _render_hot_tickers(T: dict):
             is_active = st.session_state.get("research_last_query", "").upper() == sym
             btn_label = f"{sym}"
             if st.button(btn_label, key=f"hot_{sym}", use_container_width=True,
-                         type="primary" if is_active else "secondary"):
+                         type=("primary" if is_active else "secondary")):
                 st.session_state["research_last_query"] = sym
                 st.session_state.pop("research_data", None)
                 st.rerun()
@@ -156,7 +154,7 @@ def _fetch_chart_data(symbol: str, period: str = "6mo"):
 def _render_tv_chart(symbol: str):
     period_key = f"research_chart_period_{symbol}"
     period_choice = st.radio(
-        "Range", ["1mo", "3mo", "6mo", "1y", "2y"], index=2, horizontal=True,
+        "Range", ["1mo", "3mo", "6mo", "1y", "2y"], index=2,
         key=period_key, label_visibility="collapsed"
     )
 
@@ -261,7 +259,7 @@ def _render_peer_comparison(symbol: str, T: dict):
     for row in result["rows"]:
         bg = f'{T["amber"]}14' if row["is_current"] else "transparent"
         name_color = T["amber"] if row["is_current"] else T["ivory"]
-        current_tag = f'<span style="color:{T["amber"]};font-size:9px;font-weight:700;border:1px solid {T["amber"]}55;padding:1px 6px;margin-left:6px;">CURRENT</span>' if row["is_current"] else "[...]"
+        current_tag = f'<span style="color:{T["amber"]};font-size:9px;font-weight:700;border:1px solid {T["amber"]}55;padding:1px 6px;margin-left:6px;">CURRENT</span>' if row["is_current"] else ""
         body_rows += f"""
         <tr style="background:{bg};border-bottom:1px solid {T['border']};">
             <td style="padding:8px 12px;font-size:12px;color:{name_color};font-weight:700;">{row['name']} <span style="color:{T['t3']};font-weight:500;">({row['symbol']})</span>{current_tag}</td>
@@ -377,7 +375,7 @@ def render_research_page(T: dict, news_fetch_fn=None):
             ("Face Value", sfields.get("face_value", "—"), "₹", ""),
         ]
         cells = "".join(
-            f'<div style="flex:1;min-width:100px;padding:10px 14px;border-right:1px solid {T["border"]};'>
+            f'<div style="flex:1;min-width:100px;padding:10px 14px;border-right:1px solid {T["border"]};">\n'
             f'<div style="font-size:9px;color:{T["t3"]};letter-spacing:1px;margin-bottom:4px;">{label.upper()}</div>'
             f'<div style="font-family:{T["mono"]};font-size:14px;color:{T["ivory"]};font-weight:700;">{pre}{val}{post}</div>'
             f'</div>'
