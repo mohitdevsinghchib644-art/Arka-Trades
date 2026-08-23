@@ -21,9 +21,26 @@ _HEADERS = {
 _TIMEOUT = 12
 _CACHE_DIR = Path(".cache")
 _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-
-# FIXED: Set to 12 hours (43200s). 0 was preventing the stale cache fallback from working.
 _CACHE_TTL_SECONDS = 43200  
+
+# Module-level HTTP cache to eliminate 429 Too Many Requests limits during full syncs
+_HTTP_CACHE = {}
+
+def _fetch_html(url: str) -> str | None:
+    now = time.time()
+    if url in _HTTP_CACHE:
+        cache_time, html = _HTTP_CACHE[url]
+        if now - cache_time < 60:
+            return html
+
+    try:
+        r = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
+        if r.status_code == 200:
+            _HTTP_CACHE[url] = (now, r.text)
+            return r.text
+    except Exception as e:
+        print(f"Fetch failed for {url}: {e}")
+    return None
 
 
 def _cache_path(symbol: str, section: str) -> Path:
@@ -51,7 +68,6 @@ def _cache_read(symbol: str, section: str):
         fetched = datetime.fromisoformat(payload["fetched_at_utc"])
         age_s = (datetime.now(timezone.utc) - fetched).total_seconds()
         
-        # Enforce the cache expiration time
         if age_s > _CACHE_TTL_SECONDS:
             return None
             
@@ -76,9 +92,12 @@ def resolve_symbol(symbol: str) -> dict | None:
     direct = _resolve_url(symbol)
     if direct:
         try:
-            r = requests.get(direct, headers=_HEADERS, timeout=_TIMEOUT)
-            m = re.search(r"<h1[^>]*>\s*([^<]+?)\s*</h1>", r.text)
-            name = m.group(1).strip() if m else symbol.upper()
+            html = _fetch_html(direct)
+            name = symbol.upper()
+            if html:
+                m = re.search(r"<h1[^>]*>\s*([^<]+?)\s*</h1>", html)
+                if m:
+                    name = m.group(1).strip()
             return {"url": direct, "name": name}
         except Exception:
             return {"url": direct, "name": symbol.upper()}
@@ -101,38 +120,37 @@ def resolve_symbol(symbol: str) -> dict | None:
     return None
 
 
-def _fetch_all_tables(url: str) -> list[pd.DataFrame] | None:
-    try:
-        r = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
-        if r.status_code != 200:
-            return None
-        # FIXED: Wrap in io.StringIO to prevent Pandas FutureWarnings/TypeErrors from breaking the parse
-        tables = pd.read_html(io.StringIO(r.text))
-        return tables if tables else None
-    except Exception as e:
-        # Logs to Streamlit console in case lxml/html5lib is missing
-        print(f"Pandas read_html failed: {e}") 
-        return None
-
-
-def _find_table_by_header(tables: list[pd.DataFrame], must_contain: list[str]) -> pd.DataFrame | None:
+def _find_tables_by_header(tables: list[pd.DataFrame], must_contain: list) -> list[pd.DataFrame]:
+    matches = []
     for t in tables:
         try:
-            # FIXED: Bulletproof flattening. Avoids NaN crashes from .str.cat()
             all_text = " ".join(t.astype(str).values.flatten())
             cols_text = " ".join(str(c) for c in t.columns)
             blob = (all_text + " " + cols_text).lower()
             
-            if all(needle.lower() in blob for needle in must_contain):
-                return t
+            # Normalize whitespace to fix HTML non-breaking spaces (\xa0) and newlines
+            blob = re.sub(r'\s+', ' ', blob)
+            
+            match = True
+            for condition in must_contain:
+                if isinstance(condition, str):
+                    if condition.lower() not in blob:
+                        match = False
+                        break
+                elif isinstance(condition, (list, tuple)):
+                    if not any(c.lower() in blob for c in condition):
+                        match = False
+                        break
+            
+            if match:
+                matches.append(t)
         except Exception:
             continue
-    return None
+    return matches
 
 
 def _df_to_records(df: pd.DataFrame) -> dict:
     try:
-        # FIXED: Safely handle multi-index headers if Screener changes layout
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = [str(c[-1]) for c in df.columns]
         else:
@@ -142,8 +160,6 @@ def _df_to_records(df: pd.DataFrame) -> dict:
         rows = []
         for _, row in df.iterrows():
             label = str(row.iloc[0]).strip()
-            
-            # Clean out interactive UI buttons appended to text
             label = label.replace("+", "").strip() 
             
             if not label or label.lower() in ("nan", "none", ""):
@@ -152,7 +168,7 @@ def _df_to_records(df: pd.DataFrame) -> dict:
             values = []
             for v in row.iloc[1:]:
                 v_str = str(v).strip()
-                if v_str.lower() in ("nan", "none"):
+                if v_str.lower() in ("nan", "none", ""):
                     v_str = "—"
                 values.append(v_str)
                 
@@ -162,7 +178,7 @@ def _df_to_records(df: pd.DataFrame) -> dict:
         return {"periods": [], "rows": []}
 
 
-def _get_section(symbol: str, section: str, must_contain: list[str], url: str | None = None) -> dict:
+def _get_section(symbol: str, section: str, must_contain: list, url: str | None = None, target: str = "") -> dict:
     resolved_url = url
     if resolved_url is None:
         res = resolve_symbol(symbol)
@@ -170,14 +186,35 @@ def _get_section(symbol: str, section: str, must_contain: list[str], url: str | 
             return {"status": "unavailable", "reason": "Symbol not found on Screener", "data": None}
         resolved_url = res["url"]
 
-    tables = _fetch_all_tables(resolved_url)
-    if tables:
-        table = _find_table_by_header(tables, must_contain)
-        if table is not None:
-            records = _df_to_records(table)
-            if records["rows"]:
-                _cache_write(symbol, section, records)
-                return {"status": "live", "data": records, "url": resolved_url}
+    html = _fetch_html(resolved_url)
+    if html:
+        try:
+            tables = pd.read_html(io.StringIO(html))
+            matches = _find_tables_by_header(tables, must_contain)
+            
+            table = None
+            if matches:
+                if target == "quarterly":
+                    # Screener always puts Quarterly before P&L. If only 1 matches, it's likely P&L, missing Quarterly.
+                    if len(matches) >= 2:
+                        table = matches[0]
+                elif target == "yearly":
+                    if len(matches) >= 2:
+                        table = matches[1]
+                    elif len(matches) == 1:
+                        table = matches[0]
+                elif target == "shareholding":
+                    table = matches[0]
+                else:
+                    table = matches[0]
+
+            if table is not None:
+                records = _df_to_records(table)
+                if records["rows"]:
+                    _cache_write(symbol, section, records)
+                    return {"status": "live", "data": records, "url": resolved_url}
+        except Exception as e:
+            print(f"Extraction failed for {section}: {e}")
 
     cached = _cache_read(symbol, section)
     if cached:
@@ -192,15 +229,18 @@ def _get_section(symbol: str, section: str, must_contain: list[str], url: str | 
 
 
 def get_quarterly_results(symbol: str, url: str | None = None) -> dict:
-    return _get_section(symbol, "quarterly", ["sales", "net profit"], url)
+    must_contain = [("sales", "revenue", "interest", "financing margin"), ("net profit", "profit for the period")]
+    return _get_section(symbol, "quarterly", must_contain, url, target="quarterly")
 
 
 def get_yearly_results(symbol: str, url: str | None = None) -> dict:
-    return _get_section(symbol, "yearly", ["sales", "net profit", "eps"], url)
+    must_contain = [("sales", "revenue", "interest", "financing margin"), ("net profit", "profit for the period")]
+    return _get_section(symbol, "yearly", must_contain, url, target="yearly")
 
 
 def get_shareholding(symbol: str, url: str | None = None) -> dict:
-    return _get_section(symbol, "shareholding", ["promoters", "fiis", "diis"], url)
+    must_contain = ["promoters", ("fiis", "fii"), ("diis", "dii")]
+    return _get_section(symbol, "shareholding", must_contain, url, target="shareholding")
 
 
 def get_sector_info(symbol: str, url: str | None = None) -> dict:
@@ -211,20 +251,20 @@ def get_sector_info(symbol: str, url: str | None = None) -> dict:
             return {"status": "unavailable", "reason": "Symbol not found on Screener", "data": None}
         resolved_url = res["url"]
 
-    try:
-        r = requests.get(resolved_url, headers=_HEADERS, timeout=_TIMEOUT)
-        if r.status_code == 200:
+    html = _fetch_html(resolved_url)
+    if html:
+        try:
             pattern = re.compile(
                 r'<a[^>]*title="(Broad Sector|Sector|Broad Industry|Industry)"[^>]*>([^<]+)</a>',
                 re.IGNORECASE,
             )
-            matches = pattern.findall(r.text)
+            matches = pattern.findall(html)
             if matches:
                 classification = {label: text.strip() for label, text in matches}
                 _cache_write(symbol, "sector", classification)
                 return {"status": "live", "data": classification, "url": resolved_url}
-    except Exception:
-        pass
+        except Exception:
+            pass
 
     cached = _cache_read(symbol, "sector")
     if cached:
@@ -248,10 +288,9 @@ def get_summary(symbol: str, url: str | None = None) -> dict:
             return {"status": "unavailable", "reason": "Symbol not found on Screener", "data": None}
         resolved_url = res["url"]
 
-    try:
-        r = requests.get(resolved_url, headers=_HEADERS, timeout=_TIMEOUT)
-        if r.status_code == 200:
-            text = r.text
+    html = _fetch_html(resolved_url)
+    if html:
+        try:
             fields = {}
             label_patterns = {
                 "market_cap":     r"Market Cap.*?<span class=\"number\">([\d,\.]+)</span>",
@@ -264,14 +303,14 @@ def get_summary(symbol: str, url: str | None = None) -> dict:
                 "face_value":     r"Face Value.*?<span class=\"number\">([\d,\.]+)</span>",
             }
             for key, pat in label_patterns.items():
-                m = re.search(pat, text, re.DOTALL | re.IGNORECASE)
+                m = re.search(pat, html, re.DOTALL | re.IGNORECASE)
                 if m:
                     fields[key] = m.group(1).strip()
             if fields:
                 _cache_write(symbol, "summary", fields)
                 return {"status": "live", "data": fields, "url": resolved_url}
-    except Exception:
-        pass
+        except Exception:
+            pass
 
     cached = _cache_read(symbol, "summary")
     if cached:
@@ -337,6 +376,13 @@ def get_factors(symbol: str, full_research: dict | None = None) -> dict:
     q_data = (data.get("quarterly") or {}).get("data") or {}
     for needle, label in (("sales", "Sales (QoQ)"), ("net profit", "Net Profit (QoQ)")):
         row = _row_by_label(q_data.get("rows", []), needle)
+        
+        # Fallback mappings for banking/IT structure
+        if not row and needle == "sales":
+            row = _row_by_label(q_data.get("rows", []), "revenue") or _row_by_label(q_data.get("rows", []), "interest")
+        if not row and needle == "net profit":
+            row = _row_by_label(q_data.get("rows", []), "profit for the period")
+
         if row:
             latest, prev = _latest_two(row["values"])
             if latest is not None:
