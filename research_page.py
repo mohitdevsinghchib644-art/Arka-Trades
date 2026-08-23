@@ -85,7 +85,7 @@ def _render_data_table(periods, rows, T, highlight_labels=None):
 
     header_cells = "".join(
         f'<th style="text-align:right;padding:5px 8px;font-size:10px;color:{T["t3"]};'
-        f'font-weight:600;white-space:nowrap;min-width:{col_w}px;">{p}</th>'
+        f'font-weight:600;white-space:nowrap;min-width:{col_w}px;'">{p}</th>"
         for p in periods
     )
     body_rows = ""
@@ -261,7 +261,7 @@ def _render_peer_comparison(symbol: str, T: dict):
     for row in result["rows"]:
         bg = f'{T["amber"]}14' if row["is_current"] else "transparent"
         name_color = T["amber"] if row["is_current"] else T["ivory"]
-        current_tag = f'<span style="color:{T["amber"]};font-size:9px;font-weight:700;border:1px solid {T["amber"]}55;padding:1px 6px;margin-left:6px;">CURRENT</span>' if row["is_current"] else ""
+        current_tag = f'<span style="color:{T["amber"]};font-size:9px;font-weight:700;border:1px solid {T["amber"]}55;padding:1px 6px;margin-left:6px;">CURRENT</span>' if row["is_current"] else "[...]"
         body_rows += f"""
         <tr style="background:{bg};border-bottom:1px solid {T['border']};">
             <td style="padding:8px 12px;font-size:12px;color:{name_color};font-weight:700;">{row['name']} <span style="color:{T['t3']};font-weight:500;">({row['symbol']})</span>{current_tag}</td>
@@ -312,11 +312,49 @@ def render_research_page(T: dict, news_fetch_fn=None):
             unsafe_allow_html=True)
         return
 
+    # Robust fetch: try full research, fallback to best-effort summary on error
     if "research_data" not in st.session_state:
         with st.spinner(f"Pulling institutional data for {active_query.upper()}..."):
-            st.session_state["research_data"] = get_full_research(active_query)
+            try:
+                st.session_state["research_data"] = get_full_research(active_query)
+            except Exception as e:
+                st.error(f"Full research fetch failed for {active_query.upper()}. Falling back to summary.")
+                # Attempt best-effort resolve + summary
+                try:
+                    res = resolve_symbol(active_query)
+                except Exception:
+                    res = None
+                if res:
+                    try:
+                        summary = get_summary(active_query, url=res.get("url"))
+                        sdata = summary.get("data") if isinstance(summary, dict) else {}
+                    except Exception:
+                        sdata = {}
+                    st.session_state["research_data"] = {
+                        "resolved": True,
+                        "symbol": active_query.upper(),
+                        "name": res.get("name", active_query.upper()),
+                        "url": res.get("url"),
+                        "summary": {"status": "live" if sdata else "unavailable", "data": sdata},
+                        "quarterly": {"status": "unavailable", "data": {}},
+                        "yearly": {"status": "unavailable", "data": {}},
+                        "balance_sheet": {"status": "unavailable", "data": {}},
+                        "shareholding": {"status": "unavailable", "data": {}},
+                        "sector": {"status": "unavailable", "data": {}},
+                        "peers": {"status": "not_implemented", "data": None},
+                    }
+                else:
+                    st.session_state["research_data"] = {"resolved": False, "reason": f"fetch exception: {e}"}
 
     data = st.session_state["research_data"]
+
+    # Debug dump when debug=1 in query params or session is admin
+    try:
+        if st.experimental_get_query_params().get("debug") == ["1"] or st.session_state.get("is_admin"):
+            st.markdown("#### DEBUG: raw research_data")
+            st.json(st.session_state.get("research_data"))
+    except Exception:
+        pass
 
     if not data.get("resolved"):
         st.error(f"SYMBOL NOT FOUND: {data.get('reason','')}")
