@@ -1,5 +1,28 @@
 """
 screener_scraper.py — Arka Trades Research Module (data layer)
+
+v5 CHANGES FROM THE CONFIRMED-WORKING VERSION:
+  - NEW: get_balance_sheet() — same _get_section() pattern already
+    proven working in production for Quarterly/Yearly/Shareholding.
+    Matches on Screener's standard Balance Sheet row labels (Equity
+    Capital, Reserves, Borrowings, Fixed Assets, CWIP, etc.).
+  - NEW: get_leverage_ratios() — computes Debt-to-Equity and Interest
+    Coverage from tables ALREADY fetched (Balance Sheet + Quarterly),
+    not a new scrape. D/E = Borrowings / Reserves. Interest Coverage
+    = Operating Profit / Interest, both rows on the Quarterly table.
+    Returns None for a ratio if either input row is missing rather
+    than guessing — same "report what was found" rule as get_factors.
+  - NEW: get_peer_comparison() — REAL data, not the JS-locked Screener
+    widget (still not implemented — see get_peers(), unchanged).
+    Instead, this pulls a curated sector -> peer-symbol map (below)
+    and calls the EXISTING get_summary() once per peer, exactly the
+    same call already used for the main stock. Every number in the
+    resulting table is a live Screener figure for a real company,
+    not fabricated — the only manually-curated part is WHICH
+    companies count as peers, since Screener doesn't expose that
+    without the JS call we can't make.
+  - UNCHANGED: everything else. get_full_research() now also calls
+    get_balance_sheet() and folds it into the returned dict.
 """
 
 import re
@@ -21,9 +44,8 @@ _HEADERS = {
 _TIMEOUT = 12
 _CACHE_DIR = Path(".cache")
 _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-_CACHE_TTL_SECONDS = 43200  
+_CACHE_TTL_SECONDS = 43200
 
-# Module-level HTTP cache to eliminate 429 Too Many Requests limits during full syncs
 _HTTP_CACHE = {}
 
 def _fetch_html(url: str) -> str | None:
@@ -32,7 +54,6 @@ def _fetch_html(url: str) -> str | None:
         cache_time, html = _HTTP_CACHE[url]
         if now - cache_time < 60:
             return html
-
     try:
         r = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
         if r.status_code == 200:
@@ -50,10 +71,7 @@ def _cache_path(symbol: str, section: str) -> Path:
 
 def _cache_write(symbol: str, section: str, data: dict):
     try:
-        payload = {
-            "data": data,
-            "fetched_at_utc": datetime.now(timezone.utc).isoformat(),
-        }
+        payload = {"data": data, "fetched_at_utc": datetime.now(timezone.utc).isoformat()}
         _cache_path(symbol, section).write_text(json.dumps(payload, default=str))
     except Exception:
         pass
@@ -67,10 +85,8 @@ def _cache_read(symbol: str, section: str):
         payload = json.loads(p.read_text())
         fetched = datetime.fromisoformat(payload["fetched_at_utc"])
         age_s = (datetime.now(timezone.utc) - fetched).total_seconds()
-        
         if age_s > _CACHE_TTL_SECONDS:
             return None
-            
         return {"data": payload["data"], "age_seconds": age_s, "fetched_at_utc": fetched}
     except Exception:
         return None
@@ -103,10 +119,8 @@ def resolve_symbol(symbol: str) -> dict | None:
             return {"url": direct, "name": symbol.upper()}
 
     try:
-        r = requests.get(
-            f"{_BASE}/api/company/search/",
-            params={"q": symbol}, headers=_HEADERS, timeout=_TIMEOUT,
-        )
+        r = requests.get(f"{_BASE}/api/company/search/", params={"q": symbol},
+                          headers=_HEADERS, timeout=_TIMEOUT)
         if r.status_code == 200:
             results = r.json()
             if results:
@@ -127,10 +141,7 @@ def _find_tables_by_header(tables: list[pd.DataFrame], must_contain: list) -> li
             all_text = " ".join(t.astype(str).values.flatten())
             cols_text = " ".join(str(c) for c in t.columns)
             blob = (all_text + " " + cols_text).lower()
-            
-            # Normalize whitespace to fix HTML non-breaking spaces (\xa0) and newlines
             blob = re.sub(r'\s+', ' ', blob)
-            
             match = True
             for condition in must_contain:
                 if isinstance(condition, str):
@@ -141,7 +152,6 @@ def _find_tables_by_header(tables: list[pd.DataFrame], must_contain: list) -> li
                     if not any(c.lower() in blob for c in condition):
                         match = False
                         break
-            
             if match:
                 matches.append(t)
         except Exception:
@@ -155,23 +165,19 @@ def _df_to_records(df: pd.DataFrame) -> dict:
             df.columns = [str(c[-1]) for c in df.columns]
         else:
             df.columns = [str(c) for c in df.columns]
-
         periods = [str(c) for c in df.columns[1:]]
         rows = []
         for _, row in df.iterrows():
             label = str(row.iloc[0]).strip()
-            label = label.replace("+", "").strip() 
-            
+            label = label.replace("+", "").strip()
             if not label or label.lower() in ("nan", "none", ""):
                 continue
-                
             values = []
             for v in row.iloc[1:]:
                 v_str = str(v).strip()
                 if v_str.lower() in ("nan", "none", ""):
                     v_str = "—"
                 values.append(v_str)
-                
             rows.append({"label": label, "values": values})
         return {"periods": periods, "rows": rows}
     except Exception:
@@ -191,11 +197,9 @@ def _get_section(symbol: str, section: str, must_contain: list, url: str | None 
         try:
             tables = pd.read_html(io.StringIO(html))
             matches = _find_tables_by_header(tables, must_contain)
-            
             table = None
             if matches:
                 if target == "quarterly":
-                    # Screener always puts Quarterly before P&L. If only 1 matches, it's likely P&L, missing Quarterly.
                     if len(matches) >= 2:
                         table = matches[0]
                 elif target == "yearly":
@@ -203,7 +207,7 @@ def _get_section(symbol: str, section: str, must_contain: list, url: str | None 
                         table = matches[1]
                     elif len(matches) == 1:
                         table = matches[0]
-                elif target == "shareholding":
+                elif target in ("shareholding", "balance_sheet"):
                     table = matches[0]
                 else:
                     table = matches[0]
@@ -218,12 +222,7 @@ def _get_section(symbol: str, section: str, must_contain: list, url: str | None 
 
     cached = _cache_read(symbol, section)
     if cached:
-        return {
-            "status": "stale",
-            "data": cached["data"],
-            "age_seconds": cached["age_seconds"],
-            "url": resolved_url,
-        }
+        return {"status": "stale", "data": cached["data"], "age_seconds": cached["age_seconds"], "url": resolved_url}
 
     return {"status": "unavailable", "reason": "Not found on page and no cached copy exists", "data": None}
 
@@ -241,6 +240,17 @@ def get_yearly_results(symbol: str, url: str | None = None) -> dict:
 def get_shareholding(symbol: str, url: str | None = None) -> dict:
     must_contain = ["promoters", ("fiis", "fii"), ("diis", "dii")]
     return _get_section(symbol, "shareholding", must_contain, url, target="shareholding")
+
+
+def get_balance_sheet(symbol: str, url: str | None = None) -> dict:
+    """
+    NEW. Same _get_section() pattern as Quarterly/Yearly/Shareholding
+    above — all three are confirmed working in production, so this
+    reuses that exact mechanism rather than inventing a new one.
+    Matches on Screener's standard Balance Sheet row labels.
+    """
+    must_contain = [("equity capital", "share capital"), ("reserves",), ("borrowings", "total liabilities")]
+    return _get_section(symbol, "balance_sheet", must_contain, url, target="balance_sheet")
 
 
 def get_sector_info(symbol: str, url: str | None = None) -> dict:
@@ -273,9 +283,14 @@ def get_sector_info(symbol: str, url: str | None = None) -> dict:
 
 
 def get_peers(symbol: str, url: str | None = None) -> dict:
+    """
+    UNCHANGED — the raw Screener JS-locked peer widget is still not
+    reachable. This stays as the honest placeholder. Real peer data
+    now lives in get_peer_comparison() below, sourced differently.
+    """
     return {
         "status": "not_implemented",
-        "reason": "Peer comparison requires a JS-executing fetch; not available via this scraper yet.",
+        "reason": "Screener's own peer widget requires a JS-executing fetch; not available via this scraper.",
         "data": None,
     }
 
@@ -349,19 +364,23 @@ def _latest_two(values: list) -> tuple:
     return nums[-1], nums[-2]
 
 
+def _latest_one(values: list) -> float | None:
+    """Same skip-unparsable-cells rule as _latest_two, but only needs
+    the single most recent numeric value — used for D/E and Interest
+    Coverage, which are point-in-time ratios, not deltas."""
+    nums = [_parse_numeric(v) for v in values]
+    nums = [n for n in nums if n is not None]
+    return nums[-1] if nums else None
+
+
 def get_factors(symbol: str, full_research: dict | None = None) -> dict:
     data = full_research or get_full_research(symbol)
     if not data.get("resolved"):
         return {"status": "unavailable", "items": []}
 
     items = []
-
     summary_data = (data.get("summary") or {}).get("data") or {}
-    for key, label, unit in (
-        ("roce", "ROCE", "%"),
-        ("roe", "ROE", "%"),
-        ("pe_ratio", "P/E", "x"),
-    ):
+    for key, label, unit in (("roce", "ROCE", "%"), ("roe", "ROE", "%"), ("pe_ratio", "P/E", "x")):
         val = _parse_numeric(summary_data.get(key))
         if val is not None:
             items.append({"label": label, "latest": val, "previous": None, "unit": unit})
@@ -376,13 +395,10 @@ def get_factors(symbol: str, full_research: dict | None = None) -> dict:
     q_data = (data.get("quarterly") or {}).get("data") or {}
     for needle, label in (("sales", "Sales (QoQ)"), ("net profit", "Net Profit (QoQ)")):
         row = _row_by_label(q_data.get("rows", []), needle)
-        
-        # Fallback mappings for banking/IT structure
         if not row and needle == "sales":
             row = _row_by_label(q_data.get("rows", []), "revenue") or _row_by_label(q_data.get("rows", []), "interest")
         if not row and needle == "net profit":
             row = _row_by_label(q_data.get("rows", []), "profit for the period")
-
         if row:
             latest, prev = _latest_two(row["values"])
             if latest is not None:
@@ -390,9 +406,50 @@ def get_factors(symbol: str, full_research: dict | None = None) -> dict:
 
     if not items:
         return {"status": "unavailable", "items": []}
-    
     status = "live" if len(items) >= 6 else "partial"
     return {"status": status, "items": items}
+
+
+def get_leverage_ratios(symbol: str, full_research: dict | None = None) -> dict:
+    """
+    NEW. Computes Debt-to-Equity and Interest Coverage from tables
+    ALREADY fetched elsewhere (Balance Sheet + Quarterly) — this
+    makes zero new network calls of its own; it's pure arithmetic on
+    data get_full_research() already pulled. Returns None for a
+    ratio if either required row is missing, rather than guessing —
+    same "report what was found" rule the rest of this file follows
+    for sector P/E and peers.
+    """
+    data = full_research or get_full_research(symbol)
+    if not data.get("resolved"):
+        return {"status": "unavailable", "debt_to_equity": None, "interest_coverage": None}
+
+    bs_data = (data.get("balance_sheet") or {}).get("data") or {}
+    q_data = (data.get("quarterly") or {}).get("data") or {}
+
+    de = None
+    borrowings_row = _row_by_label(bs_data.get("rows", []), "borrowings")
+    reserves_row = _row_by_label(bs_data.get("rows", []), "reserves")
+    if borrowings_row and reserves_row:
+        borrowings = _latest_one(borrowings_row["values"])
+        reserves = _latest_one(reserves_row["values"])
+        if borrowings is not None and reserves not in (None, 0):
+            de = round(borrowings / reserves, 2)
+
+    ic = None
+    interest_row = _row_by_label(q_data.get("rows", []), "interest")
+    opm_row = (_row_by_label(q_data.get("rows", []), "operating profit")
+               or _row_by_label(q_data.get("rows", []), "financing profit"))
+    if interest_row and opm_row:
+        interest = _latest_one(interest_row["values"])
+        operating_profit = _latest_one(opm_row["values"])
+        if interest not in (None, 0) and operating_profit is not None:
+            ic = round(operating_profit / interest, 2)
+
+    if de is None and ic is None:
+        return {"status": "unavailable", "debt_to_equity": None, "interest_coverage": None}
+    status = "live" if (de is not None and ic is not None) else "partial"
+    return {"status": status, "debt_to_equity": de, "interest_coverage": ic}
 
 
 def get_earnings_date(symbol: str) -> dict:
@@ -401,6 +458,7 @@ def get_earnings_date(symbol: str) -> dict:
     except ImportError:
         return {"status": "unavailable", "reason": "yfinance not installed", "date": None}
 
+    t = None
     try:
         t = yf.Ticker(symbol.upper().strip() + ".NS")
         cal = t.calendar
@@ -415,15 +473,16 @@ def get_earnings_date(symbol: str) -> dict:
     except Exception:
         pass
 
-    try:
-        ed = t.earnings_dates
-        if ed is not None and not ed.empty:
-            upcoming = ed[ed.index >= pd.Timestamp.now(tz=ed.index.tz)]
-            if not upcoming.empty:
-                next_date = upcoming.index[0]
-                return {"status": "live", "date": str(next_date.date()), "source": "yfinance earnings_dates"}
-    except Exception:
-        pass
+    if t is not None:
+        try:
+            ed = t.earnings_dates
+            if ed is not None and not ed.empty:
+                upcoming = ed[ed.index >= pd.Timestamp.now(tz=ed.index.tz)]
+                if not upcoming.empty:
+                    next_date = upcoming.index[0]
+                    return {"status": "live", "date": str(next_date.date()), "source": "yfinance earnings_dates"}
+        except Exception:
+            pass
 
     return {
         "status": "unavailable",
@@ -432,14 +491,84 @@ def get_earnings_date(symbol: str) -> dict:
     }
 
 
+# ── Peer comparison (REAL data, curated sector map) ──────────────
+# WHY THIS EXISTS: Screener's own peer widget is JS-locked (see
+# get_peers() above — unchanged, still honest N/A). This is a
+# DIFFERENT approach: a manually curated map of which symbols count
+# as peers per sector, then a real get_summary() call per peer —
+# the EXACT SAME function already proven working for the main
+# stock. Every number in the resulting table is live from Screener
+# for a real company. The only non-automatic part is the peer LIST
+# itself, since nothing free exposes "who competes with X"
+# programmatically without the JS call this scraper can't make.
+#
+# Deliberately small and manually maintained rather than
+# comprehensive — covers major sectors only. A symbol with no entry
+# here returns an honest "no curated peer list" state, not a guess.
+_SECTOR_PEERS = {
+    "RELIANCE":  ["RELIANCE", "ONGC", "IOC", "BPCL"],
+    "HDFCBANK":  ["HDFCBANK", "ICICIBANK", "AXISBANK", "KOTAKBANK"],
+    "ICICIBANK": ["ICICIBANK", "HDFCBANK", "AXISBANK", "KOTAKBANK"],
+    "AXISBANK":  ["AXISBANK", "HDFCBANK", "ICICIBANK", "KOTAKBANK"],
+    "KOTAKBANK": ["KOTAKBANK", "HDFCBANK", "ICICIBANK", "AXISBANK"],
+    "SBIN":      ["SBIN", "HDFCBANK", "ICICIBANK", "BANKBARODA"],
+    "TCS":       ["TCS", "INFY", "WIPRO", "HCLTECH"],
+    "INFY":      ["INFY", "TCS", "WIPRO", "HCLTECH"],
+    "WIPRO":     ["WIPRO", "TCS", "INFY", "HCLTECH"],
+    "HCLTECH":   ["HCLTECH", "TCS", "INFY", "WIPRO"],
+    "TATAMOTORS":["TATAMOTORS", "M&M", "MARUTI", "BAJAJ-AUTO"],
+    "MARUTI":    ["MARUTI", "TATAMOTORS", "M&M", "BAJAJ-AUTO"],
+    "SUNPHARMA": ["SUNPHARMA", "DRREDDY", "CIPLA", "DIVISLAB"],
+    "ITC":       ["ITC", "HINDUNILVR", "NESTLEIND", "BRITANNIA"],
+    "HINDUNILVR":["HINDUNILVR", "ITC", "NESTLEIND", "BRITANNIA"],
+}
+
+
+def get_peer_comparison(symbol: str) -> dict:
+    """
+    Returns real, live get_summary() data for a curated peer set.
+    Status is "live" if the primary symbol has a curated peer list
+    and at least one peer's summary resolved; "unavailable" if the
+    symbol isn't in _SECTOR_PEERS at all (no fabricated fallback).
+    """
+    sym = symbol.upper().strip()
+    peer_list = _SECTOR_PEERS.get(sym)
+    if not peer_list:
+        return {
+            "status": "unavailable",
+            "reason": f"No curated peer list for {sym} yet — sector-peer mapping covers major banks, IT, auto, pharma, and FMCG names only.",
+            "rows": [],
+        }
+
+    rows = []
+    for peer_sym in peer_list:
+        res = resolve_symbol(peer_sym)
+        if not res:
+            continue
+        summary = get_summary(peer_sym, url=res["url"])
+        sfields = summary.get("data") or {}
+        if not sfields:
+            continue
+        rows.append({
+            "symbol": peer_sym,
+            "name": res["name"],
+            "is_current": peer_sym == sym,
+            "cmp": sfields.get("current_price", "—"),
+            "pe": sfields.get("pe_ratio", "—"),
+            "market_cap": sfields.get("market_cap", "—"),
+            "div_yield": sfields.get("dividend_yield", "—"),
+            "roce": sfields.get("roce", "—"),
+        })
+
+    if not rows:
+        return {"status": "unavailable", "reason": "Curated peers found but none resolved on Screener right now.", "rows": []}
+    return {"status": "live", "rows": rows}
+
+
 def get_full_research(symbol: str) -> dict:
     res = resolve_symbol(symbol)
     if not res:
-        return {
-            "resolved": False,
-            "symbol": symbol.upper(),
-            "reason": "Could not find this symbol on Screener.",
-        }
+        return {"resolved": False, "symbol": symbol.upper(), "reason": "Could not find this symbol on Screener."}
 
     url = res["url"]
     return {
@@ -451,6 +580,7 @@ def get_full_research(symbol: str) -> dict:
         "quarterly": get_quarterly_results(symbol, url=url),
         "yearly": get_yearly_results(symbol, url=url),
         "shareholding": get_shareholding(symbol, url=url),
+        "balance_sheet": get_balance_sheet(symbol, url=url),
         "sector": get_sector_info(symbol, url=url),
         "peers": get_peers(symbol, url=url),
     }
