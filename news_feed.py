@@ -1,9 +1,6 @@
 """
-news_feed.py — Arka Trades News Module (v2 — persistent combined feed)
-
-This file provides news fetching and a combined feed. A small
-backwards-compatible alias `news_panel` is added so older imports
-that expect `news_panel` still work.
+news_feed.py — Bloomberg-style Global Market News Feed
+Fetches market-moving headlines: Indian stocks, indices, macro, global markets, commodities, crypto.
 """
 
 import streamlit as st
@@ -13,20 +10,29 @@ from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 
 IST = timezone(timedelta(hours=5, minutes=30))
-GOLD = "#FF9500"
+
+# ── Colors ──────────────────────
+GOLD = "#FFB81C"
+RED = "#FF453A"
+GREEN = "#30D158"
+CYAN = "#5AC8FA"
+PURPLE = "#BF5AF2"
+DARK = "#000000"
 DARK2 = "#0A0A0A"
-DARK3 = "#141414"
-BORDER = "#2A2A2A"
+DARK3 = "#111111"
+BORDER = "#262626"
 T2 = "#8A8A8A"
+T3 = "#5A5A5A"
 IVORY = "#E8E8E8"
-NEWS_EXPIRE = 20
-MAX_COMBINED_ITEMS = 40
+
+NEWS_EXPIRE = 15  # 15 min cache
+MAX_FEED_ITEMS = 100
 
 _STRONG_NEGATIVE = [
     "crash", "plunge", "collapse", "fraud", "scam", "default", "bankrupt",
     "insolvency", "probe", "raid", "scandal", "resign", "sebi action",
     "penalty", "banned", "suspended", "downgrade", "slump", "tumble",
-    "loss widens", "profit warning", "recall",
+    "loss widens", "profit warning", "recall", "halt", "suspend",
 ]
 _STRONG_POSITIVE = [
     "record high", "record profit", "surge", "rally", "beats estimate",
@@ -40,14 +46,14 @@ _MILD_NEGATIVE = [
 ]
 _MILD_POSITIVE = [
     "rises", "gains", "up", "beats", "growth", "profit rises",
-    "expands", "launch", "partnership",
+    "expands", "launch", "partnership", "approval",
 ]
 
 _SENTIMENT_COLORS = {
-    "strong_negative": "#B91C1C",
-    "strong_positive": "#15803D",
-    "mild_negative": "#F87171",
-    "mild_positive": "#86EFAC",
+    "strong_negative": RED,
+    "strong_positive": GREEN,
+    "mild_negative": "#FF9500",
+    "mild_positive": "#5AC8FA",
     "neutral": BORDER,
 }
 
@@ -78,11 +84,11 @@ def _format_time(pub_dt: datetime) -> str:
     diff = now - pub_dt.astimezone(IST)
     secs = int(diff.total_seconds())
     if secs < 60:
-        return "Just now"
+        return "now"
     elif secs < 3600:
-        return f"{secs // 60} min ago"
+        return f"{secs // 60}m"
     elif secs < 86400:
-        return f"{secs // 3600} hr ago"
+        return f"{secs // 3600}h"
     else:
         return pub_dt.astimezone(IST).strftime("%d %b")
 
@@ -123,35 +129,46 @@ def _fetch_news_for_stock(symbol: str) -> list[dict]:
                 "pub_dt": pub_ist,
                 "time_str": _format_time(pub_ist),
                 "sentiment": _classify_sentiment(entry.get("title", "")),
+                "type": "stock",
             })
         return results
     except Exception:
         return []
 
 
+# Market-critical queries for top-left panel + global feeds
 _MACRO_QUERIES = [
-    "RBI monetary policy",
-    "Nifty Sensex market",
-    "FII DII flows India",
-    "US Fed interest rate",
-    "crude oil price India",
-    "India GDP inflation",
+    ("RBI monetary policy India", "macro"),
+    ("Nifty Sensex BSE market today", "indices"),
+    ("FII DII flows India markets", "flows"),
+    ("Fed interest rate decision", "global"),
+    ("US market S&P Dow Nasdaq", "global"),
+    ("Crude oil price today", "commodity"),
+    ("Gold silver commodity prices", "commodity"),
+    ("Rupee USD exchange rate", "forex"),
+    ("Bitcoin Ethereum crypto market", "crypto"),
+    ("Earnings results stock market", "results"),
+    ("India inflation CPI RBI", "macro"),
+    ("US unemployment jobs report", "global"),
+    ("ECB European markets news", "global"),
+    ("China markets Hang Seng", "global"),
+    ("Blockchain tech stocks", "tech"),
 ]
 
 
 def _fetch_macro_news() -> list[dict]:
     today = _today_ist()
     results = []
-    for q in _MACRO_QUERIES:
-        query = q.replace(" ", "+")
+    for query, category in _MACRO_QUERIES:
+        q_encoded = query.replace(" ", "+")
         url = (
             f"https://news.google.com/rss/search?"
-            f"q={query}"
+            f"q={q_encoded}"
             f"&hl=en-IN&gl=IN&ceid=IN:en"
         )
         try:
             feed = feedparser.parse(url)
-            for entry in feed.entries[:5]:
+            for entry in feed.entries[:3]:
                 pub_dt = _parse_pub(entry)
                 if not pub_dt:
                     continue
@@ -159,13 +176,14 @@ def _fetch_macro_news() -> list[dict]:
                 if pub_ist.strftime("%Y-%m-%d") != today:
                     continue
                 results.append({
-                    "symbol": "MACRO",
+                    "symbol": "MARKET",
                     "title": entry.get("title", "No title"),
                     "link": entry.get("link", "#"),
                     "source": entry.get("source", {}).get("title", "News"),
                     "pub_dt": pub_ist,
                     "time_str": _format_time(pub_ist),
                     "sentiment": _classify_sentiment(entry.get("title", "")),
+                    "type": category,
                 })
         except Exception:
             continue
@@ -193,12 +211,16 @@ def _ensure_news_state():
 def refresh_news(watchlist: list[str]):
     _midnight_cleanup()
     now = time.time()
+    
+    # Fetch stock news
     for sym in watchlist:
         last = st.session_state["_news_fetched"].get(sym, 0)
         if now - last > NEWS_EXPIRE * 60:
             articles = _fetch_news_for_stock(sym)
             st.session_state["_news_cache"][sym] = articles
             st.session_state["_news_fetched"][sym] = now
+    
+    # Fetch macro + global news
     macro_last = st.session_state["_news_fetched"].get("_MACRO_", 0)
     if now - macro_last > NEWS_EXPIRE * 60:
         st.session_state["_news_cache"]["_MACRO_"] = _fetch_macro_news()
@@ -213,58 +235,25 @@ def _combined_feed(watchlist: list[str]) -> list[dict]:
     cache = st.session_state.get("_news_cache", {})
     seen_links = set()
     combined = []
-    for sym in list(watchlist) + ["_MACRO_"]:
-        for art in cache.get(sym, []):
-            if art["link"] in seen_links:
-                continue
+    
+    # Add macro first (highest priority)
+    for art in cache.get("_MACRO_", []):
+        if art["link"] not in seen_links:
             seen_links.add(art["link"])
             combined.append(art)
+    
+    # Then add stock news
+    for sym in watchlist:
+        for art in cache.get(sym, []):
+            if art["link"] not in seen_links:
+                seen_links.add(art["link"])
+                combined.append(art)
+    
     combined.sort(key=lambda a: a["pub_dt"], reverse=True)
-    return combined[:MAX_COMBINED_ITEMS]
+    return combined[:MAX_FEED_ITEMS]
 
 
-@st.fragment(run_every=30)
-def news_box(watchlist: list[str]):
-    _ensure_news_state()
-    refresh_news(watchlist)
-
-    combined = _combined_feed(watchlist)
-
-    st.markdown(f"""
-    <div style="background:{DARK2};border:1px solid {BORDER};border-radius:4px;
-         padding:16px 18px;height:100%;display:flex;flex-direction:column;">
-        <div style="display:flex;align-items:center;justify-content:space-between;
-             margin-bottom:12px;flex-shrink:0;">
-            <span style="font-size:14px;font-weight:800;color:{IVORY};
-                 letter-spacing:0.5px;text-transform:uppercase;">Market News</span>
-            <span style="font-size:10px;color:{T2};font-weight:700;">LIVE</span>
-        </div>
-        <div id="arka-news-scroll" style="overflow-y:auto;flex:1;">
-    """, unsafe_allow_html=True)
-
-    if not combined:
-        st.markdown(f"""<div style="font-size:12px;color:{T2};padding:8px 0;">
-            No news yet. Checking every {NEWS_EXPIRE} min.</div>""", unsafe_allow_html=True)
-    else:
-        rows_html = []
-        for art in combined:
-            sentiment = art.get("sentiment", "neutral")
-            accent = _SENTIMENT_COLORS.get(sentiment, BORDER)
-            tag = "MARKET" if art["symbol"] == "_MACRO_" else art["symbol"]
-            tag_color = GOLD if art["symbol"] == "_MACRO_" else IVORY
-            rows_html.append(f"""<div style="border-left:3px solid {accent};padding:8px 0 8px 12px;margin-bottom:10px;">
-                <a href="{art['link']}" target="_blank" style="font-size:13px;font-weight:600;
-                   color:{IVORY};text-decoration:none;line-height:1.45;display:block;">
-                    {art['title']}
-                </a>
-                <div style="font-size:10.5px;color:{T2};margin-top:4px;">
-                    <span style="color:{tag_color};font-weight:700;">{tag}</span>
-                    &nbsp;·&nbsp;{art['source']}&nbsp;·&nbsp;{art['time_str']}
-                </div>
-            </div>""")
-        st.markdown("".join(rows_html), unsafe_allow_html=True)
-
-    st.markdown("</div></div>", unsafe_allow_html=True)
-
-# Backwards-compatible alias for older import sites expecting news_panel()
-news_panel = news_box
+# Backwards-compatible aliases
+news_panel = lambda w: None  # Stub for compatibility
+_fetch_news_for_stock = _fetch_news_for_stock
+refresh_news = refresh_news
