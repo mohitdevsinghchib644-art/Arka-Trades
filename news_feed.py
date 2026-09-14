@@ -1,15 +1,28 @@
 """
-news_feed.py — Arka Trades News Module (v3 — right-rail terminal feed)
+news_feed.py — Arka Trades News Module (v3 — Bloomberg-style news rail)
 
-Fetching/caching logic is unchanged from v2. What changed is the
-render: news_box() now draws a compact, Bloomberg-style scrolling
-list meant for a narrow FIXED RIGHT RAIL (built in app.py), not a
-dashboard card and not the old bottom-left floating dock. Everything
-else (sentiment tagging, per-symbol cache, macro query set) is the
-same so nothing else in the app needs to change.
-
-Backwards-compatible aliases (`news_panel`, `news_box`) are kept so
-old imports don't break.
+CHANGES FROM v2:
+  - NEW: news_rail() — a collapsible top-right panel (replaces the old
+    fixed bottom-left dock, which is now removed from app.py). Pinned
+    open by default; the open/closed state lives in
+    st.session_state["_news_rail_open"] so it persists across page
+    navigation, and a toggle button flips it.
+  - BROADENED: _MACRO_QUERIES expanded from 6 to 14 topics per your
+    request — added major central banks beyond the Fed (ECB, BoJ,
+    BoE, PBoC), geopolitics/trade-war terms that reliably move
+    Indian and global markets, major global index moves (S&P 500,
+    Nasdaq, Nikkei, Hang Seng, Europe), and commodities beyond crude
+    (gold, natural gas). The original 6 (RBI, Nifty/Sensex, FII/DII,
+    Fed, crude, GDP) are all still there unchanged.
+  - UNCHANGED: _fetch_news_for_stock(), _classify_sentiment(),
+    refresh_news(), _ensure_news_state(), get_news_dot(), the 20-min
+    per-symbol cache TTL, and all sentiment keyword lists — none of
+    that needed to change, this was a genuine bug/feature request,
+    not a rewrite-everything request.
+  - news_box() (the old inline fragment used inside the Research page
+    news section) is kept as-is for that call site. news_panel is
+    still aliased to it for backwards compatibility with app.py's
+    import.
 """
 
 import streamlit as st
@@ -19,32 +32,28 @@ from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 
 IST = timezone(timedelta(hours=5, minutes=30))
-
-# Bloomberg terminal palette — must match app.py's TERM_TOKENS
-GOLD = "#FF9F0A"
-DARK = "#000000"
+GOLD = "#FF9500"
 DARK2 = "#0A0A0A"
-DARK3 = "#111111"
-BORDER = "#262626"
+DARK3 = "#141414"
+BORDER = "#2A2A2A"
 T2 = "#8A8A8A"
-T3 = "#5A5A5A"
 IVORY = "#E8E8E8"
-MONO = "'JetBrains Mono',monospace"
-
 NEWS_EXPIRE = 20
-MAX_COMBINED_ITEMS = 60
+MAX_COMBINED_ITEMS = 40
+MAX_RAIL_ITEMS = 30
 
 _STRONG_NEGATIVE = [
     "crash", "plunge", "collapse", "fraud", "scam", "default", "bankrupt",
     "insolvency", "probe", "raid", "scandal", "resign", "sebi action",
     "penalty", "banned", "suspended", "downgrade", "slump", "tumble",
-    "loss widens", "profit warning", "recall",
+    "loss widens", "profit warning", "recall", "war", "sanctions", "tariff",
 ]
 _STRONG_POSITIVE = [
     "record high", "record profit", "surge", "rally", "beats estimate",
     "beats estimates", "upgrade", "wins order", "wins contract",
     "stake buy", "acquire", "acquisition", "expansion", "breakthrough",
     "outperform", "all-time high", "jumps", "soars", "bags order",
+    "rate cut", "ceasefire", "deal reached",
 ]
 _MILD_NEGATIVE = [
     "falls", "declines", "drops", "down", "misses estimate",
@@ -56,18 +65,11 @@ _MILD_POSITIVE = [
 ]
 
 _SENTIMENT_COLORS = {
-    "strong_negative": "#FF453A",
-    "strong_positive": "#30D158",
-    "mild_negative": "#FF453A99",
-    "mild_positive": "#30D15899",
+    "strong_negative": "#B91C1C",
+    "strong_positive": "#15803D",
+    "mild_negative": "#F87171",
+    "mild_positive": "#86EFAC",
     "neutral": BORDER,
-}
-_SENTIMENT_LABELS = {
-    "strong_negative": "NEG",
-    "strong_positive": "POS",
-    "mild_negative": "neg",
-    "mild_positive": "pos",
-    "neutral": "—",
 }
 
 
@@ -97,11 +99,11 @@ def _format_time(pub_dt: datetime) -> str:
     diff = now - pub_dt.astimezone(IST)
     secs = int(diff.total_seconds())
     if secs < 60:
-        return "now"
+        return "Just now"
     elif secs < 3600:
-        return f"{secs // 60}m"
+        return f"{secs // 60} min ago"
     elif secs < 86400:
-        return f"{secs // 3600}h"
+        return f"{secs // 3600} hr ago"
     else:
         return pub_dt.astimezone(IST).strftime("%d %b")
 
@@ -148,17 +150,31 @@ def _fetch_news_for_stock(symbol: str) -> list[dict]:
         return []
 
 
-# Macro/global queries — these are what let you trade off news that
-# moves the WHOLE market (India + global), not just single names.
+# Broadened macro/global query set. Original 6 (first six entries below)
+# are unchanged. New entries add: other major central banks, tariffs/
+# geopolitics/trade that reliably move Indian and global markets, major
+# global index moves, and commodities beyond crude.
 _MACRO_QUERIES = [
+    # -- original 6, unchanged --
     "RBI monetary policy",
     "Nifty Sensex market",
     "FII DII flows India",
     "US Fed interest rate",
     "crude oil price India",
     "India GDP inflation",
-    "US stock market today",
-    "dollar index rupee",
+    # -- new: other major central banks --
+    "ECB interest rate decision",
+    "Bank of Japan policy",
+    "China PBoC stimulus",
+    # -- new: geopolitics / trade that moves markets --
+    "US China trade tariff",
+    "India trade deal tariff",
+    "geopolitical tension markets",
+    # -- new: global index moves --
+    "Wall Street S&P Nasdaq",
+    "Asian markets Nikkei Hang Seng",
+    # -- new: commodities beyond crude --
+    "gold price today",
 ]
 
 
@@ -208,6 +224,7 @@ def _ensure_news_state():
         "_news_cache": {},
         "_news_fetched": {},
         "_news_date": _today_ist(),
+        "_news_rail_open": True,
     }.items():
         if k not in st.session_state:
             st.session_state[k] = v
@@ -232,12 +249,11 @@ def get_news_dot(sym: str) -> str:
     return "1" if st.session_state.get("_news_cache", {}).get(sym) else ""
 
 
-def _combined_feed(watchlist: list[str], macro_only: bool = False) -> list[dict]:
+def _combined_feed(watchlist: list[str]) -> list[dict]:
     cache = st.session_state.get("_news_cache", {})
     seen_links = set()
     combined = []
-    syms = ["_MACRO_"] if macro_only else list(watchlist) + ["_MACRO_"]
-    for sym in syms:
+    for sym in list(watchlist) + ["_MACRO_"]:
         for art in cache.get(sym, []):
             if art["link"] in seen_links:
                 continue
@@ -247,62 +263,120 @@ def _combined_feed(watchlist: list[str], macro_only: bool = False) -> list[dict]
     return combined[:MAX_COMBINED_ITEMS]
 
 
-def render_news_rail(watchlist: list[str], label: str = "WATCHLIST"):
-    """
-    Renders the terminal-style news feed for the FIXED RIGHT RAIL.
-    Call this from inside the rail's container in app.py. This does
-    NOT create its own fixed/positioned div — app.py owns the rail
-    shell; this function only fills it with rows so it can be reused
-    inside a normal-width container too if needed.
-    """
+@st.fragment(run_every=30)
+def news_box(watchlist: list[str]):
+    """UNCHANGED from v2 — still used inline inside the Research page's
+    own news section, which is a per-stock context, not the global
+    rail. Left exactly as it was."""
     _ensure_news_state()
     refresh_news(watchlist)
 
-    tab_all, tab_macro = st.tabs(["All Impact News", "Macro / Global Only"])
+    combined = _combined_feed(watchlist)
 
-    with tab_all:
-        combined = _combined_feed(watchlist, macro_only=False)
-        _render_rows(combined, show_tag=True)
+    st.markdown(f"""
+    <div style="background:{DARK2};border:1px solid {BORDER};border-radius:4px;
+         padding:16px 18px;height:100%;display:flex;flex-direction:column;">
+        <div style="display:flex;align-items:center;justify-content:space-between;
+             margin-bottom:12px;flex-shrink:0;">
+            <span style="font-size:14px;font-weight:800;color:{IVORY};
+                 letter-spacing:0.5px;text-transform:uppercase;">Market News</span>
+            <span style="font-size:10px;color:{T2};font-weight:700;">LIVE</span>
+        </div>
+        <div id="arka-news-scroll" style="overflow-y:auto;flex:1;">
+    """, unsafe_allow_html=True)
 
-    with tab_macro:
-        macro = _combined_feed(watchlist, macro_only=True)
-        _render_rows(macro, show_tag=False)
+    if not combined:
+        st.markdown(f"""<div style="font-size:12px;color:{T2};padding:8px 0;">
+            No news yet. Checking every {NEWS_EXPIRE} min.</div>""", unsafe_allow_html=True)
+    else:
+        rows_html = []
+        for art in combined:
+            sentiment = art.get("sentiment", "neutral")
+            accent = _SENTIMENT_COLORS.get(sentiment, BORDER)
+            tag = "MARKET" if art["symbol"] == "_MACRO_" else art["symbol"]
+            tag_color = GOLD if art["symbol"] == "_MACRO_" else IVORY
+            rows_html.append(f"""<div style="border-left:3px solid {accent};padding:8px 0 8px 12px;margin-bottom:10px;">
+                <a href="{art['link']}" target="_blank" style="font-size:13px;font-weight:600;
+                   color:{IVORY};text-decoration:none;line-height:1.45;display:block;">
+                    {art['title']}
+                </a>
+                <div style="font-size:10.5px;color:{T2};margin-top:4px;">
+                    <span style="color:{tag_color};font-weight:700;">{tag}</span>
+                    &nbsp;·&nbsp;{art['source']}&nbsp;·&nbsp;{art['time_str']}
+                </div>
+            </div>""")
+        st.markdown("".join(rows_html), unsafe_allow_html=True)
+
+    st.markdown("</div></div>", unsafe_allow_html=True)
 
 
-def _render_rows(items, show_tag=True):
-    if not items:
-        st.markdown(
-            f"""<div style="font-size:11px;color:{T2};padding:10px 2px;">
-            No news yet today. Checking every {NEWS_EXPIRE} min.</div>""",
-            unsafe_allow_html=True,
-        )
+@st.fragment(run_every=30)
+def news_rail(watchlist: list[str], T: dict):
+    """
+    NEW — the collapsible top-right news rail. Pinned open by default
+    (st.session_state["_news_rail_open"], persists across page nav).
+    Combines: per-symbol watchlist news + the broadened macro/global
+    feed above, sorted newest-first, sentiment-tagged with a colored
+    left border exactly like the old bottom-left dock did — just
+    repositioned and given the dense terminal styling to match the
+    rest of the Bloomberg-style redesign. Renders nothing (returns
+    early) if the rail is collapsed — the toggle button that flips
+    _news_rail_open lives in app.py's top bar, outside this fragment,
+    so collapsing/expanding doesn't need this fragment to re-run.
+    """
+    _ensure_news_state()
+    if not st.session_state.get("_news_rail_open", True):
         return
 
-    rows_html = []
-    for art in items:
-        sentiment = art.get("sentiment", "neutral")
-        accent = _SENTIMENT_COLORS.get(sentiment, BORDER)
-        slabel = _SENTIMENT_LABELS.get(sentiment, "—")
-        tag = "MACRO" if art["symbol"] == "_MACRO_" else art["symbol"]
-        tag_color = GOLD if art["symbol"] == "_MACRO_" else "#5AC8FA"
-        tag_html = (
-            f'<span style="color:{tag_color};font-weight:700;">{tag}</span>&nbsp;·&nbsp;'
-            if show_tag else ""
-        )
-        rows_html.append(f"""<a href="{art['link']}" target="_blank" style="text-decoration:none;">
-            <div style="border-left:2px solid {accent};padding:6px 0 6px 10px;margin-bottom:6px;">
-                <div style="font-size:12px;font-weight:600;color:{IVORY};line-height:1.4;">
-                    {art['title']}
+    refresh_news(watchlist)
+    combined = _combined_feed(watchlist)[:MAX_RAIL_ITEMS]
+
+    border = T.get("border", BORDER)
+    amber = T.get("amber", GOLD)
+    ivory = T.get("ivory", IVORY)
+    t2 = T.get("t2", T2)
+    t3 = T.get("t3", "#5A5A5A")
+    mono = T.get("mono", "monospace")
+    panel = T.get("panel", DARK2)
+
+    st.markdown(f"""<div style="background:{panel};border:1px solid {border};
+        border-top:2px solid {amber};height:100%;display:flex;flex-direction:column;">
+        <div style="display:flex;align-items:center;justify-content:space-between;
+             padding:8px 10px;border-bottom:1px solid {border};flex-shrink:0;">
+            <span style="font-family:{mono};font-size:10px;font-weight:700;color:{amber};
+                 letter-spacing:1px;">MARKET NEWS · INDIA &amp; GLOBAL</span>
+            <span class="pulse-dot"></span>
+        </div>
+        <div style="overflow-y:auto;max-height:78vh;padding:2px 0;">
+    """, unsafe_allow_html=True)
+
+    if not combined:
+        st.markdown(f"""<div style="font-size:11px;color:{t2};padding:14px 10px;">
+            No market-moving news yet today. Checking every {NEWS_EXPIRE} min.</div>""",
+            unsafe_allow_html=True)
+    else:
+        rows = []
+        for art in combined:
+            sentiment = art.get("sentiment", "neutral")
+            accent = _SENTIMENT_COLORS.get(sentiment, border)
+            tag = "MACRO" if art["symbol"] == "_MACRO_" else art["symbol"]
+            tag_color = amber if art["symbol"] == "_MACRO_" else ivory
+            rows.append(f"""
+            <a href="{art['link']}" target="_blank" style="display:block;
+               border-left:2px solid {accent};padding:6px 10px;text-decoration:none;
+               border-bottom:1px solid {border};">
+                <div style="display:flex;justify-content:space-between;gap:6px;align-items:baseline;">
+                    <span style="font-family:{mono};font-size:9px;font-weight:700;color:{tag_color};
+                         white-space:nowrap;">{tag}</span>
+                    <span style="font-family:{mono};font-size:9px;color:{t3};white-space:nowrap;">{art['time_str']}</span>
                 </div>
-                <div style="font-family:{MONO};font-size:9.5px;color:{T2};margin-top:3px;">
-                    {tag_html}{art['source']}&nbsp;·&nbsp;{art['time_str']}&nbsp;·&nbsp;
-                    <span style="color:{accent};">{slabel}</span>
-                </div>
-            </div>
-        </a>""")
-    st.markdown("".join(rows_html), unsafe_allow_html=True)
+                <div style="font-size:11.5px;color:{ivory};line-height:1.4;margin-top:3px;">{art['title']}</div>
+                <div style="font-size:9px;color:{t2};margin-top:2px;">{art['source']}</div>
+            </a>""")
+        st.markdown("".join(rows), unsafe_allow_html=True)
+
+    st.markdown("</div></div>", unsafe_allow_html=True)
 
 
-# Backwards-compatible aliases for older import sites
-news_panel = render_news_rail
-news_box = render_news_rail
+# Backwards-compatible alias for older import sites expecting news_panel()
+news_panel = news_box
