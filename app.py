@@ -60,7 +60,11 @@ def db_save_watchlist(symbols: list):
 def db_load_watchlist() -> list:
     try:
         res = supabase.table("watchlist").select("symbol").execute()
-        return [r["symbol"] for r in res.data] if res.data else []
+        # dict.fromkeys dedupes while preserving order — a stale duplicate
+        # row in Supabase (e.g. from a non-atomic save) must never reach
+        # the UI, since sym-keyed widgets downstream (alerts page) will
+        # crash with StreamlitDuplicateElementKey on a repeated symbol.
+        return list(dict.fromkeys(r["symbol"] for r in res.data)) if res.data else []
     except: return []
 
 def db_save_alert(symbol: str, alert_type: str, price: float):
@@ -97,7 +101,7 @@ def db_save_admin_watchlist(symbols: list):
 def db_load_admin_watchlist() -> list:
     try:
         res = supabase.table("admin_watchlist").select("symbol").execute()
-        return [r["symbol"] for r in res.data] if res.data else []
+        return list(dict.fromkeys(r["symbol"] for r in res.data)) if res.data else []
     except: return []
 
 st.set_page_config(page_title="Arka Trades", layout="wide", page_icon="📈", initial_sidebar_state="collapsed")
@@ -180,7 +184,7 @@ def icon_box(name, color=None, size=32):
 for k, v in {"logged_in":False,"disclaimer_done":False,"show_login":False,"page":"home",
     "profile":{"name":"Trader","email":"","phone":""},"profile_photo":None,"watchlist":[],
     "admin_watchlist":[],"alerts":{},"alert_fired":set(),"db_loaded":False,"is_admin":False,
-    "active_news_source":"admin"}.items():
+    "active_news_source":"admin","show_news_rail":True}.items():
     if k not in st.session_state: st.session_state[k] = v
 
 if not st.session_state.db_loaded:
@@ -806,7 +810,19 @@ def render_top_ticker():
 
 render_top_ticker()
 
-left, center, right_rail = st.columns([0.9, 3.3, 1.1])
+# ── News rail show/hide toggle ──────────────────────────────
+tg1, tg2 = st.columns([9, 1])
+with tg2:
+    toggle_label = "Hide News ▸" if st.session_state.show_news_rail else "◂ Show News"
+    if st.button(toggle_label, key="toggle_news_rail", use_container_width=True):
+        st.session_state.show_news_rail = not st.session_state.show_news_rail
+        st.rerun()
+
+if st.session_state.show_news_rail:
+    left, center, right_rail = st.columns([0.9, 3.3, 1.1])
+else:
+    left, center = st.columns([0.9, 4.4])
+    right_rail = None
 
 PAGE_ACCENTS = {"home":AMBER,"scanner":CYAN,"alerts":AMBER,"analysis":PURPLE,
     "smart_scan":GREEN,"breadth":PINK,"heatmap":T2,"autoalert":T2,"profile":AMBER,
@@ -1141,6 +1157,13 @@ with center:
             <div style="font-size:12px;color:{T2};line-height:1.6;">Create conditional alerts on any stock in your watchlists. When the price crosses your level, a notification is pushed to Telegram instantly.</div></div>""", unsafe_allow_html=True)
 
         def render_alert_rows(watchlist, key_suffix=""):
+            # FIX: every widget below is keyed on the raw symbol
+            # (f"sa_{sym}_{key_suffix}" etc). A duplicate symbol in
+            # `watchlist` — even one stale row — collides on the second
+            # occurrence and crashes the whole page with
+            # StreamlitDuplicateElementKey. Dedupe defensively here too,
+            # on top of the dedupe now applied at both DB load points.
+            watchlist = list(dict.fromkeys(watchlist))
             st.markdown(f"""<div style="display:grid;grid-template-columns:2fr 1.2fr 1.5fr 1.2fr;gap:8px;padding:8px 14px;font-size:9px;font-weight:700;letter-spacing:1px;color:{T2};text-transform:uppercase;border-bottom:1px solid {BORDER};">
                 <span>Symbol</span><span>Status</span><span>Condition</span><span>Level</span></div>""", unsafe_allow_html=True)
             for sym in watchlist:
@@ -1311,21 +1334,24 @@ with center:
 # Replaces the old bottom-left floating dock entirely. Shows the
 # combined watchlist + macro/global feed so you can trade off news
 # that moves individual names AND the broader Indian/global market.
+# Hidden entirely (columns collapse to nav+content) when the person
+# clicks "Hide News" in the toggle above the ticker strip.
 # ═══════════════════════════════════════════════════════════════════
-with right_rail:
-    st.markdown(f"""<div style="position:sticky;top:8px;" id="arka-news-rail-col">
-        <div style="display:flex;align-items:center;justify-content:space-between;
-             padding:12px 4px 8px;border-bottom:1px solid {BORDER};margin-bottom:8px;">
-            <span style="font-family:{MONO};font-size:11px;font-weight:800;color:{AMBER};letter-spacing:1.5px;">MARKET NEWS</span>
-            <span class="pulse-dot"></span>
-        </div>
-        <div id="news-rail-inner">""", unsafe_allow_html=True)
+if right_rail is not None:
+    with right_rail:
+        st.markdown(f"""<div style="position:sticky;top:8px;" id="arka-news-rail-col">
+            <div style="display:flex;align-items:center;justify-content:space-between;
+                 padding:12px 4px 8px;border-bottom:1px solid {BORDER};margin-bottom:8px;">
+                <span style="font-family:{MONO};font-size:11px;font-weight:800;color:{AMBER};letter-spacing:1.5px;">MARKET NEWS</span>
+                <span class="pulse-dot"></span>
+            </div>
+            <div id="news-rail-inner">""", unsafe_allow_html=True)
 
-    watchlist_for_news, rail_label = _news_watchlist_for_rail()
-    if not watchlist_for_news:
-        st.markdown(f"""<div style="font-size:11px;color:{T2};padding:8px 4px;">
-            Upload a watchlist in Scanner to see stock-specific news here.
-            Macro/global news still updates below.</div>""", unsafe_allow_html=True)
-    render_news_rail(watchlist_for_news, label=rail_label)
+        watchlist_for_news, rail_label = _news_watchlist_for_rail()
+        if not watchlist_for_news:
+            st.markdown(f"""<div style="font-size:11px;color:{T2};padding:8px 4px;">
+                Upload a watchlist in Scanner to see stock-specific news here.
+                Macro/global news still updates below.</div>""", unsafe_allow_html=True)
+        render_news_rail(watchlist_for_news, label=rail_label)
 
-    st.markdown("</div></div>", unsafe_allow_html=True)
+        st.markdown("</div></div>", unsafe_allow_html=True)
