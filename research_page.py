@@ -1,39 +1,39 @@
 """
-research_page.py — Arka Trades Research Terminal (v5 — matches AI Studio
-reference layout, built on real confirmed-working data sources)
+research_page.py — Arka Trades Research Terminal (v6)
 
-This patch fixes an f-string quoting bug introduced in the previous
-update that caused a TypeError while rendering the stat cells. It
-also preserves the earlier resilience improvements.
+CHANGES FROM v5:
+  - The actual "No data rows parsed" bug lived entirely in
+    screener_scraper.py (a pandas 3.0 NaN-handling crash inside table
+    header matching) — nothing in this file caused it. See
+    screener_scraper.py's module docstring for the root cause.
+  - FIXED (speed): _render_hot_tickers() was calling resolve_symbol()
+    + get_summary() for all 7 hot tickers on EVERY Streamlit rerun —
+    up to 14 sequential blocking HTTP requests just to draw the top
+    button row, before the user had even picked a stock. Prices for
+    those buttons are now cached in st.session_state with a 5-minute
+    TTL, so they're fetched once per 5 minutes instead of once per
+    rerun. This is the main contributor to "taking a lot of time to
+    load" — Streamlit reruns the whole script on most interactions
+    (typing in the search box, clicking a tab, etc.), and each of
+    those reruns was re-fetching all 7 tickers from scratch.
+  - UNCHANGED: everything else — chart rendering, factors panel, peer
+    comparison, tab layout, news feed — kept exactly as in v5.
 """
 
 import re
+import time
 import streamlit as st
 from datetime import datetime, timezone, timedelta
 
-# Try to import the optional streamlit_option_menu package. If it's not
-# available in the environment (ModuleNotFoundError on Streamlit Cloud
-# or other hosts), provide a small fallback that uses st.radio so the
-# UI still works.
 try:
     from streamlit_option_menu import option_menu
 except Exception:
     def option_menu(menu_title=None, options=None, icons=None, default_index=0,
                     orientation="horizontal", styles=None, **kwargs):
-        """Fallback option_menu implemented with st.radio.
-
-        - Ignores icons and styles but preserves the expected return value
-          (the selected option string). Uses a deterministic key based on
-          the menu_title to avoid widget collisions across reruns.
-        - This keeps the research page functional without requiring the
-          external dependency to be installed.
-        """
         key = "option_menu_fallback_" + (menu_title or "_")
         if not options:
             return None
-        # Ensure default_index in bounds
         idx = default_index if 0 <= default_index < len(options) else 0
-        # Use radio for a simple horizontal/vertical fallback
         return st.radio(menu_title if menu_title else "", options, index=idx, key=key)
 
 
@@ -46,6 +46,10 @@ from screener_scraper import (
 IST = timezone(timedelta(hours=5, minutes=30))
 
 _HOT_TICKERS = ["RELIANCE", "HDFCBANK", "TCS", "INFY", "ICICIBANK", "TATAMOTORS", "SBIN"]
+_HOT_TICKER_TTL_SECONDS = 300  # 5 minutes — hot-ticker button prices don't
+                                 # need to be live-live, just fresh-ish, and
+                                 # this is what stops every rerun from
+                                 # re-fetching all 7 from Screener.
 
 
 # ── Helper functions ──────────────────────────────────────────
@@ -115,19 +119,42 @@ def _render_data_table(periods, rows, T, highlight_labels=None):
     """, unsafe_allow_html=True)
 
 
-# ── NEW: Hot Tickers strip ────────────────────────────────────
+# ── Hot Tickers strip (now cached) ────────────────────────────
+
+def _get_hot_ticker_prices(T: dict) -> dict:
+    """
+    Returns {symbol: price_str} for _HOT_TICKERS, using a
+    session_state cache with a TTL so repeated Streamlit reruns don't
+    re-fetch all 7 tickers from Screener every time. Previously this
+    logic lived inline in _render_hot_tickers() and ran unconditionally
+    on every rerun — that was the single biggest contributor to slow
+    page loads, since it happened before the user even selected a
+    stock to research.
+    """
+    cache = st.session_state.get("_hot_ticker_cache")
+    now = time.time()
+    if cache and (now - cache.get("fetched_at", 0)) < _HOT_TICKER_TTL_SECONDS:
+        return cache["prices"]
+
+    prices = {}
+    for sym in _HOT_TICKERS:
+        price_str = "···"
+        res = resolve_symbol(sym)
+        if res:
+            summary = get_summary(sym, url=res["url"])
+            sfields = summary.get("data") or {}
+            price_str = sfields.get("current_price", "···")
+        prices[sym] = price_str
+
+    st.session_state["_hot_ticker_cache"] = {"fetched_at": now, "prices": prices}
+    return prices
+
 
 def _render_hot_tickers(T: dict):
+    prices = _get_hot_ticker_prices(T)
     cols = st.columns(len(_HOT_TICKERS))
     for i, sym in enumerate(_HOT_TICKERS):
         with cols[i]:
-            res = resolve_symbol(sym)
-            price_str = "···"
-            arrow_color = T["t3"]
-            if res:
-                summary = get_summary(sym, url=res["url"])
-                sfields = summary.get("data") or {}
-                price_str = sfields.get("current_price", "···")
             is_active = st.session_state.get("research_last_query", "").upper() == sym
             btn_label = f"{sym}"
             if st.button(btn_label, key=f"hot_{sym}", use_container_width=True,
@@ -240,7 +267,7 @@ def _render_factors_panel(symbol: str, full_research: dict, T: dict):
                  unsafe_allow_html=True)
 
 
-# ── NEW: Peer Comparison table ────────────────────────────────
+# ── Peer Comparison table ────────────────────────────────
 
 def _render_peer_comparison(symbol: str, T: dict):
     result = get_peer_comparison(symbol)
@@ -317,7 +344,6 @@ def render_research_page(T: dict, news_fetch_fn=None):
                 st.session_state["research_data"] = get_full_research(active_query)
             except Exception as e:
                 st.error(f"Full research fetch failed for {active_query.upper()}. Falling back to summary.")
-                # Attempt best-effort resolve + summary
                 try:
                     res = resolve_symbol(active_query)
                 except Exception:
@@ -346,7 +372,6 @@ def render_research_page(T: dict, news_fetch_fn=None):
 
     data = st.session_state["research_data"]
 
-    # Debug dump when debug=1 in query params or session is admin
     try:
         if st.experimental_get_query_params().get("debug") == ["1"] or st.session_state.get("is_admin"):
             st.markdown("#### DEBUG: raw research_data")
@@ -362,7 +387,6 @@ def render_research_page(T: dict, news_fetch_fn=None):
     sfields = summary.get("data") or {}
     current_price = sfields.get("current_price", "—")
 
-    # ── Stat row (Market Cap / Price / P/E / Book Value / Div Yield / ROCE / ROE / Face Value) ──
     if sfields:
         stat_order = [
             ("Market Cap", sfields.get("market_cap", "—"), "₹", "Cr"),
@@ -395,7 +419,6 @@ def render_research_page(T: dict, news_fetch_fn=None):
         st.markdown(f'<div style="padding:10px;color:{T["t3"]};font-size:11px;border:1px solid {T["border"]};">Key stats unavailable.</div>',
                      unsafe_allow_html=True)
 
-    # ── Chart (left, wide) + Factors (right, narrow) ──────────────
     st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
     chart_col, factors_col = st.columns([2.5, 1])
     with chart_col:
@@ -405,7 +428,6 @@ def render_research_page(T: dict, news_fetch_fn=None):
                     unsafe_allow_html=True)
         _render_factors_panel(data["symbol"], data, T)
 
-    # ── Tab strip ──────────────────────────────────────────────────
     st.markdown("<div style='height:24px;'></div>", unsafe_allow_html=True)
     selected_tab = option_menu(
         menu_title=None,
