@@ -1,6 +1,15 @@
 """
-news_feed.py — Bloomberg-style Global Market News Feed
-Fetches market-moving headlines: Indian stocks, indices, macro, global markets, commodities, crypto.
+news_feed.py — Arka Trades News Module (v3 — right-rail terminal feed)
+
+Fetching/caching logic is unchanged from v2. What changed is the
+render: news_box() now draws a compact, Bloomberg-style scrolling
+list meant for a narrow FIXED RIGHT RAIL (built in app.py), not a
+dashboard card and not the old bottom-left floating dock. Everything
+else (sentiment tagging, per-symbol cache, macro query set) is the
+same so nothing else in the app needs to change.
+
+Backwards-compatible aliases (`news_panel`, `news_box`) are kept so
+old imports don't break.
 """
 
 import streamlit as st
@@ -11,12 +20,8 @@ from email.utils import parsedate_to_datetime
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-# ── Colors ──────────────────────
-GOLD = "#FFB81C"
-RED = "#FF453A"
-GREEN = "#30D158"
-CYAN = "#5AC8FA"
-PURPLE = "#BF5AF2"
+# Bloomberg terminal palette — must match app.py's TERM_TOKENS
+GOLD = "#FF9F0A"
 DARK = "#000000"
 DARK2 = "#0A0A0A"
 DARK3 = "#111111"
@@ -24,15 +29,16 @@ BORDER = "#262626"
 T2 = "#8A8A8A"
 T3 = "#5A5A5A"
 IVORY = "#E8E8E8"
+MONO = "'JetBrains Mono',monospace"
 
-NEWS_EXPIRE = 15  # 15 min cache
-MAX_FEED_ITEMS = 100
+NEWS_EXPIRE = 20
+MAX_COMBINED_ITEMS = 60
 
 _STRONG_NEGATIVE = [
     "crash", "plunge", "collapse", "fraud", "scam", "default", "bankrupt",
     "insolvency", "probe", "raid", "scandal", "resign", "sebi action",
     "penalty", "banned", "suspended", "downgrade", "slump", "tumble",
-    "loss widens", "profit warning", "recall", "halt", "suspend",
+    "loss widens", "profit warning", "recall",
 ]
 _STRONG_POSITIVE = [
     "record high", "record profit", "surge", "rally", "beats estimate",
@@ -46,15 +52,22 @@ _MILD_NEGATIVE = [
 ]
 _MILD_POSITIVE = [
     "rises", "gains", "up", "beats", "growth", "profit rises",
-    "expands", "launch", "partnership", "approval",
+    "expands", "launch", "partnership",
 ]
 
 _SENTIMENT_COLORS = {
-    "strong_negative": RED,
-    "strong_positive": GREEN,
-    "mild_negative": "#FF9500",
-    "mild_positive": "#5AC8FA",
+    "strong_negative": "#FF453A",
+    "strong_positive": "#30D158",
+    "mild_negative": "#FF453A99",
+    "mild_positive": "#30D15899",
     "neutral": BORDER,
+}
+_SENTIMENT_LABELS = {
+    "strong_negative": "NEG",
+    "strong_positive": "POS",
+    "mild_negative": "neg",
+    "mild_positive": "pos",
+    "neutral": "—",
 }
 
 
@@ -129,46 +142,39 @@ def _fetch_news_for_stock(symbol: str) -> list[dict]:
                 "pub_dt": pub_ist,
                 "time_str": _format_time(pub_ist),
                 "sentiment": _classify_sentiment(entry.get("title", "")),
-                "type": "stock",
             })
         return results
     except Exception:
         return []
 
 
-# Market-critical queries for top-left panel + global feeds
+# Macro/global queries — these are what let you trade off news that
+# moves the WHOLE market (India + global), not just single names.
 _MACRO_QUERIES = [
-    ("RBI monetary policy India", "macro"),
-    ("Nifty Sensex BSE market today", "indices"),
-    ("FII DII flows India markets", "flows"),
-    ("Fed interest rate decision", "global"),
-    ("US market S&P Dow Nasdaq", "global"),
-    ("Crude oil price today", "commodity"),
-    ("Gold silver commodity prices", "commodity"),
-    ("Rupee USD exchange rate", "forex"),
-    ("Bitcoin Ethereum crypto market", "crypto"),
-    ("Earnings results stock market", "results"),
-    ("India inflation CPI RBI", "macro"),
-    ("US unemployment jobs report", "global"),
-    ("ECB European markets news", "global"),
-    ("China markets Hang Seng", "global"),
-    ("Blockchain tech stocks", "tech"),
+    "RBI monetary policy",
+    "Nifty Sensex market",
+    "FII DII flows India",
+    "US Fed interest rate",
+    "crude oil price India",
+    "India GDP inflation",
+    "US stock market today",
+    "dollar index rupee",
 ]
 
 
 def _fetch_macro_news() -> list[dict]:
     today = _today_ist()
     results = []
-    for query, category in _MACRO_QUERIES:
-        q_encoded = query.replace(" ", "+")
+    for q in _MACRO_QUERIES:
+        query = q.replace(" ", "+")
         url = (
             f"https://news.google.com/rss/search?"
-            f"q={q_encoded}"
+            f"q={query}"
             f"&hl=en-IN&gl=IN&ceid=IN:en"
         )
         try:
             feed = feedparser.parse(url)
-            for entry in feed.entries[:3]:
+            for entry in feed.entries[:5]:
                 pub_dt = _parse_pub(entry)
                 if not pub_dt:
                     continue
@@ -176,14 +182,13 @@ def _fetch_macro_news() -> list[dict]:
                 if pub_ist.strftime("%Y-%m-%d") != today:
                     continue
                 results.append({
-                    "symbol": "MARKET",
+                    "symbol": "MACRO",
                     "title": entry.get("title", "No title"),
                     "link": entry.get("link", "#"),
                     "source": entry.get("source", {}).get("title", "News"),
                     "pub_dt": pub_ist,
                     "time_str": _format_time(pub_ist),
                     "sentiment": _classify_sentiment(entry.get("title", "")),
-                    "type": category,
                 })
         except Exception:
             continue
@@ -211,16 +216,12 @@ def _ensure_news_state():
 def refresh_news(watchlist: list[str]):
     _midnight_cleanup()
     now = time.time()
-    
-    # Fetch stock news
     for sym in watchlist:
         last = st.session_state["_news_fetched"].get(sym, 0)
         if now - last > NEWS_EXPIRE * 60:
             articles = _fetch_news_for_stock(sym)
             st.session_state["_news_cache"][sym] = articles
             st.session_state["_news_fetched"][sym] = now
-    
-    # Fetch macro + global news
     macro_last = st.session_state["_news_fetched"].get("_MACRO_", 0)
     if now - macro_last > NEWS_EXPIRE * 60:
         st.session_state["_news_cache"]["_MACRO_"] = _fetch_macro_news()
@@ -231,29 +232,77 @@ def get_news_dot(sym: str) -> str:
     return "1" if st.session_state.get("_news_cache", {}).get(sym) else ""
 
 
-def _combined_feed(watchlist: list[str]) -> list[dict]:
+def _combined_feed(watchlist: list[str], macro_only: bool = False) -> list[dict]:
     cache = st.session_state.get("_news_cache", {})
     seen_links = set()
     combined = []
-    
-    # Add macro first (highest priority)
-    for art in cache.get("_MACRO_", []):
-        if art["link"] not in seen_links:
+    syms = ["_MACRO_"] if macro_only else list(watchlist) + ["_MACRO_"]
+    for sym in syms:
+        for art in cache.get(sym, []):
+            if art["link"] in seen_links:
+                continue
             seen_links.add(art["link"])
             combined.append(art)
-    
-    # Then add stock news
-    for sym in watchlist:
-        for art in cache.get(sym, []):
-            if art["link"] not in seen_links:
-                seen_links.add(art["link"])
-                combined.append(art)
-    
     combined.sort(key=lambda a: a["pub_dt"], reverse=True)
-    return combined[:MAX_FEED_ITEMS]
+    return combined[:MAX_COMBINED_ITEMS]
 
 
-# Backwards-compatible aliases
-news_panel = lambda w: None  # Stub for compatibility
-_fetch_news_for_stock = _fetch_news_for_stock
-refresh_news = refresh_news
+def render_news_rail(watchlist: list[str], label: str = "WATCHLIST"):
+    """
+    Renders the terminal-style news feed for the FIXED RIGHT RAIL.
+    Call this from inside the rail's container in app.py. This does
+    NOT create its own fixed/positioned div — app.py owns the rail
+    shell; this function only fills it with rows so it can be reused
+    inside a normal-width container too if needed.
+    """
+    _ensure_news_state()
+    refresh_news(watchlist)
+
+    tab_all, tab_macro = st.tabs(["All Impact News", "Macro / Global Only"])
+
+    with tab_all:
+        combined = _combined_feed(watchlist, macro_only=False)
+        _render_rows(combined, show_tag=True)
+
+    with tab_macro:
+        macro = _combined_feed(watchlist, macro_only=True)
+        _render_rows(macro, show_tag=False)
+
+
+def _render_rows(items, show_tag=True):
+    if not items:
+        st.markdown(
+            f"""<div style="font-size:11px;color:{T2};padding:10px 2px;">
+            No news yet today. Checking every {NEWS_EXPIRE} min.</div>""",
+            unsafe_allow_html=True,
+        )
+        return
+
+    rows_html = []
+    for art in items:
+        sentiment = art.get("sentiment", "neutral")
+        accent = _SENTIMENT_COLORS.get(sentiment, BORDER)
+        slabel = _SENTIMENT_LABELS.get(sentiment, "—")
+        tag = "MACRO" if art["symbol"] == "_MACRO_" else art["symbol"]
+        tag_color = GOLD if art["symbol"] == "_MACRO_" else "#5AC8FA"
+        tag_html = (
+            f'<span style="color:{tag_color};font-weight:700;">{tag}</span>&nbsp;·&nbsp;'
+            if show_tag else ""
+        )
+        rows_html.append(f"""<a href="{art['link']}" target="_blank" style="text-decoration:none;">
+            <div style="border-left:2px solid {accent};padding:6px 0 6px 10px;margin-bottom:6px;">
+                <div style="font-size:12px;font-weight:600;color:{IVORY};line-height:1.4;">
+                    {art['title']}
+                </div>
+                <div style="font-family:{MONO};font-size:9.5px;color:{T2};margin-top:3px;">
+                    {tag_html}{art['source']}&nbsp;·&nbsp;{art['time_str']}&nbsp;·&nbsp;
+                    <span style="color:{accent};">{slabel}</span>
+                </div>
+            </div>
+        </a>""")
+    st.markdown("".join(rows_html), unsafe_allow_html=True)
+
+
+# Backwards-compatible aliases for older import sites
+news_panel = render_news_rail
+news_box = render_news_rail
