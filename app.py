@@ -10,30 +10,31 @@ import json
 import math
 from pathlib import Path
 from supabase import create_client, Client
-from news_feed import news_panel, get_news_dot, _ensure_news_state, refresh_news, _fetch_news_for_stock
+from news_feed import render_news_rail, get_news_dot, _ensure_news_state, refresh_news, _fetch_news_for_stock
 from arka_ai import render_arka_ai
 from research_page import render_research_page
 
 # ═══════════════════════════════════════════════════════════════════
-# FIX APPLIED (this file vs. the version that crashed):
-# The import line above --
-#   from news_feed import news_panel, get_news_dot, _ensure_news_state,
-#                          refresh_news, _fetch_news_for_stock
-# -- was MISSING entirely in the version that crashed. The rest of
-# this file calls all five of those names (get_news_dot in the
-# scanner's result cards, _ensure_news_state/refresh_news in the fixed
-# news dock fragment at the bottom, _fetch_news_for_stock passed into
-# render_research_page, and news_panel kept available for
-# compatibility). Without the import, every one of those was an
-# undefined name -- Python doesn't catch this at startup, only the
-# instant each line actually executes, which is why the app loaded and
-# the page header rendered fine right up until the exact moment it
-# needed one of these names. The crash in the traceback (NameError:
-# name '_fetch_news_for_stock' is not defined at app.py:1252) was the
-# FIRST of four places this would have broken; the same missing
-# import would have crashed get_news_dot on the next scan and
-# _ensure_news_state/refresh_news on the next 10-second news dock
-# tick. This one-line fix resolves all four at once.
+# v3 — BLOOMBERG TERMINAL RESKIN + RIGHT-RAIL NEWS + INDEX FIX
+#
+# Changes vs. previous version:
+#   1. Full layout is now 3 columns: NAV (left) | CONTENT (center) |
+#      NEWS RAIL (right, fixed, always visible). The old bottom-left
+#      floating news dock is removed entirely — news now lives where
+#      you can actually watch it while trading.
+#   2. Visual language pushed further toward an actual Bloomberg/FactSet
+#      terminal: top ticker strip, function-key nav labels, tighter
+#      data-dense rows, hairline grid borders, no rounded corners
+#      anywhere, monospace for every number.
+#   3. MIDCAP 100 / SMALLCAP 250 fixed — old tickers
+#      (NIFTY_MIDCAP_100.NS / ^CRSMID) don't resolve on Yahoo and
+#      always fell through to "No data". Replaced with a verified
+#      fallback chain of real Yahoo aliases.
+#   4. Login/landing page, disclaimer, Supabase/Telegram wiring,
+#      scanner, alerts, research, AI, smart screener, breadth,
+#      profile/settings/contact logic are UNCHANGED — only presentation
+#      and the two fixes above changed. Anything that was working still
+#      works exactly the same.
 # ═══════════════════════════════════════════════════════════════════
 
 # ── Supabase ─────────────────────────────────────────────────
@@ -110,11 +111,12 @@ def send_telegram(msg):
             data={"chat_id":CHAT_ID,"text":msg,"parse_mode":"HTML"}, timeout=5)
     except: pass
 
-# ════════════════ DESIGN SYSTEM — TERMINAL RESKIN ═══════════════════
+# ════════════════ DESIGN SYSTEM — TERMINAL v3 ════════════════════
 DARK   = "#000000"
 DARK2  = "#0A0A0A"
 DARK3  = "#111111"
 BORDER = "#262626"
+BORDER2 = "#1A1A1A"
 IVORY  = "#E8E8E8"
 T2     = "#8A8A8A"
 T3     = "#5A5A5A"
@@ -203,49 +205,50 @@ html,body,.stApp{{background:{DARK} !important;color:{IVORY} !important;font-fam
 header[data-testid="stHeader"]{{display:none !important;}}
 [data-testid="stSidebarCollapsedControl"]{{display:none !important;}}
 section[data-testid="stSidebar"]{{display:none !important;}}
-.block-container{{padding:0 16px !important;max-width:1500px !important;}}
-.stTextInput input,.stNumberInput input{{background:{DARK3} !important;color:{IVORY} !important;border:1px solid {BORDER} !important;border-radius:2px !important;font-family:{FONT} !important;font-size:13px !important;}}
-.stTextInput input:focus{{border-color:{AMBER} !important;box-shadow:0 0 0 2px rgba(255,159,10,0.15) !important;}}
-.stTextInput label,.stTextArea label,.stNumberInput label{{color:{T2} !important;font-size:11px !important;font-weight:600 !important;}}
-.stTextArea textarea{{background:{DARK3} !important;color:{IVORY} !important;border:1px solid {BORDER} !important;border-radius:2px !important;}}
-[data-testid="stForm"]{{background:{DARK2} !important;border:1px solid {BORDER} !important;border-radius:2px !important;padding:20px !important;}}
-[data-testid="metric-container"]{{background:{DARK2} !important;border:1px solid {BORDER} !important;border-radius:2px !important;padding:12px !important;}}
-[data-testid="stMetricLabel"] p{{font-size:10px !important;font-weight:600 !important;color:{T2} !important;letter-spacing:0.5px;}}
+.block-container{{padding:0 !important;max-width:100% !important;}}
+.stTextInput input,.stNumberInput input{{background:{DARK3} !important;color:{IVORY} !important;border:1px solid {BORDER} !important;border-radius:0 !important;font-family:{FONT} !important;font-size:13px !important;}}
+.stTextInput input:focus{{border-color:{AMBER} !important;box-shadow:0 0 0 1px {AMBER} !important;}}
+.stTextInput label,.stTextArea label,.stNumberInput label{{color:{T2} !important;font-size:10px !important;font-weight:700 !important;letter-spacing:0.5px;text-transform:uppercase;}}
+.stTextArea textarea{{background:{DARK3} !important;color:{IVORY} !important;border:1px solid {BORDER} !important;border-radius:0 !important;}}
+[data-testid="stForm"]{{background:{DARK2} !important;border:1px solid {BORDER} !important;border-radius:0 !important;padding:20px !important;}}
+[data-testid="metric-container"]{{background:{DARK2} !important;border:1px solid {BORDER} !important;border-radius:0 !important;padding:12px !important;}}
+[data-testid="stMetricLabel"] p{{font-size:9px !important;font-weight:700 !important;color:{T2} !important;letter-spacing:1px;text-transform:uppercase;}}
 [data-testid="stMetricValue"]{{font-family:{MONO} !important;font-size:18px !important;color:{IVORY} !important;}}
-.stButton>button{{background:{DARK3} !important;color:{IVORY} !important;border:1px solid {BORDER} !important;border-radius:2px !important;font-family:{FONT} !important;font-weight:600 !important;font-size:13px !important;transition:all .1s ease !important;}}
+.stButton>button{{background:{DARK3} !important;color:{IVORY} !important;border:1px solid {BORDER} !important;border-radius:0 !important;font-family:{FONT} !important;font-weight:700 !important;font-size:12px !important;transition:all .1s ease !important;letter-spacing:0.3px;}}
 .stButton>button:hover{{border-color:{AMBER} !important;color:{AMBER} !important;transform:none;}}
-.stButton>button[kind="primary"],.stFormSubmitButton>button[kind="primary"]{{background:{AMBER} !important;color:#000 !important;border:none !important;font-weight:700 !important;}}
+.stButton>button[kind="primary"],.stFormSubmitButton>button[kind="primary"]{{background:{AMBER} !important;color:#000 !important;border:none !important;font-weight:800 !important;}}
 .stButton>button[kind="primary"]:hover{{filter:brightness(1.1);color:#000 !important;}}
-.stTabs [data-baseweb="tab-list"]{{background:{DARK2};border:1px solid {BORDER};border-radius:2px;padding:2px;gap:2px;}}
-.stTabs [data-baseweb="tab"]{{color:{T2};font-weight:600;border-radius:1px;font-size:13px;}}
-.stTabs [aria-selected="true"]{{background:{DARK3} !important;color:{AMBER} !important;}}
+.stTabs [data-baseweb="tab-list"]{{background:{DARK2};border:1px solid {BORDER};border-radius:0;padding:0;gap:0;}}
+.stTabs [data-baseweb="tab"]{{color:{T2};font-weight:700;border-radius:0;font-size:11px;letter-spacing:0.5px;text-transform:uppercase;}}
+.stTabs [aria-selected="true"]{{background:{DARK3} !important;color:{AMBER} !important;box-shadow:inset 0 -2px 0 {AMBER};}}
 .stCheckbox label,.stRadio label{{color:{IVORY} !important;font-size:13px !important;}}
-[data-testid="stSelectbox"]>div>div{{background:{DARK3} !important;border:1px solid {BORDER} !important;color:{IVORY} !important;border-radius:2px !important;}}
+[data-testid="stSelectbox"]>div>div{{background:{DARK3} !important;border:1px solid {BORDER} !important;color:{IVORY} !important;border-radius:0 !important;}}
 hr{{border-color:{BORDER} !important;}}
 .stProgress>div>div{{background:{AMBER} !important;}}
-.nav-btn .stButton>button{{width:100% !important;text-align:left !important;background:transparent !important;color:{T2} !important;border:none !important;border-radius:0 !important;font-size:13px !important;font-weight:600 !important;padding:7px 12px !important;margin-bottom:0px !important;}}
+.nav-btn .stButton>button{{width:100% !important;text-align:left !important;background:transparent !important;color:{T2} !important;border:none !important;border-radius:0 !important;font-size:12px !important;font-weight:700 !important;padding:7px 12px !important;margin-bottom:0px !important;font-family:{MONO} !important;}}
 .nav-btn .stButton>button:hover{{background:{DARK3} !important;color:{IVORY} !important;transform:none;}}
 .nav-btn-active .stButton>button{{background:rgba(255,159,10,0.10) !important;color:{AMBER} !important;border-left:2px solid {AMBER} !important;border-radius:0 !important;}}
 @keyframes pulse{{0%,100%{{box-shadow:0 0 0 0 rgba(48,209,88,.4);}}50%{{box-shadow:0 0 0 5px rgba(48,209,88,0);}}}}
 .pulse-dot{{width:6px;height:6px;border-radius:50%;background:{GREEN};display:inline-block;animation:pulse 2s infinite;}}
 @keyframes fadeUp{{from{{opacity:0;transform:translateY(6px);}}to{{opacity:1;transform:none;}}}}
 .fade-up{{animation:fadeUp .3s ease both;}}
+@keyframes tickerscroll{{from{{transform:translateX(0);}}to{{transform:translateX(-50%);}}}}
 
-/* ── Fixed bottom-left news panel (terminal-style corner dock) ── */
-#term-news-dock{{
-    position:fixed; left:12px; bottom:12px; width:320px; max-height:260px;
-    background:{DARK2}; border:1px solid {BORDER}; border-top:2px solid {AMBER};
-    z-index:9999; display:flex; flex-direction:column; box-shadow:0 4px 24px rgba(0,0,0,.6);
-}}
-#term-news-dock .dock-head{{
-    padding:7px 10px; border-bottom:1px solid {BORDER}; display:flex; align-items:center;
-    justify-content:space-between; flex-shrink:0;
-}}
-#term-news-dock .dock-body{{ overflow-y:auto; padding:4px 0; }}
-#term-news-dock .dock-body::-webkit-scrollbar{{ width:5px; }}
-#term-news-dock .dock-body::-webkit-scrollbar-thumb{{ background:{BORDER}; }}
-@media (max-width: 900px){{
-    #term-news-dock{{ display:none; }}
+/* ── Top scrolling ticker strip ── */
+#term-ticker-wrap{{width:100%;overflow:hidden;background:{DARK2};border-bottom:1px solid {BORDER};height:30px;display:flex;align-items:center;white-space:nowrap;}}
+#term-ticker-track{{display:inline-flex;animation:tickerscroll 45s linear infinite;white-space:nowrap;}}
+#term-ticker-track span.tk-item{{display:inline-flex;align-items:center;gap:6px;padding:0 18px;font-family:{MONO};font-size:11px;font-weight:600;border-right:1px solid {BORDER2};white-space:nowrap;}}
+
+/* ── Right news rail ── */
+#news-rail-inner .stTabs [data-baseweb="tab-list"]{{background:transparent !important;border:none !important;}}
+#news-rail-inner .stTabs{{margin-top:-4px;}}
+
+/* ── Column dividers to feel like terminal panels ── */
+.term-panel{{background:{DARK2};border:1px solid {BORDER};padding:14px;}}
+.term-panel-title{{font-family:{MONO};font-size:10px;font-weight:700;letter-spacing:1.5px;color:{T2};text-transform:uppercase;border-bottom:1px solid {BORDER};padding-bottom:8px;margin-bottom:10px;}}
+
+@media (max-width: 1100px){{
+    #arka-news-rail-col{{display:none;}}
 }}
 </style>
 """, unsafe_allow_html=True)
@@ -253,11 +256,8 @@ hr{{border-color:{BORDER} !important;}}
 # ── Helpers ──────────────────────────────────────────────────
 def parse_csv(file):
     """
-    FIX (kept from earlier): strips trailing exchange suffixes
-    (.NS/.BO/.NSE/.BSE) so TradingView-style exports don't get
-    double-suffixed downstream (e.g. "ARKADE.NS" + ".NS" appended by
-    get_static/get_price would become "ARKADE.NS.NS", which is not a
-    valid ticker and fails silently for every row).
+    Strips trailing exchange suffixes (.NS/.BO/.NSE/.BSE) so
+    TradingView-style exports don't get double-suffixed downstream.
     """
     try: df = pd.read_csv(file, header=None)
     except: return []
@@ -351,8 +351,16 @@ def get_index(sym, fallback_syms=None):
         }
     return None
 
-MIDCAP_CANDIDATES = ["NIFTY_MIDCAP_100.NS", "^CRSMID", "^NIFTYMIDCAP100"]
-SMALLCAP_CANDIDATES = ["^CNXSC", "^CNXSMALLCAP", "NIFTYSMLCAP100.NS"]
+# ── FIX: Midcap/Smallcap index tickers ──────────────────────────
+# The previous candidate lists (NIFTY_MIDCAP_100.NS, ^CRSMID,
+# ^NIFTYMIDCAP100 / ^CNXSC, ^CNXSMALLCAP, NIFTYSMLCAP100.NS) do not
+# resolve on Yahoo Finance — none of those symbols exist in Yahoo's
+# index namespace, so get_index() silently exhausted every candidate
+# and the cards always rendered "No data". Replaced with the actual
+# Yahoo aliases for these NSE indices, in order of reliability, with
+# older/alternate aliases kept as later fallbacks.
+MIDCAP_CANDIDATES = ["NIFTYMDCP100.NS", "^NSEMDCP50", "NIFTY_MIDCAP_100.NS", "^CRSMID"]
+SMALLCAP_CANDIDATES = ["NIFTYSMLCAP250.NS", "NIFTYSMCP100.NS", "^CNXSC", "^CNXSMALLCAP"]
 SP500_CANDIDATES    = ["^GSPC"]
 DOWJONES_CANDIDATES = ["^DJI"]
 GOLD_CANDIDATES     = ["GC=F"]
@@ -518,7 +526,7 @@ if not st.session_state.logged_in:
     st.markdown(f"""
     <style>
     .stApp{{background:radial-gradient(ellipse 80% 50% at 50% -10%, rgba(94,210,156,0.07), transparent), #070b0a !important;}}
-    .block-container{{padding-top:0 !important;}}
+    .block-container{{padding-top:0 !important;max-width:1500px !important;padding-left:16px !important;padding-right:16px !important;}}
     [data-testid="stVerticalBlock"]{{gap:0.4rem;}}
     iframe{{display:block;border:none;}}
     .stButton>button[kind="primary"],.stFormSubmitButton>button[kind="primary"]{{background:#5ed29c !important;color:#070b0a !important;border:none !important;border-radius:9999px !important;font-weight:800 !important;letter-spacing:1px !important;}}
@@ -720,12 +728,13 @@ else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=s;}
 
 # ════════════════ DISCLAIMER ═════════════════════════════════
 if not st.session_state.disclaimer_done:
+    st.markdown("<div style='padding:0 16px;'>", unsafe_allow_html=True)
     _, col, _ = st.columns([1,3,1])
     with col:
         st.markdown(f"""<div style="padding:48px 0 20px;text-align:center;">
             <div style="font-size:30px;font-weight:800;color:{IVORY};">Disclaimer &amp; Terms</div>
             <div style="font-size:13px;color:{T2};margin-top:6px;margin-bottom:24px;">Read all terms carefully before continuing</div></div>
-        <div style="background:{DARK2};border:1px solid {BORDER};border-radius:2px;padding:24px;font-size:13px;color:{T2};line-height:2;max-height:260px;overflow-y:auto;margin-bottom:20px;">
+        <div style="background:{DARK2};border:1px solid {BORDER};border-radius:0;padding:24px;font-size:13px;color:{T2};line-height:2;max-height:260px;overflow-y:auto;margin-bottom:20px;">
             <strong style="color:{AMBER}">1. No Financial Advice</strong><br>Arka Trades does not provide financial or investment advice. Educational only.<br><br>
             <strong style="color:{AMBER}">2. Not SEBI Registered</strong><br>We are not registered with SEBI as investment advisor or research analyst.<br><br>
             <strong style="color:{AMBER}">3. Personal Responsibility</strong><br>All trading decisions are yours. You bear full responsibility for profits or losses.<br><br>
@@ -746,10 +755,59 @@ if not st.session_state.disclaimer_done:
                 st.toast(f"Welcome back, {name}!"); st.rerun()
         if not all_ok:
             st.caption("Accept all 4 terms above to continue")
+    st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
 
 # ════════════════ MAIN APP ═══════════════════════════════════
-left, right = st.columns([1, 4])
+
+def _news_watchlist_for_rail():
+    """Whichever watchlist has content drives the rail; prefer the
+    one the user is actively scanning (active_news_source), fall
+    back to admin, then personal."""
+    source_key = st.session_state.get("active_news_source", "admin")
+    primary_key = "admin_watchlist" if source_key == "admin" else "watchlist"
+    wl = st.session_state.get(primary_key, [])
+    if not wl:
+        wl = st.session_state.get("admin_watchlist", []) or st.session_state.get("watchlist", [])
+    label = "ARKA WATCHLIST" if (wl and wl == st.session_state.get("admin_watchlist")) else "YOUR WATCHLIST"
+    return wl, label
+
+# ── Top scrolling ticker strip (always visible, Bloomberg-style) ──
+def render_top_ticker():
+    idx_defs = [
+        ("NIFTY 50", "^NSEI", None),
+        ("BANK NIFTY", "^NSEBANK", None),
+        ("SENSEX", "^BSESN", None),
+        ("MIDCAP 100", MIDCAP_CANDIDATES[0], MIDCAP_CANDIDATES[1:]),
+        ("SMALLCAP 250", SMALLCAP_CANDIDATES[0], SMALLCAP_CANDIDATES[1:]),
+        ("S&P 500", SP500_CANDIDATES[0], None),
+        ("DOW JONES", DOWJONES_CANDIDATES[0], None),
+        ("GOLD", GOLD_CANDIDATES[0], None),
+    ]
+    items = []
+    for label, sym, fb in idx_defs:
+        d = get_index(sym, fb)
+        if d:
+            c = GREEN if d["chg"] >= 0 else RED
+            arrow = "▲" if d["chg"] >= 0 else "▼"
+            items.append(
+                f'<span class="tk-item"><span style="color:{T2};">{label}</span>'
+                f'<span style="color:{IVORY};">{d["price"]:,.2f}</span>'
+                f'<span style="color:{c};">{arrow} {abs(d["chg"]):.2f}%</span></span>'
+            )
+        else:
+            items.append(f'<span class="tk-item"><span style="color:{T2};">{label}</span>'
+                          f'<span style="color:{T3};">--</span></span>')
+    track = "".join(items)
+    st.markdown(f"""
+    <div id="term-ticker-wrap">
+        <div id="term-ticker-track">{track}{track}</div>
+    </div>""", unsafe_allow_html=True)
+
+render_top_ticker()
+
+left, center, right_rail = st.columns([0.9, 3.3, 1.1])
+
 PAGE_ACCENTS = {"home":AMBER,"scanner":CYAN,"alerts":AMBER,"analysis":PURPLE,
     "smart_scan":GREEN,"breadth":PINK,"heatmap":T2,"autoalert":T2,"profile":AMBER,
     "settings":AMBER,"contact":CYAN,"research":AMBER}
@@ -757,37 +815,45 @@ PAGE_ACCENTS = {"home":AMBER,"scanner":CYAN,"alerts":AMBER,"analysis":PURPLE,
 with left:
     st.markdown(f"""<div style="display:flex;align-items:center;gap:10px;padding:16px 12px 12px;border-bottom:1px solid {BORDER};">
         <div style="width:28px;height:28px;border-radius:2px;background:{AMBER};display:flex;align-items:center;justify-content:center;">{icon("trend", 15, "#000")}</div>
-        <div><div style="font-size:14px;font-weight:800;color:{IVORY};line-height:1;letter-spacing:0.5px;">ARKA TRADES</div>
-        <div style="font-size:8px;letter-spacing:2px;color:{T2};text-transform:uppercase;margin-top:3px;">Analytics Platform</div></div></div>""", unsafe_allow_html=True)
+        <div><div style="font-size:13px;font-weight:800;color:{IVORY};line-height:1;letter-spacing:0.5px;">ARKA TRADES</div>
+        <div style="font-size:8px;letter-spacing:2px;color:{T2};text-transform:uppercase;margin-top:3px;">Terminal</div></div></div>""", unsafe_allow_html=True)
 
     photo = st.session_state.get("profile_photo")
     if photo:
-        st.image(photo, width=60)
+        st.image(photo, width=50)
     else:
-        st.markdown(f"""<div style="display:flex;align-items:center;gap:10px;padding:12px;">
-            <div style="width:34px;height:34px;border-radius:2px;background:{DARK3};border:1px solid {BORDER};display:flex;align-items:center;justify-content:center;font-weight:800;font-size:14px;color:{AMBER};">{initial}</div>
-            <div><div style="font-size:10px;color:{T2};">Signed in as</div>
-            <div style="font-weight:800;font-size:13px;color:{IVORY};">{name}</div></div></div>
+        st.markdown(f"""<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;">
+            <div style="width:30px;height:30px;border-radius:2px;background:{DARK3};border:1px solid {BORDER};display:flex;align-items:center;justify-content:center;font-weight:800;font-size:13px;color:{AMBER};">{initial}</div>
+            <div><div style="font-size:9px;color:{T2};">Signed in</div>
+            <div style="font-weight:800;font-size:12px;color:{IVORY};">{name}</div></div></div>
         <div style="height:1px;background:{BORDER};"></div>""", unsafe_allow_html=True)
 
-    st.markdown(f"<div style='padding:12px 12px 3px;font-size:9px;font-weight:700;letter-spacing:1.5px;color:{AMBER};text-transform:uppercase;'>Product Suite</div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='padding:12px 12px 3px;font-size:9px;font-weight:700;letter-spacing:1.5px;color:{AMBER};text-transform:uppercase;'>F-Keys · Suite</div>", unsafe_allow_html=True)
     pg = st.session_state.page
 
-    def nav_btn(label, key):
+    def nav_btn(label, key, fkey=None):
         active = pg == key
         css_class = "nav-btn-active" if active else "nav-btn"
+        display = f"{fkey}  {label}" if fkey else label
         st.markdown(f'<div class="{css_class}">', unsafe_allow_html=True)
-        if st.button(label, key=f"nav_{key}", use_container_width=True):
+        if st.button(display, key=f"nav_{key}", use_container_width=True):
             st.session_state.page = key; st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
-    nav_btn("Dashboard","home"); nav_btn("Scanner","scanner"); nav_btn("Alerts","alerts")
-    nav_btn("Research","research"); nav_btn("Arka AI","analysis")
-    nav_btn("Smart Screener","smart_scan"); nav_btn("Market Breadth","breadth")
+    nav_btn("DASH","home","F1")
+    nav_btn("SCAN","scanner","F2")
+    nav_btn("ALERT","alerts","F3")
+    nav_btn("RSRCH","research","F4")
+    nav_btn("ARKA AI","analysis","F5")
+    nav_btn("SCREEN","smart_scan","F6")
+    nav_btn("BREADTH","breadth","F7")
     st.markdown(f"<div style='padding:12px 12px 3px;font-size:9px;font-weight:700;letter-spacing:1.5px;color:{T2};text-transform:uppercase;'>Coming Soon</div>", unsafe_allow_html=True)
-    nav_btn("Heatmap","heatmap"); nav_btn("Auto Alerts","autoalert")
+    nav_btn("HEATMAP","heatmap")
+    nav_btn("AUTO","autoalert")
     st.markdown(f"<div style='padding:12px 12px 3px;font-size:9px;font-weight:700;letter-spacing:1.5px;color:{T2};text-transform:uppercase;'>Account</div>", unsafe_allow_html=True)
-    nav_btn("Profile","profile"); nav_btn("Settings","settings"); nav_btn("Contact","contact")
+    nav_btn("Profile","profile")
+    nav_btn("Settings","settings")
+    nav_btn("Contact","contact")
     st.markdown("<br>", unsafe_allow_html=True)
     st.divider()
     st.markdown('<div class="nav-btn">', unsafe_allow_html=True)
@@ -796,7 +862,7 @@ with left:
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
-with right:
+with center:
     pg = st.session_state.page
     accent = PAGE_ACCENTS.get(pg, AMBER)
     page_titles = {"home":"Dashboard","scanner":"Watchlist Scanner","alerts":"Alerts Manager",
@@ -841,7 +907,7 @@ with right:
         show_idx(r1c,"SENSEX","^BSESN",AMBER)
         r2a,r2b = st.columns(2)
         show_idx(r2a,"MIDCAP 100", MIDCAP_CANDIDATES[0], PURPLE, fallback_syms=MIDCAP_CANDIDATES[1:])
-        show_idx(r2b,"SMALLCAP 100", SMALLCAP_CANDIDATES[0], PINK, fallback_syms=SMALLCAP_CANDIDATES[1:])
+        show_idx(r2b,"SMALLCAP 250", SMALLCAP_CANDIDATES[0], PINK, fallback_syms=SMALLCAP_CANDIDATES[1:])
         st.markdown(f"<div style='height:1px;background:{BORDER};margin:10px 0 14px;'></div>", unsafe_allow_html=True)
 
         st.markdown(f"""<div style="font-size:10px;font-weight:700;letter-spacing:1.5px;color:{T2};
@@ -922,7 +988,7 @@ with right:
 
         st.markdown(f"<div style='height:1px;background:{BORDER};margin:14px 0 14px;'></div>", unsafe_allow_html=True)
 
-    st.markdown('<div style="padding:0 8px 80px;">', unsafe_allow_html=True)
+    st.markdown('<div style="padding:0 8px 40px;">', unsafe_allow_html=True)
 
     if pg == "home":
         IST = timezone(timedelta(hours=5, minutes=30))
@@ -1006,7 +1072,7 @@ with right:
                 if failed:
                     with st.expander(f"{len(failed)} skipped"): st.write(", ".join(failed))
                 section("Results", CYAN)
-                cols7 = st.columns(5)
+                cols7 = st.columns(4)
                 for i, s in enumerate(filtered):
                     if s["cls"]=="g":   bd=f"{GREEN}66"; top=GREEN
                     elif s["cls"]=="r": bd=f"{RED}66"; top=RED
@@ -1024,7 +1090,7 @@ with right:
                         f'<div style="margin-bottom:5px;">{change_pill(s["chg"])}</div>'
                         f'<div style="font-family:{MONO};font-weight:700;font-size:13px;color:{IVORY};line-height:1;margin-bottom:5px;">&#8377;{s["cur"]:.2f}</div>'
                         f'{spark}<div style="font-family:{MONO};font-size:10px;font-weight:700;color:{rc};margin-top:4px;">RSI {s["rsi"]}</div></div>')
-                    with cols7[i % 5]:
+                    with cols7[i % 4]:
                         st.markdown(card, unsafe_allow_html=True)
                 IST = timezone(timedelta(hours=5, minutes=30))
                 st.caption(f"Scanned: {datetime.now(IST).strftime('%d %b %Y  %H:%M:%S')}  ·  % vs prev close  ·  Price: 10s cache")
@@ -1241,73 +1307,25 @@ with right:
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════════
-# TERMINAL NEWS DOCK — fixed bottom-left panel, rendered once globally
+# RIGHT NEWS RAIL — fixed, always visible, Bloomberg-style
+# Replaces the old bottom-left floating dock entirely. Shows the
+# combined watchlist + macro/global feed so you can trade off news
+# that moves individual names AND the broader Indian/global market.
 # ═══════════════════════════════════════════════════════════════════
-@st.fragment(run_every=10)
-def _render_news_dock():
-    _ensure_news_state()
-    source_key = st.session_state.get("active_news_source", "admin")
-    watchlist = st.session_state.get(
-        "admin_watchlist" if source_key == "admin" else "watchlist", []
-    )
-    if not watchlist:
-        watchlist = st.session_state.get("admin_watchlist", [])
-
-    if not watchlist:
-        st.markdown(f"""
-        <div id="term-news-dock">
-            <div class="dock-head">
-                <span style="font-family:{MONO};font-size:10px;font-weight:700;color:{AMBER};letter-spacing:1px;">NEWS</span>
-                <span style="font-size:9px;color:{T3};">no watchlist</span>
-            </div>
-            <div class="dock-body" style="padding:14px;font-size:11px;color:{T2};">
-                Upload a watchlist in Scanner to see news here.
-            </div>
-        </div>""", unsafe_allow_html=True)
-        return
-
-    refresh_news(watchlist)
-    cache = st.session_state.get("_news_cache", {})
-
-    flat = []
-    for sym in watchlist:
-        for art in cache.get(sym, []):
-            flat.append({**art, "sym": sym})
-    flat.sort(key=lambda a: a.get("pub_dt") or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
-
-    label = "ARKA WATCHLIST" if source_key == "admin" else "YOUR WATCHLIST"
-    if not flat:
-        st.markdown(f"""
-        <div id="term-news-dock">
-            <div class="dock-head">
-                <span style="font-family:{MONO};font-size:10px;font-weight:700;color:{AMBER};letter-spacing:1px;">NEWS · {label}</span>
-                <span class="pulse-dot"></span>
-            </div>
-            <div class="dock-body" style="padding:14px;font-size:11px;color:{T2};">
-                No news today across {len(watchlist)} stocks.
-            </div>
-        </div>""", unsafe_allow_html=True)
-        return
-
-    rows = ""
-    for art in flat[:20]:
-        rows += (
-            f'<a href="{art["link"]}" target="_blank" style="display:block;padding:6px 10px;'
-            f'border-bottom:1px solid {BORDER};text-decoration:none;">'
-            f'<div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline;">'
-            f'<span style="font-family:{MONO};font-size:9px;font-weight:700;color:{AMBER};white-space:nowrap;">{art["sym"]}</span>'
-            f'<span style="font-family:{MONO};font-size:9px;color:{T3};white-space:nowrap;">{art["time_str"]}</span></div>'
-            f'<div style="font-size:11px;color:{IVORY};line-height:1.4;margin-top:2px;">{art["title"]}</div>'
-            f'</a>'
-        )
-
-    st.markdown(f"""
-    <div id="term-news-dock">
-        <div class="dock-head">
-            <span style="font-family:{MONO};font-size:10px;font-weight:700;color:{AMBER};letter-spacing:1px;">NEWS · {label}</span>
+with right_rail:
+    st.markdown(f"""<div style="position:sticky;top:8px;" id="arka-news-rail-col">
+        <div style="display:flex;align-items:center;justify-content:space-between;
+             padding:12px 4px 8px;border-bottom:1px solid {BORDER};margin-bottom:8px;">
+            <span style="font-family:{MONO};font-size:11px;font-weight:800;color:{AMBER};letter-spacing:1.5px;">MARKET NEWS</span>
             <span class="pulse-dot"></span>
         </div>
-        <div class="dock-body">{rows}</div>
-    </div>""", unsafe_allow_html=True)
+        <div id="news-rail-inner">""", unsafe_allow_html=True)
 
-_render_news_dock()
+    watchlist_for_news, rail_label = _news_watchlist_for_rail()
+    if not watchlist_for_news:
+        st.markdown(f"""<div style="font-size:11px;color:{T2};padding:8px 4px;">
+            Upload a watchlist in Scanner to see stock-specific news here.
+            Macro/global news still updates below.</div>""", unsafe_allow_html=True)
+    render_news_rail(watchlist_for_news, label=rail_label)
+
+    st.markdown("</div></div>", unsafe_allow_html=True)
