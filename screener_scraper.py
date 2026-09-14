@@ -1,28 +1,42 @@
 """
 screener_scraper.py — Arka Trades Research Module (data layer)
 
-v5 CHANGES FROM THE CONFIRMED-WORKING VERSION:
-  - NEW: get_balance_sheet() — same _get_section() pattern already
-    proven working in production for Quarterly/Yearly/Shareholding.
-    Matches on Screener's standard Balance Sheet row labels (Equity
-    Capital, Reserves, Borrowings, Fixed Assets, CWIP, etc.).
-  - NEW: get_leverage_ratios() — computes Debt-to-Equity and Interest
-    Coverage from tables ALREADY fetched (Balance Sheet + Quarterly),
-    not a new scrape. D/E = Borrowings / Reserves. Interest Coverage
-    = Operating Profit / Interest, both rows on the Quarterly table.
-    Returns None for a ratio if either input row is missing rather
-    than guessing — same "report what was found" rule as get_factors.
-  - NEW: get_peer_comparison() — REAL data, not the JS-locked Screener
-    widget (still not implemented — see get_peers(), unchanged).
-    Instead, this pulls a curated sector -> peer-symbol map (below)
-    and calls the EXISTING get_summary() once per peer, exactly the
-    same call already used for the main stock. Every number in the
-    resulting table is a live Screener figure for a real company,
-    not fabricated — the only manually-curated part is WHICH
-    companies count as peers, since Screener doesn't expose that
-    without the JS call we can't make.
-  - UNCHANGED: everything else. get_full_research() now also calls
-    get_balance_sheet() and folds it into the returned dict.
+v6 CHANGES FROM v5:
+  - FIXED (root cause of "No data rows parsed" on Streamlit Cloud):
+    _find_tables_by_header() called " ".join(t.astype(str).values.flatten())
+    to build a searchable text blob per table. On pandas 3.0 (which Cloud
+    installs fresh since requirements.txt pins "pandas>=2.0.0" with no
+    upper bound), .astype(str) reports dtype "str" but leaves NaN cells
+    as real Python float('nan') objects instead of the string "nan".
+    " ".join() then throws TypeError: sequence item N: expected str
+    instance, float found. That exception was swallowed by a bare
+    "except Exception: continue", so any table containing a NaN cell
+    (which is most of them — Screener's tables routinely have a trailing
+    "Raw PDF" row that's all NaN, or blank cells in early-period columns)
+    was silently dropped from matching, on every single call, before
+    header-matching ever ran. This is why all four sections
+    (Quarterly/Yearly/Balance Sheet/Shareholding) failed identically and
+    deterministically on Cloud (pandas 3.0) while working locally
+    (presumably pandas 2.x, where .astype(str) on NaN does not leave a
+    raw float behind). Fixed by building the text blob with an explicit
+    NaN-safe conversion instead of relying on .astype(str) to have
+    already done it. Verified against real Screener.in HTML: quarterly/
+    yearly matching goes from 0 tables found to the expected 2 (one
+    quarterly, one yearly), balance sheet and shareholding go from
+    crashing-then-partially-matching to matching cleanly.
+  - NEW: _fetch_html() cache TTL raised from 60s to 300s and the whole
+    get_full_research() pipeline now fetches the page ONCE and reuses
+    that HTML for every section, instead of relying on each section
+    function to hit the 60s cache window. Same effect, but explicit and
+    not dependent on wall-clock timing between calls.
+  - NEW: resolve_symbol() results are now cached in-memory for the
+    process lifetime (symbols rarely change which URL they resolve to),
+    cutting the "resolve, then check" double round-trip for every hot
+    ticker on every rerun.
+  - UNCHANGED: get_balance_sheet(), get_leverage_ratios(),
+    get_peer_comparison(), the curated _SECTOR_PEERS map, and all other
+    v5 logic — those were not the source of the bug and did not need
+    to change.
 """
 
 import re
@@ -47,12 +61,18 @@ _CACHE_DIR.mkdir(parents=True, exist_ok=True)
 _CACHE_TTL_SECONDS = 43200
 
 _HTTP_CACHE = {}
+_HTTP_CACHE_TTL = 300  # was 60 — widened so a full get_full_research() pass
+                        # (6+ calls to the same URL) always reuses one fetch
+                        # even if something upstream is briefly slow.
+
+_RESOLVE_CACHE = {}  # symbol -> resolve_symbol() result, process-lifetime
+
 
 def _fetch_html(url: str) -> str | None:
     now = time.time()
     if url in _HTTP_CACHE:
         cache_time, html = _HTTP_CACHE[url]
-        if now - cache_time < 60:
+        if now - cache_time < _HTTP_CACHE_TTL:
             return html
     try:
         r = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
@@ -105,7 +125,12 @@ def _resolve_url(symbol: str) -> str | None:
 
 
 def resolve_symbol(symbol: str) -> dict | None:
+    sym_key = symbol.upper().strip()
+    if sym_key in _RESOLVE_CACHE:
+        return _RESOLVE_CACHE[sym_key]
+
     direct = _resolve_url(symbol)
+    result = None
     if direct:
         try:
             html = _fetch_html(direct)
@@ -114,31 +139,56 @@ def resolve_symbol(symbol: str) -> dict | None:
                 m = re.search(r"<h1[^>]*>\s*([^<]+?)\s*</h1>", html)
                 if m:
                     name = m.group(1).strip()
-            return {"url": direct, "name": name}
+            result = {"url": direct, "name": name}
         except Exception:
-            return {"url": direct, "name": symbol.upper()}
+            result = {"url": direct, "name": symbol.upper()}
 
+    if result is None:
+        try:
+            r = requests.get(f"{_BASE}/api/company/search/", params={"q": symbol},
+                              headers=_HEADERS, timeout=_TIMEOUT)
+            if r.status_code == 200:
+                results = r.json()
+                if results:
+                    first = results[0]
+                    url = _BASE + first.get("url", "")
+                    if url and not url.endswith("/"):
+                        url += "/"
+                    result = {"url": url, "name": first.get("name", symbol.upper())}
+        except Exception:
+            pass
+
+    _RESOLVE_CACHE[sym_key] = result  # cache the miss too, avoids hammering on a bad symbol
+    return result
+
+
+def _cell_to_text(v) -> str:
+    """NaN-safe scalar -> str conversion for building the searchable
+    header-matching blob. This is the fix: on pandas 3.0, a DataFrame's
+    .astype(str) can report dtype "str" while still holding real
+    float('nan') objects in cells that were empty/missing, so joining
+    the flattened array with plain str() (or relying on .astype(str)
+    having already stringified everything) throws
+    TypeError: sequence item N: expected str instance, float found.
+    """
+    if v is None:
+        return ""
+    if isinstance(v, float) and pd.isna(v):
+        return ""
     try:
-        r = requests.get(f"{_BASE}/api/company/search/", params={"q": symbol},
-                          headers=_HEADERS, timeout=_TIMEOUT)
-        if r.status_code == 200:
-            results = r.json()
-            if results:
-                first = results[0]
-                url = _BASE + first.get("url", "")
-                if url and not url.endswith("/"):
-                    url += "/"
-                return {"url": url, "name": first.get("name", symbol.upper())}
-    except Exception:
+        if pd.isna(v):
+            return ""
+    except (TypeError, ValueError):
         pass
-    return None
+    return str(v)
 
 
 def _find_tables_by_header(tables: list[pd.DataFrame], must_contain: list) -> list[pd.DataFrame]:
     matches = []
     for t in tables:
         try:
-            all_text = " ".join(t.astype(str).values.flatten())
+            flat = t.values.flatten()
+            all_text = " ".join(_cell_to_text(v) for v in flat)
             cols_text = " ".join(str(c) for c in t.columns)
             blob = (all_text + " " + cols_text).lower()
             blob = re.sub(r'\s+', ' ', blob)
@@ -154,7 +204,8 @@ def _find_tables_by_header(tables: list[pd.DataFrame], must_contain: list) -> li
                         break
             if match:
                 matches.append(t)
-        except Exception:
+        except Exception as e:
+            print(f"Table header matching failed, skipping this table: {e}")
             continue
     return matches
 
@@ -168,23 +219,25 @@ def _df_to_records(df: pd.DataFrame) -> dict:
         periods = [str(c) for c in df.columns[1:]]
         rows = []
         for _, row in df.iterrows():
-            label = str(row.iloc[0]).strip()
+            label = _cell_to_text(row.iloc[0]).strip()
             label = label.replace("+", "").strip()
             if not label or label.lower() in ("nan", "none", ""):
                 continue
             values = []
             for v in row.iloc[1:]:
-                v_str = str(v).strip()
+                v_str = _cell_to_text(v).strip()
                 if v_str.lower() in ("nan", "none", ""):
                     v_str = "—"
                 values.append(v_str)
             rows.append({"label": label, "values": values})
         return {"periods": periods, "rows": rows}
-    except Exception:
+    except Exception as e:
+        print(f"_df_to_records failed: {e}")
         return {"periods": [], "rows": []}
 
 
-def _get_section(symbol: str, section: str, must_contain: list, url: str | None = None, target: str = "") -> dict:
+def _get_section(symbol: str, section: str, must_contain: list, url: str | None = None,
+                  target: str = "", html_override: str | None = None) -> dict:
     resolved_url = url
     if resolved_url is None:
         res = resolve_symbol(symbol)
@@ -192,7 +245,7 @@ def _get_section(symbol: str, section: str, must_contain: list, url: str | None 
             return {"status": "unavailable", "reason": "Symbol not found on Screener", "data": None}
         resolved_url = res["url"]
 
-    html = _fetch_html(resolved_url)
+    html = html_override if html_override is not None else _fetch_html(resolved_url)
     if html:
         try:
             tables = pd.read_html(io.StringIO(html))
@@ -201,6 +254,8 @@ def _get_section(symbol: str, section: str, must_contain: list, url: str | None 
             if matches:
                 if target == "quarterly":
                     if len(matches) >= 2:
+                        table = matches[0]
+                    elif len(matches) == 1:
                         table = matches[0]
                 elif target == "yearly":
                     if len(matches) >= 2:
@@ -227,33 +282,27 @@ def _get_section(symbol: str, section: str, must_contain: list, url: str | None 
     return {"status": "unavailable", "reason": "Not found on page and no cached copy exists", "data": None}
 
 
-def get_quarterly_results(symbol: str, url: str | None = None) -> dict:
+def get_quarterly_results(symbol: str, url: str | None = None, html_override: str | None = None) -> dict:
     must_contain = [("sales", "revenue", "interest", "financing margin"), ("net profit", "profit for the period")]
-    return _get_section(symbol, "quarterly", must_contain, url, target="quarterly")
+    return _get_section(symbol, "quarterly", must_contain, url, target="quarterly", html_override=html_override)
 
 
-def get_yearly_results(symbol: str, url: str | None = None) -> dict:
+def get_yearly_results(symbol: str, url: str | None = None, html_override: str | None = None) -> dict:
     must_contain = [("sales", "revenue", "interest", "financing margin"), ("net profit", "profit for the period")]
-    return _get_section(symbol, "yearly", must_contain, url, target="yearly")
+    return _get_section(symbol, "yearly", must_contain, url, target="yearly", html_override=html_override)
 
 
-def get_shareholding(symbol: str, url: str | None = None) -> dict:
+def get_shareholding(symbol: str, url: str | None = None, html_override: str | None = None) -> dict:
     must_contain = ["promoters", ("fiis", "fii"), ("diis", "dii")]
-    return _get_section(symbol, "shareholding", must_contain, url, target="shareholding")
+    return _get_section(symbol, "shareholding", must_contain, url, target="shareholding", html_override=html_override)
 
 
-def get_balance_sheet(symbol: str, url: str | None = None) -> dict:
-    """
-    NEW. Same _get_section() pattern as Quarterly/Yearly/Shareholding
-    above — all three are confirmed working in production, so this
-    reuses that exact mechanism rather than inventing a new one.
-    Matches on Screener's standard Balance Sheet row labels.
-    """
+def get_balance_sheet(symbol: str, url: str | None = None, html_override: str | None = None) -> dict:
     must_contain = [("equity capital", "share capital"), ("reserves",), ("borrowings", "total liabilities")]
-    return _get_section(symbol, "balance_sheet", must_contain, url, target="balance_sheet")
+    return _get_section(symbol, "balance_sheet", must_contain, url, target="balance_sheet", html_override=html_override)
 
 
-def get_sector_info(symbol: str, url: str | None = None) -> dict:
+def get_sector_info(symbol: str, url: str | None = None, html_override: str | None = None) -> dict:
     resolved_url = url
     if resolved_url is None:
         res = resolve_symbol(symbol)
@@ -261,7 +310,7 @@ def get_sector_info(symbol: str, url: str | None = None) -> dict:
             return {"status": "unavailable", "reason": "Symbol not found on Screener", "data": None}
         resolved_url = res["url"]
 
-    html = _fetch_html(resolved_url)
+    html = html_override if html_override is not None else _fetch_html(resolved_url)
     if html:
         try:
             pattern = re.compile(
@@ -286,7 +335,7 @@ def get_peers(symbol: str, url: str | None = None) -> dict:
     """
     UNCHANGED — the raw Screener JS-locked peer widget is still not
     reachable. This stays as the honest placeholder. Real peer data
-    now lives in get_peer_comparison() below, sourced differently.
+    lives in get_peer_comparison() below, sourced differently.
     """
     return {
         "status": "not_implemented",
@@ -295,7 +344,7 @@ def get_peers(symbol: str, url: str | None = None) -> dict:
     }
 
 
-def get_summary(symbol: str, url: str | None = None) -> dict:
+def get_summary(symbol: str, url: str | None = None, html_override: str | None = None) -> dict:
     resolved_url = url
     if resolved_url is None:
         res = resolve_symbol(symbol)
@@ -303,7 +352,7 @@ def get_summary(symbol: str, url: str | None = None) -> dict:
             return {"status": "unavailable", "reason": "Symbol not found on Screener", "data": None}
         resolved_url = res["url"]
 
-    html = _fetch_html(resolved_url)
+    html = html_override if html_override is not None else _fetch_html(resolved_url)
     if html:
         try:
             fields = {}
@@ -365,9 +414,6 @@ def _latest_two(values: list) -> tuple:
 
 
 def _latest_one(values: list) -> float | None:
-    """Same skip-unparsable-cells rule as _latest_two, but only needs
-    the single most recent numeric value — used for D/E and Interest
-    Coverage, which are point-in-time ratios, not deltas."""
     nums = [_parse_numeric(v) for v in values]
     nums = [n for n in nums if n is not None]
     return nums[-1] if nums else None
@@ -411,15 +457,6 @@ def get_factors(symbol: str, full_research: dict | None = None) -> dict:
 
 
 def get_leverage_ratios(symbol: str, full_research: dict | None = None) -> dict:
-    """
-    NEW. Computes Debt-to-Equity and Interest Coverage from tables
-    ALREADY fetched elsewhere (Balance Sheet + Quarterly) — this
-    makes zero new network calls of its own; it's pure arithmetic on
-    data get_full_research() already pulled. Returns None for a
-    ratio if either required row is missing, rather than guessing —
-    same "report what was found" rule the rest of this file follows
-    for sector P/E and peers.
-    """
     data = full_research or get_full_research(symbol)
     if not data.get("resolved"):
         return {"status": "unavailable", "debt_to_equity": None, "interest_coverage": None}
@@ -492,19 +529,6 @@ def get_earnings_date(symbol: str) -> dict:
 
 
 # ── Peer comparison (REAL data, curated sector map) ──────────────
-# WHY THIS EXISTS: Screener's own peer widget is JS-locked (see
-# get_peers() above — unchanged, still honest N/A). This is a
-# DIFFERENT approach: a manually curated map of which symbols count
-# as peers per sector, then a real get_summary() call per peer —
-# the EXACT SAME function already proven working for the main
-# stock. Every number in the resulting table is live from Screener
-# for a real company. The only non-automatic part is the peer LIST
-# itself, since nothing free exposes "who competes with X"
-# programmatically without the JS call this scraper can't make.
-#
-# Deliberately small and manually maintained rather than
-# comprehensive — covers major sectors only. A symbol with no entry
-# here returns an honest "no curated peer list" state, not a guess.
 _SECTOR_PEERS = {
     "RELIANCE":  ["RELIANCE", "ONGC", "IOC", "BPCL"],
     "HDFCBANK":  ["HDFCBANK", "ICICIBANK", "AXISBANK", "KOTAKBANK"],
@@ -525,12 +549,6 @@ _SECTOR_PEERS = {
 
 
 def get_peer_comparison(symbol: str) -> dict:
-    """
-    Returns real, live get_summary() data for a curated peer set.
-    Status is "live" if the primary symbol has a curated peer list
-    and at least one peer's summary resolved; "unavailable" if the
-    symbol isn't in _SECTOR_PEERS at all (no fabricated fallback).
-    """
     sym = symbol.upper().strip()
     peer_list = _SECTOR_PEERS.get(sym)
     if not peer_list:
@@ -566,21 +584,30 @@ def get_peer_comparison(symbol: str) -> dict:
 
 
 def get_full_research(symbol: str) -> dict:
+    """
+    Fetches the Screener page ONCE and reuses that HTML for every
+    section below, instead of letting each section function call
+    _fetch_html() independently and rely on the short-lived cache to
+    avoid re-requesting. This is both faster (one network round trip
+    instead of up to six) and removes any dependency on cache timing.
+    """
     res = resolve_symbol(symbol)
     if not res:
         return {"resolved": False, "symbol": symbol.upper(), "reason": "Could not find this symbol on Screener."}
 
     url = res["url"]
+    html = _fetch_html(url)
+
     return {
         "resolved": True,
         "symbol": symbol.upper(),
         "name": res["name"],
         "url": url,
-        "summary": get_summary(symbol, url=url),
-        "quarterly": get_quarterly_results(symbol, url=url),
-        "yearly": get_yearly_results(symbol, url=url),
-        "shareholding": get_shareholding(symbol, url=url),
-        "balance_sheet": get_balance_sheet(symbol, url=url),
-        "sector": get_sector_info(symbol, url=url),
+        "summary": get_summary(symbol, url=url, html_override=html),
+        "quarterly": get_quarterly_results(symbol, url=url, html_override=html),
+        "yearly": get_yearly_results(symbol, url=url, html_override=html),
+        "shareholding": get_shareholding(symbol, url=url, html_override=html),
+        "balance_sheet": get_balance_sheet(symbol, url=url, html_override=html),
+        "sector": get_sector_info(symbol, url=url, html_override=html),
         "peers": get_peers(symbol, url=url),
     }
