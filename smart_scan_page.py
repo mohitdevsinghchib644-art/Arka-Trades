@@ -1,44 +1,23 @@
 # --------------------------------------------------------------
 # smart_scan_page.py  —  Arka Trades Smart Screener  (Sept 2026 rev)
 #
-# THREE CHANGES THIS REVISION:
+# STRICT SETUP MATCH REVISION — explicit rule enforcement + candlestick hover charts
 #
-# 1. BUG FIX — "can't find the right stocks for my setup":
-#    _calculate_indicators() was already computing atr_pct (the
-#    stock's average daily range as a % of price — i.e. its
-#    volatility) and roc_5 for every candidate, but _passes_filters()
-#    never checked either one. The setup schema only had price / RSI
-#    / volume fields. So a setup like "stocks that move 2-3% up or
-#    down" had NO field capable of expressing it — the AI rule parser
-#    had nowhere to put that intent, and the scanner was filtering on
-#    criteria that had nothing to do with what was actually asked.
-#    Fixed by adding two new filter bands, both using the existing
-#    "0 = no filter" convention volume_multiplier already used:
-#      - atr_pct_min / atr_pct_max   → the stock's TYPICAL daily
-#        volatility (a rolling average — use this for "usually moves
-#        2-3% a day").
-#      - move_pct_min / move_pct_max → TODAY's move, magnitude only
-#        (abs(chg_pct), direction-agnostic — use this for "moved
-#        2-3% today, up or down").
-#    Threaded through: the setup schema, the AI plain-English parser
-#    prompt, the manual setup-builder form, the live scan-page
-#    overrides, _passes_filters(), and _filters_summary(). Old setups
-#    saved before this revision have neither field — .get(...) or 0
-#    means they just behave exactly as before (no-op).
+# The scanner now treats the saved setup as a real rule specification.
+# Numeric filters run BEFORE AI vision, and the following pattern rules are
+# evaluated directly from OHLCV data:
+#   1) 30-day momentum > configured minimum (default 20%).
+#   2) RSI > 50 AND RSI > its 14-period SMA.
+#   3) Volume dry-up during the pullback.
+#   4) Pullback lasts 2-4 candles (2-3 preferred, 4 accepted).
+#   5) Close is above the 50-day SMA.
 #
-# 2. Reskinned to the same black/amber terminal look as the rest of
-#    the app (was its own blue "ChartX"-style palette before).
+# Existing saved setups that pre-date this revision still work: when their
+# new rule_config field is absent, the scanner derives these rules from the
+# plain-English visual_rules description.
 #
-# 3. NEW — Chartink-style hover charts: the "Rules Shortlist" table
-#    used to be a bare st.dataframe with zero visuals. Hovering a
-#    symbol now pops up a mini price chart. This uses a cheap
-#    pure-SVG line (no matplotlib) built straight from the OHLCV data
-#    each candidate already carries in memory (see _calculate_
-#    indicators — "df" was already being kept per candidate), so it
-#    costs nothing extra to fetch and stays fast even for a couple
-#    hundred rows. The AI-vision match cards already show a real
-#    rendered candlestick+volume chart per card, which is strictly
-#    more detail than a hover preview, so those are untouched.
+# The hover preview is a REAL candlestick + volume SVG chart; the old
+# close-only line chart is gone.
 #
 # NOTE ON THE SUPABASE `setups` TABLE: the 4 new filter columns need
 # to exist there before they'll persist. Run this once:
@@ -47,7 +26,8 @@
 #     add column if not exists atr_pct_min double precision default 0,
 #     add column if not exists atr_pct_max double precision default 0,
 #     add column if not exists move_pct_min double precision default 0,
-#     add column if not exists move_pct_max double precision default 0;
+#     add column if not exists move_pct_max double precision default 0,
+#     add column if not exists rule_config jsonb default '{}'::jsonb;
 #
 # _save_setup() below degrades gracefully if you haven't run that yet
 # — it retries without the new fields and tells you why, rather than
@@ -61,6 +41,7 @@ import yfinance as yf
 import base64
 import io
 import json
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -244,6 +225,7 @@ def get_full_nse_universe():
 #     atr_pct_max double precision default 0,
 #     move_pct_min double precision default 0,
 #     move_pct_max double precision default 0,
+#     rule_config jsonb default '{}'::jsonb,
 #     visual_rules text,
 #     reference_image_b64 text,
 #     created_at timestamptz default now()
@@ -255,7 +237,8 @@ def get_full_nse_universe():
 #     add column if not exists atr_pct_min double precision default 0,
 #     add column if not exists atr_pct_max double precision default 0,
 #     add column if not exists move_pct_min double precision default 0,
-#     add column if not exists move_pct_max double precision default 0;
+#     add column if not exists move_pct_max double precision default 0,
+#     add column if not exists rule_config jsonb default '{}'::jsonb;
 
 def _load_setups(supabase):
     try:
@@ -269,7 +252,7 @@ def _load_setups(supabase):
 def _save_setup(supabase, name, price_min, price_max, rsi_min, rsi_max,
                  volume_multiplier, atr_pct_min, atr_pct_max,
                  move_pct_min, move_pct_max, visual_rules,
-                 reference_image_b64=None):
+                 rule_config=None, reference_image_b64=None):
     row = {
         "name": name,
         "price_min": float(price_min),
@@ -281,6 +264,7 @@ def _save_setup(supabase, name, price_min, price_max, rsi_min, rsi_max,
         "atr_pct_max": float(atr_pct_max),
         "move_pct_min": float(move_pct_min),
         "move_pct_max": float(move_pct_max),
+        "rule_config": rule_config or {},
         "visual_rules": visual_rules,
     }
     if reference_image_b64:
@@ -288,22 +272,14 @@ def _save_setup(supabase, name, price_min, price_max, rsi_min, rsi_max,
     try:
         supabase.table("setups").insert(row).execute()
         return True
-    except Exception as e:
-        # Most likely cause: the live `setups` table predates this
-        # revision and doesn't have the 4 new columns yet (see the
-        # ALTER TABLE snippet in this module's docstring). Retry once
-        # with only the original columns so the setup still saves —
-        # just without the new volatility/move filters — instead of
-        # failing outright.
-        new_fields = {"atr_pct_min", "atr_pct_max", "move_pct_min", "move_pct_max"}
-        trimmed = {k: v for k, v in row.items() if k not in new_fields}
+    except Exception:
+        # Backward-compatible save until rule_config is added to Supabase.
+        trimmed = {k: v for k, v in row.items() if k != "rule_config"}
         try:
             supabase.table("setups").insert(trimmed).execute()
             st.warning(
-                "Saved, but without the ATR%/Move% filters — your Supabase "
-                "`setups` table needs 4 new columns first. See the ALTER "
-                "TABLE snippet at the top of smart_scan_page.py, then "
-                "re-save this setup to include them."
+                "Saved without rule_config. Run the SQL migration at the top "
+                "of this file, then re-save the setup so strict rules persist."
             )
             return True
         except Exception as e2:
@@ -318,6 +294,102 @@ def _delete_setup(supabase, setup_id):
     except Exception as e:
         st.error(f"Could not delete setup: {e}")
         return False
+
+
+# ════════════════════════════════════════════════════════════
+# STRICT PATTERN RULES
+# ════════════════════════════════════════════════════════════
+
+DEFAULT_RULE_CONFIG = {
+    # Disabled by default so unrelated saved setups keep their old behavior.
+    "require_momentum_30": False,
+    "momentum_30_min": 20.0,
+    "require_rsi_above_50": False,
+    "require_rsi_above_sma14": False,
+    "require_sma50": False,
+    "require_pullback": False,
+    "pullback_min_candles": 2,
+    "pullback_max_candles": 4,
+    "volume_dryup_ratio_max": 0.80,
+}
+
+def _default_rule_config_from_description(description):
+    """Recover the requested strict rules from an existing saved description."""
+    cfg = dict(DEFAULT_RULE_CONFIG)
+    d = (description or "").lower()
+    m = re.search(r'(?:more than|over|above|greater than|at least)\s*(\d+(?:\.\d+)?)\s*%', d)
+    if m and any(k in d for k in ("momentum", "previous 30", "last 30", "30 days", "30d")):
+        cfg["require_momentum_30"] = True
+        cfg["momentum_30_min"] = float(m.group(1))
+    if "rsi" in d and any(k in d for k in ("above 50", "> 50")):
+        cfg["require_rsi_above_50"] = True
+    if "rsi" in d and any(k in d for k in ("above its 14 sma", "above 14 sma", "above its 14-period sma")):
+        cfg["require_rsi_above_sma14"] = True
+    if any(k in d for k in ("above 50 ma", "above 50-day ma", "above 50 day ma", "above sma50", "above sma 50", "above its 50 ma")):
+        cfg["require_sma50"] = True
+    mm = re.search(r'(\d+)\s*(?:to|-|–)\s*(\d+)\s*candles?', d)
+    if mm and "pullback" in d:
+        cfg["require_pullback"] = True
+        cfg["pullback_min_candles"] = int(mm.group(1))
+        cfg["pullback_max_candles"] = max(int(mm.group(2)), int(mm.group(1)))
+    if "4 is also acceptable" in d or "4 candles" in d:
+        cfg["require_pullback"] = True
+        cfg["pullback_max_candles"] = max(4, int(cfg["pullback_min_candles"]))
+    if "volume" in d and any(k in d for k in ("dry-up", "dry up", "decrease as the price pulls down")):
+        cfg["require_pullback"] = True
+        cfg["volume_dryup_ratio_max"] = 0.80
+    return cfg
+
+def _get_rule_config(setup):
+    raw = setup.get("rule_config")
+    if isinstance(raw, dict) and raw:
+        cfg = dict(DEFAULT_RULE_CONFIG); cfg.update(raw); return cfg
+    if isinstance(raw, str) and raw.strip():
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                cfg = dict(DEFAULT_RULE_CONFIG); cfg.update(data); return cfg
+        except Exception:
+            pass
+    return _default_rule_config_from_description(setup.get("visual_rules", ""))
+
+def _detect_pullback(df, min_candles=2, max_candles=4, dryup_ratio=0.80):
+    """Strict current pullback: 2-4 mostly-down candles + volume dry-up."""
+    min_candles=max(1,int(min_candles)); max_candles=max(min_candles,int(max_candles)); dryup_ratio=float(dryup_ratio)
+    if len(df) < max(55, max_candles+20):
+        return {"matched":False,"candles":0,"volume_ratio":np.nan,"pullback_pct":0.0}
+    for n in range(max_candles, min_candles-1, -1):
+        seg=df.iloc[-n:].copy()
+        c=seg["Close"].astype(float)
+        down_count=int((c.diff().dropna()<0).sum())
+        net=float(c.iloc[-1]/c.iloc[0]-1) if c.iloc[0] else 0.0
+        if down_count < n-1 or net >= 0:
+            continue
+        pre=df.iloc[:-n].tail(20)
+        base=float(pre["Volume"].astype(float).mean()) if not pre.empty else 0.0
+        pv=float(seg["Volume"].astype(float).mean())
+        ratio=pv/base if base>0 else np.nan
+        declining=float(seg["Volume"].iloc[-1]) <= float(seg["Volume"].iloc[0])
+        if base>0 and ratio<=dryup_ratio and declining:
+            return {"matched":True,"candles":n,"volume_ratio":ratio,"pullback_pct":abs(net)*100.0}
+    return {"matched":False,"candles":0,"volume_ratio":np.nan,"pullback_pct":0.0}
+
+def _strict_rule_failures(ind, setup):
+    cfg=_get_rule_config(setup); failures=[]
+    mm=float(cfg.get("momentum_30_min",20.0))
+    if bool(cfg.get("require_momentum_30",False)) and float(ind.get("momentum_30_pct",0)) <= mm:
+        failures.append(f"30D momentum {ind.get('momentum_30_pct',0):.1f}% <= {mm:.1f}%")
+    if bool(cfg.get("require_rsi_above_50",False)) and float(ind.get("rsi",0)) <= 50:
+        failures.append(f"RSI {ind.get('rsi',0):.1f} is not > 50")
+    if bool(cfg.get("require_rsi_above_sma14",False)) and float(ind.get("rsi",0)) <= float(ind.get("rsi_sma14",0)):
+        failures.append(f"RSI {ind.get('rsi',0):.1f} <= RSI SMA14 {ind.get('rsi_sma14',0):.1f}")
+    if bool(cfg.get("require_sma50",False)) and not bool(ind.get("above_sma50",False)):
+        failures.append(f"Close Rs {ind.get('close',0):,.2f} <= SMA50 Rs {ind.get('sma50',0):,.2f}")
+    pb=ind.get("pullback",{}) or {}
+    pmin=int(cfg.get("pullback_min_candles",2)); pmax=int(cfg.get("pullback_max_candles",4))
+    if bool(cfg.get("require_pullback",False)) and not pb.get("matched",False):
+        failures.append(f"No {pmin}-{pmax} candle volume-dry-up pullback")
+    return failures
 
 
 def _filters_summary(setup):
@@ -493,75 +565,62 @@ def _fetch_bulk(symbols, batch_size=BATCH_SIZE, period="60d", progress_cb=None):
 # ════════════════════════════════════════════════════════════
 
 def _calculate_indicators(sym, df):
-    if df is None or len(df) < 20:
+    if df is None or len(df) < 55:
         return None
-    close = df["Close"]
-    vol = df["Volume"]
-    cur_close = float(close.iloc[-1])
-    if cur_close <= 0:
-        return None
-    prev = df.iloc[-2]
-    rsi_val = _rsi(close).iloc[-1]
-    atr_val = _atr(df).iloc[-1]
-    vol_avg20 = vol.rolling(20).mean().iloc[-1]
-    vol_ratio = float(vol.iloc[-1] / vol_avg20) if vol_avg20 and vol_avg20 > 0 else 0.0
-    roc_5 = float((close.iloc[-1] / close.iloc[-6] - 1) * 100) if len(close) > 6 else 0.0
-    chg_pct = float((cur_close - float(prev["Close"])) / float(prev["Close"]) * 100)
-
-    return {
-        "symbol": sym,
-        "close": cur_close,
-        "chg_pct": chg_pct,
-        "rsi": float(rsi_val) if pd.notna(rsi_val) else 50.0,
-        "atr_pct": float(atr_val / cur_close * 100) if pd.notna(atr_val) else 0.0,
-        "vol_ratio": vol_ratio,
-        "roc_5": roc_5,
-        "pdh": float(prev["High"]),
-        "pdl": float(prev["Low"]),
-        "df": df,
-    }
+    df=df.copy(); close=df["Close"].astype(float); vol=df["Volume"].astype(float).fillna(0)
+    cur=float(close.iloc[-1])
+    if cur<=0: return None
+    prev=df.iloc[-2]
+    rsi_series=_rsi(close); rsi=float(rsi_series.iloc[-1]) if pd.notna(rsi_series.iloc[-1]) else 50.0
+    rsi_sma14=float(rsi_series.rolling(14).mean().iloc[-1]) if pd.notna(rsi_series.rolling(14).mean().iloc[-1]) else 50.0
+    sma50=float(close.rolling(50).mean().iloc[-1])
+    atr=float(_atr(df).iloc[-1]) if pd.notna(_atr(df).iloc[-1]) else 0.0
+    av20=float(vol.rolling(20).mean().iloc[-1])
+    vr=float(vol.iloc[-1]/av20) if av20>0 else 0.0
+    roc5=float((cur/close.iloc[-6]-1)*100) if len(close)>6 else 0.0
+    prior30=close.iloc[-31:-1] if len(close)>=31 else close.iloc[:-1]
+    mom=0.0
+    if len(prior30)>=10:
+        low=float(prior30.min()); pos=int(np.argmin(prior30.to_numpy())); high=float(prior30.iloc[pos:].max())
+        if low>0: mom=(high/low-1)*100
+    pull=_detect_pullback(df,2,4,0.80)
+    return {"symbol":sym,"close":cur,"chg_pct":float((cur-float(prev["Close"]))/float(prev["Close"])*100),
+            "rsi":rsi,"rsi_sma14":rsi_sma14,"sma50":sma50,"above_sma50":bool(cur>sma50),
+            "momentum_30_pct":float(mom),"atr_pct":float(atr/cur*100),"vol_ratio":vr,"roc_5":roc5,
+            "pullback":pull,"pullback_candles":int(pull.get("candles",0)),
+            "pullback_vol_ratio":float(pull.get("volume_ratio",0)) if pd.notna(pull.get("volume_ratio",np.nan)) else 0.0,
+            "pdh":float(prev["High"]),"pdl":float(prev["Low"]),"df":df}
 
 
 def _passes_filters(ind, setup):
-    """
-    THE FIX: atr_pct and move (abs(chg_pct)) are now real filter
-    criteria, not just numbers computed and displayed but never
-    checked. Both use the same "0 = no filter" convention
-    volume_multiplier already used, so an old setup that never set
-    them behaves exactly as it did before (pure no-op).
-    """
-    pmin = float(setup.get("price_min") or 0)
-    pmax = float(setup.get("price_max") or 99999)
-    rmin = float(setup.get("rsi_min") or 0)
-    rmax = float(setup.get("rsi_max") or 100)
-    vmin = float(setup.get("volume_multiplier") or 0)
-    amin = float(setup.get("atr_pct_min") or 0)
-    amax = float(setup.get("atr_pct_max") or 0)
-    mmin = float(setup.get("move_pct_min") or 0)
-    mmax = float(setup.get("move_pct_max") or 0)
-
-    if not (pmin <= ind["close"] <= pmax):
-        return False
-    if not (rmin <= ind["rsi"] <= rmax):
-        return False
-    if vmin > 0 and ind["vol_ratio"] < vmin:
-        return False
-    if amax > 0 and not (amin <= ind["atr_pct"] <= amax):
-        return False
-    if mmax > 0 and not (mmin <= abs(ind["chg_pct"]) <= mmax):
-        return False
-    return True
+    pmin=float(setup.get("price_min") or 0); pmax=float(setup.get("price_max") or 99999)
+    rmin=float(setup.get("rsi_min") or 0); rmax=float(setup.get("rsi_max") or 100)
+    vmin=float(setup.get("volume_multiplier") or 0); amin=float(setup.get("atr_pct_min") or 0); amax=float(setup.get("atr_pct_max") or 0)
+    mmin=float(setup.get("move_pct_min") or 0); mmax=float(setup.get("move_pct_max") or 0)
+    if not (pmin<=ind["close"]<=pmax): return False
+    if not (rmin<=ind["rsi"]<=rmax): return False
+    if vmin>0 and ind["vol_ratio"]<vmin: return False
+    if amax>0 and not (amin<=ind["atr_pct"]<=amax): return False
+    if mmax>0 and not (mmin<=abs(ind["chg_pct"])<=mmax): return False
+    return not _strict_rule_failures(ind,setup)
 
 
 def run_math_scan(universe, setup, progress_cb=None):
     dfs, fetch_failed = _fetch_bulk(universe, progress_cb=progress_cb)
     shortlist = []
     failed = list(fetch_failed)
+    cfg = _get_rule_config(setup)
     for sym, df in dfs.items():
         ind = _calculate_indicators(sym, df)
         if ind is None:
             failed.append(sym)
             continue
+        ind["pullback"] = _detect_pullback(ind["df"], int(cfg.get("pullback_min_candles",2)),
+                                             int(cfg.get("pullback_max_candles",4)),
+                                             float(cfg.get("volume_dryup_ratio_max",0.80)))
+        ind["pullback_candles"] = int(ind["pullback"].get("candles",0))
+        ind["pullback_vol_ratio"] = float(ind["pullback"].get("volume_ratio",0)) if pd.notna(ind["pullback"].get("volume_ratio",np.nan)) else 0.0
+        ind["rule_failures"] = _strict_rule_failures(ind, setup)
         if _passes_filters(ind, setup):
             shortlist.append(ind)
         # symbols that fetched fine but didn't pass the filter are simply
@@ -617,29 +676,22 @@ def _make_chart_image(sym, df, lookback=60):
 # of AI-audited cards.
 # ════════════════════════════════════════════════════════════
 
-def _svg_mini_chart(df, width=220, height=88):
+def _svg_mini_chart(df, width=240, height=120):
+    """Real candlestick + volume SVG preview."""
     try:
-        closes = [float(c) for c in df["Close"].tail(40).tolist() if pd.notna(c)]
+        d=df.tail(40).copy().dropna(subset=["Open","High","Low","Close","Volume"])
     except Exception:
-        closes = []
-    if len(closes) < 2:
-        return (f'<div style="font-size:10px;color:{T2};padding:28px 0;'
-                f'text-align:center;">No chart data</div>')
-    color = GREEN if closes[-1] >= closes[0] else RED
-    lo, hi = min(closes), max(closes)
-    rng = (hi - lo) or 1
-    pad = 6
-    n = len(closes)
-    pts = " ".join(
-        f"{pad + i / (n - 1) * (width - 2*pad):.1f},"
-        f"{height - pad - ((c - lo) / rng) * (height - 2*pad):.1f}"
-        for i, c in enumerate(closes)
-    )
-    area = f"{pad},{height-pad} {pts} {width-pad},{height-pad}"
-    return (f'<svg width="{width}" height="{height-10}" viewBox="0 0 {width} {height}">'
-            f'<polygon points="{area}" fill="{color}22"/>'
-            f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="1.6" '
-            f'stroke-linejoin="round" stroke-linecap="round"/></svg>')
+        d=pd.DataFrame()
+    if len(d)<2:
+        return f'<div style="font-size:10px;color:{T2};padding:38px 0;text-align:center;">No chart data</div>'
+    px=6; pw=width-2*px; ph=78; vt=88; vh=25; lo=float(d["Low"].min()); hi=float(d["High"].max()); rng=(hi-lo) or 1; vmax=float(d["Volume"].max()) or 1; n=len(d); step=pw/n; bw=max(2,min(5,step*.62))
+    out=[f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg">',f'<rect width="{width}" height="{height}" fill="{DARK2}"/>']
+    for i,(_,r) in enumerate(d.iterrows()):
+        x=px+(i+.5)*step; op=float(r["Open"]); cl=float(r["Close"]); wh=float(r["High"]); wl=float(r["Low"]);
+        yhi=4+(hi-wh)/rng*(ph-8); ylo=4+(hi-wl)/rng*(ph-8); yop=4+(hi-op)/rng*(ph-8); ycl=4+(hi-cl)/rng*(ph-8); c=GREEN if cl>=op else RED
+        by=min(yop,ycl); bh=max(1.2,abs(ycl-yop)); out.append(f'<line x1="{x:.1f}" y1="{yhi:.1f}" x2="{x:.1f}" y2="{ylo:.1f}" stroke="{T2}" stroke-width="0.8"/>'); out.append(f'<rect x="{x-bw/2:.1f}" y="{by:.1f}" width="{bw:.1f}" height="{bh:.1f}" fill="{c}"/>')
+        vv=float(r["Volume"])/vmax*vh; vy=vt+vh-vv; out.append(f'<rect x="{x-bw/2:.1f}" y="{vy:.1f}" width="{bw:.1f}" height="{max(1,vv):.1f}" fill="{c}" opacity="0.65"/>')
+    out.append(f'<line x1="0" y1="{vt-1}" x2="{width}" y2="{vt-1}" stroke="{BORDER}" stroke-width="1"/>'); out.append('</svg>'); return ''.join(out)
 
 
 def _render_hover_shortlist(results, max_rows=80):
@@ -653,27 +705,35 @@ def _render_hover_shortlist(results, max_rows=80):
           <td>
             <span class="hc-wrap">{r['symbol']}
               <span class="hc-pop">
-                <div class="hc-pop-head">{r['symbol']} · 60D</div>
+                <div class="hc-pop-head">{r['symbol']} · 40D CANDLES</div>
                 {chart_svg}
                 <div class="hc-pop-foot">
                   <span>Rs {r['close']:,.2f}</span>
                   <span style="color:{cc};">{'▲' if chg >= 0 else '▼'} {abs(chg):.2f}%</span>
+                </div>
+                <div style="font-size:10px;color:{T2};margin-top:6px;">
+                  30D MOM {r.get('momentum_30_pct',0):.1f}% · RSI {r.get('rsi',0):.1f}/{r.get('rsi_sma14',0):.1f} · SMA50 {r.get('sma50',0):,.0f}
                 </div>
               </span>
             </span>
           </td>
           <td>Rs {r['close']:,.2f}</td>
           <td style="color:{cc};">{'▲' if chg >= 0 else '▼'} {abs(chg):.2f}%</td>
-          <td>{r['rsi']:.0f}</td>
+          <td>{r['rsi']:.1f}</td>
+          <td>{r.get('rsi_sma14',0):.1f}</td>
+          <td style="color:{GREEN if r.get('above_sma50') else RED};">Rs {r.get('sma50',0):,.0f}</td>
+          <td>{r.get('momentum_30_pct',0):.1f}%</td>
+          <td>{r.get('pullback_candles',0)}</td>
+          <td>{r.get('pullback_vol_ratio',0):.2f}x</td>
           <td>{r['vol_ratio']:.2f}x</td>
-          <td>{r['roc_5']:.1f}%</td>
           <td>{r['atr_pct']:.2f}%</td>
           <td>Rs {r['pdh']:,.2f}</td>
           <td>Rs {r['pdl']:,.2f}</td>
         </tr>""")
 
     header = ("<tr><th>SYMBOL</th><th>PRICE</th><th>CHG%</th><th>RSI</th>"
-              "<th>VOL RATIO</th><th>5D ROC</th><th>ATR%</th><th>PDH</th><th>PDL</th></tr>")
+              "<th>RSI SMA14</th><th>SMA50</th><th>30D MOM</th><th>PB CANDLES</th>"
+              "<th>PB VOL</th><th>VOL RATIO</th><th>ATR%</th><th>PDH</th><th>PDL</th></tr>")
     st.markdown(
         f'<div class="hc-table-wrap"><table class="hc-table"><thead>{header}</thead>'
         f'<tbody>{"".join(rows_html)}</tbody></table></div>',
@@ -704,7 +764,9 @@ rubric. Default to skepticism — most candidates will NOT be a good match:
 
 Evaluate specifically: overall trend/shape, candle formation, position of
 highs/lows relative to recent price action, and volume behavior versus the
-reference. Do not give a high score just because both charts show *a* trend
+reference. The candidate has already passed every hard rule enabled in the saved setup;
+AI is only a second-stage visual similarity check and must never override a
+failed rule. Do not give a high score just because both charts show *a* trend
 or *a* pattern in general — the structure has to actually match.
 
 Respond with ONLY this JSON object, no markdown, no other text:
@@ -828,6 +890,9 @@ def _render_result_card(res, setup):
               <span style="color:{cc};margin-left:8px;">{'▲' if chg >= 0 else '▼'} {abs(chg):.2f}%</span>
           </div>
           <div style="font-size:13px;color:{T2};line-height:1.6;margin:8px 0;">{res.get('caption', '')}</div>
+          <div style="font-family:{MONO};font-size:11px;color:{T2};line-height:1.8;">
+            30D MOM {res.get('momentum_30_pct',0):.1f}% · RSI {res.get('rsi',0):.1f}/{res.get('rsi_sma14',0):.1f} · SMA50 Rs {res.get('sma50',0):,.0f} · Pullback {res.get('pullback_candles',0)} candles · PB Vol {res.get('pullback_vol_ratio',0):.2f}x
+          </div>
         """, unsafe_allow_html=True)
         for m in res.get("matches", []):
             st.markdown(f"<div style='font-size:12px;color:{GREEN};margin:2px 0;'>+ {m}</div>", unsafe_allow_html=True)
@@ -852,9 +917,8 @@ def _render_setup_manager(supabase, gemini_key):
         ref_img = st.file_uploader("Reference chart image", type=["png", "jpg", "jpeg"])
         description = st.text_area(
             "Describe the setup in plain English",
-            placeholder="e.g. Price between 200 and 1000, RSI between 45 and 70, "
-                        "volume at least 1.5x the 20-day average, moving 2-3% up or "
-                        "down today, breaking out above a tight consolidation range.",
+            placeholder="e.g. Stock gained >20% in the previous 30 days, RSI >50 and >RSI SMA14, "
+                        "price above SMA50, then a 2-4 candle pullback with volume dry-up.",
             height=100)
 
         ai_col, _sp = st.columns([1, 3])
@@ -881,6 +945,24 @@ def _render_setup_manager(supabase, gemini_key):
                                       value=float(defaults.get("rsi_max", 100)))
         volume_multiplier = st.number_input("Min volume (x 20-day avg, 0 = no filter)",
                                             0.0, 10.0, value=float(defaults.get("volume_multiplier", 0)), step=0.1)
+
+        desc_cfg = _default_rule_config_from_description(description)
+        st.markdown(f"<div style='font-size:12px;color:{IVORY};font-weight:800;margin:12px 0 6px;'>Strict pattern rules</div>", unsafe_allow_html=True)
+        sr1, sr2 = st.columns(2)
+        with sr1:
+            momentum_30_min = st.number_input("30D momentum must be > (%)", 0.0, 200.0, value=float(desc_cfg.get("momentum_30_min",20)), step=1.0)
+            require_momentum_30 = st.checkbox("Enforce 30D momentum rule", value=bool(desc_cfg.get("require_momentum_30",False)))
+            require_rsi_above_50 = st.checkbox("RSI must be above 50", value=bool(desc_cfg.get("require_rsi_above_50",False)))
+            require_rsi_above_sma14 = st.checkbox("RSI must be above RSI SMA14", value=bool(desc_cfg.get("require_rsi_above_sma14",False)))
+            require_sma50 = st.checkbox("Price must be above SMA50", value=bool(desc_cfg.get("require_sma50",False)))
+        with sr2:
+            require_pullback = st.checkbox("Enforce pullback + volume dry-up", value=bool(desc_cfg.get("require_pullback",False)))
+            pullback_min_candles = st.number_input("Pullback min candles", 1, 8, value=int(desc_cfg.get("pullback_min_candles",2)), step=1)
+            pullback_max_candles = st.number_input("Pullback max candles", 1, 8, value=int(desc_cfg.get("pullback_max_candles",4)), step=1)
+            volume_dryup_ratio_max = st.number_input("Pullback avg volume max vs prior 20D", 0.10, 1.00, value=float(desc_cfg.get("volume_dryup_ratio_max",0.80)), step=0.05)
+
+        if pullback_min_candles > pullback_max_candles:
+            st.error("Pullback minimum cannot be greater than pullback maximum.")
 
         st.markdown(f"<div style='font-size:11px;color:{T2};margin:6px 0 2px;'>"
                     f"Volatility &amp; today's move (0 = no filter on either bound)</div>",
@@ -910,7 +992,17 @@ def _render_setup_manager(supabase, gemini_key):
                 ok = _save_setup(supabase, name.strip(), price_min, price_max,
                                  rsi_min, rsi_max, volume_multiplier,
                                  atr_pct_min, atr_pct_max, move_pct_min, move_pct_max,
-                                 description.strip(), ref_b64)
+                                 description.strip(),
+                                 {"require_momentum_30":bool(require_momentum_30),
+                                  "momentum_30_min":float(momentum_30_min),
+                                  "require_rsi_above_50":bool(require_rsi_above_50),
+                                  "require_rsi_above_sma14":bool(require_rsi_above_sma14),
+                                  "require_sma50":bool(require_sma50),
+                                  "require_pullback":bool(require_pullback),
+                                  "pullback_min_candles":int(pullback_min_candles),
+                                  "pullback_max_candles":int(pullback_max_candles),
+                                  "volume_dryup_ratio_max":float(volume_dryup_ratio_max)},
+                                 ref_b64)
                 if ok:
                     st.session_state.pop("_pending_parsed_filters", None)
                     st.success(f"Setup '{name}' saved.")
@@ -1075,7 +1167,15 @@ def _render_scan_page(supabase, gemini_key):
     scan_setup["move_pct_max"] = float(ov_move_max)
 
     _section(f"Scan With: {selected_setup['name']}")
-    st.caption(f"Active filters this run: {_filters_summary(scan_setup)}")
+    rc = _get_rule_config(scan_setup)
+    strict_bits = []
+    if rc.get("require_momentum_30", False): strict_bits.append(f"30D MOM > {float(rc.get('momentum_30_min',20)):.0f}%")
+    if rc.get("require_rsi_above_50", False): strict_bits.append("RSI > 50")
+    if rc.get("require_rsi_above_sma14", False): strict_bits.append("RSI > SMA14")
+    if rc.get("require_sma50", False): strict_bits.append("Close > SMA50")
+    if rc.get("require_pullback", False): strict_bits.append(f"Pullback {int(rc.get('pullback_min_candles',2))}-{int(rc.get('pullback_max_candles',4))} candles + volume dry-up")
+    strict_label = " · ".join(strict_bits) if strict_bits else "no strict pattern rules enabled"
+    st.caption(f"Active numeric filters: {_filters_summary(scan_setup)} · Strict pattern: {strict_label}")
     c1, c2 = st.columns([2, 1])
     with c1:
         universe_opt = st.selectbox("Scan Universe",
@@ -1126,8 +1226,7 @@ def _render_scan_page(supabase, gemini_key):
         if not shortlist:
             prog.progress(1.0)
             stat.empty()
-            st.warning("No stocks passed your numeric filters. Widen the price/RSI/volume/"
-                       "volatility/move range — active filters were: " + _filters_summary(scan_setup))
+            st.warning("No stocks passed ALL saved rules. The scanner is enforcing momentum, RSI, SMA50, pullback length and volume dry-up, plus your numeric filters: " + _filters_summary(scan_setup))
             if failed:
                 with st.expander(f"{len(failed)} symbols had no usable data"):
                     st.write(", ".join(failed[:80]))
@@ -1213,7 +1312,7 @@ def _render_scan_page(supabase, gemini_key):
     sort_col, dl_col = st.columns([3, 1])
     with sort_col:
         shortlist_sort = st.selectbox(
-            "Sort by", ["Volume Ratio", "RSI", "Price", "Chg %", "ATR %", "5D ROC"],
+            "Sort by", ["Volume Ratio", "RSI", "Price", "Chg %", "ATR %", "5D ROC", "30D Momentum"],
             key="shortlist_sort")
     sort_key_map = {
         "Volume Ratio": lambda r: r["vol_ratio"],
@@ -1222,17 +1321,18 @@ def _render_scan_page(supabase, gemini_key):
         "Chg %": lambda r: r["chg_pct"],
         "ATR %": lambda r: r["atr_pct"],
         "5D ROC": lambda r: r["roc_5"],
+        "30D Momentum": lambda r: r.get("momentum_30_pct",0),
     }
     sorted_results = sorted(math_results, key=sort_key_map[shortlist_sort], reverse=True)
     with dl_col:
         st.markdown("<div style='height:26px;'></div>", unsafe_allow_html=True)
         csv_bytes = pd.DataFrame(
-            [{k: v for k, v in r.items() if k != "df"} for r in math_results]
+            [{k: v for k, v in r.items() if k not in {"df", "pullback", "rule_failures"}} for r in math_results]
         ).to_csv(index=False).encode("utf-8")
         st.download_button("Export CSV", csv_bytes, file_name="arka_shortlist.csv",
                            mime="text/csv", use_container_width=True)
 
-    st.caption("Hover a symbol for a quick 60-day chart.")
+    st.caption("Hover a symbol for a real 40-day candlestick + volume chart.")
     _render_hover_shortlist(sorted_results)
 
 
