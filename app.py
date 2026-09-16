@@ -716,7 +716,7 @@ else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=s;}
     rm1, rm2, rm3 = st.columns(3)
     for col,(day,title,desc,c) in zip([rm1,rm2,rm3],[
         ("DAY 1","Connection & Import","Sign in and upload your TradingView watchlist. Cloud sync is instant.",L_CYAN),
-        ("DAY 7","AI Strategy Training","Teach Arka AI your setups, rules and reference charts.",L_PURPLE),
+        ("DAY 7","AI Strategy Training","Teach Arka your setups, rules and reference charts.",L_PURPLE),
         ("DAY 14","Automated Scans Live","Full-universe scans and Telegram alerts on your exact conditions.",L_GREEN)]):
         with col:
             st.markdown(f"""<div class="fade-up" style="background:{L_DARK2};border:1px solid {L_BORDER};border-top:2px solid {c};border-radius:14px;padding:24px;">
