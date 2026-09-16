@@ -13,7 +13,6 @@ from supabase import create_client, Client
 from news_feed import render_news_rail, get_news_dot, _ensure_news_state, refresh_news, _fetch_news_for_stock
 from arka_ai import render_arka_ai
 from research_page import render_research_page
-from screener_scraper import resolve_symbol, get_summary, get_sector_info
 
 # ═══════════════════════════════════════════════════════════════════
 # v3 — BLOOMBERG TERMINAL RESKIN + RIGHT-RAIL NEWS + INDEX FIX
@@ -39,21 +38,16 @@ from screener_scraper import resolve_symbol, get_summary, get_sector_info
 # ═══════════════════════════════════════════════════════════════════
 
 # ── Supabase ─────────────────────────────────────────────────
-SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
-SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
+SUPABASE_URL = st.secrets.get("SUPABASE_URL", "https://vpxagxjgtonynblhddwh.supabase.co")
+SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "sb_publishable_J709kk-CNgm4GVkd5jemEg_XZb5wPDA")
 
 @st.cache_resource
-def get_supabase() -> Client | None:
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        return None
+def get_supabase() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 supabase = get_supabase()
 
 def db_save_watchlist(symbols: list):
-    if supabase is None:
-        st.session_state.watchlist = symbols
-        return True
     try:
         supabase.table("watchlist").delete().neq("id", 0).execute()
         rows = [{"symbol": s} for s in symbols]
@@ -64,20 +58,12 @@ def db_save_watchlist(symbols: list):
         st.error(f"Save error: {e}"); return False
 
 def db_load_watchlist() -> list:
-    if supabase is None:
-        return []
     try:
         res = supabase.table("watchlist").select("symbol").execute()
-        # dict.fromkeys dedupes while preserving order — a stale duplicate
-        # row in Supabase (e.g. from a non-atomic save) must never reach
-        # the UI, since sym-keyed widgets downstream (alerts page) will
-        # crash with StreamlitDuplicateElementKey on a repeated symbol.
-        return list(dict.fromkeys(r["symbol"] for r in res.data)) if res.data else []
+        return [r["symbol"] for r in res.data] if res.data else []
     except: return []
 
 def db_save_alert(symbol: str, alert_type: str, price: float):
-    if supabase is None:
-        return True
     try:
         supabase.table("alerts").delete().eq("symbol", symbol).execute()
         supabase.table("alerts").insert({"symbol": symbol, "alert_type": alert_type,
@@ -87,15 +73,11 @@ def db_save_alert(symbol: str, alert_type: str, price: float):
         st.error(f"Alert save error: {e}"); return False
 
 def db_delete_alert(symbol: str):
-    if supabase is None:
-        return True
     try:
         supabase.table("alerts").delete().eq("symbol", symbol).execute(); return True
     except: return False
 
 def db_load_alerts() -> dict:
-    if supabase is None:
-        return {}
     try:
         res = supabase.table("alerts").select("*").eq("active", True).execute()
         return {r["symbol"]: {"type": r["alert_type"], "price": float(r["price"]), "active": True}
@@ -103,9 +85,6 @@ def db_load_alerts() -> dict:
     except: return {}
 
 def db_save_admin_watchlist(symbols: list):
-    if supabase is None:
-        st.session_state.admin_watchlist = symbols
-        return True
     try:
         supabase.table("admin_watchlist").delete().neq("id", 0).execute()
         rows = [{"symbol": s} for s in symbols]
@@ -116,17 +95,15 @@ def db_save_admin_watchlist(symbols: list):
         st.error(f"Admin save error: {e}"); return False
 
 def db_load_admin_watchlist() -> list:
-    if supabase is None:
-        return []
     try:
         res = supabase.table("admin_watchlist").select("symbol").execute()
-        return list(dict.fromkeys(r["symbol"] for r in res.data)) if res.data else []
+        return [r["symbol"] for r in res.data] if res.data else []
     except: return []
 
 st.set_page_config(page_title="Arka Trades", layout="wide", page_icon="📈", initial_sidebar_state="collapsed")
 
-BOT_TOKEN = st.secrets.get("BOT_TOKEN", "")
-CHAT_ID   = st.secrets.get("CHAT_ID", "")
+BOT_TOKEN = st.secrets.get("BOT_TOKEN", "8720913228:AAEJEpA30KiJ5H0XwIdqxfOA5YSjxW3cfK8")
+CHAT_ID   = st.secrets.get("CHAT_ID", "1987688902")
 
 def send_telegram(msg):
     try:
@@ -203,7 +180,7 @@ def icon_box(name, color=None, size=32):
 for k, v in {"logged_in":False,"disclaimer_done":False,"show_login":False,"page":"home",
     "profile":{"name":"Trader","email":"","phone":""},"profile_photo":None,"watchlist":[],
     "admin_watchlist":[],"alerts":{},"alert_fired":set(),"db_loaded":False,"is_admin":False,
-    "active_news_source":"admin","show_news_rail":True,"active_security":""}.items():
+    "active_news_source":"admin"}.items():
     if k not in st.session_state: st.session_state[k] = v
 
 if not st.session_state.db_loaded:
@@ -219,79 +196,60 @@ name    = st.session_state.profile.get("name","Trader") or "Trader"
 initial = name[0].upper()
 IS_ADMIN = st.session_state.get("is_admin", False)
 
-# ── Global CSS — ARKA TERMINAL v5 ─────────────────────────────
+# ── Global CSS ───────────────────────────────────────────────
 st.markdown(f"""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
-:root{{color-scheme:dark;}}
-*,*::before,*::after{{box-sizing:border-box;}}
-html,body,.stApp{{background:#050505 !important;color:{IVORY} !important;font-family:'Inter',sans-serif !important;}}
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap');
+*,*::before,*::after{{box-sizing:border-box;margin:0;padding:0;}}
+html,body,.stApp{{background:{DARK} !important;color:{IVORY} !important;font-family:{FONT} !important;}}
 header[data-testid="stHeader"]{{display:none !important;}}
-[data-testid="stSidebar"],[data-testid="stSidebarCollapsedControl"]{{display:none !important;}}
-.block-container{{padding:0 8px 28px !important;max-width:100% !important;}}
-.stButton>button{{background:#0b0b0b !important;color:#d8d8d8 !important;border:1px solid #252525 !important;border-radius:0 !important;font-family:'Inter',sans-serif !important;font-size:11px !important;font-weight:600 !important;min-height:30px !important;box-shadow:none !important;}}
-.stButton>button:hover{{border-color:{AMBER} !important;color:{AMBER} !important;background:#111 !important;}}
-.stButton>button[kind="primary"]{{background:{AMBER} !important;color:#000 !important;border-color:{AMBER} !important;}}
-.stTextInput input{{background:#0a0a0a !important;color:#eee !important;border:1px solid #303030 !important;border-radius:0 !important;font-family:'Inter',sans-serif !important;font-size:13px !important;height:40px !important;}}
+[data-testid="stSidebarCollapsedControl"]{{display:none !important;}}
+section[data-testid="stSidebar"]{{display:none !important;}}
+.block-container{{padding:0 !important;max-width:100% !important;}}
+.stTextInput input,.stNumberInput input{{background:{DARK3} !important;color:{IVORY} !important;border:1px solid {BORDER} !important;border-radius:0 !important;font-family:{FONT} !important;font-size:13px !important;}}
 .stTextInput input:focus{{border-color:{AMBER} !important;box-shadow:0 0 0 1px {AMBER} !important;}}
-.stTextInput label,.stSelectbox label,.stRadio label{{font-size:9px !important;color:#777 !important;text-transform:uppercase !important;letter-spacing:1px !important;}}
-[data-testid="stSelectbox"]>div>div{{background:#0a0a0a !important;border:1px solid #303030 !important;border-radius:0 !important;color:#ddd !important;}}
-.stTabs [data-baseweb="tab-list"]{{background:#0a0a0a !important;border:1px solid #252525 !important;border-radius:0 !important;gap:0 !important;}}
-.stTabs [data-baseweb="tab"]{{font-family:'JetBrains Mono',monospace !important;font-size:10px !important;color:#777 !important;text-transform:uppercase !important;border-radius:0 !important;}}
-.stTabs [aria-selected="true"]{{color:{AMBER} !important;background:#101010 !important;box-shadow:inset 0 -2px 0 {AMBER};}}
-[data-testid="stMetric"]{{background:#090909 !important;border:1px solid #202020 !important;border-radius:0 !important;padding:9px !important;}}
-[data-testid="stMetricLabel"] p{{font-size:8px !important;color:#777 !important;letter-spacing:1px !important;text-transform:uppercase !important;}}
-[data-testid="stMetricValue"]{{font-family:'JetBrains Mono',monospace !important;font-size:16px !important;}}
-hr{{border-color:#202020 !important;}}
-.pulse-dot{{width:5px;height:5px;border-radius:50%;background:{GREEN};display:inline-block;box-shadow:0 0 7px {GREEN};}}
-.terminal-shell{{background:#070707;border:1px solid #202020;border-top:2px solid {AMBER};}}
-.terminal-brandbar{{height:45px;display:flex;align-items:center;justify-content:space-between;padding:0 12px;border-bottom:1px solid #202020;background:#080808;}}
-.brand-left{{display:flex;align-items:center;gap:9px;}}
-.brand-mark{{width:24px;height:24px;background:{AMBER};display:flex;align-items:center;justify-content:center;}}
-.brand-name{{font-size:12px;font-weight:700;letter-spacing:1.3px;color:#eee;}}
-.brand-sub{{font-family:'JetBrains Mono',monospace;font-size:7px;letter-spacing:1.5px;color:#666;margin-top:2px;}}
-.brand-status{{font-family:'JetBrains Mono',monospace;font-size:8px;letter-spacing:1px;color:{GREEN};display:flex;align-items:center;gap:6px;}}
-.market-strip{{border-bottom:1px solid #202020;background:#050505;}}
-.market-row{{display:grid;grid-template-columns:70px repeat(6,minmax(120px,1fr));min-height:30px;border-bottom:1px solid #161616;}}
-.market-row:last-child{{border-bottom:0;}}
-.market-row-label{{font-family:'JetBrains Mono',monospace;font-size:8px;color:#666;display:flex;align-items:center;padding:0 8px;letter-spacing:1px;text-transform:uppercase;}}
-.market-cell{{border-left:1px solid #161616;padding:4px 7px;display:flex;align-items:center;justify-content:space-between;gap:6px;min-width:0;}}
-.market-cell .m-name{{font-family:'JetBrains Mono',monospace;font-size:8px;color:#8a8a8a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}}
-.market-cell .m-price{{font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:600;color:#e6e6e6;white-space:nowrap;}}
-.market-cell .m-chg{{font-family:'JetBrains Mono',monospace;font-size:8px;font-weight:600;white-space:nowrap;}}
-.command-wrap{{padding:9px 0 7px;background:#050505;border-bottom:1px solid #202020;}}
-.command-label{{font-family:'JetBrains Mono',monospace;font-size:8px;color:{AMBER};letter-spacing:1.4px;margin:0 0 4px 4px;text-transform:uppercase;}}
-.command-hint{{font-family:'JetBrains Mono',monospace;font-size:8px;color:#555;text-align:right;margin-top:-24px;margin-right:9px;pointer-events:none;}}
-.security-head{{display:flex;justify-content:space-between;align-items:center;background:#090909;border:1px solid #262626;border-top:2px solid {AMBER};padding:11px 13px;margin-bottom:8px;}}
-.security-kicker{{font-family:'JetBrains Mono',monospace;color:#666;font-size:8px;letter-spacing:1.2px;}}
-.security-title{{font-size:17px;font-weight:700;color:#eee;margin-top:3px;}}
-.security-symbol{{font-family:'JetBrains Mono',monospace;color:#777;font-size:9px;margin-top:3px;}}
-.security-quote{{text-align:right;font-family:'JetBrains Mono',monospace;}}
-.quote-price{{font-size:20px;color:#eee;font-weight:600;}}
-.panel-title{{font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:600;letter-spacing:1.3px;color:{AMBER};border-bottom:1px solid #242424;padding:8px 0 6px;margin-bottom:6px;text-transform:uppercase;}}
-.overview-box{{background:#090909;border:1px solid #242424;}}
-.overview-row{{display:flex;justify-content:space-between;padding:6px 9px;border-bottom:1px solid #181818;font-size:9px;}}
-.overview-row:last-child{{border-bottom:0;}}
-.overview-row span{{color:#777;}}
-.overview-row b{{font-family:'JetBrains Mono',monospace;color:#ddd;font-weight:500;}}
-.company-desc{{background:#090909;border:1px solid #242424;padding:9px;font-size:9px;color:#858585;line-height:1.6;}}
-.module-launcher{{margin-top:9px;border-top:1px solid #242424;background:#070707;}}
-.module-launcher-head{{height:28px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #1d1d1d;padding:0 8px;}}
-.module-launcher-title{{font-family:'JetBrains Mono',monospace;font-size:8px;letter-spacing:1.3px;color:#777;text-transform:uppercase;}}
-.module-launcher-context{{font-family:'JetBrains Mono',monospace;font-size:8px;color:{AMBER};}}
-.module-cell{{padding:8px 9px;border-right:1px solid #222;min-height:48px;}}
-.module-code{{font-family:'JetBrains Mono',monospace;color:{AMBER};font-size:8px;font-weight:700;}}
-.module-label{{font-size:9px;color:#cfcfcf;margin-top:3px;}}
-.monitor-grid{{display:grid;grid-template-columns:1.15fr 1fr 1fr;gap:8px;margin-top:8px;}}
-.monitor-panel{{background:#090909;border:1px solid #242424;min-height:145px;}}
-.monitor-head{{height:30px;border-bottom:1px solid #202020;padding:0 9px;display:flex;align-items:center;justify-content:space-between;font-family:'JetBrains Mono',monospace;font-size:8px;color:{AMBER};letter-spacing:1px;}}
-.monitor-row{{display:grid;grid-template-columns:1fr 72px 62px;gap:5px;padding:6px 9px;border-bottom:1px solid #161616;font-family:'JetBrains Mono',monospace;font-size:9px;}}
-.monitor-row span:first-child{{color:#aaa;}}
-.monitor-row span:nth-child(2){{text-align:right;color:#ddd;}}
-.monitor-row span:last-child{{text-align:right;}}
-.small-positive{{color:{GREEN};}} .small-negative{{color:{RED};}}
-.news-rail{{background:#080808;border-left:1px solid #262626;min-height:100%;}}
-@media(max-width:1100px){{.market-row{{grid-template-columns:70px repeat(6,minmax(120px,1fr));overflow-x:auto;}}.monitor-grid{{grid-template-columns:1fr;}}}}
+.stTextInput label,.stTextArea label,.stNumberInput label{{color:{T2} !important;font-size:10px !important;font-weight:700 !important;letter-spacing:0.5px;text-transform:uppercase;}}
+.stTextArea textarea{{background:{DARK3} !important;color:{IVORY} !important;border:1px solid {BORDER} !important;border-radius:0 !important;}}
+[data-testid="stForm"]{{background:{DARK2} !important;border:1px solid {BORDER} !important;border-radius:0 !important;padding:20px !important;}}
+[data-testid="metric-container"]{{background:{DARK2} !important;border:1px solid {BORDER} !important;border-radius:0 !important;padding:12px !important;}}
+[data-testid="stMetricLabel"] p{{font-size:9px !important;font-weight:700 !important;color:{T2} !important;letter-spacing:1px;text-transform:uppercase;}}
+[data-testid="stMetricValue"]{{font-family:{MONO} !important;font-size:18px !important;color:{IVORY} !important;}}
+.stButton>button{{background:{DARK3} !important;color:{IVORY} !important;border:1px solid {BORDER} !important;border-radius:0 !important;font-family:{FONT} !important;font-weight:700 !important;font-size:12px !important;transition:all .1s ease !important;letter-spacing:0.3px;}}
+.stButton>button:hover{{border-color:{AMBER} !important;color:{AMBER} !important;transform:none;}}
+.stButton>button[kind="primary"],.stFormSubmitButton>button[kind="primary"]{{background:{AMBER} !important;color:#000 !important;border:none !important;font-weight:800 !important;}}
+.stButton>button[kind="primary"]:hover{{filter:brightness(1.1);color:#000 !important;}}
+.stTabs [data-baseweb="tab-list"]{{background:{DARK2};border:1px solid {BORDER};border-radius:0;padding:0;gap:0;}}
+.stTabs [data-baseweb="tab"]{{color:{T2};font-weight:700;border-radius:0;font-size:11px;letter-spacing:0.5px;text-transform:uppercase;}}
+.stTabs [aria-selected="true"]{{background:{DARK3} !important;color:{AMBER} !important;box-shadow:inset 0 -2px 0 {AMBER};}}
+.stCheckbox label,.stRadio label{{color:{IVORY} !important;font-size:13px !important;}}
+[data-testid="stSelectbox"]>div>div{{background:{DARK3} !important;border:1px solid {BORDER} !important;color:{IVORY} !important;border-radius:0 !important;}}
+hr{{border-color:{BORDER} !important;}}
+.stProgress>div>div{{background:{AMBER} !important;}}
+.nav-btn .stButton>button{{width:100% !important;text-align:left !important;background:transparent !important;color:{T2} !important;border:none !important;border-radius:0 !important;font-size:12px !important;font-weight:700 !important;padding:7px 12px !important;margin-bottom:0px !important;font-family:{MONO} !important;}}
+.nav-btn .stButton>button:hover{{background:{DARK3} !important;color:{IVORY} !important;transform:none;}}
+.nav-btn-active .stButton>button{{background:rgba(255,159,10,0.10) !important;color:{AMBER} !important;border-left:2px solid {AMBER} !important;border-radius:0 !important;}}
+@keyframes pulse{{0%,100%{{box-shadow:0 0 0 0 rgba(48,209,88,.4);}}50%{{box-shadow:0 0 0 5px rgba(48,209,88,0);}}}}
+.pulse-dot{{width:6px;height:6px;border-radius:50%;background:{GREEN};display:inline-block;animation:pulse 2s infinite;}}
+@keyframes fadeUp{{from{{opacity:0;transform:translateY(6px);}}to{{opacity:1;transform:none;}}}}
+.fade-up{{animation:fadeUp .3s ease both;}}
+@keyframes tickerscroll{{from{{transform:translateX(0);}}to{{transform:translateX(-50%);}}}}
+
+/* ── Top scrolling ticker strip ── */
+#term-ticker-wrap{{width:100%;overflow:hidden;background:{DARK2};border-bottom:1px solid {BORDER};height:30px;display:flex;align-items:center;white-space:nowrap;}}
+#term-ticker-track{{display:inline-flex;animation:tickerscroll 45s linear infinite;white-space:nowrap;}}
+#term-ticker-track span.tk-item{{display:inline-flex;align-items:center;gap:6px;padding:0 18px;font-family:{MONO};font-size:11px;font-weight:600;border-right:1px solid {BORDER2};white-space:nowrap;}}
+
+/* ── Right news rail ── */
+#news-rail-inner .stTabs [data-baseweb="tab-list"]{{background:transparent !important;border:none !important;}}
+#news-rail-inner .stTabs{{margin-top:-4px;}}
+
+/* ── Column dividers to feel like terminal panels ── */
+.term-panel{{background:{DARK2};border:1px solid {BORDER};padding:14px;}}
+.term-panel-title{{font-family:{MONO};font-size:10px;font-weight:700;letter-spacing:1.5px;color:{T2};text-transform:uppercase;border-bottom:1px solid {BORDER};padding-bottom:8px;margin-bottom:10px;}}
+
+@media (max-width: 1100px){{
+    #arka-news-rail-col{{display:none;}}
+}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -754,7 +712,7 @@ else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=s;}
     rm1, rm2, rm3 = st.columns(3)
     for col,(day,title,desc,c) in zip([rm1,rm2,rm3],[
         ("DAY 1","Connection & Import","Sign in and upload your TradingView watchlist. Cloud sync is instant.",L_CYAN),
-        ("DAY 7","AI Strategy Training","Teach Arka your setups, rules and reference charts.",L_PURPLE),
+        ("DAY 7","AI Strategy Training","Teach Arka AI your setups, rules and reference charts.",L_PURPLE),
         ("DAY 14","Automated Scans Live","Full-universe scans and Telegram alerts on your exact conditions.",L_GREEN)]):
         with col:
             st.markdown(f"""<div class="fade-up" style="background:{L_DARK2};border:1px solid {L_BORDER};border-top:2px solid {c};border-radius:14px;padding:24px;">
@@ -801,276 +759,11 @@ if not st.session_state.disclaimer_done:
     st.stop()
 
 # ════════════════ MAIN APP ═══════════════════════════════════
-# ════════════════ MAIN APP — ARKA TERMINAL v4 ════════════════
-# The authenticated workspace is now a single terminal rather than a
-# permanent left-sidebar application. Search is the primary entry point;
-# the selected security becomes the context for chart/research/AI tools.
-# The existing right-side MARKET NEWS rail is deliberately preserved.
-
-
-def _fmt_num(value, prefix="", suffix=""):
-    if value in (None, "", "—", "-"):
-        return "—"
-    return f"{prefix}{value}{suffix}"
-
-
-def _security_candidates(query: str):
-    """Build a small fast dropdown from known/active symbols.
-    Exact/near matches are offered in the UI; unknown symbols are resolved
-    through Screener when the user presses SEARCH.
-    """
-    base = [
-        "RELIANCE", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK",
-        "TCS", "INFY", "WIPRO", "LT", "ITC", "BHARTIARTL", "TATAMOTORS",
-        "M&M", "MARUTI", "SUNPHARMA", "HINDUNILVR", "BAJFINANCE", "ADANIENT",
-        "ADANIPORTS", "TATASTEEL", "JSWSTEEL", "NTPC", "POWERGRID", "ONGC",
-        "COALINDIA", "BEL", "HAL", "RVNL", "IRFC", "TRENT", "PERSISTENT",
-    ]
-    for source in (st.session_state.get("watchlist", []), st.session_state.get("admin_watchlist", [])):
-        for x in source:
-            if x and x.upper() not in base:
-                base.append(x.upper())
-    q = (query or "").strip().upper()
-    if not q:
-        return base[:18]
-    starts = [x for x in base if x.startswith(q)]
-    contains = [x for x in base if q in x and x not in starts]
-    return (starts + contains)[:12]
-
-
-def _open_security(symbol: str):
-    symbol = (symbol or "").strip().upper()
-    if not symbol:
-        return
-    st.session_state["active_security"] = symbol
-    st.session_state["research_last_query"] = symbol
-    st.session_state["m1_ticker"] = symbol
-    st.session_state.pop("research_data", None)
-    st.session_state.page = "security"
-    st.rerun()
-
-
-def _market_cell(label, data):
-    if data:
-        c = GREEN if data["chg"] >= 0 else RED
-        arrow = "▲" if data["chg"] >= 0 else "▼"
-        return f'<div class="market-cell"><span class="m-name">{label}</span><span class="m-price">{data["price"]:,.2f}</span><span class="m-chg" style="color:{c}">{arrow}{abs(data["chg"]):.2f}%</span></div>'
-    return f'<div class="market-cell"><span class="m-name">{label}</span><span class="m-price">—</span><span class="m-chg" style="color:#555">—</span></div>'
-
-
-def _render_terminal_header():
-    india = [("NIFTY 50", "^NSEI", None), ("BANK NIFTY", "^NSEBANK", None), ("SENSEX", "^BSESN", None), ("NIFTY IT", "^CNXIT", None), ("NIFTY AUTO", "^CNXAUTO", None), ("MIDCAP 100", MIDCAP_CANDIDATES[0], MIDCAP_CANDIDATES[1:])]
-    global_ = [("S&P 500", "^GSPC", None), ("NASDAQ", "^IXIC", None), ("DOW", "^DJI", None), ("DAX", "^GDAXI", None), ("FTSE", "^FTSE", None), ("NIKKEI", "^N225", None)]
-    st.markdown('<div class="terminal-shell">', unsafe_allow_html=True)
-    st.markdown(f'''<div class="terminal-brandbar"><div class="brand-left"><div class="brand-mark">{icon("trend",15,"#000")}</div><div><div class="brand-name">ARKA TRADES</div><div class="brand-sub">MARKET TERMINAL · EQUITIES</div></div></div><div class="brand-status"><span class="pulse-dot"></span> LIVE MARKET DATA</div></div>''', unsafe_allow_html=True)
-    for title, items in (("INDIA", india), ("GLOBAL", global_)):
-        cells = ''.join(_market_cell(label, get_index(sym, fb)) for label, sym, fb in items)
-        st.markdown(f'<div class="market-strip"><div class="market-row"><div class="market-row-label">{title}</div>{cells}</div></div>', unsafe_allow_html=True)
-    st.markdown('<div class="command-wrap"><div class="command-label">SECURITY / INDEX / COMPANY SEARCH</div>', unsafe_allow_html=True)
-    q = st.text_input("Security search", value=st.session_state.get("security_search", ""), placeholder="Type ticker or company name  ·  e.g. RELIANCE", label_visibility="collapsed", key="security_search")
-    st.markdown('<div class="command-hint">LOAD SECURITY →</div></div>', unsafe_allow_html=True)
-    suggestions = _security_candidates(q)
-    sc1, sc2 = st.columns([5.7, 1])
-    with sc1:
-        labels = [f"{s} · NSE EQUITY" for s in suggestions]
-        selected = st.selectbox("Matches", labels, index=0 if labels else None, placeholder="Select a matching security…", label_visibility="collapsed", key="security_dropdown_v5") if labels else None
-    with sc2:
-        search_clicked = st.button("LOAD", type="primary", use_container_width=True, key="global_security_search_v5")
-    if search_clicked:
-        if selected:
-            _open_security(selected.split(" · " )[0].strip())
-        elif q.strip():
-            with st.spinner("Resolving security…"):
-                try:
-                    resolved = resolve_symbol(q.strip())
-                except Exception:
-                    resolved = None
-            if resolved:
-                _open_security(q.strip())
-            else:
-                st.error(f"No security found for '{q.strip().upper()}'.")
-    st.markdown('</div>', unsafe_allow_html=True)
-
-
-def _render_module_dock(active=None):
-    modules = [("F2", "Watchlist Scanner", "scanner"), ("F3", "Alerts", "alerts"), ("F4", "Research", "research"), ("F5", "Arka AI", "analysis"), ("F6", "Smart Screener", "smart_scan"), ("F7", "Market Breadth", "breadth")]
-    ctx = st.session_state.get("active_security") or "MARKET"
-    st.markdown(f'<div class="module-launcher"><div class="module-launcher-head"><span class="module-launcher-title">FUNCTIONS / MODULES</span><span class="module-launcher-context">CONTEXT: {ctx}</span></div></div>', unsafe_allow_html=True)
-    cols = st.columns(len(modules))
-    for col, (code, label, target) in zip(cols, modules):
-        with col:
-            st.markdown(f'<div class="module-cell"><div class="module-code">{code}</div><div class="module-label">{label}</div></div>', unsafe_allow_html=True)
-            if st.button("OPEN", key=f"module_v5_{target}", use_container_width=True):
-                st.session_state.page = target
-                sym = st.session_state.get("active_security")
-                if sym:
-                    st.session_state["research_last_query"] = sym
-                    st.session_state["m1_ticker"] = sym
-                st.rerun()
-
-def _render_security_chart(symbol: str):
-    try:
-        hist = yf.Ticker(symbol + ".NS").history(period="6mo", interval="1d")
-    except Exception:
-        hist = None
-    if hist is None or hist.empty:
-        st.warning(f"Chart data unavailable for {symbol}.")
-        return
-    try:
-        import plotly.graph_objects as go
-        from plotly.subplots import make_subplots
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.02, row_heights=[0.82, 0.18])
-        fig.add_trace(go.Candlestick(
-            x=hist.index, open=hist["Open"], high=hist["High"], low=hist["Low"], close=hist["Close"],
-            increasing_line_color=GREEN, decreasing_line_color=RED,
-            increasing_fillcolor=GREEN, decreasing_fillcolor=RED, name="Price"), row=1, col=1)
-        vol_colors = [GREEN if c >= o else RED for c, o in zip(hist["Close"], hist["Open"])]
-        fig.add_trace(go.Bar(x=hist.index, y=hist["Volume"], marker_color=vol_colors, name="Volume"), row=2, col=1)
-        fig.update_layout(
-            height=490, margin=dict(l=4,r=46,t=8,b=4), paper_bgcolor=DARK2, plot_bgcolor=DARK2,
-            font=dict(color=T2, family="JetBrains Mono, Consolas, monospace", size=10), showlegend=False,
-            xaxis_rangeslider_visible=False, hovermode="x unified"
-        )
-        fig.update_xaxes(showgrid=True, gridcolor=BORDER, nticks=10)
-        fig.update_yaxes(showgrid=True, gridcolor=BORDER, side="right", row=1, col=1)
-        fig.update_yaxes(showgrid=False, showticklabels=False, side="right", row=2, col=1)
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": True, "scrollZoom": True})
-    except ImportError:
-        st.line_chart(hist["Close"], height=430)
-
-
-def _render_security_workspace(symbol: str):
-    symbol = symbol.upper().strip()
-    try:
-        resolved = resolve_symbol(symbol)
-    except Exception:
-        resolved = None
-    if not resolved:
-        st.error(f"Could not resolve {symbol}.")
-        return
-
-    name_ = resolved.get("name", symbol)
-    url_ = resolved.get("url")
-    try:
-        summary = get_summary(symbol, url=url_)
-        s = summary.get("data") or {}
-    except Exception:
-        summary, s = {}, {}
-    try:
-        sector = get_sector_info(symbol, url=url_)
-        sec = sector.get("data") or {}
-    except Exception:
-        sec = {}
-
-    price = s.get("current_price")
-    prev = None
-    try:
-        daily = yf.Ticker(symbol + ".NS").history(period="5d", interval="1d")
-        if len(daily) >= 2:
-            price = float(daily["Close"].iloc[-1])
-            prev = float(daily["Close"].iloc[-2])
-    except Exception:
-        pass
-    chg = ((price - prev) / prev * 100) if price is not None and prev else None
-    chg_c = GREEN if (chg or 0) >= 0 else RED
-
-    st.markdown(f"""
-    <div class="security-head">
-      <div>
-        <div class="security-kicker">SECURITY WORKSPACE · NSE</div>
-        <div class="security-title">{name_}</div>
-        <div class="security-symbol">{symbol} · {sec.get('Sector','') or sec.get('Industry','') or 'EQUITY'}</div>
-      </div>
-      <div class="security-quote">
-        <div class="quote-price">₹{float(price):,.2f}</div>
-        <div style="color:{chg_c};">{'▲' if (chg or 0)>=0 else '▼'} {abs(chg):.2f}%</div>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    chart_col, info_col = st.columns([3.2, 1.55])
-    with chart_col:
-        st.markdown('<div class="panel-title">PRICE CHART · CANDLESTICK</div>', unsafe_allow_html=True)
-        tf = st.radio("Chart range", ["1M", "3M", "6M", "1Y", "2Y"], index=2, horizontal=True, label_visibility="collapsed", key=f"security_tf_{symbol}")
-        # Reuse the chart renderer with period mapping by fetching locally for accurate selected range.
-        period_map = {"1M":"1mo", "3M":"3mo", "6M":"6mo", "1Y":"1y", "2Y":"2y"}
-        try:
-            hist = yf.Ticker(symbol + ".NS").history(period=period_map[tf], interval="1d")
-        except Exception:
-            hist = None
-        if hist is not None and not hist.empty:
-            try:
-                import plotly.graph_objects as go
-                from plotly.subplots import make_subplots
-                fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.01, row_heights=[0.82,0.18])
-                fig.add_trace(go.Candlestick(x=hist.index, open=hist["Open"], high=hist["High"], low=hist["Low"], close=hist["Close"], increasing_line_color=GREEN, decreasing_line_color=RED, increasing_fillcolor=GREEN, decreasing_fillcolor=RED), row=1,col=1)
-                fig.add_trace(go.Bar(x=hist.index, y=hist["Volume"], marker_color=[GREEN if c>=o else RED for c,o in zip(hist["Close"],hist["Open"])]), row=2,col=1)
-                fig.update_layout(height=500, margin=dict(l=0,r=45,t=4,b=0), paper_bgcolor=DARK2, plot_bgcolor=DARK2, font=dict(color=T2,family="JetBrains Mono, Consolas, monospace",size=10), showlegend=False, xaxis_rangeslider_visible=False)
-                fig.update_xaxes(showgrid=True, gridcolor=BORDER, nticks=10)
-                fig.update_yaxes(showgrid=True, gridcolor=BORDER, side="right", row=1,col=1)
-                fig.update_yaxes(showgrid=False, showticklabels=False, side="right", row=2,col=1)
-                st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": True, "scrollZoom": True})
-            except ImportError:
-                st.line_chart(hist["Close"], height=450)
-        else:
-            st.warning("Chart data unavailable.")
-
-        cc1,cc2,cc3,cc4 = st.columns(4)
-        with cc1: st.caption(f"52W HIGH\n₹{s.get('year_high','—')}")
-        with cc2: st.caption(f"52W LOW\n₹{s.get('year_low','—')}")
-        with cc3: st.caption(f"PDH\n{get_static(symbol).get('pdh','—') if get_static(symbol) else '—'}")
-        with cc4: st.caption(f"PDL\n{get_static(symbol).get('pdl','—') if get_static(symbol) else '—'}")
-
-    with info_col:
-        st.markdown('<div class="panel-title">COMPANY OVERVIEW</div>', unsafe_allow_html=True)
-        overview_items = [
-            ("Sector", sec.get("Sector", sec.get("Broad Sector", "—"))),
-            ("Industry", sec.get("Industry", sec.get("Broad Industry", "—"))),
-            ("Market Cap", _fmt_num(s.get("market_cap"), "₹", " Cr")),
-            ("P/E", _fmt_num(s.get("pe_ratio"), "", "x")),
-            ("Book Value", _fmt_num(s.get("book_value"), "₹", "")),
-            ("Dividend Yield", _fmt_num(s.get("dividend_yield"), "", "%")),
-            ("ROCE", _fmt_num(s.get("roce"), "", "%")),
-            ("ROE", _fmt_num(s.get("roe"), "", "%")),
-        ]
-        rows = "".join(f'<div class="overview-row"><span>{k}</span><b>{v}</b></div>' for k,v in overview_items)
-        st.markdown(f'<div class="overview-box">{rows}</div>', unsafe_allow_html=True)
-        st.markdown('<div class="panel-title company-desc-title">COMPANY DESCRIPTION</div>', unsafe_allow_html=True)
-        desc = f"{name_} is listed on the Indian equity market. The security is classified under {sec.get('Sector') or sec.get('Industry') or 'its reported sector/industry classification'}. Detailed fundamentals are available through the Research module."
-        st.markdown(f'<div class="company-desc">{desc}</div>', unsafe_allow_html=True)
-        if st.button("ADD TO WATCHLIST", use_container_width=True, key=f"sec_wl_{symbol}"):
-            if symbol not in st.session_state.watchlist:
-                st.session_state.watchlist.append(symbol)
-                db_save_watchlist(st.session_state.watchlist)
-                st.success(f"{symbol} added to watchlist")
-
-    st.markdown('<div class="security-tabs-spacer"></div>', unsafe_allow_html=True)
-    _render_module_dock(active=None)
-
-
-def _render_dashboard():
-    wl = st.session_state.get("watchlist", [])[:8]
-    rows = []
-    for sym in wl:
-        d = get_price(sym)
-        if d:
-            c = GREEN if d["chg"] >= 0 else RED
-            rows.append(f'<div class="monitor-row"><span>{sym}</span><span>₹{d["price"]:,.2f}</span><span style="color:{c}">{d["chg"]:+.2f}%</span></div>')
-    watch_html = ''.join(rows) if rows else '<div style="padding:10px;color:#666;font-size:9px;font-family:JetBrains Mono,monospace;">NO WATCHLIST LOADED · OPEN WATCHLIST SCANNER</div>'
-    all_syms = list(dict.fromkeys(st.session_state.get("admin_watchlist", []) + wl))[:30]
-    adv = dec = flat = 0
-    for sym in all_syms:
-        d = get_price(sym)
-        if not d: continue
-        if d["chg"] > 0.05: adv += 1
-        elif d["chg"] < -0.05: dec += 1
-        else: flat += 1
-    ratio = (adv/dec) if dec else (float(adv) if adv else 0)
-    st.markdown(f'''<div class="monitor-grid"><div class="monitor-panel"><div class="monitor-head"><span>WATCHLIST MONITOR</span><span>{len(wl)} NAMES</span></div>{watch_html}</div><div class="monitor-panel"><div class="monitor-head"><span>MARKET INTERNALS</span><span>WATCHLIST SAMPLE</span></div><div class="monitor-row"><span>ADVANCING</span><span>{adv}</span><span class="small-positive">▲</span></div><div class="monitor-row"><span>DECLINING</span><span>{dec}</span><span class="small-negative">▼</span></div><div class="monitor-row"><span>UNCHANGED</span><span>{flat}</span><span style="color:#777">—</span></div><div class="monitor-row"><span>A/D RATIO</span><span>{ratio:.2f}</span><span style="color:#888">RATIO</span></div></div><div class="monitor-panel"><div class="monitor-head"><span>TERMINAL FUNCTIONS</span><span>F2–F7</span></div><div class="monitor-row"><span>SEARCH SECURITY</span><span>CMD</span><span style="color:{AMBER}">LOAD</span></div><div class="monitor-row"><span>RESEARCH</span><span>F4</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>ARKA AI</span><span>F5</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>SCREENER</span><span>F6</span><span style="color:{AMBER}">OPEN</span></div></div></div>''', unsafe_allow_html=True)
-    _render_module_dock(active=None)
-
 
 def _news_watchlist_for_rail():
+    """Whichever watchlist has content drives the rail; prefer the
+    one the user is actively scanning (active_news_source), fall
+    back to admin, then personal."""
     source_key = st.session_state.get("active_news_source", "admin")
     primary_key = "admin_watchlist" if source_key == "admin" else "watchlist"
     wl = st.session_state.get(primary_key, [])
@@ -1079,180 +772,560 @@ def _news_watchlist_for_rail():
     label = "ARKA WATCHLIST" if (wl and wl == st.session_state.get("admin_watchlist")) else "YOUR WATCHLIST"
     return wl, label
 
-# ── Global terminal state ──────────────────────────────────────
-if "active_security" not in st.session_state:
-    st.session_state["active_security"] = ""
+# ── Top scrolling ticker strip (always visible, Bloomberg-style) ──
+def render_top_ticker():
+    idx_defs = [
+        ("NIFTY 50", "^NSEI", None),
+        ("BANK NIFTY", "^NSEBANK", None),
+        ("SENSEX", "^BSESN", None),
+        ("MIDCAP 100", MIDCAP_CANDIDATES[0], MIDCAP_CANDIDATES[1:]),
+        ("SMALLCAP 250", SMALLCAP_CANDIDATES[0], SMALLCAP_CANDIDATES[1:]),
+        ("S&P 500", SP500_CANDIDATES[0], None),
+        ("DOW JONES", DOWJONES_CANDIDATES[0], None),
+        ("GOLD", GOLD_CANDIDATES[0], None),
+    ]
+    items = []
+    for label, sym, fb in idx_defs:
+        d = get_index(sym, fb)
+        if d:
+            c = GREEN if d["chg"] >= 0 else RED
+            arrow = "▲" if d["chg"] >= 0 else "▼"
+            items.append(
+                f'<span class="tk-item"><span style="color:{T2};">{label}</span>'
+                f'<span style="color:{IVORY};">{d["price"]:,.2f}</span>'
+                f'<span style="color:{c};">{arrow} {abs(d["chg"]):.2f}%</span></span>'
+            )
+        else:
+            items.append(f'<span class="tk-item"><span style="color:{T2};">{label}</span>'
+                          f'<span style="color:{T3};">--</span></span>')
+    track = "".join(items)
+    st.markdown(f"""
+    <div id="term-ticker-wrap">
+        <div id="term-ticker-track">{track}{track}</div>
+    </div>""", unsafe_allow_html=True)
 
-# Header / search stays above every authenticated page.
-_render_terminal_header()
+render_top_ticker()
 
-# News rail toggle: the rail stays on the RIGHT, in the same location.
-tg1, tg2 = st.columns([8.8, 1.2])
-with tg2:
-    toggle_label = "HIDE NEWS ▸" if st.session_state.show_news_rail else "◂ SHOW NEWS"
-    if st.button(toggle_label, key="toggle_news_rail_v5", use_container_width=True):
-        st.session_state.show_news_rail = not st.session_state.show_news_rail
+left, center, right_rail = st.columns([0.9, 3.3, 1.1])
+
+PAGE_ACCENTS = {"home":AMBER,"scanner":CYAN,"alerts":AMBER,"analysis":PURPLE,
+    "smart_scan":GREEN,"breadth":PINK,"heatmap":T2,"autoalert":T2,"profile":AMBER,
+    "settings":AMBER,"contact":CYAN,"research":AMBER}
+
+with left:
+    st.markdown(f"""<div style="display:flex;align-items:center;gap:10px;padding:16px 12px 12px;border-bottom:1px solid {BORDER};">
+        <div style="width:28px;height:28px;border-radius:2px;background:{AMBER};display:flex;align-items:center;justify-content:center;">{icon("trend", 15, "#000")}</div>
+        <div><div style="font-size:13px;font-weight:800;color:{IVORY};line-height:1;letter-spacing:0.5px;">ARKA TRADES</div>
+        <div style="font-size:8px;letter-spacing:2px;color:{T2};text-transform:uppercase;margin-top:3px;">Terminal</div></div></div>""", unsafe_allow_html=True)
+
+    photo = st.session_state.get("profile_photo")
+    if photo:
+        st.image(photo, width=50)
+    else:
+        st.markdown(f"""<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;">
+            <div style="width:30px;height:30px;border-radius:2px;background:{DARK3};border:1px solid {BORDER};display:flex;align-items:center;justify-content:center;font-weight:800;font-size:13px;color:{AMBER};">{initial}</div>
+            <div><div style="font-size:9px;color:{T2};">Signed in</div>
+            <div style="font-weight:800;font-size:12px;color:{IVORY};">{name}</div></div></div>
+        <div style="height:1px;background:{BORDER};"></div>""", unsafe_allow_html=True)
+
+    st.markdown(f"<div style='padding:12px 12px 3px;font-size:9px;font-weight:700;letter-spacing:1.5px;color:{AMBER};text-transform:uppercase;'>F-Keys · Suite</div>", unsafe_allow_html=True)
+    pg = st.session_state.page
+
+    def nav_btn(label, key, fkey=None):
+        active = pg == key
+        css_class = "nav-btn-active" if active else "nav-btn"
+        display = f"{fkey}  {label}" if fkey else label
+        st.markdown(f'<div class="{css_class}">', unsafe_allow_html=True)
+        if st.button(display, key=f"nav_{key}", use_container_width=True):
+            st.session_state.page = key; st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    nav_btn("DASH","home","F1")
+    nav_btn("SCAN","scanner","F2")
+    nav_btn("ALERT","alerts","F3")
+    nav_btn("RSRCH","research","F4")
+    nav_btn("ARKA AI","analysis","F5")
+    nav_btn("SCREEN","smart_scan","F6")
+    nav_btn("BREADTH","breadth","F7")
+    st.markdown(f"<div style='padding:12px 12px 3px;font-size:9px;font-weight:700;letter-spacing:1.5px;color:{T2};text-transform:uppercase;'>Coming Soon</div>", unsafe_allow_html=True)
+    nav_btn("HEATMAP","heatmap")
+    nav_btn("AUTO","autoalert")
+    st.markdown(f"<div style='padding:12px 12px 3px;font-size:9px;font-weight:700;letter-spacing:1.5px;color:{T2};text-transform:uppercase;'>Account</div>", unsafe_allow_html=True)
+    nav_btn("Profile","profile")
+    nav_btn("Settings","settings")
+    nav_btn("Contact","contact")
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.divider()
+    st.markdown('<div class="nav-btn">', unsafe_allow_html=True)
+    if st.button("Sign Out", use_container_width=True):
+        for k in ["logged_in","disclaimer_done","show_login"]: st.session_state[k]=False
         st.rerun()
-
-if st.session_state.show_news_rail:
-    center, right_rail = st.columns([4.55, 1.15])
-else:
-    center = st.container()
-    right_rail = None
+    st.markdown('</div>', unsafe_allow_html=True)
 
 with center:
     pg = st.session_state.page
+    accent = PAGE_ACCENTS.get(pg, AMBER)
+    page_titles = {"home":"Dashboard","scanner":"Watchlist Scanner","alerts":"Alerts Manager",
+        "research":"Research Terminal","analysis":"Arka AI","smart_scan":"Smart Screener",
+        "breadth":"Market Breadth","heatmap":"Heatmap","autoalert":"Auto Alerts",
+        "profile":"Profile","settings":"Settings","contact":"Contact"}
+
+    n1, n2 = st.columns([5,1])
+    with n1:
+        st.markdown(f"""<div style="display:flex;align-items:center;gap:10px;padding:14px 0 8px;">
+            <div style="width:4px;height:28px;background:{accent};"></div>
+            <div><div style="font-size:18px;font-weight:800;color:{IVORY};">{page_titles.get(pg,"Dashboard")}</div>
+            <div style="font-size:11px;color:{T2};margin-top:2px;">Arka Trades · Market Analytics Platform</div></div></div>""", unsafe_allow_html=True)
+    with n2:
+        st.markdown(f"""<div style="display:flex;align-items:center;justify-content:flex-end;height:56px;padding-right:8px;">
+            <div style="display:inline-flex;align-items:center;gap:6px;font-weight:700;font-size:10px;letter-spacing:1px;color:{GREEN};border:1px solid {GREEN}44;padding:4px 10px;"><span class="pulse-dot"></span>LIVE</div></div>""", unsafe_allow_html=True)
+
+    st.markdown(f"<div style='height:1px;background:{BORDER};margin-bottom:12px;'></div>", unsafe_allow_html=True)
+
+    def show_idx(col, label, sym, c, fallback_syms=None, currency=""):
+        d = get_index(sym, fallback_syms)
+        with col:
+            if d:
+                cc = GREEN if d["chg"]>=0 else RED
+                pts_sign = "+" if d["pts"] >= 0 else ""
+                spark = sparkline(d.get("spark", []), color=cc, w=120, h=26)
+                st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {c};padding:12px;margin:3px 1px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:7px;">
+                    <span style="font-size:10px;font-weight:700;color:{T2};letter-spacing:0.5px;">{label}</span>{change_pill(d['chg'])}</div>
+                    <div style="font-family:{MONO};font-weight:700;font-size:18px;color:{IVORY};line-height:1;margin-bottom:4px;">{currency}{d['price']:,.2f}</div>
+                    <div style="font-family:{MONO};font-size:11px;font-weight:600;color:{cc};margin-bottom:5px;">{pts_sign}{d['pts']:,.2f} pts</div>{spark}</div>""", unsafe_allow_html=True)
+            else:
+                st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {c};padding:12px;margin:3px 1px;opacity:0.5;">
+                    <div style="font-size:10px;font-weight:700;color:{T2};margin-bottom:7px;">{label}</div>
+                    <div style="font-family:{MONO};font-size:18px;color:{T2};">--</div>
+                    <div style="font-size:10px;color:{T2};margin-top:4px;">No data</div></div>""", unsafe_allow_html=True)
+
     if pg == "home":
-        _render_dashboard()
-    elif pg == "security":
-        active = st.session_state.get("active_security", "")
-        if not active:
-            _render_dashboard()
+        r1a,r1b,r1c = st.columns(3)
+        show_idx(r1a,"NIFTY 50","^NSEI",AMBER)
+        show_idx(r1b,"BANK NIFTY","^NSEBANK",CYAN)
+        show_idx(r1c,"SENSEX","^BSESN",AMBER)
+        r2a,r2b = st.columns(2)
+        show_idx(r2a,"MIDCAP 100", MIDCAP_CANDIDATES[0], PURPLE, fallback_syms=MIDCAP_CANDIDATES[1:])
+        show_idx(r2b,"SMALLCAP 250", SMALLCAP_CANDIDATES[0], PINK, fallback_syms=SMALLCAP_CANDIDATES[1:])
+        st.markdown(f"<div style='height:1px;background:{BORDER};margin:10px 0 14px;'></div>", unsafe_allow_html=True)
+
+        st.markdown(f"""<div style="font-size:10px;font-weight:700;letter-spacing:1.5px;color:{T2};
+            text-transform:uppercase;margin-bottom:7px;">Global Markets</div>""", unsafe_allow_html=True)
+        gi1, gi2, gi3 = st.columns(3)
+        show_idx(gi1,"S&P 500", SP500_CANDIDATES[0], CYAN, fallback_syms=SP500_CANDIDATES[1:], currency="$")
+        show_idx(gi2,"DOW JONES", DOWJONES_CANDIDATES[0], AMBER, fallback_syms=DOWJONES_CANDIDATES[1:], currency="$")
+        show_idx(gi3,"GOLD (USD)", GOLD_CANDIDATES[0], "#FFD700", fallback_syms=GOLD_CANDIDATES[1:], currency="$")
+
+        st.markdown(f"<div style='height:1px;background:{BORDER};margin:14px 0 14px;'></div>", unsafe_allow_html=True)
+        st.markdown(f"""<div style="font-size:10px;font-weight:700;letter-spacing:1.5px;color:{T2};
+            text-transform:uppercase;margin-bottom:7px;">Stock Research</div>""", unsafe_allow_html=True)
+        hs1, hs2 = st.columns([4,1])
+        with hs1:
+            home_query = st.text_input("Search", placeholder="Search any NSE stock — news, results, shareholding, sector...",
+                                        label_visibility="collapsed", key="home_search_box")
+        with hs2:
+            home_go = st.button("GO", use_container_width=True, type="primary", key="home_search_go")
+        if home_go and home_query.strip():
+            st.session_state["research_last_query"] = home_query.strip()
+            st.session_state.pop("research_data", None)
+            st.session_state.page = "research"
+            st.rerun()
+
+        mmi = get_mmi()
+        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+
+        if mmi["status"] == "live":
+            zc = mmi_zone_color(mmi["zone"])
+            st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};
+                border-top:2px solid {zc};padding:14px 16px;margin:3px 1px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;">
+                    <div>
+                        <div style="font-size:10px;font-weight:700;color:{T2};text-transform:uppercase;margin-bottom:5px;letter-spacing:0.5px;">
+                            Market Mood Index (MMI)</div>
+                        <div style="display:flex;align-items:baseline;gap:10px;">
+                            <span style="font-family:{MONO};font-weight:700;font-size:22px;color:{IVORY};">{mmi['score']}</span>
+                            <span style="color:{zc};font-size:11px;font-weight:700;
+                                border:1px solid {zc}55;padding:1px 8px;">{mmi['zone']}</span>
+                        </div>
+                    </div>
+                    <div style="text-align:right;font-size:10px;color:{T2};">Updated {mmi['fetched_at_ist'].strftime('%d %b %Y, %I:%M%p')}<br>
+                        <span style="opacity:.7;">Source: Tickertape</span></div>
+                </div></div>""", unsafe_allow_html=True)
+
+        elif mmi["status"] == "stale":
+            zc = mmi_zone_color(mmi["zone"])
+            age = mmi["age"]
+            hrs = int(age.total_seconds() // 3600)
+            age_label = f"{hrs}h ago" if hrs < 48 else f"{hrs // 24}d ago"
+            st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {AMBER}55;
+                border-top:2px solid {AMBER};padding:14px 16px;margin:3px 1px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;">
+                    <div>
+                        <div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">
+                            <span style="font-size:10px;font-weight:700;color:{T2};text-transform:uppercase;letter-spacing:0.5px;">
+                                Market Mood Index (MMI)</span>
+                            <span style="color:{AMBER};font-size:9px;font-weight:700;
+                                border:1px solid {AMBER}55;padding:1px 6px;">⚠ STALE DATA</span>
+                        </div>
+                        <div style="display:flex;align-items:baseline;gap:10px;">
+                            <span style="font-family:{MONO};font-weight:700;font-size:22px;color:{IVORY};opacity:.75;">{mmi['score']}</span>
+                            <span style="color:{zc};font-size:11px;font-weight:700;
+                                border:1px solid {zc}55;padding:1px 8px;opacity:.85;">{mmi['zone']}</span>
+                        </div>
+                    </div>
+                    <div style="text-align:right;font-size:10px;color:{AMBER};">Live fetch failed<br>
+                        <span style="opacity:.8;">Last known value · {age_label}</span></div>
+                </div></div>""", unsafe_allow_html=True)
+
         else:
-            _render_security_workspace(active)
+            st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {T2};
+                padding:14px 16px;margin:3px 1px;opacity:0.6;">
+                <div style="font-size:10px;font-weight:700;color:{T2};text-transform:uppercase;margin-bottom:5px;letter-spacing:0.5px;">
+                    Market Mood Index (MMI)</div>
+                <div style="font-size:11px;color:{T2};">Unavailable — Tickertape's page couldn't be read and no
+                    cached value exists yet. This will populate automatically once a scan succeeds.</div></div>""", unsafe_allow_html=True)
+
+        st.markdown(f"<div style='height:1px;background:{BORDER};margin:14px 0 14px;'></div>", unsafe_allow_html=True)
+
+    st.markdown('<div style="padding:0 8px 40px;">', unsafe_allow_html=True)
+
+    if pg == "home":
+        IST = timezone(timedelta(hours=5, minutes=30))
+        now = datetime.now(IST)
+        mkt = now.replace(hour=9,minute=15,second=0,microsecond=0) <= now <= now.replace(hour=15,minute=30,second=0,microsecond=0)
+        mkt_color = GREEN if mkt else RED
+        mkt_label = "MARKET OPEN" if mkt else "MARKET CLOSED"
+        g1,g2,g3 = st.columns([1.2, 1, 1])
+        with g1:
+            st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};padding:20px;min-height:120px;">
+                <div style="display:inline-flex;align-items:center;gap:7px;background:{mkt_color}14;border:1px solid {mkt_color}33;padding:4px 12px;margin-bottom:12px;">
+                <span style="width:6px;height:6px;border-radius:50%;background:{mkt_color};display:inline-block;"></span>
+                <span style="font-size:10px;font-weight:700;letter-spacing:0.5px;color:{mkt_color};">{mkt_label}</span></div>
+                <div style="font-size:12px;color:{T2};">NSE trading hours · 09:15 to 15:30 IST</div>
+                <div style="font-family:{MONO};font-size:12px;color:{IVORY};margin-top:5px;">{now.strftime("%d %b %Y · %H:%M:%S IST")}</div></div>""", unsafe_allow_html=True)
+        with g2:
+            st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};padding:20px;min-height:120px;">
+                {icon_box("layers", CYAN, 30)}<div style="font-family:{MONO};font-size:20px;font-weight:700;color:{IVORY};">{len(st.session_state.watchlist)}</div>
+                <div style="font-size:11px;color:{T2};">Stocks in your watchlist</div></div>""", unsafe_allow_html=True)
+        with g3:
+            active_alerts = sum(1 for a in st.session_state.alerts.values() if a.get("active"))
+            st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};padding:20px;min-height:120px;">
+                {icon_box("bell", AMBER, 30)}<div style="font-family:{MONO};font-size:20px;font-weight:700;color:{IVORY};">{active_alerts}</div>
+                <div style="font-size:11px;color:{T2};">Active price alerts</div></div>""", unsafe_allow_html=True)
+
+        section("Platform Modules", AMBER)
+        w1,w2,w3,w4 = st.columns(4)
+        for col,ic,c,title,desc,target in [
+            (w1,"brain",PURPLE,"AI Chart Analysis","Arka AI checks any chart against your saved rules and returns a scored verdict.","analysis"),
+            (w2,"search",GREEN,"Smart Screener","Scan all NSE stocks with plain-English rules and AI vision matching.","smart_scan"),
+            (w3,"trend",PINK,"Market Breadth","See how many NSE stocks are actually confirming the move — not just the index.","breadth"),
+            (w4,"bell",AMBER,"Breakout Alerts","PDH, PDL and custom price alerts delivered to Telegram instantly.","alerts")]:
+            with col:
+                st.markdown(f"""<div class="fade-up" style="background:{DARK2};border:1px solid {BORDER};border-top:2px solid {c};padding:18px;min-height:180px;margin-bottom:6px;">
+                    {icon_box(ic, c, 30)}<div style="font-size:12px;font-weight:800;color:{IVORY};margin-bottom:7px;">{title}</div>
+                    <div style="font-size:11px;color:{T2};line-height:1.6;">{desc}</div></div>""", unsafe_allow_html=True)
+                if st.button("Open module", key=f"go_{target}", use_container_width=True):
+                    st.session_state.page = target; st.rerun()
+
     elif pg == "scanner":
-        # Keep existing scanner module, now without a sidebar.
-        # This block intentionally mirrors the existing implementation.
         if not st.session_state.admin_watchlist:
             awl = db_load_admin_watchlist()
             if awl: st.session_state.admin_watchlist = awl
         if not st.session_state.watchlist:
             wl = db_load_watchlist()
             if wl: st.session_state.watchlist = wl
+
         def render_scan_results(syms, key_prefix=""):
             sc1,sc2,sc3,sc4 = st.columns([1,1,1,2])
-            filt = sc1.selectbox("Show",["All","Above PDH","Below PDL","In Range"], key=f"filt_v4_{key_prefix}")
-            l10 = sc2.checkbox("10s Live", key=f"l10_v4_{key_prefix}")
-            l60 = sc3.checkbox("60s Auto", key=f"l60_v4_{key_prefix}")
-            scanbtn = sc4.button("Run Scan", use_container_width=True, type="primary", key=f"scan_v4_{key_prefix}")
+            filt = sc1.selectbox("Show",["All","Above PDH","Below PDL","In Range"], key=f"filt_{key_prefix}")
+            l10  = sc2.checkbox("10s Live", key=f"l10_{key_prefix}")
+            l60  = sc3.checkbox("60s Auto", key=f"l60_{key_prefix}")
+            scanbtn = sc4.button("Run Scan", use_container_width=True, type="primary", key=f"scan_{key_prefix}")
             if scanbtn:
                 st.session_state["active_news_source"] = key_prefix
-                results,failed=[],[]
-                bar=st.progress(0,text="Scanning...")
+                results,failed = [],[]
+                bar = st.progress(0, text="Scanning...")
                 for i,sym in enumerate(syms):
-                    st_=get_static(sym); lv=get_price(sym)
+                    st_ = get_static(sym); lv = get_price(sym)
                     if st_ and lv:
                         cur=lv["price"]; chg=lv["chg"]
                         cls="g" if cur>st_["pdh"] else "r" if cur<st_["pdl"] else "n"
                         results.append({"sym":sym,"cur":cur,"chg":chg,"pdh":st_["pdh"],"pdl":st_["pdl"],"rsi":st_["rsi"],"cls":cls,"spark":st_.get("spark",[])})
                     else: failed.append(sym)
-                    bar.progress((i+1)/len(syms),text=f"Fetching {sym}...")
-                bar.empty(); check_alerts(results)
-                st.session_state[f"results_{key_prefix}"]=results; st.session_state[f"failed_{key_prefix}"]=failed
-            results=st.session_state.get(f"results_{key_prefix}",[]); failed=st.session_state.get(f"failed_{key_prefix}",[])
+                    bar.progress((i+1)/len(syms), text=f"Fetching {sym}...")
+                bar.empty()
+                check_alerts(results)
+                st.session_state[f"results_{key_prefix}"] = results
+                st.session_state[f"failed_{key_prefix}"] = failed
+            results = st.session_state.get(f"results_{key_prefix}", [])
+            failed  = st.session_state.get(f"failed_{key_prefix}", [])
             if results:
                 filtered=results
-                if filt=="Above PDH": filtered=[r for r in results if r["cls"]=="g"]
-                elif filt=="Below PDL": filtered=[r for r in results if r["cls"]=="r"]
+                if filt=="Above PDH":  filtered=[r for r in results if r["cls"]=="g"]
+                elif filt=="Below PDL":filtered=[r for r in results if r["cls"]=="r"]
                 elif filt=="In Range": filtered=[r for r in results if r["cls"]=="n"]
                 filtered.sort(key=lambda x:{"g":0,"r":1,"n":2}[x["cls"]])
-                g=sum(r["cls"]=="g" for r in results); rr=sum(r["cls"]=="r" for r in results); n=sum(r["cls"]=="n" for r in results)
-                m1,m2,m3,m4=st.columns(4); m1.metric("Above PDH",g); m2.metric("Below PDL",rr); m3.metric("In Range",n); m4.metric("Total",len(results))
-                cols7=st.columns(4)
-                for i,s in enumerate(filtered):
-                    bd=f"{GREEN}66" if s["cls"]=="g" else f"{RED}66" if s["cls"]=="r" else BORDER
-                    top=GREEN if s["cls"]=="g" else RED if s["cls"]=="r" else BORDER
-                    cc=GREEN if s["chg"]>=0 else RED; rc=GREEN if s["rsi"]<35 else RED if s["rsi"]>65 else T2
-                    st.markdown(f'<div style="background:{DARK2};border:1px solid {bd};border-top:2px solid {top};padding:10px;text-align:center;margin-bottom:6px;"><b style="color:{IVORY};">{s["sym"]}</b><br>{change_pill(s["chg"])}<div style="font-family:{MONO};color:{IVORY};margin:6px 0;">₹{s["cur"]:.2f}</div><div style="font-family:{MONO};font-size:10px;color:{rc};">RSI {s["rsi"]}</div></div>',unsafe_allow_html=True)
-                    with cols7[i%4]:
-                        if st.button("OPEN",key=f"open_scan_{key_prefix}_{s['sym']}",use_container_width=True): _open_security(s["sym"])
-                if failed: st.caption(f"Skipped: {', '.join(failed)}")
+                g=sum(1 for r in results if r["cls"]=="g"); r=sum(1 for r in results if r["cls"]=="r"); n=sum(1 for r in results if r["cls"]=="n")
+                m1,m2,m3,m4=st.columns(4)
+                m1.metric("Above PDH",g); m2.metric("Below PDL",r); m3.metric("In Range",n); m4.metric("Total",len(results))
+                if failed:
+                    with st.expander(f"{len(failed)} skipped"): st.write(", ".join(failed))
+                section("Results", CYAN)
+                cols7 = st.columns(4)
+                for i, s in enumerate(filtered):
+                    if s["cls"]=="g":   bd=f"{GREEN}66"; top=GREEN
+                    elif s["cls"]=="r": bd=f"{RED}66"; top=RED
+                    else:               bd=BORDER; top=BORDER
+                    cc = GREEN if s["chg"] >= 0 else RED
+                    rc = GREEN if s["rsi"] < 35 else RED if s["rsi"] > 65 else T2
+                    ha = s["sym"] in st.session_state.alerts and st.session_state.alerts[s["sym"]].get("active")
+                    nd = get_news_dot(s["sym"])
+                    dot = f'<span style="color:{AMBER};font-size:9px;margin:0 2px;">&#9679;</span>' if nd else ""
+                    bell = icon("bell", 11, AMBER) if ha else ""
+                    spark = sparkline(s.get("spark", []), color=cc, w=95, h=24)
+                    card = (f'<div style="background:{DARK2};border:1px solid {bd};border-top:2px solid {top};padding:10px 8px 9px;text-align:center;margin-bottom:5px;">'
+                        f'<div style="display:flex;align-items:center;justify-content:center;gap:4px;margin-bottom:4px;">'
+                        f'<span style="font-weight:800;font-size:12px;color:{IVORY};white-space:nowrap;">{s["sym"]}</span>{dot}{bell}</div>'
+                        f'<div style="margin-bottom:5px;">{change_pill(s["chg"])}</div>'
+                        f'<div style="font-family:{MONO};font-weight:700;font-size:13px;color:{IVORY};line-height:1;margin-bottom:5px;">&#8377;{s["cur"]:.2f}</div>'
+                        f'{spark}<div style="font-family:{MONO};font-size:10px;font-weight:700;color:{rc};margin-top:4px;">RSI {s["rsi"]}</div></div>')
+                    with cols7[i % 4]:
+                        st.markdown(card, unsafe_allow_html=True)
+                IST = timezone(timedelta(hours=5, minutes=30))
+                st.caption(f"Scanned: {datetime.now(IST).strftime('%d %b %Y  %H:%M:%S')}  ·  % vs prev close  ·  Price: 10s cache")
                 if l10: time.sleep(10); st.cache_data.clear(); st.rerun()
                 elif l60: time.sleep(60); st.cache_data.clear(); st.rerun()
-        tab1,tab2=st.tabs(["Arka Watchlist","Your Watchlist"])
+
+        st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
+        tab1, tab2 = st.tabs(["Arka Watchlist", "Your Watchlist"])
         with tab1:
             if IS_ADMIN:
-                uploaded_admin=st.file_uploader("Upload Arka Watchlist",type=["csv","txt"],key="admin_upload_v4")
+                uploaded_admin = st.file_uploader("Upload Arka Watchlist", type=["csv","txt"], key="admin_upload")
                 if uploaded_admin:
-                    syms=parse_csv(uploaded_admin)
-                    if syms and db_save_admin_watchlist(syms): st.success(f"Arka Watchlist updated — {len(syms)} stocks.")
-            syms=st.session_state.admin_watchlist
-            if syms: render_scan_results(syms,"admin_v4")
-            else: st.info("Arka Watchlist not available yet.")
+                    syms = parse_csv(uploaded_admin)
+                    if not syms: st.error("No symbols found.")
+                    elif db_save_admin_watchlist(syms):
+                        st.success(f"Arka Watchlist updated — {len(syms)} stocks.")
+            admin_syms = st.session_state.admin_watchlist
+            st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-left:2px solid {CYAN};padding:14px 20px;margin:14px 0;">
+                <div style="font-size:13px;font-weight:800;color:{IVORY};margin-bottom:3px;">Arka Watchlist</div>
+                <div style="font-size:11px;color:{T2};">{f"{len(admin_syms)} stocks · Curated by the Arka Trades desk" if admin_syms else "No curated watchlist published yet"}</div></div>""", unsafe_allow_html=True)
+            if not admin_syms:
+                st.info("Arka Watchlist not available yet.")
+            else:
+                render_scan_results(admin_syms, key_prefix="admin")
         with tab2:
-            uploaded_yours=st.file_uploader("Upload Your Watchlist (CSV or TXT)",type=["csv","txt"],key="your_upload_v4")
+            uploaded_yours = st.file_uploader("Upload Your Watchlist (CSV or TXT)", type=["csv","txt"], key="your_upload")
             if uploaded_yours:
-                syms=parse_csv(uploaded_yours)
-                if syms and db_save_watchlist(syms): st.success(f"{len(syms)} stocks loaded and saved.")
-            syms=st.session_state.watchlist
-            if syms: render_scan_results(syms,"yours_v4")
-            else: st.info("Upload your TradingView watchlist above to start scanning.")
+                syms = parse_csv(uploaded_yours)
+                if not syms: st.error("No symbols found.")
+                elif db_save_watchlist(syms):
+                    st.success(f"{len(syms)} stocks loaded and saved.")
+            your_syms = st.session_state.watchlist
+            st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-left:2px solid {GREEN};padding:14px 20px;margin:14px 0;">
+                <div style="font-size:13px;font-weight:800;color:{IVORY};margin-bottom:3px;">Your Watchlist</div>
+                <div style="font-size:11px;color:{T2};">{f"{len(your_syms)} stocks · Synced to cloud" if your_syms else "No watchlist uploaded yet"}</div></div>""", unsafe_allow_html=True)
+            if not your_syms:
+                st.info("Upload your TradingView watchlist above to start scanning.")
+            else:
+                render_scan_results(your_syms, key_prefix="yours")
+
     elif pg == "alerts":
-        # Existing alert manager is preserved in a compact terminal wrapper.
-        active_alerts={s:a for s,a in st.session_state.alerts.items() if a.get("active")}
-        a1,a2,a3=st.columns(3); a1.metric("Active Alerts",len(active_alerts)); a2.metric("Triggered Today",len(st.session_state.alert_fired)); a3.metric("Delivery","Telegram")
-        tabs=st.tabs(["Arka Watchlist","Your Watchlist"])
-        def alert_block(watchlist,suffix):
-            for sym in list(dict.fromkeys(watchlist)):
-                a=st.session_state.alerts.get(sym,{}); active=bool(a.get("active"))
-                c1,c2,c3,c4=st.columns([2,1.2,1.4,1])
-                c1.markdown(f"**{sym}**")
-                c2.write("ACTIVE" if active else "INACTIVE")
-                c3.write(a.get("type","—").upper() if active else "—")
-                if c4.button("OFF" if active else "SET",key=f"alertact_{suffix}_{sym}"):
-                    if active:
-                        del st.session_state.alerts[sym]; db_delete_alert(sym); st.rerun()
-                    else:
-                        st.session_state[f"alert_open_{suffix}_{sym}"]=True; st.rerun()
-                if st.session_state.get(f"alert_open_{suffix}_{sym}"):
-                    typ=st.radio("Condition",["PDH","PDL","Custom"],horizontal=True,key=f"atype_{suffix}_{sym}")
-                    cp=st.number_input("Trigger price",min_value=0.0,step=0.5,key=f"acp_{suffix}_{sym}") if typ=="Custom" else 0.0
-                    x,y=st.columns(2)
-                    if x.button("Cancel",key=f"acan_{suffix}_{sym}"): st.session_state[f"alert_open_{suffix}_{sym}"]=False; st.rerun()
-                    if y.button("Confirm",key=f"acon_{suffix}_{sym}",type="primary"):
-                        if typ=="Custom" and cp<=0: st.error("Enter a valid price.")
-                        else:
-                            sd=get_static(sym); price=cp if typ=="Custom" else (sd["pdh"] if typ=="PDH" else sd["pdl"]) if sd else None
-                            if price:
-                                at=typ.lower(); st.session_state.alerts[sym]={"type":at,"price":price,"active":True}; db_save_alert(sym,at,price); st.session_state[f"alert_open_{suffix}_{sym}"]=False; st.rerun()
-        with tabs[0]: alert_block(st.session_state.get("admin_watchlist",[]),"admin")
-        with tabs[1]: alert_block(st.session_state.get("watchlist",[]),"yours")
+        active_alerts = {s: a for s, a in st.session_state.alerts.items() if a.get("active")}
+        a1, a2, a3 = st.columns(3)
+        a1.metric("Active Alerts", len(active_alerts))
+        a2.metric("Triggered Today", len(st.session_state.alert_fired))
+        a3.metric("Delivery Channel", "Telegram")
+        st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-left:2px solid {AMBER};padding:12px 18px;margin:14px 0 8px;">
+            <div style="font-size:12px;color:{T2};line-height:1.6;">Create conditional alerts on any stock in your watchlists. When the price crosses your level, a notification is pushed to Telegram instantly.</div></div>""", unsafe_allow_html=True)
+
+        def render_alert_rows(watchlist, key_suffix=""):
+            st.markdown(f"""<div style="display:grid;grid-template-columns:2fr 1.2fr 1.5fr 1.2fr;gap:8px;padding:8px 14px;font-size:9px;font-weight:700;letter-spacing:1px;color:{T2};text-transform:uppercase;border-bottom:1px solid {BORDER};">
+                <span>Symbol</span><span>Status</span><span>Condition</span><span>Level</span></div>""", unsafe_allow_html=True)
+            for sym in watchlist:
+                has_alert = sym in st.session_state.alerts and st.session_state.alerts[sym].get("active", False)
+                a = st.session_state.alerts.get(sym, {})
+                cond  = a.get("type", "").upper() if has_alert else "—"
+                level = f"Rs {a['price']:,.2f}" if has_alert else "—"
+                if has_alert:
+                    status = (f'<span style="display:inline-flex;align-items:center;gap:5px;color:{AMBER};font-size:10px;font-weight:700;border:1px solid {AMBER}44;padding:2px 8px;"><span class="pulse-dot" style="background:{AMBER};"></span>ACTIVE</span>')
+                else:
+                    status = (f'<span style="color:{T2};font-size:10px;font-weight:700;border:1px solid {BORDER};padding:2px 8px;">INACTIVE</span>')
+                rc1, rc2 = st.columns([4, 1.4])
+                with rc1:
+                    st.markdown(f"""<div style="display:grid;grid-template-columns:2fr 1.2fr 1.5fr 1.2fr;gap:8px;align-items:center;background:{DARK2};border:1px solid {BORDER};padding:10px 14px;margin-bottom:5px;">
+                        <span style="font-weight:800;font-size:12px;color:{IVORY};">{sym}</span><span>{status}</span>
+                        <span style="font-family:{MONO};font-size:11px;color:{T2};">{cond}</span>
+                        <span style="font-family:{MONO};font-size:11px;color:{IVORY};">{level}</span></div>""", unsafe_allow_html=True)
+                with rc2:
+                    bA, bB = st.columns(2)
+                    with bA:
+                        if st.button("Set", key=f"sa_{sym}_{key_suffix}", use_container_width=True):
+                            st.session_state[f"open_{sym}_{key_suffix}"] = True; st.rerun()
+                    with bB:
+                        if has_alert:
+                            if st.button("Off", key=f"rm_{sym}_{key_suffix}", use_container_width=True):
+                                del st.session_state.alerts[sym]
+                                db_delete_alert(sym)
+                                if sym in st.session_state.alert_fired:
+                                    st.session_state.alert_fired.remove(sym)
+                                st.rerun()
+                if st.session_state.get(f"open_{sym}_{key_suffix}"):
+                    st.markdown(f"""<div style="background:{DARK3};border:1px solid {BORDER};padding:4px 14px;margin-bottom:8px;">
+                        <div style="font-size:11px;font-weight:700;color:{AMBER};padding:8px 0 0;">Configure alert · {sym}</div></div>""", unsafe_allow_html=True)
+                    alert_type = st.radio("Condition", ["PDH","PDL","Custom"], key=f"at_{sym}_{key_suffix}", horizontal=True)
+                    cp = 0.0
+                    if alert_type == "Custom":
+                        cp = st.number_input("Trigger price", key=f"cp_{sym}_{key_suffix}", min_value=0.0, step=0.5)
+                    bc1, bc2, _ = st.columns([1,1,3])
+                    with bc1:
+                        if st.button("Cancel", key=f"can_{sym}_{key_suffix}", use_container_width=True):
+                            st.session_state[f"open_{sym}_{key_suffix}"] = False; st.rerun()
+                    with bc2:
+                        if st.button("Confirm", key=f"ok_{sym}_{key_suffix}", type="primary", use_container_width=True):
+                            price = None; atype = None
+                            if alert_type == "Custom":
+                                if cp > 0: price, atype = cp, "custom"
+                                else: st.error("Enter a trigger price above 0.")
+                            else:
+                                st_data = get_static(sym)
+                                if st_data:
+                                    price = st_data["pdh"] if alert_type=="PDH" else st_data["pdl"]
+                                    atype = alert_type.lower()
+                                else:
+                                    st.error(f"Could not fetch data for {sym}. Try again.")
+                            if price is not None:
+                                st.session_state.alerts[sym] = {"type": atype, "price": price, "active": True}
+                                db_save_alert(sym, atype, price)
+                                if sym in st.session_state.alert_fired:
+                                    st.session_state.alert_fired.remove(sym)
+                                send_telegram(f"Alert set!\n{sym} · {atype.upper()} · Rs{price:.2f}")
+                                st.session_state[f"open_{sym}_{key_suffix}"] = False
+                                st.success(f"Alert active for {sym} at Rs{price:.2f}")
+                                time.sleep(0.6); st.rerun()
+
+        st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
+        alert_tab1, alert_tab2 = st.tabs(["Arka Watchlist", "Your Watchlist"])
+        with alert_tab1:
+            watchlist = st.session_state.get("admin_watchlist", [])
+            if not watchlist: st.warning("Arka Watchlist not available yet.")
+            else: render_alert_rows(watchlist, key_suffix="admin")
+        with alert_tab2:
+            watchlist = st.session_state.get("watchlist", [])
+            if not watchlist: st.warning("Upload your watchlist in Scanner first.")
+            else: render_alert_rows(watchlist, key_suffix="yours")
+
     elif pg == "research":
-        if st.session_state.get("active_security"):
-            st.session_state["research_last_query"] = st.session_state["active_security"]
         render_research_page(TERM_TOKENS, news_fetch_fn=_fetch_news_for_stock)
-    elif pg == "analysis":
-        if st.session_state.get("active_security"):
-            st.session_state["m1_ticker"] = st.session_state["active_security"]
-        render_arka_ai()
+
+    elif pg in ["analysis","heatmap","autoalert"]:
+        if pg == "analysis":
+            render_arka_ai()
+        else:
+            labels = {"heatmap":"Market Heatmap","autoalert":"Auto Smart Alerts"}
+            st.markdown(f"""<div style="background:{DARK2};border:1px dashed {BORDER};padding:80px 20px;text-align:center;margin:20px 0;">
+                <div style="margin-bottom:14px;">{icon("clock", 28, T2)}</div>
+                <div style="font-size:22px;font-weight:800;color:{T2};margin-bottom:8px;">{labels.get(pg,'Coming Soon')}</div>
+                <div style="font-size:13px;color:{T2};opacity:.6;">This module is under development</div></div>""", unsafe_allow_html=True)
+
     elif pg == "smart_scan":
         from smart_scan_page import render_smart_scanner
         render_smart_scanner(supabase)
+
     elif pg == "breadth":
         try:
             from breadth_page import render_market_breadth
             render_market_breadth()
         except Exception as e:
+            import traceback
             st.error(f"Market Breadth module failed to load: {e}")
+            st.code(traceback.format_exc())
+
     elif pg == "profile":
-        p1,p2=st.columns([1,2])
+        p1,p2 = st.columns([1,2])
         with p1:
             photo=st.session_state.get("profile_photo")
-            if photo: st.image(photo,width=110); st.caption(name)
-            else: st.markdown(f'<div style="width:88px;height:88px;background:{DARK3};border:1px solid {BORDER};display:flex;align-items:center;justify-content:center;font-size:32px;color:{AMBER};">{initial}</div><div style="font-size:18px;font-weight:800;color:{IVORY};margin-top:12px;">{name}</div>',unsafe_allow_html=True)
+            if photo:
+                st.image(photo,width=110); st.caption(name)
+            else:
+                st.markdown(f"""<div style="width:88px;height:88px;border-radius:2px;background:{DARK3};border:1px solid {BORDER};display:flex;align-items:center;justify-content:center;font-weight:800;font-size:32px;color:{AMBER};margin-bottom:12px;">{initial}</div>
+                <div style="font-size:18px;font-weight:800;color:{IVORY};">{name}</div>
+                <div style="font-size:10px;color:{T2};letter-spacing:1px;text-transform:uppercase;margin-top:4px;">Arka Trades Member</div>""", unsafe_allow_html=True)
         with p2:
-            with st.form("pf_v4"):
-                a,b=st.columns(2); nn=a.text_input("Full Name",value=st.session_state.profile["name"]); np_=b.text_input("Contact Number",value=st.session_state.profile["phone"]); ne=st.text_input("Email Address",value=st.session_state.profile["email"]); ph=st.file_uploader("Upload Profile Photo",type=["jpg","jpeg","png"],key="profile_photo_v4")
+            with st.form("pf"):
+                a,b=st.columns(2)
+                nn=a.text_input("Full Name", value=st.session_state.profile["name"])
+                np_=b.text_input("Contact Number", value=st.session_state.profile["phone"])
+                ne=st.text_input("Email Address", value=st.session_state.profile["email"])
+                ph=st.file_uploader("Upload Profile Photo",type=["jpg","jpeg","png"])
                 if st.form_submit_button("Save Profile",use_container_width=True,type="primary"):
-                    st.session_state.profile.update({"name":nn,"phone":np_,"email":ne});
-                    if ph: st.session_state.profile_photo=ph
-                    st.rerun()
-    elif pg == "settings":
-        st.markdown(f'<div class="panel-title">SETTINGS</div>',unsafe_allow_html=True)
-        st.info("Terminal appearance is currently locked to the Bloomberg-style dark theme.")
-        st.markdown(f'<div class="term-panel"><b style="color:{AMBER};">Telegram</b><br><span style="color:{T2};">Bot connected · Chat ID configured in Streamlit Secrets.</span></div>',unsafe_allow_html=True)
-    elif pg == "contact":
-        st.markdown(f'<div class="term-panel"><div class="panel-title">CONTACT</div><div style="color:{T2};line-height:1.8;">Questions, feedback or suggestions?<br>Contact the Arka Trades desk through the configured support email.</div></div>',unsafe_allow_html=True)
+                    st.session_state.profile.update({"name":nn,"phone":np_,"email":ne})
+                    if ph: st.session_state["profile_photo"]=ph
+                    st.success(f"Saved! Welcome, {nn}!"); st.rerun()
 
-# ── RIGHT NEWS RAIL: deliberately kept in the same right-side position ──
-if right_rail is not None:
-    with right_rail:
-        st.markdown(f"""<div style="position:sticky;top:8px;" class="news-rail" id="arka-news-rail-col">
-            <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 4px 8px;border-bottom:1px solid {BORDER};margin-bottom:8px;">
-                <span style="font-family:{MONO};font-size:11px;font-weight:800;color:{AMBER};letter-spacing:1.5px;">MARKET NEWS</span><span class="pulse-dot"></span>
-            </div><div id="news-rail-inner">""", unsafe_allow_html=True)
-        watchlist_for_news, rail_label = _news_watchlist_for_rail()
-        if not watchlist_for_news:
-            st.markdown(f'<div style="font-size:11px;color:{T2};padding:8px 4px;">Macro/global news updates below. Add a watchlist in Scanner for stock-specific news.</div>',unsafe_allow_html=True)
-        render_news_rail(watchlist_for_news, label=rail_label)
-        st.markdown("</div></div>", unsafe_allow_html=True)
+    elif pg == "settings":
+        st.markdown(f"<div style='font-size:14px;font-weight:800;color:{IVORY};margin:8px 0 10px;'>Appearance</div>", unsafe_allow_html=True)
+        t1,t2=st.columns(2)
+        with t1:
+            st.markdown(f"""<div style="background:{DARK2};border:2px solid {AMBER};padding:18px;text-align:center;">
+                <div style="margin-bottom:8px;">{icon("shield", 22, AMBER)}</div>
+                <div style="font-weight:800;font-size:13px;color:{AMBER};">DARK MODE</div>
+                <div style="font-size:11px;color:{T2};margin-top:4px;">Currently active</div></div>""", unsafe_allow_html=True)
+        with t2:
+            st.markdown(f"""<div style="background:{DARK3};border:1px solid {BORDER};padding:18px;text-align:center;opacity:.6;">
+                <div style="margin-bottom:8px;">{icon("clock", 22, T2)}</div>
+                <div style="font-weight:800;font-size:13px;color:{T2};">LIGHT MODE</div>
+                <div style="font-size:11px;color:{T2};margin-top:4px;">Coming soon</div></div>""", unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown(f"<div style='font-size:14px;font-weight:800;color:{IVORY};margin-bottom:10px;'>Telegram Notifications</div>", unsafe_allow_html=True)
+        st.info(f"Bot connected · Chat ID: {CHAT_ID}")
+        if st.button("Send Test Notification",use_container_width=True):
+            send_telegram("<b>Arka Trades</b>\nTest notification successful.")
+            st.success("Test sent to Telegram.")
+        st.divider()
+        st.markdown(f"<div style='font-size:14px;font-weight:800;color:{IVORY};'>Broker API — Coming Soon</div>", unsafe_allow_html=True)
+
+    elif pg == "contact":
+        c1,c2=st.columns([1,1])
+        with c1:
+            st.markdown(f"""<div style="background:{DARK2};border:1px solid {BORDER};border-left:2px solid {CYAN};padding:24px;">
+                <div style="margin-bottom:10px;">{icon("mail", 22, CYAN)}</div>
+                <div style="font-weight:800;font-size:12px;letter-spacing:1px;color:{CYAN};text-transform:uppercase;margin-bottom:12px;">Get in Touch</div>
+                <div style="font-size:13px;color:{T2};line-height:1.8;margin-bottom:16px;">Questions, feedback or suggestions?<br>We would love to hear from you.</div>
+                <div style="font-family:{MONO};font-size:12px;color:{CYAN};font-weight:700;word-break:break-all;">Mohitdevsinghchib644@gmail.com</div>
+                <div style="font-size:11px;color:{T2};margin-top:10px;">Mention ARKA TRADES in subject line.<br>Reply within 24 hours.</div></div>""", unsafe_allow_html=True)
+        with c2:
+            with st.form("cf"):
+                n=st.text_input("Your Name")
+                e=st.text_input("Your Email")
+                m=st.text_area("Message",height=120)
+                if st.form_submit_button("Send Message",use_container_width=True,type="primary"):
+                    if n and m: st.success("Please email: Mohitdevsinghchib644@gmail.com")
+                    else: st.warning("Fill name and message.")
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# ═══════════════════════════════════════════════════════════════════
+# RIGHT NEWS RAIL — fixed, always visible, Bloomberg-style
+# Replaces the old bottom-left floating dock entirely. Shows the
+# combined watchlist + macro/global feed so you can trade off news
+# that moves individual names AND the broader Indian/global market.
+# ═══════════════════════════════════════════════════════════════════
+with right_rail:
+    st.markdown(f"""<div style="position:sticky;top:8px;" id="arka-news-rail-col">
+        <div style="display:flex;align-items:center;justify-content:space-between;
+             padding:12px 4px 8px;border-bottom:1px solid {BORDER};margin-bottom:8px;">
+            <span style="font-family:{MONO};font-size:11px;font-weight:800;color:{AMBER};letter-spacing:1.5px;">MARKET NEWS</span>
+            <span class="pulse-dot"></span>
+        </div>
+        <div id="news-rail-inner">""", unsafe_allow_html=True)
+
+    watchlist_for_news, rail_label = _news_watchlist_for_rail()
+    if not watchlist_for_news:
+        st.markdown(f"""<div style="font-size:11px;color:{T2};padding:8px 4px;">
+            Upload a watchlist in Scanner to see stock-specific news here.
+            Macro/global news still updates below.</div>""", unsafe_allow_html=True)
+    render_news_rail(watchlist_for_news, label=rail_label)
+
+    st.markdown("</div></div>", unsafe_allow_html=True)
