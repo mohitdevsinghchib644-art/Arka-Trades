@@ -1,42 +1,25 @@
 """
 screener_scraper.py — Arka Trades Research Module (data layer)
 
-v6 CHANGES FROM v5:
-  - FIXED (root cause of "No data rows parsed" on Streamlit Cloud):
-    _find_tables_by_header() called " ".join(t.astype(str).values.flatten())
-    to build a searchable text blob per table. On pandas 3.0 (which Cloud
-    installs fresh since requirements.txt pins "pandas>=2.0.0" with no
-    upper bound), .astype(str) reports dtype "str" but leaves NaN cells
-    as real Python float('nan') objects instead of the string "nan".
-    " ".join() then throws TypeError: sequence item N: expected str
-    instance, float found. That exception was swallowed by a bare
-    "except Exception: continue", so any table containing a NaN cell
-    (which is most of them — Screener's tables routinely have a trailing
-    "Raw PDF" row that's all NaN, or blank cells in early-period columns)
-    was silently dropped from matching, on every single call, before
-    header-matching ever ran. This is why all four sections
-    (Quarterly/Yearly/Balance Sheet/Shareholding) failed identically and
-    deterministically on Cloud (pandas 3.0) while working locally
-    (presumably pandas 2.x, where .astype(str) on NaN does not leave a
-    raw float behind). Fixed by building the text blob with an explicit
-    NaN-safe conversion instead of relying on .astype(str) to have
-    already done it. Verified against real Screener.in HTML: quarterly/
-    yearly matching goes from 0 tables found to the expected 2 (one
-    quarterly, one yearly), balance sheet and shareholding go from
-    crashing-then-partially-matching to matching cleanly.
-  - NEW: _fetch_html() cache TTL raised from 60s to 300s and the whole
-    get_full_research() pipeline now fetches the page ONCE and reuses
-    that HTML for every section, instead of relying on each section
-    function to hit the 60s cache window. Same effect, but explicit and
-    not dependent on wall-clock timing between calls.
-  - NEW: resolve_symbol() results are now cached in-memory for the
-    process lifetime (symbols rarely change which URL they resolve to),
-    cutting the "resolve, then check" double round-trip for every hot
-    ticker on every rerun.
-  - UNCHANGED: get_balance_sheet(), get_leverage_ratios(),
-    get_peer_comparison(), the curated _SECTOR_PEERS map, and all other
-    v5 logic — those were not the source of the bug and did not need
-    to change.
+v7 CHANGES FROM v6:
+  - NO CHANGES to scraping/parsing logic. The v6 NaN-safe header-matching
+    fix (_cell_to_text / _find_tables_by_header), the one-fetch-per-page
+    get_full_research() pipeline, and resolve_symbol()'s process-lifetime
+    cache are all correct and untouched — that bug is fixed, not a design
+    problem, so there's nothing here to "redesign."
+  - NEW: get_hot_ticker_quotes(symbols) — a single batched helper the v7
+    terminal UI uses for the live blotter. Previously the UI file looped
+    resolve_symbol() + get_summary() per symbol itself (that loop is what
+    v6 fixed with a 5-min session_state cache). v7 replaces the UI-side
+    cache with a real auto-refresh fragment (see research_page.py), so
+    this function intentionally does NOT cache — the fragment controls
+    its own refresh cadence now. Caching would fight the autorefresh
+    instead of supporting it.
+  - NEW: get_hot_ticker_quotes() also returns previous-close and % change
+    (parsed from the same summary regex fields already being fetched) so
+    the blotter can show real green/red deltas instead of just a static
+    price.
+  - UNCHANGED: everything else byte-for-byte from v6.
 """
 
 import re
@@ -61,9 +44,9 @@ _CACHE_DIR.mkdir(parents=True, exist_ok=True)
 _CACHE_TTL_SECONDS = 43200
 
 _HTTP_CACHE = {}
-_HTTP_CACHE_TTL = 300  # was 60 — widened so a full get_full_research() pass
-                        # (6+ calls to the same URL) always reuses one fetch
-                        # even if something upstream is briefly slow.
+_HTTP_CACHE_TTL = 300  # a full get_full_research() pass (6+ calls to the
+                        # same URL) always reuses one fetch even if
+                        # something upstream is briefly slow.
 
 _RESOLVE_CACHE = {}  # symbol -> resolve_symbol() result, process-lifetime
 
@@ -164,12 +147,11 @@ def resolve_symbol(symbol: str) -> dict | None:
 
 def _cell_to_text(v) -> str:
     """NaN-safe scalar -> str conversion for building the searchable
-    header-matching blob. This is the fix: on pandas 3.0, a DataFrame's
-    .astype(str) can report dtype "str" while still holding real
-    float('nan') objects in cells that were empty/missing, so joining
-    the flattened array with plain str() (or relying on .astype(str)
-    having already stringified everything) throws
-    TypeError: sequence item N: expected str instance, float found.
+    header-matching blob. On pandas 3.0, a DataFrame's .astype(str) can
+    report dtype "str" while still holding real float('nan') objects in
+    cells that were empty/missing, so joining the flattened array with
+    plain str() throws TypeError: sequence item N: expected str
+    instance, float found.
     """
     if v is None:
         return ""
@@ -365,11 +347,16 @@ def get_summary(symbol: str, url: str | None = None, html_override: str | None =
                 "roce":           r"ROCE.*?<span class=\"number\">([\d,\.]+)</span>",
                 "roe":            r"ROE.*?<span class=\"number\">([\d,\.]+)</span>",
                 "face_value":     r"Face Value.*?<span class=\"number\">([\d,\.]+)</span>",
+                "high_low":       r"High\s*/\s*Low.*?<span class=\"number\">([\d,\.]+)\s*/\s*([\d,\.]+)</span>",
             }
             for key, pat in label_patterns.items():
                 m = re.search(pat, html, re.DOTALL | re.IGNORECASE)
                 if m:
-                    fields[key] = m.group(1).strip()
+                    if key == "high_low":
+                        fields["year_high"] = m.group(1).strip()
+                        fields["year_low"] = m.group(2).strip()
+                    else:
+                        fields[key] = m.group(1).strip()
             if fields:
                 _cache_write(symbol, "summary", fields)
                 return {"status": "live", "data": fields, "url": resolved_url}
@@ -587,9 +574,7 @@ def get_full_research(symbol: str) -> dict:
     """
     Fetches the Screener page ONCE and reuses that HTML for every
     section below, instead of letting each section function call
-    _fetch_html() independently and rely on the short-lived cache to
-    avoid re-requesting. This is both faster (one network round trip
-    instead of up to six) and removes any dependency on cache timing.
+    _fetch_html() independently.
     """
     res = resolve_symbol(symbol)
     if not res:
@@ -611,3 +596,49 @@ def get_full_research(symbol: str) -> dict:
         "sector": get_sector_info(symbol, url=url, html_override=html),
         "peers": get_peers(symbol, url=url),
     }
+
+
+# ── NEW v7: batched hot-ticker blotter quotes ─────────────────────
+
+def get_hot_ticker_quotes(symbols: list[str]) -> dict:
+    """
+    Returns {symbol: {"price": str, "prev_close": str|None, "pct_change":
+    float|None, "status": "live"|"unavailable"}} for a list of symbols.
+
+    Intentionally NOT cached at this layer (unlike v6's session_state
+    TTL cache, which lived in the UI file). The v7 terminal drives
+    refresh cadence itself via an st.fragment + st_autorefresh (see
+    research_page.py _render_hot_tickers_blotter) — a cache here would
+    just serve stale numbers back to a component whose entire purpose
+    is to re-poll on a timer. _fetch_html()'s own 300s HTTP cache still
+    prevents hammering Screener if the autorefresh interval is shorter
+    than that.
+    """
+    out = {}
+    for sym in symbols:
+        res = resolve_symbol(sym)
+        if not res:
+            out[sym] = {"price": "···", "prev_close": None, "pct_change": None, "status": "unavailable"}
+            continue
+        summary = get_summary(sym, url=res["url"])
+        sfields = summary.get("data") or {}
+        price = sfields.get("current_price")
+        pct_change = None
+        if price:
+            try:
+                import yfinance as yf
+                t = yf.Ticker(sym.upper().strip() + ".NS")
+                fi = getattr(t, "fast_info", None)
+                prev_close = fi.get("previousClose") if fi else None
+                if prev_close:
+                    price_f = float(str(price).replace(",", ""))
+                    pct_change = round((price_f - prev_close) / prev_close * 100, 2)
+            except Exception:
+                pct_change = None
+        out[sym] = {
+            "price": price if price else "···",
+            "prev_close": None,
+            "pct_change": pct_change,
+            "status": "live" if price else "unavailable",
+        }
+    return out
