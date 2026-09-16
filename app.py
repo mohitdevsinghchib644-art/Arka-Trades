@@ -39,16 +39,21 @@ from screener_scraper import resolve_symbol, get_summary, get_sector_info
 # ═══════════════════════════════════════════════════════════════════
 
 # ── Supabase ─────────────────────────────────────────────────
-SUPABASE_URL = st.secrets.get("SUPABASE_URL", "https://vpxagxjgtonynblhddwh.supabase.co")
-SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "sb_publishable_J709kk-CNgm4GVkd5jemEg_XZb5wPDA")
+SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
+SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
 
 @st.cache_resource
-def get_supabase() -> Client:
+def get_supabase() -> Client | None:
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return None
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 supabase = get_supabase()
 
 def db_save_watchlist(symbols: list):
+    if supabase is None:
+        st.session_state.watchlist = symbols
+        return True
     try:
         supabase.table("watchlist").delete().neq("id", 0).execute()
         rows = [{"symbol": s} for s in symbols]
@@ -59,6 +64,8 @@ def db_save_watchlist(symbols: list):
         st.error(f"Save error: {e}"); return False
 
 def db_load_watchlist() -> list:
+    if supabase is None:
+        return []
     try:
         res = supabase.table("watchlist").select("symbol").execute()
         # dict.fromkeys dedupes while preserving order — a stale duplicate
@@ -69,6 +76,8 @@ def db_load_watchlist() -> list:
     except: return []
 
 def db_save_alert(symbol: str, alert_type: str, price: float):
+    if supabase is None:
+        return True
     try:
         supabase.table("alerts").delete().eq("symbol", symbol).execute()
         supabase.table("alerts").insert({"symbol": symbol, "alert_type": alert_type,
@@ -78,11 +87,15 @@ def db_save_alert(symbol: str, alert_type: str, price: float):
         st.error(f"Alert save error: {e}"); return False
 
 def db_delete_alert(symbol: str):
+    if supabase is None:
+        return True
     try:
         supabase.table("alerts").delete().eq("symbol", symbol).execute(); return True
     except: return False
 
 def db_load_alerts() -> dict:
+    if supabase is None:
+        return {}
     try:
         res = supabase.table("alerts").select("*").eq("active", True).execute()
         return {r["symbol"]: {"type": r["alert_type"], "price": float(r["price"]), "active": True}
@@ -90,6 +103,9 @@ def db_load_alerts() -> dict:
     except: return {}
 
 def db_save_admin_watchlist(symbols: list):
+    if supabase is None:
+        st.session_state.admin_watchlist = symbols
+        return True
     try:
         supabase.table("admin_watchlist").delete().neq("id", 0).execute()
         rows = [{"symbol": s} for s in symbols]
@@ -100,6 +116,8 @@ def db_save_admin_watchlist(symbols: list):
         st.error(f"Admin save error: {e}"); return False
 
 def db_load_admin_watchlist() -> list:
+    if supabase is None:
+        return []
     try:
         res = supabase.table("admin_watchlist").select("symbol").execute()
         return list(dict.fromkeys(r["symbol"] for r in res.data)) if res.data else []
@@ -107,8 +125,8 @@ def db_load_admin_watchlist() -> list:
 
 st.set_page_config(page_title="Arka Trades", layout="wide", page_icon="📈", initial_sidebar_state="collapsed")
 
-BOT_TOKEN = st.secrets.get("BOT_TOKEN", "8720913228:AAEJEpA30KiJ5H0XwIdqxfOA5YSjxW3cfK8")
-CHAT_ID   = st.secrets.get("CHAT_ID", "1987688902")
+BOT_TOKEN = st.secrets.get("BOT_TOKEN", "")
+CHAT_ID   = st.secrets.get("CHAT_ID", "")
 
 def send_telegram(msg):
     try:
@@ -201,61 +219,79 @@ name    = st.session_state.profile.get("name","Trader") or "Trader"
 initial = name[0].upper()
 IS_ADMIN = st.session_state.get("is_admin", False)
 
-# ── Global CSS ───────────────────────────────────────────────
+# ── Global CSS — ARKA TERMINAL v5 ─────────────────────────────
 st.markdown(f"""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap');
-*,*::before,*::after{{box-sizing:border-box;margin:0;padding:0;}}
-html,body,.stApp{{background:{DARK} !important;color:{IVORY} !important;font-family:{FONT} !important;}}
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+:root{{color-scheme:dark;}}
+*,*::before,*::after{{box-sizing:border-box;}}
+html,body,.stApp{{background:#050505 !important;color:{IVORY} !important;font-family:'Inter',sans-serif !important;}}
 header[data-testid="stHeader"]{{display:none !important;}}
-[data-testid="stSidebarCollapsedControl"]{{display:none !important;}}
-section[data-testid="stSidebar"]{{display:none !important;}}
-.block-container{{padding:0 !important;max-width:100% !important;}}
-.stTextInput input,.stNumberInput input{{background:{DARK3} !important;color:{IVORY} !important;border:1px solid {BORDER} !important;border-radius:0 !important;font-family:{FONT} !important;font-size:13px !important;}}
+[data-testid="stSidebar"],[data-testid="stSidebarCollapsedControl"]{{display:none !important;}}
+.block-container{{padding:0 8px 28px !important;max-width:100% !important;}}
+.stButton>button{{background:#0b0b0b !important;color:#d8d8d8 !important;border:1px solid #252525 !important;border-radius:0 !important;font-family:'Inter',sans-serif !important;font-size:11px !important;font-weight:600 !important;min-height:30px !important;box-shadow:none !important;}}
+.stButton>button:hover{{border-color:{AMBER} !important;color:{AMBER} !important;background:#111 !important;}}
+.stButton>button[kind="primary"]{{background:{AMBER} !important;color:#000 !important;border-color:{AMBER} !important;}}
+.stTextInput input{{background:#0a0a0a !important;color:#eee !important;border:1px solid #303030 !important;border-radius:0 !important;font-family:'Inter',sans-serif !important;font-size:13px !important;height:40px !important;}}
 .stTextInput input:focus{{border-color:{AMBER} !important;box-shadow:0 0 0 1px {AMBER} !important;}}
-.stTextInput label,.stTextArea label,.stNumberInput label{{color:{T2} !important;font-size:10px !important;font-weight:700 !important;letter-spacing:0.5px;text-transform:uppercase;}}
-.stTextArea textarea{{background:{DARK3} !important;color:{IVORY} !important;border:1px solid {BORDER} !important;border-radius:0 !important;}}
-[data-testid="stForm"]{{background:{DARK2} !important;border:1px solid {BORDER} !important;border-radius:0 !important;padding:20px !important;}}
-[data-testid="metric-container"]{{background:{DARK2} !important;border:1px solid {BORDER} !important;border-radius:0 !important;padding:12px !important;}}
-[data-testid="stMetricLabel"] p{{font-size:9px !important;font-weight:700 !important;color:{T2} !important;letter-spacing:1px;text-transform:uppercase;}}
-[data-testid="stMetricValue"]{{font-family:{MONO} !important;font-size:18px !important;color:{IVORY} !important;}}
-.stButton>button{{background:{DARK3} !important;color:{IVORY} !important;border:1px solid {BORDER} !important;border-radius:0 !important;font-family:{FONT} !important;font-weight:700 !important;font-size:12px !important;transition:all .1s ease !important;letter-spacing:0.3px;}}
-.stButton>button:hover{{border-color:{AMBER} !important;color:{AMBER} !important;transform:none;}}
-.stButton>button[kind="primary"],.stFormSubmitButton>button[kind="primary"]{{background:{AMBER} !important;color:#000 !important;border:none !important;font-weight:800 !important;}}
-.stButton>button[kind="primary"]:hover{{filter:brightness(1.1);color:#000 !important;}}
-.stTabs [data-baseweb="tab-list"]{{background:{DARK2};border:1px solid {BORDER};border-radius:0;padding:0;gap:0;}}
-.stTabs [data-baseweb="tab"]{{color:{T2};font-weight:700;border-radius:0;font-size:11px;letter-spacing:0.5px;text-transform:uppercase;}}
-.stTabs [aria-selected="true"]{{background:{DARK3} !important;color:{AMBER} !important;box-shadow:inset 0 -2px 0 {AMBER};}}
-.stCheckbox label,.stRadio label{{color:{IVORY} !important;font-size:13px !important;}}
-[data-testid="stSelectbox"]>div>div{{background:{DARK3} !important;border:1px solid {BORDER} !important;color:{IVORY} !important;border-radius:0 !important;}}
-hr{{border-color:{BORDER} !important;}}
-.stProgress>div>div{{background:{AMBER} !important;}}
-.nav-btn .stButton>button{{width:100% !important;text-align:left !important;background:transparent !important;color:{T2} !important;border:none !important;border-radius:0 !important;font-size:12px !important;font-weight:700 !important;padding:7px 12px !important;margin-bottom:0px !important;font-family:{MONO} !important;}}
-.nav-btn .stButton>button:hover{{background:{DARK3} !important;color:{IVORY} !important;transform:none;}}
-.nav-btn-active .stButton>button{{background:rgba(255,159,10,0.10) !important;color:{AMBER} !important;border-left:2px solid {AMBER} !important;border-radius:0 !important;}}
-@keyframes pulse{{0%,100%{{box-shadow:0 0 0 0 rgba(48,209,88,.4);}}50%{{box-shadow:0 0 0 5px rgba(48,209,88,0);}}}}
-.pulse-dot{{width:6px;height:6px;border-radius:50%;background:{GREEN};display:inline-block;animation:pulse 2s infinite;}}
-@keyframes fadeUp{{from{{opacity:0;transform:translateY(6px);}}to{{opacity:1;transform:none;}}}}
-.fade-up{{animation:fadeUp .3s ease both;}}
-@keyframes tickerscroll{{from{{transform:translateX(0);}}to{{transform:translateX(-50%);}}}}
-
-/* ── Top scrolling ticker strip ── */
-#term-ticker-wrap{{width:100%;overflow:hidden;background:{DARK2};border-bottom:1px solid {BORDER};height:30px;display:flex;align-items:center;white-space:nowrap;}}
-#term-ticker-track{{display:inline-flex;animation:tickerscroll 45s linear infinite;white-space:nowrap;}}
-#term-ticker-track span.tk-item{{display:inline-flex;align-items:center;gap:6px;padding:0 18px;font-family:{MONO};font-size:11px;font-weight:600;border-right:1px solid {BORDER2};white-space:nowrap;}}
-
-/* ── Right news rail ── */
-#news-rail-inner .stTabs [data-baseweb="tab-list"]{{background:transparent !important;border:none !important;}}
-#news-rail-inner .stTabs{{margin-top:-4px;}}
-
-/* ── Column dividers to feel like terminal panels ── */
-.term-panel{{background:{DARK2};border:1px solid {BORDER};padding:14px;}}
-.term-panel-title{{font-family:{MONO};font-size:10px;font-weight:700;letter-spacing:1.5px;color:{T2};text-transform:uppercase;border-bottom:1px solid {BORDER};padding-bottom:8px;margin-bottom:10px;}}
-
-@media (max-width: 1100px){{
-    #arka-news-rail-col{{display:none;}}
-}}
-.terminal-brandbar{{display:flex;justify-content:space-between;align-items:center;padding:12px 14px;background:#0A0A0A;border:1px solid #262626;border-top:2px solid #FF9F0A;margin-bottom:8px}}.brand-left{{display:flex;align-items:center;gap:9px}}.brand-mark{{width:28px;height:28px;background:#FF9F0A;display:flex;align-items:center;justify-content:center}}.brand-name{{font-size:13px;font-weight:800;letter-spacing:1px}}.brand-sub{{font-size:8px;color:#8A8A8A;letter-spacing:2px;margin-top:2px}}.brand-status{{font-family:'JetBrains Mono',monospace;font-size:9px;color:#30D158;letter-spacing:1px}}.market-group-label{{font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:800;letter-spacing:1.5px;color:#8A8A8A;margin:10px 0 5px}}.global-label{{margin-top:12px}}.market-tile{{background:#0A0A0A;border:1px solid #262626;padding:7px 8px;min-height:62px}}.market-name{{font-family:'JetBrains Mono',monospace;font-size:8px;color:#8A8A8A;white-space:nowrap}}.market-value{{font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:700;color:#E8E8E8;margin-top:4px}}.market-change{{font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;margin-top:2px}}.terminal-search-label{{font-family:'JetBrains Mono',monospace;font-size:9px;color:#FF9F0A;letter-spacing:1.5px;font-weight:800;margin:14px 0 5px}}.module-dock-title{{font-family:'JetBrains Mono',monospace;font-size:10px;color:#8A8A8A;letter-spacing:1.5px;border-bottom:1px solid #262626;padding:10px 0 7px;margin-top:10px}}.module-dock-card{{border:1px solid #262626;background:#0A0A0A;padding:9px 8px;min-height:60px}}.module-dock-card.active{{border-top:2px solid #FF9F0A}}.module-code{{font-family:'JetBrains Mono',monospace;color:#FF9F0A;font-size:9px;font-weight:800}}.module-label{{font-size:10px;color:#E8E8E8;font-weight:700;margin-top:4px}}.security-head{{display:flex;justify-content:space-between;align-items:flex-end;background:#0A0A0A;border:1px solid #262626;border-top:2px solid #FF9F0A;padding:14px 16px;margin-top:10px}}.security-kicker{{font-family:'JetBrains Mono',monospace;color:#8A8A8A;font-size:8px;letter-spacing:1.4px}}.security-title{{font-size:20px;font-weight:800;color:#E8E8E8;margin-top:4px}}.security-symbol{{font-family:'JetBrains Mono',monospace;color:#8A8A8A;font-size:10px;margin-top:3px}}.security-quote{{text-align:right;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700}}.quote-price{{font-size:22px;color:#FF9F0A;margin-bottom:3px}}.panel-title{{font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;letter-spacing:1.4px;color:#FF9F0A;border-bottom:1px solid #262626;padding:10px 0 7px}}.overview-box{{background:#0A0A0A;border:1px solid #262626}}.overview-row{{display:flex;justify-content:space-between;gap:8px;padding:8px 10px;border-bottom:1px solid #1A1A1A;font-size:10px}}.overview-row:last-child{{border-bottom:none}}.overview-row span{{color:#8A8A8A}}.overview-row b{{font-family:'JetBrains Mono',monospace;color:#E8E8E8;text-align:right}}.company-desc-title{{margin-top:14px}}.company-desc{{background:#0A0A0A;border:1px solid #262626;padding:12px;font-size:11px;color:#8A8A8A;line-height:1.7}}.dashboard-intro{{border:1px solid #262626;border-left:2px solid #FF9F0A;background:#0A0A0A;padding:18px 20px;margin-top:10px}}.dashboard-eyebrow{{font-family:'JetBrains Mono',monospace;color:#FF9F0A;font-size:9px;letter-spacing:1.5px}}.dashboard-title{{font-size:24px;font-weight:800;color:#E8E8E8;margin-top:5px}}.dashboard-title span{{color:#FF9F0A}}.dashboard-copy{{font-size:11px;color:#8A8A8A;margin-top:6px;line-height:1.6}}@media(max-width:1100px){{.market-tile{{min-height:56px}}.security-head{{align-items:flex-start}}.module-dock-card{{min-height:70px}}}}@media(max-width:850px){{.market-tile{{margin-bottom:4px}}.brand-status{{display:none}}.module-label{{font-size:9px}}}}
+.stTextInput label,.stSelectbox label,.stRadio label{{font-size:9px !important;color:#777 !important;text-transform:uppercase !important;letter-spacing:1px !important;}}
+[data-testid="stSelectbox"]>div>div{{background:#0a0a0a !important;border:1px solid #303030 !important;border-radius:0 !important;color:#ddd !important;}}
+.stTabs [data-baseweb="tab-list"]{{background:#0a0a0a !important;border:1px solid #252525 !important;border-radius:0 !important;gap:0 !important;}}
+.stTabs [data-baseweb="tab"]{{font-family:'JetBrains Mono',monospace !important;font-size:10px !important;color:#777 !important;text-transform:uppercase !important;border-radius:0 !important;}}
+.stTabs [aria-selected="true"]{{color:{AMBER} !important;background:#101010 !important;box-shadow:inset 0 -2px 0 {AMBER};}}
+[data-testid="stMetric"]{{background:#090909 !important;border:1px solid #202020 !important;border-radius:0 !important;padding:9px !important;}}
+[data-testid="stMetricLabel"] p{{font-size:8px !important;color:#777 !important;letter-spacing:1px !important;text-transform:uppercase !important;}}
+[data-testid="stMetricValue"]{{font-family:'JetBrains Mono',monospace !important;font-size:16px !important;}}
+hr{{border-color:#202020 !important;}}
+.pulse-dot{{width:5px;height:5px;border-radius:50%;background:{GREEN};display:inline-block;box-shadow:0 0 7px {GREEN};}}
+.terminal-shell{{background:#070707;border:1px solid #202020;border-top:2px solid {AMBER};}}
+.terminal-brandbar{{height:45px;display:flex;align-items:center;justify-content:space-between;padding:0 12px;border-bottom:1px solid #202020;background:#080808;}}
+.brand-left{{display:flex;align-items:center;gap:9px;}}
+.brand-mark{{width:24px;height:24px;background:{AMBER};display:flex;align-items:center;justify-content:center;}}
+.brand-name{{font-size:12px;font-weight:700;letter-spacing:1.3px;color:#eee;}}
+.brand-sub{{font-family:'JetBrains Mono',monospace;font-size:7px;letter-spacing:1.5px;color:#666;margin-top:2px;}}
+.brand-status{{font-family:'JetBrains Mono',monospace;font-size:8px;letter-spacing:1px;color:{GREEN};display:flex;align-items:center;gap:6px;}}
+.market-strip{{border-bottom:1px solid #202020;background:#050505;}}
+.market-row{{display:grid;grid-template-columns:70px repeat(6,minmax(120px,1fr));min-height:30px;border-bottom:1px solid #161616;}}
+.market-row:last-child{{border-bottom:0;}}
+.market-row-label{{font-family:'JetBrains Mono',monospace;font-size:8px;color:#666;display:flex;align-items:center;padding:0 8px;letter-spacing:1px;text-transform:uppercase;}}
+.market-cell{{border-left:1px solid #161616;padding:4px 7px;display:flex;align-items:center;justify-content:space-between;gap:6px;min-width:0;}}
+.market-cell .m-name{{font-family:'JetBrains Mono',monospace;font-size:8px;color:#8a8a8a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}}
+.market-cell .m-price{{font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:600;color:#e6e6e6;white-space:nowrap;}}
+.market-cell .m-chg{{font-family:'JetBrains Mono',monospace;font-size:8px;font-weight:600;white-space:nowrap;}}
+.command-wrap{{padding:9px 0 7px;background:#050505;border-bottom:1px solid #202020;}}
+.command-label{{font-family:'JetBrains Mono',monospace;font-size:8px;color:{AMBER};letter-spacing:1.4px;margin:0 0 4px 4px;text-transform:uppercase;}}
+.command-hint{{font-family:'JetBrains Mono',monospace;font-size:8px;color:#555;text-align:right;margin-top:-24px;margin-right:9px;pointer-events:none;}}
+.security-head{{display:flex;justify-content:space-between;align-items:center;background:#090909;border:1px solid #262626;border-top:2px solid {AMBER};padding:11px 13px;margin-bottom:8px;}}
+.security-kicker{{font-family:'JetBrains Mono',monospace;color:#666;font-size:8px;letter-spacing:1.2px;}}
+.security-title{{font-size:17px;font-weight:700;color:#eee;margin-top:3px;}}
+.security-symbol{{font-family:'JetBrains Mono',monospace;color:#777;font-size:9px;margin-top:3px;}}
+.security-quote{{text-align:right;font-family:'JetBrains Mono',monospace;}}
+.quote-price{{font-size:20px;color:#eee;font-weight:600;}}
+.panel-title{{font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:600;letter-spacing:1.3px;color:{AMBER};border-bottom:1px solid #242424;padding:8px 0 6px;margin-bottom:6px;text-transform:uppercase;}}
+.overview-box{{background:#090909;border:1px solid #242424;}}
+.overview-row{{display:flex;justify-content:space-between;padding:6px 9px;border-bottom:1px solid #181818;font-size:9px;}}
+.overview-row:last-child{{border-bottom:0;}}
+.overview-row span{{color:#777;}}
+.overview-row b{{font-family:'JetBrains Mono',monospace;color:#ddd;font-weight:500;}}
+.company-desc{{background:#090909;border:1px solid #242424;padding:9px;font-size:9px;color:#858585;line-height:1.6;}}
+.module-launcher{{margin-top:9px;border-top:1px solid #242424;background:#070707;}}
+.module-launcher-head{{height:28px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #1d1d1d;padding:0 8px;}}
+.module-launcher-title{{font-family:'JetBrains Mono',monospace;font-size:8px;letter-spacing:1.3px;color:#777;text-transform:uppercase;}}
+.module-launcher-context{{font-family:'JetBrains Mono',monospace;font-size:8px;color:{AMBER};}}
+.module-cell{{padding:8px 9px;border-right:1px solid #222;min-height:48px;}}
+.module-code{{font-family:'JetBrains Mono',monospace;color:{AMBER};font-size:8px;font-weight:700;}}
+.module-label{{font-size:9px;color:#cfcfcf;margin-top:3px;}}
+.monitor-grid{{display:grid;grid-template-columns:1.15fr 1fr 1fr;gap:8px;margin-top:8px;}}
+.monitor-panel{{background:#090909;border:1px solid #242424;min-height:145px;}}
+.monitor-head{{height:30px;border-bottom:1px solid #202020;padding:0 9px;display:flex;align-items:center;justify-content:space-between;font-family:'JetBrains Mono',monospace;font-size:8px;color:{AMBER};letter-spacing:1px;}}
+.monitor-row{{display:grid;grid-template-columns:1fr 72px 62px;gap:5px;padding:6px 9px;border-bottom:1px solid #161616;font-family:'JetBrains Mono',monospace;font-size:9px;}}
+.monitor-row span:first-child{{color:#aaa;}}
+.monitor-row span:nth-child(2){{text-align:right;color:#ddd;}}
+.monitor-row span:last-child{{text-align:right;}}
+.small-positive{{color:{GREEN};}} .small-negative{{color:{RED};}}
+.news-rail{{background:#080808;border-left:1px solid #262626;min-height:100%;}}
+@media(max-width:1100px){{.market-row{{grid-template-columns:70px repeat(6,minmax(120px,1fr));overflow-x:auto;}}.monitor-grid{{grid-template-columns:1fr;}}}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -814,129 +850,63 @@ def _open_security(symbol: str):
     st.rerun()
 
 
+def _market_cell(label, data):
+    if data:
+        c = GREEN if data["chg"] >= 0 else RED
+        arrow = "▲" if data["chg"] >= 0 else "▼"
+        return f'<div class="market-cell"><span class="m-name">{label}</span><span class="m-price">{data["price"]:,.2f}</span><span class="m-chg" style="color:{c}">{arrow}{abs(data["chg"]):.2f}%</span></div>'
+    return f'<div class="market-cell"><span class="m-name">{label}</span><span class="m-price">—</span><span class="m-chg" style="color:#555">—</span></div>'
+
+
 def _render_terminal_header():
-    """Top-level Bloomberg-like market header + global search."""
-    india = [
-        ("NIFTY 50", "^NSEI", None),
-        ("BANK NIFTY", "^NSEBANK", None),
-        ("SENSEX", "^BSESN", None),
-        ("NIFTY IT", "^CNXIT", None),
-        ("NIFTY AUTO", "^CNXAUTO", None),
-        ("MIDCAP 100", MIDCAP_CANDIDATES[0], MIDCAP_CANDIDATES[1:]),
-    ]
-    global_ = [
-        ("S&P 500", "^GSPC", None), ("NASDAQ", "^IXIC", None),
-        ("DOW JONES", "^DJI", None), ("DAX", "^GDAXI", None),
-        ("FTSE 100", "^FTSE", None), ("NIKKEI 225", "^N225", None),
-    ]
-
-    st.markdown(f"""
-    <div class="terminal-brandbar">
-      <div class="brand-left">
-        <div class="brand-mark">{icon('trend', 17, '#000')}</div>
-        <div><div class="brand-name">ARKA TRADES</div><div class="brand-sub">MARKET TERMINAL</div></div>
-      </div>
-      <div class="brand-status"><span class="pulse-dot"></span> LIVE MARKET DATA</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.markdown(f'<div class="market-group-label">INDIAN MARKETS</div>', unsafe_allow_html=True)
-    cols = st.columns(len(india))
-    for col, (label, sym, fb) in zip(cols, india):
-        d = get_index(sym, fb)
-        with col:
-            if d:
-                cc = GREEN if d["chg"] >= 0 else RED
-                arrow = "▲" if d["chg"] >= 0 else "▼"
-                st.markdown(f"""
-                <div class="market-tile">
-                  <div class="market-name">{label}</div>
-                  <div class="market-value">{d['price']:,.2f}</div>
-                  <div class="market-change" style="color:{cc};">{arrow} {abs(d['chg']):.2f}%</div>
-                </div>""", unsafe_allow_html=True)
-            else:
-                st.markdown(f'<div class="market-tile"><div class="market-name">{label}</div><div class="market-value">—</div><div class="market-change">NO DATA</div></div>', unsafe_allow_html=True)
-
-    st.markdown(f'<div class="market-group-label global-label">GLOBAL MARKETS</div>', unsafe_allow_html=True)
-    cols = st.columns(len(global_))
-    for col, (label, sym, fb) in zip(cols, global_):
-        d = get_index(sym, fb)
-        with col:
-            if d:
-                cc = GREEN if d["chg"] >= 0 else RED
-                arrow = "▲" if d["chg"] >= 0 else "▼"
-                st.markdown(f"""
-                <div class="market-tile">
-                  <div class="market-name">{label}</div>
-                  <div class="market-value">{d['price']:,.2f}</div>
-                  <div class="market-change" style="color:{cc};">{arrow} {abs(d['chg']):.2f}%</div>
-                </div>""", unsafe_allow_html=True)
-            else:
-                st.markdown(f'<div class="market-tile"><div class="market-name">{label}</div><div class="market-value">—</div><div class="market-change">NO DATA</div></div>', unsafe_allow_html=True)
-
-    st.markdown('<div class="terminal-search-label">SECURITY SEARCH</div>', unsafe_allow_html=True)
-    sc1, sc2 = st.columns([5.5, 1.1])
-    with sc1:
-        q = st.text_input(
-            "Search",
-            value=st.session_state.get("security_search", ""),
-            placeholder="Search stocks, companies, indices...  e.g. RELIANCE",
-            label_visibility="collapsed",
-            key="security_search",
-        )
+    india = [("NIFTY 50", "^NSEI", None), ("BANK NIFTY", "^NSEBANK", None), ("SENSEX", "^BSESN", None), ("NIFTY IT", "^CNXIT", None), ("NIFTY AUTO", "^CNXAUTO", None), ("MIDCAP 100", MIDCAP_CANDIDATES[0], MIDCAP_CANDIDATES[1:])]
+    global_ = [("S&P 500", "^GSPC", None), ("NASDAQ", "^IXIC", None), ("DOW", "^DJI", None), ("DAX", "^GDAXI", None), ("FTSE", "^FTSE", None), ("NIKKEI", "^N225", None)]
+    st.markdown('<div class="terminal-shell">', unsafe_allow_html=True)
+    st.markdown(f'''<div class="terminal-brandbar"><div class="brand-left"><div class="brand-mark">{icon("trend",15,"#000")}</div><div><div class="brand-name">ARKA TRADES</div><div class="brand-sub">MARKET TERMINAL · EQUITIES</div></div></div><div class="brand-status"><span class="pulse-dot"></span> LIVE MARKET DATA</div></div>''', unsafe_allow_html=True)
+    for title, items in (("INDIA", india), ("GLOBAL", global_)):
+        cells = ''.join(_market_cell(label, get_index(sym, fb)) for label, sym, fb in items)
+        st.markdown(f'<div class="market-strip"><div class="market-row"><div class="market-row-label">{title}</div>{cells}</div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="command-wrap"><div class="command-label">SECURITY / INDEX / COMPANY SEARCH</div>', unsafe_allow_html=True)
+    q = st.text_input("Security search", value=st.session_state.get("security_search", ""), placeholder="Type ticker or company name  ·  e.g. RELIANCE", label_visibility="collapsed", key="security_search")
+    st.markdown('<div class="command-hint">LOAD SECURITY →</div></div>', unsafe_allow_html=True)
     suggestions = _security_candidates(q)
+    sc1, sc2 = st.columns([5.7, 1])
+    with sc1:
+        labels = [f"{s} · NSE EQUITY" for s in suggestions]
+        selected = st.selectbox("Matches", labels, index=0 if labels else None, placeholder="Select a matching security…", label_visibility="collapsed", key="security_dropdown_v5") if labels else None
     with sc2:
-        search_clicked = st.button("SEARCH", type="primary", use_container_width=True, key="global_security_search")
-
-    if suggestions:
-        labels = [f"{s}  ·  NSE" for s in suggestions]
-        pick_col, _ = st.columns([5.5, 1.1])
-        with pick_col:
-            selected = st.selectbox(
-                "Search results",
-                labels,
-                label_visibility="collapsed",
-                key="security_dropdown",
-            )
-            picked_symbol = selected.split("  ·  ")[0].strip()
-        if search_clicked:
-            _open_security(picked_symbol)
-    elif search_clicked and q.strip():
-        with st.spinner(f"Resolving {q.strip().upper()}..."):
-            try:
-                resolved = resolve_symbol(q.strip())
-            except Exception:
-                resolved = None
-        if resolved:
-            _open_security(q.strip())
-        else:
-            st.error(f"No security found for '{q.strip()}'. Try an NSE symbol such as RELIANCE or HDFCBANK.")
+        search_clicked = st.button("LOAD", type="primary", use_container_width=True, key="global_security_search_v5")
+    if search_clicked:
+        if selected:
+            _open_security(selected.split(" · " )[0].strip())
+        elif q.strip():
+            with st.spinner("Resolving security…"):
+                try:
+                    resolved = resolve_symbol(q.strip())
+                except Exception:
+                    resolved = None
+            if resolved:
+                _open_security(q.strip())
+            else:
+                st.error(f"No security found for '{q.strip().upper()}'.")
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 def _render_module_dock(active=None):
-    modules = [
-        ("Watchlist Scanner", "scanner", "SCAN"),
-        ("Alerts", "alerts", "ALERT"),
-        ("Research", "research", "RSRCH"),
-        ("Arka AI", "analysis", "ARKA AI"),
-        ("Smart Screener", "smart_scan", "SCREEN"),
-        ("Market Breadth", "breadth", "BREADTH"),
-    ]
-    st.markdown('<div class="module-dock-title">ARKA TERMINAL MODULES</div>', unsafe_allow_html=True)
+    modules = [("F2", "Watchlist Scanner", "scanner"), ("F3", "Alerts", "alerts"), ("F4", "Research", "research"), ("F5", "Arka AI", "analysis"), ("F6", "Smart Screener", "smart_scan"), ("F7", "Market Breadth", "breadth")]
+    ctx = st.session_state.get("active_security") or "MARKET"
+    st.markdown(f'<div class="module-launcher"><div class="module-launcher-head"><span class="module-launcher-title">FUNCTIONS / MODULES</span><span class="module-launcher-context">CONTEXT: {ctx}</span></div></div>', unsafe_allow_html=True)
     cols = st.columns(len(modules))
-    for col, (label, target, short) in zip(cols, modules):
+    for col, (code, label, target) in zip(cols, modules):
         with col:
-            active_cls = " active" if active == target else ""
-            st.markdown(f'<div class="module-dock-card{active_cls}"><div class="module-code">{short}</div><div class="module-label">{label}</div></div>', unsafe_allow_html=True)
-            if st.button("OPEN", key=f"dock_{target}", use_container_width=True):
+            st.markdown(f'<div class="module-cell"><div class="module-code">{code}</div><div class="module-label">{label}</div></div>', unsafe_allow_html=True)
+            if st.button("OPEN", key=f"module_v5_{target}", use_container_width=True):
                 st.session_state.page = target
-                if st.session_state.get("active_security"):
-                    sym = st.session_state["active_security"]
+                sym = st.session_state.get("active_security")
+                if sym:
                     st.session_state["research_last_query"] = sym
                     st.session_state["m1_ticker"] = sym
-                    st.session_state.pop("research_data", None)
                 st.rerun()
-
 
 def _render_security_chart(symbol: str):
     try:
@@ -1079,13 +1049,24 @@ def _render_security_workspace(symbol: str):
 
 
 def _render_dashboard():
-    st.markdown(f"""
-    <div class="dashboard-intro">
-      <div class="dashboard-eyebrow">ARKA TRADES · TERMINAL HOME</div>
-      <div class="dashboard-title">Search a security. <span>Then work from one terminal.</span></div>
-      <div class="dashboard-copy">Market indices stay at the top, your security workspace stays in context, and the trading modules remain one click away.</div>
-    </div>
-    """, unsafe_allow_html=True)
+    wl = st.session_state.get("watchlist", [])[:8]
+    rows = []
+    for sym in wl:
+        d = get_price(sym)
+        if d:
+            c = GREEN if d["chg"] >= 0 else RED
+            rows.append(f'<div class="monitor-row"><span>{sym}</span><span>₹{d["price"]:,.2f}</span><span style="color:{c}">{d["chg"]:+.2f}%</span></div>')
+    watch_html = ''.join(rows) if rows else '<div style="padding:10px;color:#666;font-size:9px;font-family:JetBrains Mono,monospace;">NO WATCHLIST LOADED · OPEN WATCHLIST SCANNER</div>'
+    all_syms = list(dict.fromkeys(st.session_state.get("admin_watchlist", []) + wl))[:30]
+    adv = dec = flat = 0
+    for sym in all_syms:
+        d = get_price(sym)
+        if not d: continue
+        if d["chg"] > 0.05: adv += 1
+        elif d["chg"] < -0.05: dec += 1
+        else: flat += 1
+    ratio = (adv/dec) if dec else (float(adv) if adv else 0)
+    st.markdown(f'''<div class="monitor-grid"><div class="monitor-panel"><div class="monitor-head"><span>WATCHLIST MONITOR</span><span>{len(wl)} NAMES</span></div>{watch_html}</div><div class="monitor-panel"><div class="monitor-head"><span>MARKET INTERNALS</span><span>WATCHLIST SAMPLE</span></div><div class="monitor-row"><span>ADVANCING</span><span>{adv}</span><span class="small-positive">▲</span></div><div class="monitor-row"><span>DECLINING</span><span>{dec}</span><span class="small-negative">▼</span></div><div class="monitor-row"><span>UNCHANGED</span><span>{flat}</span><span style="color:#777">—</span></div><div class="monitor-row"><span>A/D RATIO</span><span>{ratio:.2f}</span><span style="color:#888">RATIO</span></div></div><div class="monitor-panel"><div class="monitor-head"><span>TERMINAL FUNCTIONS</span><span>F2–F7</span></div><div class="monitor-row"><span>SEARCH SECURITY</span><span>CMD</span><span style="color:{AMBER}">LOAD</span></div><div class="monitor-row"><span>RESEARCH</span><span>F4</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>ARKA AI</span><span>F5</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>SCREENER</span><span>F6</span><span style="color:{AMBER}">OPEN</span></div></div></div>''', unsafe_allow_html=True)
     _render_module_dock(active=None)
 
 
@@ -1109,7 +1090,7 @@ _render_terminal_header()
 tg1, tg2 = st.columns([8.8, 1.2])
 with tg2:
     toggle_label = "HIDE NEWS ▸" if st.session_state.show_news_rail else "◂ SHOW NEWS"
-    if st.button(toggle_label, key="toggle_news_rail_v4", use_container_width=True):
+    if st.button(toggle_label, key="toggle_news_rail_v5", use_container_width=True):
         st.session_state.show_news_rail = not st.session_state.show_news_rail
         st.rerun()
 
@@ -1266,7 +1247,7 @@ with center:
 # ── RIGHT NEWS RAIL: deliberately kept in the same right-side position ──
 if right_rail is not None:
     with right_rail:
-        st.markdown(f"""<div style="position:sticky;top:8px;" id="arka-news-rail-col">
+        st.markdown(f"""<div style="position:sticky;top:8px;" class="news-rail" id="arka-news-rail-col">
             <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 4px 8px;border-bottom:1px solid {BORDER};margin-bottom:8px;">
                 <span style="font-family:{MONO};font-size:11px;font-weight:800;color:{AMBER};letter-spacing:1.5px;">MARKET NEWS</span><span class="pulse-dot"></span>
             </div><div id="news-rail-inner">""", unsafe_allow_html=True)
