@@ -17,6 +17,8 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 
+from news_feed import get_security_news
+
 from screener_scraper import (
     resolve_symbol,
     get_summary,
@@ -585,7 +587,13 @@ def _valuation(data, T):
         _table(p, r, T, ["PERatio", "PBRatio", "EnterpriseValue", "EVToEBITDA", "PSTrailing12Months"])
     else:
         s = (data.get("summary") or {}).get("data") or {}
-        _kpis([("P/E",s.get("pe_ratio","N/A"),"current"),("P/B","N/A","requires balance-sheet normalization"),("EV/EBITDA","N/A","provider unavailable"),("FCF yield","N/A","provider unavailable")],T,4)
+        _kpis([
+            ("P/E", s.get("pe_ratio", "N/A"), "current"),
+            ("P/B", "N/A", "requires balance-sheet normalization"),
+            ("EV/EBITDA", "N/A", "provider unavailable"),
+            ("FCF yield", "N/A", "provider unavailable"),
+        ], T, 4)
+
     peers = _peer_cached(symbol)
     _header("Relative valuation · peer set", T, peers.get("status"))
     if peers.get("rows"):
@@ -593,8 +601,75 @@ def _valuation(data, T):
         _table(["CMP ₹","P/E","M.CAP ₹Cr","DIV YIELD %","ROCE %"],rows,T)
     else:
         _unavailable("Peer valuation", "Comparable-company dataset", T)
-    # A true point-in-time DCF cannot be responsibly fabricated from one-click free data.
-    _unavailable("DCF", "Forward free cash flow, WACC and terminal-growth assumptions", T, "V9.1 leaves the workspace reserved for an editable point-in-time model rather than hiding the missing inputs.")
+
+    # V9.1 includes an actual editable DCF when a usable free-cash-flow basis
+    # and share-count are available. For banks/insurers, FCF DCF is not used
+    # because their cash-flow statements are not comparable to industrial firms.
+    info=_yf_info(symbol)
+    sec=((data.get("sector") or {}).get("data") or {})
+    sector_name=str(sec.get("Sector") or info.get("sector") or "").lower()
+    financial_firm=any(x in sector_name for x in ["bank", "financial", "insurance"])
+    cf=_yf_cashflow(symbol,"annual")
+    base_fcf=None
+    if not financial_firm and cf is not None and not cf.empty:
+        try:
+            if "Free Cash Flow" in cf.index:
+                v=cf.loc["Free Cash Flow"].dropna()
+                if len(v): base_fcf=float(v.iloc[0])
+            if base_fcf is None and "Operating Cash Flow" in cf.index and "Capital Expenditure" in cf.index:
+                ocf=cf.loc["Operating Cash Flow"].dropna(); cap=cf.loc["Capital Expenditure"].dropna()
+                if len(ocf) and len(cap): base_fcf=float(ocf.iloc[0])+float(cap.iloc[0])
+        except Exception:
+            base_fcf=None
+    shares=info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
+    if shares is None:
+        try:
+            shares=float(info.get("marketCap"))/float(info.get("currentPrice")) if info.get("marketCap") and info.get("currentPrice") else None
+        except Exception:
+            shares=None
+    if financial_firm:
+        _panel("DCF", f'<div style="font:10px {T["mono"]};color:{T["t2"]};line-height:1.7">FUNDAMENTAL FIT CHECK: skipped for this security because a conventional industrial free-cash-flow DCF is not an appropriate cash-flow model for banks / insurers. Use relative valuation, book value and return metrics instead.</div>', T)
+    elif base_fcf is None or base_fcf<=0 or not shares:
+        _unavailable("DCF", "Usable positive free cash flow + share count", T, "The model is enabled only when the connected provider supplies the required inputs.")
+    else:
+        _header("DCF workspace",T,"live","Illustrative model using the latest provider free-cash-flow observation; edit assumptions below.")
+        a,b,c=st.columns(3)
+        growth=a.number_input("FCF growth %",min_value=-20.0,max_value=40.0,value=8.0,step=0.5,key="dcf_growth_v91")/100
+        wacc=b.number_input("WACC %",min_value=5.0,max_value=25.0,value=11.0,step=0.5,key="dcf_wacc_v91")/100
+        tg=c.number_input("Terminal growth %",min_value=0.0,max_value=8.0,value=3.0,step=0.25,key="dcf_terminal_v91")/100
+        years=st.slider("Forecast years",3,10,5,key="dcf_years_v91")
+        if tg>=wacc:
+            st.warning("Terminal growth must be below WACC.")
+        else:
+            fcf0=float(base_fcf)
+            pv=0.0; forecast=[]
+            for y in range(1,years+1):
+                fcf=fcf0*((1+growth)**y); disc=(1+wacc)**y; pv+=fcf/disc; forecast.append({"label":f"Year {y}","values":[f"₹{fcf:,.0f} Cr",f"₹{fcf/disc:,.0f} Cr"]})
+            terminal=forecast[-1]["values"] if forecast else None
+            last_fcf=fcf0*((1+growth)**years)
+            tv=last_fcf*(1+tg)/(wacc-tg)
+            equity_value=pv+tv/(1+wacc)**years
+            per_share=equity_value/shares if shares else None
+            _kpis([("Base FCF",f"₹{base_fcf:,.0f}","provider cash-flow basis"),("PV of forecast",f"₹{pv:,.0f}","Cr"),("Terminal value",f"₹{tv:,.0f}","Cr"),("DCF / share",f"₹{per_share:,.2f}" if per_share is not None else "N/A","model output")],T,4)
+            _table(["FCF","PV OF FCF"],forecast,T)
+            _panel("Model discipline",f'<div style="font:9px {T["mono"]};color:{T["t3"]};line-height:1.7">Inputs are editable and stored only for this session. This is a scenario model, not a forecast or investment recommendation. Base FCF: ₹{base_fcf:,.0f} Cr · Shares: {shares:,.0f} · WACC: {wacc*100:.1f}% · Terminal growth: {tg*100:.2f}%.</div>',T)
+
+            _header("DCF sensitivity",T,"live","Rows = WACC · Columns = terminal growth. Values are model output per share.")
+            wacc_grid=[max(0.06,wacc-0.02),max(0.06,wacc-0.01),wacc,min(0.25,wacc+0.01),min(0.25,wacc+0.02)]
+            tg_grid=[max(0.0,tg-0.01),max(0.0,tg-0.005),tg,min(wacc-0.005,tg+0.005),min(wacc-0.005,tg+0.01)]
+            sens=[]
+            for wa in wacc_grid:
+                vals=[]
+                for gt in tg_grid:
+                    if gt>=wa:
+                        vals.append("—"); continue
+                    pvx=sum(fcf0*((1+growth)**y)/(1+wa)**y for y in range(1,years+1))
+                    last=fcf0*((1+growth)**years)
+                    tvx=last*(1+gt)/(wa-gt)
+                    evx=pvx+tvx/(1+wa)**years
+                    vals.append(f"₹{evx/shares:,.0f}")
+                sens.append({"label":f"WACC {wa*100:.1f}%","values":vals})
+            _table([f"g {gt*100:.1f}%" for gt in tg_grid],sens,T)
 
 
 def _ownership(data, T):
@@ -621,14 +696,30 @@ def _ownership(data, T):
 
 def _flows(data,T):
     symbol=data["symbol"]
+    sh=data.get("shareholding") or {}
+    sd=sh.get("data") or {}
+    _header("Ownership-change tape",T,sh.get("status","unavailable"))
+    flow_rows=[]
+    for needle,label in [("promoters","Promoters"),("fiis","FIIs"),("fiis","FII"),("diis","DIIs"),("diis","DII"),("public","Public")]:
+        if any(r.get("label","").lower()==needle or needle in r.get("label","").lower() for r in sd.get("rows",[])):
+            row=next(r for r in sd.get("rows",[]) if needle in r.get("label","").lower())
+            vals=[_num(v) for v in row.get("values",[])]; vals=[v for v in vals if v is not None]
+            if vals:
+                latest=vals[-1]; prev=vals[-2] if len(vals)>1 else None
+                change=(latest-prev) if prev is not None else None
+                flow_rows.append({"label":label,"values":[f"{latest:.2f}%",f"{prev:.2f}%" if prev is not None else "—",f"{change:+.2f} pp" if change is not None else "—"]})
+    if flow_rows:
+        _table(["LATEST","PREVIOUS","CHANGE"],flow_rows,T)
+    else:
+        _unavailable("Ownership-change tape","Quarterly shareholding observations",T)
+
     ins=_yf_insider_transactions(symbol)
     inst=_yf_institutional_holders(symbol)
-    _header("Holder-flow observations",T,"live" if (not ins.empty or not inst.empty) else "unavailable")
     if not ins.empty:
-        p,r=_df_to_rows(ins,20,9); _table(p,r,T)
+        _header("Insider transaction observations",T,"live"); p,r=_df_to_rows(ins,20,9); _table(p,r,T)
     if not inst.empty:
-        p,r=_df_to_rows(inst,20,9); _table(p,r,T)
-    _unavailable("FII / DII security-level flow attribution", "Exchange-linked security-level institutional flow dataset", T)
+        _header("Institutional-holder observations",T,"live"); p,r=_df_to_rows(inst,20,9); _table(p,r,T)
+    _unavailable("FII / DII security-level flow attribution", "Exchange-linked security-level flow dataset", T)
     _unavailable("Block / bulk deals", "NSE/BSE bulk and block deal feed", T)
 
 
@@ -720,15 +811,22 @@ def _events(data,T):
 
 
 def _news(data,T,news_fetch_fn):
+    symbol=data["symbol"]
     news=[]
-    if news_fetch_fn:
-        try: news=news_fetch_fn(data["symbol"],days=3) or []
+    # v9.1 Arka News engine is the primary source so Research > News and the
+    # right rail use one normalized article model.
+    try:
+        news=get_security_news(symbol,days=7) or []
+    except Exception:
+        news=[]
+    if not news and news_fetch_fn:
+        try: news=news_fetch_fn(symbol,days=7) or []
         except TypeError:
-            try: news=news_fetch_fn(data["symbol"]) or []
+            try: news=news_fetch_fn(symbol) or []
             except Exception: news=[]
         except Exception: news=[]
     if not news:
-        raw=_yf_news(data["symbol"])
+        raw=_yf_news(symbol)
         for x in raw[:20]:
             content=x.get("content",x) if isinstance(x,dict) else {}
             title=content.get("title") or x.get("title") or "Untitled"
@@ -736,16 +834,21 @@ def _news(data,T,news_fetch_fn):
             provider=content.get("provider",{}).get("displayName") if isinstance(content.get("provider"),dict) else x.get("publisher")
             news.append({"title":title,"source":provider or "Yahoo Finance","published":content.get("pubDate") or x.get("providerPublishTime"),"url":url})
     if not news:
-        _unavailable("News timeline","Working security news feed",T)
+        _unavailable("News timeline","Arka News Intelligence v9.1 / Yahoo fallback",T)
         return
     _header("Security news timeline",T,"live")
     for item in news[:30]:
         title=item.get("title") or item.get("headline") or "Untitled"
         source=item.get("source") or item.get("publisher") or "Source"
-        ts=item.get("published") or item.get("published_at") or item.get("time") or ""
+        ts=item.get("time_str") or item.get("published") or item.get("published_at") or item.get("time") or ""
+        event=item.get("event") or "NEWS"
+        priority=item.get("priority")
+        sentiment=item.get("sentiment_label") or item.get("sentiment") or "—"
         url=item.get("url") or item.get("link")
         link=f'<a href="{html.escape(str(url),quote=True)}" target="_blank" style="color:{T["ivory"]};text-decoration:none">{_esc(title)}</a>' if url else _esc(title)
-        st.markdown(f'<div style="padding:8px 0;border-bottom:1px solid {T["border"]};font:10px {T["mono"]}"><div>{link}</div><div style="color:{T["t3"]};margin-top:3px">{_esc(source)} · {_esc(ts)}</div></div>',unsafe_allow_html=True)
+        meta=f'{_esc(source)} · {_esc(ts)} · {_esc(event)} · {_esc(sentiment)}'
+        if priority is not None: meta += f' · priority {_esc(priority)}'
+        st.markdown(f'<div style="padding:8px 0;border-bottom:1px solid {T["border"]};font:10px {T["mono"]}"><div>{link}</div><div style="color:{T["t3"]};margin-top:3px">{meta}</div></div>',unsafe_allow_html=True)
 
 
 def _rsi(close, period=14):
@@ -892,7 +995,7 @@ def _data_sources(data,T):
         {"label":"Earnings estimates / revisions","values":["yfinance","lazy"]},
         {"label":"Holder datasets","values":["yfinance","lazy"]},
         {"label":"Peer comparison","values":["Curated Screener peer map","lazy"]},
-        {"label":"News","values":["Arka News + Yahoo fallback","lazy"]},
+        {"label":"News","values":["Arka News Intelligence v9.1 + Yahoo fallback","cached / lazy"]},
         {"label":"FII/DII security attribution","values":["Dedicated exchange dataset required","not connected"]},
         {"label":"Segment / supply chain","values":["Company filing / research dataset required","not connected"]},
         {"label":"Point-in-time DCF","values":["Editable assumption engine required","not connected"]},
