@@ -284,6 +284,13 @@ def get_balance_sheet(symbol: str, url: str | None = None, html_override: str | 
     return _get_section(symbol, "balance_sheet", must_contain, url, target="balance_sheet", html_override=html_override)
 
 
+def get_cash_flow(symbol: str, url: str | None = None, html_override: str | None = None) -> dict:
+    """Extract the cash-flow statement when the source page exposes it."""
+    must_contain = [("cash from operating", "cash flow from operating", "operating activities"),
+                    ("cash from investing", "investing activities", "capital expenditure")]
+    return _get_section(symbol, "cash_flow", must_contain, url, target="cash_flow", html_override=html_override)
+
+
 def get_sector_info(symbol: str, url: str | None = None, html_override: str | None = None) -> dict:
     resolved_url = url
     if resolved_url is None:
@@ -593,6 +600,7 @@ def get_full_research(symbol: str) -> dict:
         "yearly": get_yearly_results(symbol, url=url, html_override=html),
         "shareholding": get_shareholding(symbol, url=url, html_override=html),
         "balance_sheet": get_balance_sheet(symbol, url=url, html_override=html),
+        "cash_flow": get_cash_flow(symbol, url=url, html_override=html),
         "sector": get_sector_info(symbol, url=url, html_override=html),
         "peers": get_peers(symbol, url=url),
     }
