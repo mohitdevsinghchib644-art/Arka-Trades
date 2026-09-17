@@ -370,6 +370,24 @@ def get_price(sym):
         return {"price": cur, "chg": ((cur-prev_close)/prev_close)*100, "prev_close": prev_close}
     except: return None
 
+@st.cache_data(ttl=20, show_spinner=False)
+def get_prices_batch(symbols):
+    """Concurrent cached quote boundary for terminal monitor widgets."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    syms = list(dict.fromkeys([str(x).upper().strip() for x in (symbols or []) if x]))
+    out = {}
+    if not syms:
+        return out
+    with ThreadPoolExecutor(max_workers=min(8, len(syms))) as ex:
+        futures = {ex.submit(get_price, s): s for s in syms}
+        for future in as_completed(futures):
+            s = futures[future]
+            try:
+                out[s] = future.result()
+            except Exception:
+                out[s] = None
+    return out
+
 def _values_are_sane(cur, pc):
     try:
         if cur is None or pc is None:
@@ -965,18 +983,24 @@ def _render_terminal_header(show_indices=True):
         else:
             # Prefer the selected dropdown result. For unknown/company-name queries,
             # resolve through the existing provider and retain the requested text as fallback.
-            candidate = chosen.upper()
-            if candidate not in _security_candidates(candidate):
+            raw_norm = raw.upper()
+            known = set(_security_candidates(""))
+            # The selectbox may retain a previous selection while the user edits the query.
+            # Exact typed tickers therefore always take precedence.
+            if raw_norm in known:
+                candidate = raw_norm
+            else:
+                candidate = ""
                 try:
                     resolved = resolve_symbol(raw)
                 except Exception:
                     resolved = None
                 if resolved:
-                    # Screener's company URL contains the canonical ticker even
-                    # when the user searched by the full company name.
                     url = str(resolved.get("url", ""))
                     m = re.search(r"/company/([^/]+)", url, flags=re.I)
-                    candidate = m.group(1).upper() if m else candidate
+                    candidate = m.group(1).upper() if m else ""
+                if not candidate:
+                    candidate = chosen.upper() if chosen else raw_norm
             _open_security(candidate)
 
 
@@ -1140,26 +1164,22 @@ def _render_security_workspace(symbol: str):
 
 
 def _render_dashboard():
-    wl = st.session_state.get("watchlist", [])[:8]
+    wl = list(dict.fromkeys(st.session_state.get("watchlist", [])[:10]))
+    all_syms = list(dict.fromkeys((st.session_state.get("admin_watchlist", []) + wl)))[:14]
+    quotes = get_prices_batch(all_syms)
     rows = []
     for sym in wl:
-        d = get_price(sym)
+        d = quotes.get(sym)
         if d:
             c = GREEN if d["chg"] >= 0 else RED
-            rows.append(f'<div class="monitor-row"><span>{sym}</span><span>₹{d["price"]:,.2f}</span><span style="color:{c}">{d["chg"]:+.2f}%</span></div>')
-    watch_html = ''.join(rows) if rows else '<div style="padding:10px;color:#666;font-size:9px;font-family:JetBrains Mono,monospace;">NO WATCHLIST LOADED · OPEN WATCHLIST SCANNER</div>'
-    all_syms = list(dict.fromkeys(st.session_state.get("admin_watchlist", []) + wl))[:30]
-    adv = dec = flat = 0
-    for sym in all_syms:
-        d = get_price(sym)
-        if not d: continue
-        if d["chg"] > 0.05: adv += 1
-        elif d["chg"] < -0.05: dec += 1
-        else: flat += 1
-    ratio = (adv/dec) if dec else (float(adv) if adv else 0)
-    st.markdown(f'''<div class="monitor-grid"><div class="monitor-panel"><div class="monitor-head"><span>WATCHLIST MONITOR</span><span>{len(wl)} NAMES</span></div>{watch_html}</div><div class="monitor-panel"><div class="monitor-head"><span>MARKET INTERNALS</span><span>WATCHLIST SAMPLE</span></div><div class="monitor-row"><span>ADVANCING</span><span>{adv}</span><span class="small-positive">▲</span></div><div class="monitor-row"><span>DECLINING</span><span>{dec}</span><span class="small-negative">▼</span></div><div class="monitor-row"><span>UNCHANGED</span><span>{flat}</span><span style="color:#777">—</span></div><div class="monitor-row"><span>A/D RATIO</span><span>{ratio:.2f}</span><span style="color:#888">RATIO</span></div></div><div class="monitor-panel"><div class="monitor-head"><span>TERMINAL FUNCTIONS</span><span>F2–F7</span></div><div class="monitor-row"><span>SEARCH SECURITY</span><span>CMD</span><span style="color:{AMBER}">LOAD</span></div><div class="monitor-row"><span>RESEARCH</span><span>F4</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>ARKA AI</span><span>F5</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>SCREENER</span><span>F6</span><span style="color:{AMBER}">OPEN</span></div></div></div>''', unsafe_allow_html=True)
+            rows.append(f'<div class="monitor-row monitor-click-row"><span>{sym}</span><span>₹{d["price"]:,.2f}</span><span style="color:{c}">{d["chg"]:+.2f}%</span></div>')
+    watch_html = ''.join(rows) if rows else '<div style="padding:12px;color:#666;font-size:10px;font-family:JetBrains Mono,monospace;">NO WATCHLIST LOADED · OPEN WATCHLIST SCANNER</div>'
+    adv = sum(1 for s in all_syms if quotes.get(s) and quotes[s]["chg"] > 0.05)
+    dec = sum(1 for s in all_syms if quotes.get(s) and quotes[s]["chg"] < -0.05)
+    flat = sum(1 for s in all_syms if quotes.get(s) and abs(quotes[s]["chg"]) <= 0.05)
+    ratio = (adv / dec) if dec else (float(adv) if adv else 0)
+    st.markdown(f'''<div class="monitor-grid"><div class="monitor-panel"><div class="monitor-head"><span>WATCHLIST MONITOR</span><span>{len(wl)} NAMES · FAST CACHE</span></div>{watch_html}</div><div class="monitor-panel"><div class="monitor-head"><span>MARKET INTERNALS</span><span>{len(all_syms)} SAMPLE</span></div><div class="monitor-row"><span>ADVANCING</span><span>{adv}</span><span class="small-positive">▲</span></div><div class="monitor-row"><span>DECLINING</span><span>{dec}</span><span class="small-negative">▼</span></div><div class="monitor-row"><span>UNCHANGED</span><span>{flat}</span><span style="color:#777">—</span></div><div class="monitor-row"><span>A/D RATIO</span><span>{ratio:.2f}</span><span style="color:#888">RATIO</span></div></div><div class="monitor-panel"><div class="monitor-head"><span>TERMINAL FUNCTIONS</span><span>F2–F7</span></div><div class="monitor-row"><span>SEARCH SECURITY</span><span>CMD</span><span style="color:{AMBER}">LOAD</span></div><div class="monitor-row"><span>RESEARCH</span><span>F4</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>ARKA AI</span><span>F5</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>SCREENER</span><span>F6</span><span style="color:{AMBER}">OPEN</span></div></div></div>''', unsafe_allow_html=True)
     _render_module_dock(active=None)
-
 
 def _news_watchlist_for_rail():
     source_key = st.session_state.get("active_news_source", "admin")
@@ -1343,9 +1363,6 @@ with center:
         st.markdown(f'<div class="term-panel"><b style="color:{AMBER};">Telegram</b><br><span style="color:{T2};">Bot connected · Chat ID configured in Streamlit Secrets.</span></div>',unsafe_allow_html=True)
     elif pg == "contact":
         st.markdown(f'<div class="term-panel"><div class="panel-title">CONTACT</div><div style="color:{T2};line-height:1.8;">Questions, feedback or suggestions?<br>Contact the Arka Trades desk through the configured support email.</div></div>',unsafe_allow_html=True)
-
-    if pg in {"scanner", "alerts", "research", "analysis", "smart_scan", "breadth"}:
-        _render_module_directory()
 
 # ── RIGHT NEWS RAIL: deliberately kept in the same right-side position ──
 if right_rail is not None:
