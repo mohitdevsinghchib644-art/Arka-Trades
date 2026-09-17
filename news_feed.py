@@ -1,31 +1,32 @@
 """
-news_feed.py — Arka Trades News Intelligence v4
+news_feed.py — Arka Trades News Intelligence v9.1
 
-Terminal-style right-rail news engine.
+A terminal-style news engine designed for the Arka Trades right rail and the
+Research > News workspace.
 
-v4 keeps the existing public API compatible with app.py while adding:
-- security-aware news context
-- watchlist / security / sector / macro filtering
-- event classification (earnings, order, stake, regulatory, etc.)
-- headline importance and breaking-news detection
-- duplicate / near-duplicate headline clustering
-- source-type classification
-- 24h / 7d / 30d cache windows
-- compact news search
-- optional price-impact calculation for company headlines
-- explicit source/provenance labels; no invented data
-
-The fetch layer still uses Google News RSS. If a stronger exchange/company
-filings connector is added later, it can feed the same normalized article
-schema without changing the UI.
+v9.1 goals:
+- fast staged refresh instead of fetching a large watchlist on every rerun
+- one normalized article schema for every consumer
+- Google News RSS as the public baseline feed, with strict timeouts
+- event / sentiment / source / importance classification
+- recency + relevance + multi-source priority ranking
+- near-duplicate headline clustering
+- breaking / catalyst / risk views
+- security-aware context and watchlist filtering
+- optional intraday price-reaction calculation for the active security
+- explicit data provenance; no fabricated articles, scores, or market claims
+- backwards-compatible public API:
+    render_news_rail, news_panel, news_box, refresh_news,
+    get_news_dot, _fetch_news_for_stock
 """
 
 from __future__ import annotations
 
+import difflib
 import html
 import re
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
@@ -33,6 +34,7 @@ from urllib.parse import quote_plus, urlparse
 
 import feedparser
 import pandas as pd
+import requests
 import streamlit as st
 import yfinance as yf
 
@@ -41,38 +43,41 @@ IST = timezone(timedelta(hours=5, minutes=30))
 # Terminal palette
 GOLD = "#FF9F0A"
 DARK = "#000000"
-DARK2 = "#0A0A0A"
+DARK2 = "#090909"
 DARK3 = "#111111"
-BORDER = "#262626"
-T2 = "#8A8A8A"
-T3 = "#5A5A5A"
+BORDER = "#242424"
+T2 = "#8E8E8E"
+T3 = "#5C5C5C"
 IVORY = "#E8E8E8"
 GREEN = "#30D158"
 RED = "#FF453A"
 BLUE = "#5AC8FA"
-MONO = "'JetBrains Mono',monospace"
+PURPLE = "#BF5AF2"
+CYAN = "#64D2FF"
+MONO = "'JetBrains Mono','Consolas',monospace"
 
-NEWS_EXPIRE = 20
+# Performance: the news rail is a narrow context panel, so it does not need
+# every watchlist symbol on every rerun.
 NEWS_FETCH_TTL = 300
-MAX_COMBINED_ITEMS = 60
-MAX_SECURITY_REFRESH = 12
-MAX_FETCH_WORKERS = 6
+NEWS_EXPIRE_MIN = 5
+MAX_SECURITY_REFRESH = 4
+MAX_FETCH_WORKERS = 4
+MAX_COMBINED_ITEMS = 70
+MAX_ARTICLES_PER_FEED = 25
+HTTP_TIMEOUT = 7
 DEFAULT_DAYS = 1
 
-# ---------------------------------------------------------------------------
-# Classification dictionaries
-# ---------------------------------------------------------------------------
 _EVENT_RULES = {
-    "EARNINGS": ["earnings", "results", "quarterly result", "profit", "revenue", "ebitda", "eps"],
-    "ORDER": ["order", "contract", "bags order", "wins order", "wins contract", "work order", "purchase order"],
-    "STAKE": ["stake", "acquire", "acquisition", "buy stake", "sells stake", "buys stake", "block deal"],
+    "EARNINGS": ["earnings", "results", "quarterly result", "profit", "revenue", "ebitda", "eps", "guidance"],
+    "ORDER": ["order", "contract", "bags order", "wins order", "wins contract", "work order", "purchase order", "letter of award"],
+    "STAKE": ["stake", "acquire", "acquisition", "buy stake", "sells stake", "buys stake", "block deal", "open offer"],
     "PROMOTER": ["promoter", "promoters", "pledge", "pledged", "insider", "insider buying", "insider selling"],
-    "REGULATORY": ["sebi", "rbi", "penalty", "probe", "raid", "regulatory", "show cause", "ban", "banned", "compliance"],
+    "REGULATORY": ["sebi", "rbi", "penalty", "probe", "raid", "regulatory", "show cause", "ban", "banned", "compliance", "notice"],
     "DIVIDEND": ["dividend", "ex-dividend", "record date", "bonus", "split", "buyback"],
-    "RATING": ["upgrade", "downgrade", "target price", "rating", "outperform", "underperform", "brokerage"],
-    "CAPEX": ["capex", "capital expenditure", "expansion", "new plant", "capacity", "investment plan"],
-    "MANAGEMENT": ["ceo", "cfo", "management", "md & ceo", "appoints", "resigns", "steps down", "guidance"],
-    "MACRO": ["rbi", "fed", "federal reserve", "inflation", "gdp", "crude", "oil price", "rupee", "dollar", "nifty", "sensex", "fii", "dii"],
+    "RATING": ["upgrade", "downgrade", "target price", "rating", "outperform", "underperform", "brokerage", "price target"],
+    "CAPEX": ["capex", "capital expenditure", "expansion", "new plant", "capacity", "investment plan", "commissioning"],
+    "MANAGEMENT": ["ceo", "cfo", "management", "md & ceo", "appoints", "resigns", "steps down", "outlook", "guidance"],
+    "MACRO": ["rbi", "fed", "federal reserve", "inflation", "gdp", "crude", "oil price", "rupee", "dollar", "nifty", "sensex", "fii", "dii", "bond yield", "tariff"],
 }
 
 _STRONG_NEGATIVE = [
@@ -85,17 +90,23 @@ _STRONG_POSITIVE = [
     "record high", "record profit", "surge", "rally", "beats estimate",
     "beats estimates", "upgrade", "wins order", "wins contract", "stake buy",
     "acquire", "acquisition", "expansion", "breakthrough", "outperform",
-    "all-time high", "jumps", "soars", "bags order", "profit rises",
+    "all-time high", "jumps", "soars", "bags order", "profit rises", "raises guidance",
 ]
-_MILD_NEGATIVE = ["falls", "declines", "drops", "down", "cut", "weak", "concern", "delay", "misses"]
-_MILD_POSITIVE = ["rises", "gains", "up", "beats", "growth", "expands", "launch", "partnership"]
+_MILD_NEGATIVE = ["falls", "declines", "drops", "down", "cut", "weak", "concern", "delay", "misses", "soft outlook"]
+_MILD_POSITIVE = ["rises", "gains", "up", "beats", "growth", "expands", "launch", "partnership", "higher outlook"]
 
-_SENTIMENT_COLORS = {
-    "strong_negative": RED,
-    "strong_positive": GREEN,
-    "mild_negative": "#FF453A99",
-    "mild_positive": "#30D15899",
-    "neutral": BORDER,
+_EVENT_COLORS = {
+    "EARNINGS": PURPLE,
+    "ORDER": GREEN,
+    "STAKE": GOLD,
+    "PROMOTER": GOLD,
+    "REGULATORY": RED,
+    "DIVIDEND": GREEN,
+    "RATING": BLUE,
+    "CAPEX": CYAN,
+    "MANAGEMENT": "#FFD60A",
+    "MACRO": GOLD,
+    "NEWS": T2,
 }
 _SENTIMENT_LABELS = {
     "strong_negative": "NEG",
@@ -104,21 +115,13 @@ _SENTIMENT_LABELS = {
     "mild_positive": "pos",
     "neutral": "—",
 }
-
-_EVENT_COLORS = {
-    "EARNINGS": "#BF5AF2",
-    "ORDER": GREEN,
-    "STAKE": GOLD,
-    "PROMOTER": GOLD,
-    "REGULATORY": RED,
-    "DIVIDEND": GREEN,
-    "RATING": BLUE,
-    "CAPEX": "#64D2FF",
-    "MANAGEMENT": "#FFD60A",
-    "MACRO": GOLD,
-    "NEWS": T2,
+_SENTIMENT_COLORS = {
+    "strong_negative": RED,
+    "strong_positive": GREEN,
+    "mild_negative": f"{RED}99",
+    "mild_positive": f"{GREEN}99",
+    "neutral": BORDER,
 }
-
 _SOURCE_TYPES = {
     "reuters": "NEWS",
     "cnbc": "NEWS",
@@ -137,20 +140,16 @@ _SOURCE_TYPES = {
     "rbi": "REGULATOR",
 }
 
-# Macro queries intentionally remain broad enough to catch market-moving stories.
 _MACRO_QUERIES = [
-    "RBI monetary policy",
-    "Nifty Sensex market",
+    "RBI monetary policy India",
+    "Nifty Sensex Indian market",
     "FII DII flows India",
-    "US Fed interest rate",
-    "crude oil price India",
-    "India GDP inflation",
+    "US Fed interest rates stocks",
+    "crude oil India markets",
+    "India GDP inflation markets",
     "US stock market today",
-    "dollar index rupee",
+    "rupee dollar India markets",
 ]
-
-# Sector query aliases used when a sector is known. These are query fragments,
-# not claims about a company's classification.
 _SECTOR_QUERY_TERMS = {
     "bank": "Indian banks banking stocks",
     "financial": "Indian financial services stocks",
@@ -165,6 +164,20 @@ _SECTOR_QUERY_TERMS = {
     "power": "Indian power stocks electricity",
 }
 
+_EVENT_REASON = {
+    "EARNINGS": "Earnings / operating performance headline",
+    "ORDER": "Commercial order or contract headline",
+    "STAKE": "Ownership / acquisition headline",
+    "PROMOTER": "Promoter / insider / pledge headline",
+    "REGULATORY": "Regulatory, compliance or policy action",
+    "DIVIDEND": "Corporate action headline",
+    "RATING": "Brokerage / rating / target-price headline",
+    "CAPEX": "Capacity / investment / expansion headline",
+    "MANAGEMENT": "Management / outlook / leadership headline",
+    "MACRO": "Macro or market-wide headline",
+    "NEWS": "General company / market headline",
+}
+
 
 def _now_ist() -> datetime:
     return datetime.now(IST)
@@ -176,30 +189,33 @@ def _today_ist() -> str:
 
 def _format_time(pub_dt: datetime) -> str:
     now = _now_ist()
-    diff = now - pub_dt.astimezone(IST)
-    secs = int(diff.total_seconds())
-    if secs < 0:
+    diff = int((now - pub_dt.astimezone(IST)).total_seconds())
+    if diff < 0 or diff < 60:
         return "now"
-    if secs < 60:
-        return "now"
-    if secs < 3600:
-        return f"{secs // 60}m"
-    if secs < 86400:
-        return f"{secs // 3600}h"
+    if diff < 3600:
+        return f"{diff // 60}m"
+    if diff < 86400:
+        return f"{diff // 3600}h"
     return pub_dt.astimezone(IST).strftime("%d %b")
 
 
-def _parse_pub(entry):
+def _parse_pub(entry) -> datetime | None:
     raw = entry.get("published", entry.get("updated", ""))
-    if not raw:
-        return None
-    try:
-        dt = parsedate_to_datetime(raw)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(IST)
-    except Exception:
-        return None
+    if raw:
+        try:
+            dt = parsedate_to_datetime(raw)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(IST)
+        except Exception:
+            pass
+    parsed = entry.get("published_parsed") or entry.get("updated_parsed")
+    if parsed:
+        try:
+            return datetime(*parsed[:6], tzinfo=timezone.utc).astimezone(IST)
+        except Exception:
+            pass
+    return None
 
 
 def _classify_sentiment(title: str) -> str:
@@ -217,8 +233,6 @@ def _classify_sentiment(title: str) -> str:
 
 def _classify_event(title: str, is_macro: bool = False) -> str:
     t = (title or "").lower()
-    # Specific events first so generic words such as "profit" do not swallow
-    # a regulatory/order headline.
     order = ["REGULATORY", "ORDER", "STAKE", "PROMOTER", "DIVIDEND", "EARNINGS", "CAPEX", "MANAGEMENT", "RATING", "MACRO"]
     for event in order:
         if any(kw in t for kw in _EVENT_RULES[event]):
@@ -230,12 +244,12 @@ def _importance(title: str, event: str, sentiment: str) -> int:
     score = 1
     if event in {"EARNINGS", "ORDER", "STAKE", "PROMOTER", "REGULATORY", "DIVIDEND"}:
         score += 2
-    if event in {"CAPEX", "MANAGEMENT", "RATING"}:
+    elif event in {"CAPEX", "MANAGEMENT", "RATING"}:
         score += 1
     if sentiment.startswith("strong"):
         score += 1
     t = (title or "").lower()
-    if any(x in t for x in ["breaking", "just in", "exclusive"]):
+    if any(x in t for x in ["breaking", "just in", "exclusive", "flash"]):
         score += 1
     return min(score, 5)
 
@@ -246,80 +260,128 @@ def _source_type(source: str, link: str = "") -> str:
         if key in s:
             return typ
     host = urlparse(link or "").netloc.lower()
-    if "nseindia" in host or "nse" in host:
+    if "nseindia" in host:
         return "EXCHANGE"
     if "bseindia" in host:
         return "EXCHANGE"
     if "sebi" in host:
+        return "REGULATOR"
+    if "rbi" in host:
         return "REGULATOR"
     return "NEWS"
 
 
 def _normalise_title(title: str) -> str:
     t = re.sub(r"\[[^\]]+\]", " ", title or "")
-    t = re.sub(r"\b(live updates?|live blog|breaking)\b", " ", t, flags=re.I)
+    t = re.sub(r"\b(live updates?|live blog|breaking|watch)\b", " ", t, flags=re.I)
     t = re.sub(r"[^a-z0-9 ]+", " ", t.lower())
     t = re.sub(r"\s+", " ", t).strip()
-    # Remove common source suffixes so the same story from several feeds can cluster.
-    t = re.sub(r"\s+-\s+(reuters|cnbc|moneycontrol|business standard|economic times|mint)$", "", t)
     return t
 
 
-def _article_key(article: dict) -> str:
-    return _normalise_title(article.get("title", ""))[:180]
+def _token_similarity(a: str, b: str) -> float:
+    if not a or not b:
+        return 0.0
+    sa, sb = set(a.split()), set(b.split())
+    jaccard = len(sa & sb) / max(1, len(sa | sb))
+    seq = difflib.SequenceMatcher(None, a, b).ratio()
+    return max(jaccard, seq * 0.9)
+
+
+def _extract_source(entry, title: str) -> tuple[str, str]:
+    source_obj = entry.get("source", {}) or {}
+    source = source_obj.get("title") if isinstance(source_obj, dict) else str(source_obj)
+    clean_title = title.strip()
+    if source:
+        return str(source).strip(), clean_title
+    parts = re.split(r"\s+-\s+", clean_title)
+    if len(parts) >= 2:
+        maybe_source = parts[-1].strip()
+        if 1 < len(maybe_source) <= 60:
+            return maybe_source, " - ".join(parts[:-1]).strip()
+    return "News", clean_title
 
 
 def _build_article(entry, symbol: str, is_macro: bool = False, query_kind: str = "company") -> dict | None:
     pub_dt = _parse_pub(entry)
     if not pub_dt:
         return None
-    title = entry.get("title", "No title") or "No title"
+    raw_title = entry.get("title", "No title") or "No title"
+    source, title = _extract_source(entry, raw_title)
     link = entry.get("link", "") or ""
-    source_obj = entry.get("source", {}) or {}
-    source = source_obj.get("title", "News") if isinstance(source_obj, dict) else str(source_obj)
     event = _classify_event(title, is_macro=is_macro)
     sentiment = _classify_sentiment(title)
     return {
         "symbol": symbol,
-        "title": title.strip(),
+        "title": title,
         "link": link,
         "source": source or "News",
         "pub_dt": pub_dt,
         "time_str": _format_time(pub_dt),
         "sentiment": sentiment,
+        "sentiment_label": _SENTIMENT_LABELS[sentiment],
         "event": event,
+        "event_reason": _EVENT_REASON.get(event, "General news headline"),
         "importance": _importance(title, event, sentiment),
         "source_type": _source_type(source, link),
         "query_kind": query_kind,
         "cluster_key": _normalise_title(title),
         "is_new": False,
+        "is_breaking": False,
+        "priority": 0,
+        "relevance": 0,
+        "source_count": 1,
+        "sources": [source or "News"],
     }
 
 
 def _rss_url(query: str, days: int = 1) -> str:
-    # Google News accepts when:N queries and returns a compact RSS feed.
     q = f"{query} when:{max(1, int(days))}d"
-    return (
-        "https://news.google.com/rss/search?"
-        f"q={quote_plus(q)}&hl=en-IN&gl=IN&ceid=IN:en"
-    )
+    return f"https://news.google.com/rss/search?q={quote_plus(q)}&hl=en-IN&gl=IN&ceid=IN:en"
 
 
 @st.cache_data(ttl=NEWS_FETCH_TTL, show_spinner=False)
-def _fetch_query_cached(query: str, symbol: str, is_macro: bool = False, query_kind: str = "company", days: int = 1) -> list[dict]:
-    """Cached network boundary: one RSS request is shared across reruns/users."""
+def _fetch_rss_cached(url: str) -> list[dict]:
+    """Fetch RSS through requests so the connection has a hard timeout."""
     try:
-        feed = feedparser.parse(_rss_url(query, days=days))
-        out = []
-        cutoff = _now_ist() - timedelta(days=days)
-        for entry in feed.entries[:20]:
-            article = _build_article(entry, symbol, is_macro=is_macro, query_kind=query_kind)
-            if not article or article["pub_dt"] < cutoff:
-                continue
-            out.append(article)
-        return out
+        response = requests.get(
+            url,
+            timeout=HTTP_TIMEOUT,
+            headers={"User-Agent": "Mozilla/5.0 Arka-Trades-News/9.1"},
+        )
+        response.raise_for_status()
+        feed = feedparser.parse(response.content)
+        rows = []
+        for entry in feed.entries[:MAX_ARTICLES_PER_FEED]:
+            rows.append({
+                "title": entry.get("title", ""),
+                "link": entry.get("link", ""),
+                "published": entry.get("published", ""),
+                "updated": entry.get("updated", ""),
+                "published_parsed": entry.get("published_parsed"),
+                "updated_parsed": entry.get("updated_parsed"),
+                "source": entry.get("source", {}),
+            })
+        return rows
     except Exception:
         return []
+
+
+@st.cache_data(ttl=NEWS_FETCH_TTL, show_spinner=False)
+def _fetch_query_cached(
+    query: str,
+    symbol: str,
+    is_macro: bool = False,
+    query_kind: str = "company",
+    days: int = 1,
+) -> list[dict]:
+    cutoff = _now_ist() - timedelta(days=days)
+    out = []
+    for entry in _fetch_rss_cached(_rss_url(query, days)):
+        article = _build_article(entry, symbol, is_macro=is_macro, query_kind=query_kind)
+        if article and article["pub_dt"] >= cutoff:
+            out.append(article)
+    return out
 
 
 def _fetch_query(query: str, symbol: str, is_macro: bool = False, query_kind: str = "company", days: int = 1) -> list[dict]:
@@ -327,19 +389,19 @@ def _fetch_query(query: str, symbol: str, is_macro: bool = False, query_kind: st
 
 
 def _fetch_news_for_stock(symbol: str, days: int = 1) -> list[dict]:
-    """Fetch company/security news with a single cached RSS request."""
     symbol = (symbol or "").strip().upper()
     if not symbol:
         return []
-    query = f"{symbol} NSE India stock results earnings order stake promoter"
+    # One broad query keeps latency bounded. It is deliberately event-rich so
+    # the same feed supports earnings/orders/ownership/regulatory stories.
+    query = f'"{symbol}" India stock results earnings order promoter stake'
     return _dedupe_articles(_fetch_query_cached(query, symbol, query_kind="company", days=days))
 
 
 def _fetch_macro_news(days: int = 1) -> list[dict]:
-    # Keep macro coverage broad, but fetch concurrently and cache each feed.
+    results: list[dict] = []
     with ThreadPoolExecutor(max_workers=MAX_FETCH_WORKERS) as ex:
         futures = [ex.submit(_fetch_query_cached, q, "MACRO", True, "macro", days) for q in _MACRO_QUERIES]
-        results = []
         for f in as_completed(futures):
             try:
                 results.extend(f.result())
@@ -358,31 +420,69 @@ def _fetch_sector_news(sector: str, days: int = 1) -> list[dict]:
 
 
 def _dedupe_articles(items: list[dict]) -> list[dict]:
-    """Remove duplicate links and cluster repeated headlines into one lead story."""
-    by_link = {}
+    """Deduplicate links and cluster highly similar headlines into one story."""
+    by_link: dict[str, dict] = {}
     for item in items:
         link = item.get("link") or item.get("title")
         if link not in by_link:
             by_link[link] = item
+            continue
+        old = by_link[link]
+        if item.get("importance", 0) > old.get("importance", 0):
+            by_link[link] = item
+
+    raw = list(by_link.values())
+    raw.sort(key=lambda x: x.get("pub_dt", datetime.min.replace(tzinfo=IST)), reverse=True)
+    clusters: list[list[dict]] = []
+    representatives: list[str] = []
+
+    # Compare only recent headlines; this avoids quadratic work over the full feed.
+    for item in raw:
+        key = item.get("cluster_key") or _normalise_title(item.get("title", ""))
+        found = None
+        for idx, rep in enumerate(representatives[-80:]):
+            if _token_similarity(key, rep) >= 0.88:
+                found = len(representatives) - len(representatives[-80:]) + idx
+                break
+        if found is None:
+            representatives.append(key)
+            clusters.append([item])
         else:
-            # Keep the stronger metadata when the same article appeared twice.
-            old = by_link[link]
-            if item.get("importance", 0) > old.get("importance", 0):
-                by_link[link] = item
+            clusters[found].append(item)
 
-    groups = defaultdict(list)
-    for item in by_link.values():
-        groups[item.get("cluster_key") or _article_key(item)].append(item)
-
-    clustered = []
-    for group in groups.values():
+    clustered: list[dict] = []
+    for group in clusters:
         group.sort(key=lambda x: x.get("pub_dt", datetime.min.replace(tzinfo=IST)), reverse=True)
         lead = dict(group[0])
         lead["source_count"] = len(group)
-        lead["sources"] = list(dict.fromkeys(x.get("source", "News") for x in group))[:6]
+        lead["sources"] = list(dict.fromkeys(str(x.get("source", "News")) for x in group))[:6]
         clustered.append(lead)
+
     clustered.sort(key=lambda x: x.get("pub_dt", datetime.min.replace(tzinfo=IST)), reverse=True)
     return clustered
+
+
+def _minutes_old(article: dict) -> float:
+    try:
+        return max(0.0, (_now_ist() - article["pub_dt"].astimezone(IST)).total_seconds() / 60.0)
+    except Exception:
+        return 999999.0
+
+
+def _enrich_priority(items: list[dict], current_security: str | None = None) -> list[dict]:
+    current = (current_security or "").strip().upper()
+    for art in items:
+        age = _minutes_old(art)
+        recency = max(0, 30 - int(age // 20))
+        multi_source = min(15, max(0, int(art.get("source_count", 1)) - 1) * 5)
+        source_bonus = 5 if art.get("source_type") in {"EXCHANGE", "REGULATOR"} else 0
+        context_bonus = 20 if current and art.get("symbol") == current else 0
+        importance = int(art.get("importance", 1)) * 10
+        score = min(100, importance + recency + multi_source + source_bonus + context_bonus)
+        art["priority"] = score
+        art["relevance"] = min(100, 40 + context_bonus + multi_source + recency)
+        art["is_breaking"] = age <= 75 and (art.get("importance", 1) >= 4 or art.get("source_count", 1) > 1)
+    return items
 
 
 def _midnight_cleanup():
@@ -404,9 +504,14 @@ def _ensure_news_state():
         "_news_category": "ALL",
         "_news_search": "",
     }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v.copy() if isinstance(v, dict) else (set(v) if isinstance(v, set) else v)
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            if isinstance(value, dict):
+                st.session_state[key] = dict(value)
+            elif isinstance(value, set):
+                st.session_state[key] = set(value)
+            else:
+                st.session_state[key] = value
 
 
 def _mark_new(items: list[dict]) -> list[dict]:
@@ -414,43 +519,47 @@ def _mark_new(items: list[dict]) -> list[dict]:
     for item in items:
         key = item.get("link") or item.get("cluster_key") or item.get("title")
         item["is_new"] = key not in seen
-    # Do not let the set grow forever.
-    for item in items[:100]:
+    for item in items[:120]:
         key = item.get("link") or item.get("cluster_key") or item.get("title")
         if key:
             seen.add(key)
-    if len(seen) > 2000:
-        st.session_state["_news_seen_keys"] = set(list(seen)[-1000:])
+    if len(seen) > 2500:
+        st.session_state["_news_seen_keys"] = set(list(seen)[-1200:])
     return items
 
 
-def refresh_news(watchlist: list[str], current_security: str | None = None, sector: str | None = None, days: int = 1):
-    """Refresh news without blocking the app on dozens of serial network calls."""
+def refresh_news(
+    watchlist: list[str],
+    current_security: str | None = None,
+    sector: str | None = None,
+    days: int = 1,
+):
+    """Refresh a small prioritized news universe; the UI remains responsive."""
     _ensure_news_state()
     days = max(1, min(int(days or 1), 30))
     now = time.time()
-    symbols = list(dict.fromkeys([s.strip().upper() for s in (watchlist or []) if s]))
-    if current_security:
-        cs = current_security.strip().upper()
-        if cs:
-            if cs in symbols:
-                symbols.remove(cs)
-            symbols.insert(0, cs)
-    # The rail is narrow; prioritize the active security, then the first part of the watchlist.
+
+    symbols = list(dict.fromkeys([str(s).strip().upper() for s in (watchlist or []) if str(s).strip()]))
+    current = (current_security or "").strip().upper()
+    if current:
+        symbols = [current] + [s for s in symbols if s != current]
     symbols = symbols[:MAX_SECURITY_REFRESH]
 
     jobs = []
     for sym in symbols:
-        cache_key = f"SEC:{sym}:{days}"
-        last = st.session_state["_news_fetched"].get(cache_key, 0)
-        if now - last > NEWS_EXPIRE * 60:
-            jobs.append((cache_key, sym))
+        key = f"SEC:{sym}:{days}"
+        last = st.session_state["_news_fetched"].get(key, 0)
+        if now - last >= NEWS_EXPIRE_MIN * 60:
+            jobs.append((key, sym))
 
     if jobs:
         with ThreadPoolExecutor(max_workers=MAX_FETCH_WORKERS) as ex:
-            future_map = {ex.submit(_fetch_news_for_stock, sym, days): (key, sym) for key, sym in jobs}
+            future_map = {
+                ex.submit(_fetch_news_for_stock, sym, days): (key, sym)
+                for key, sym in jobs
+            }
             for future in as_completed(future_map):
-                key, sym = future_map[future]
+                key, _sym = future_map[future]
                 try:
                     st.session_state["_news_cache"][key] = future.result()
                 except Exception:
@@ -459,57 +568,84 @@ def refresh_news(watchlist: list[str], current_security: str | None = None, sect
 
     macro_key = f"MACRO:{days}"
     macro_last = st.session_state["_news_fetched"].get(macro_key, 0)
-    if now - macro_last > NEWS_EXPIRE * 60:
-        st.session_state["_news_cache"][macro_key] = _fetch_macro_news(days=days)
+    if now - macro_last >= NEWS_EXPIRE_MIN * 60:
+        st.session_state["_news_cache"][macro_key] = _fetch_macro_news(days)
         st.session_state["_news_fetched"][macro_key] = now
 
     if sector:
         sector_key = f"SECTOR:{sector}:{days}"
         sector_last = st.session_state["_news_fetched"].get(sector_key, 0)
-        if now - sector_last > NEWS_EXPIRE * 60:
-            st.session_state["_news_cache"][sector_key] = _fetch_sector_news(sector, days=days)
+        if now - sector_last >= NEWS_EXPIRE_MIN * 60:
+            st.session_state["_news_cache"][sector_key] = _fetch_sector_news(sector, days)
             st.session_state["_news_fetched"][sector_key] = now
 
 
 def get_news_dot(sym: str) -> str:
     _ensure_news_state()
-    sym = (sym or "").strip().upper()
+    symbol = (sym or "").strip().upper()
     for key, items in st.session_state.get("_news_cache", {}).items():
-        if key.startswith(f"SEC:{sym}:") and items:
+        if key.startswith(f"SEC:{symbol}:") and items:
             return "1"
     return ""
 
 
-def _combined_feed(watchlist: list[str], macro_only: bool = False, current_security: str | None = None, sector: str | None = None, days: int = 1) -> list[dict]:
+def _combined_feed(
+    watchlist: list[str],
+    macro_only: bool = False,
+    current_security: str | None = None,
+    sector: str | None = None,
+    days: int = 1,
+) -> list[dict]:
     cache = st.session_state.get("_news_cache", {})
-    symbols = list(dict.fromkeys([s.strip().upper() for s in (watchlist or []) if s]))
-    if current_security:
-        cs = current_security.strip().upper()
-        if cs:
-            symbols.insert(0, cs)
-    symbols = list(dict.fromkeys(symbols))
+    symbols = list(dict.fromkeys([str(s).strip().upper() for s in (watchlist or []) if str(s).strip()]))
+    current = (current_security or "").strip().upper()
+    if current:
+        symbols = [current] + [s for s in symbols if s != current]
 
     keys = []
     if not macro_only:
-        keys.extend(f"SEC:{s}:{days}" for s in symbols[:30])
+        keys.extend(f"SEC:{s}:{days}" for s in symbols[:MAX_SECURITY_REFRESH])
         if sector:
             keys.append(f"SECTOR:{sector}:{days}")
     keys.append(f"MACRO:{days}")
 
-    combined = []
+    combined: list[dict] = []
     for key in keys:
         combined.extend(cache.get(key, []))
-    return _dedupe_articles(combined)[:MAX_COMBINED_ITEMS]
+    combined = _dedupe_articles(combined)
+    combined = _enrich_priority(combined, current)
+    combined.sort(key=lambda x: (x.get("priority", 0), x.get("pub_dt", datetime.min.replace(tzinfo=IST))), reverse=True)
+    return combined[:MAX_COMBINED_ITEMS]
 
 
-def _category_filter(items: list[dict], category: str) -> list[dict]:
+def get_security_news(symbol: str, days: int = 7) -> list[dict]:
+    """Public helper for Research > News."""
+    _ensure_news_state()
+    symbol = (symbol or "").strip().upper()
+    if not symbol:
+        return []
+    key = f"SEC:{symbol}:{int(days)}"
+    now = time.time()
+    last = st.session_state["_news_fetched"].get(key, 0)
+    if now - last >= NEWS_EXPIRE_MIN * 60:
+        try:
+            st.session_state["_news_cache"][key] = _fetch_news_for_stock(symbol, int(days))
+        except Exception:
+            st.session_state["_news_cache"][key] = []
+        st.session_state["_news_fetched"][key] = now
+    items = _dedupe_articles(st.session_state["_news_cache"].get(key, []))
+    return _enrich_priority(items, symbol)
+
+
+def _category_filter(items: list[dict], category: str, current_security: str | None = None) -> list[dict]:
     category = (category or "ALL").upper()
+    current = (current_security or "").strip().upper()
     if category == "ALL":
         return items
     if category == "WATCHLIST":
         return [x for x in items if x.get("symbol") not in {"MACRO", "SECTOR"}]
     if category == "SECURITY":
-        return [x for x in items if x.get("symbol") not in {"MACRO", "SECTOR"}]
+        return [x for x in items if current and x.get("symbol") == current]
     if category == "SECTOR":
         return [x for x in items if x.get("query_kind") == "sector" or x.get("symbol") == "SECTOR"]
     if category == "MACRO":
@@ -522,6 +658,10 @@ def _category_filter(items: list[dict], category: str) -> list[dict]:
         return [x for x in items if x.get("event") == "REGULATORY"]
     if category == "RATING":
         return [x for x in items if x.get("event") == "RATING"]
+    if category == "POSITIVE":
+        return [x for x in items if x.get("sentiment") in {"strong_positive", "mild_positive"}]
+    if category == "NEGATIVE":
+        return [x for x in items if x.get("sentiment") in {"strong_negative", "mild_negative"}]
     return [x for x in items if x.get("event") == category]
 
 
@@ -530,24 +670,30 @@ def _search_filter(items: list[dict], query: str) -> list[dict]:
     if not q:
         return items
     return [
-        x for x in items
-        if q in x.get("title", "").lower()
-        or q in x.get("source", "").lower()
-        or q in x.get("event", "").lower()
-        or q in x.get("symbol", "").lower()
+        item for item in items
+        if q in item.get("title", "").lower()
+        or q in item.get("source", "").lower()
+        or q in item.get("event", "").lower()
+        or q in item.get("symbol", "").lower()
     ]
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-@st.cache_data(ttl=300, show_spinner=False)
 def _intraday_closes(symbol: str):
-    """Fetch intraday prices once per symbol, not once per headline."""
+    """Fetch one compact intraday series per active security."""
     try:
         sym = (symbol or "").strip().upper()
         if not sym or sym in {"MACRO", "SECTOR"}:
             return []
         ticker = sym if "." in sym else f"{sym}.NS"
-        df = yf.download(ticker, period="1d", interval="1m", progress=False, auto_adjust=False, threads=False)
+        df = yf.download(
+            ticker,
+            period="1d",
+            interval="5m",
+            progress=False,
+            auto_adjust=False,
+            threads=False,
+        )
         if df is None or df.empty:
             return []
         if isinstance(df.columns, pd.MultiIndex):
@@ -568,7 +714,6 @@ def _intraday_closes(symbol: str):
 
 
 def _intraday_price_impact(symbol: str, pub_dt_iso: str):
-    """Best-effort move from nearest post-headline 1m price to latest price."""
     try:
         points = _intraday_closes(symbol)
         if not points:
@@ -577,7 +722,11 @@ def _intraday_price_impact(symbol: str, pub_dt_iso: str):
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=IST)
         target = dt.astimezone(IST)
-        after = [(ts, price) for ts, price in points if datetime.fromisoformat(ts) >= target]
+        after = [
+            (datetime.fromisoformat(ts), price)
+            for ts, price in points
+            if datetime.fromisoformat(ts) >= target
+        ]
         if not after:
             return None
         start = float(after[0][1])
@@ -590,12 +739,13 @@ def _intraday_price_impact(symbol: str, pub_dt_iso: str):
 
 
 def _impact_badge(article: dict) -> str:
-    if article.get("symbol") in {"MACRO", "SECTOR"}:
+    symbol = article.get("symbol")
+    if symbol in {"MACRO", "SECTOR", None, ""}:
         return ""
-    impact = _intraday_price_impact(article["symbol"], article["pub_dt"].isoformat())
+    impact = _intraday_price_impact(symbol, article["pub_dt"].isoformat())
     if not impact:
         return ""
-    pct = impact["pct"]
+    pct = float(impact["pct"])
     c = GREEN if pct >= 0 else RED
     sign = "+" if pct >= 0 else ""
     return f'<span style="color:{c};">{sign}{pct:.2f}% since headline</span>'
@@ -610,61 +760,89 @@ def _safe_href(url: str) -> str:
     return "#"
 
 
-def _render_rows(items: list[dict], show_tag: bool = True, show_impact: bool = True, impact_symbols: set[str] | None = None):
+def _priority_badge(priority: int) -> tuple[str, str]:
+    if priority >= 70:
+        return "P1", RED
+    if priority >= 45:
+        return "P2", GOLD
+    return "P3", T2
+
+
+def _render_story(art: dict, show_impact: bool = False):
+    sentiment = art.get("sentiment", "neutral")
+    accent = _SENTIMENT_COLORS.get(sentiment, BORDER)
+    event = str(art.get("event", "NEWS"))
+    event_color = _EVENT_COLORS.get(event, T2)
+    source = html.escape(str(art.get("source", "News")))
+    title = html.escape(str(art.get("title", "No title")))
+    href = _safe_href(art.get("link", ""))
+    symbol = art.get("symbol", "NEWS")
+    tag = "MACRO" if symbol == "MACRO" else ("SECTOR" if symbol == "SECTOR" else str(symbol))
+    tag_color = GOLD if symbol in {"MACRO", "SECTOR"} else BLUE
+    ptxt, pcolor = _priority_badge(int(art.get("priority", 0)))
+    source_count = int(art.get("source_count", 1) or 1)
+    sources_html = f" · {source_count} sources" if source_count > 1 else ""
+    new_html = '<span style="color:#FF453A;font-weight:800;">NEW</span> · ' if art.get("is_new") else ""
+    impact_html = _impact_badge(art) if show_impact else ""
+    impact_block = f'<span style="margin-left:8px;">{impact_html}</span>' if impact_html else ""
+    breaking_html = '<span style="color:#FF453A;font-weight:800;">BREAK</span> · ' if art.get("is_breaking") else ""
+    reason = html.escape(str(art.get("event_reason", "General headline")))
+
+    return f'''
+<a href="{href}" target="_blank" style="text-decoration:none;">
+  <div style="border-left:2px solid {accent};padding:8px 0 8px 10px;margin-bottom:7px;background:linear-gradient(90deg,#0b0b0b,transparent);">
+    <div style="font:800 9px {MONO};letter-spacing:.7px;margin-bottom:3px;">
+      <span style="color:{pcolor};">{ptxt}</span> ·
+      <span style="color:{event_color};">{html.escape(event)}</span> ·
+      <span style="color:{T3};">IMP {art.get('importance', 1)}/5</span>
+    </div>
+    <div style="font:600 12px/1.4 Inter,Arial,sans-serif;color:{IVORY};">{title}</div>
+    <div style="font:700 8.5px {MONO};color:{T3};margin-top:4px;">{reason}</div>
+    <div style="font:9px {MONO};color:{T2};margin-top:4px;">
+      {new_html}{breaking_html}<span style="color:{tag_color};font-weight:700;">{html.escape(tag)}</span> · {source}{sources_html} · {art.get('time_str','—')} ·
+      <span style="color:{accent};">{html.escape(art.get('sentiment_label','—'))}</span>{impact_block}
+    </div>
+  </div>
+</a>'''
+
+
+def _render_rows(items: list[dict], show_tag: bool = True, show_impact: bool = False, impact_symbols: set[str] | None = None):
     if not items:
         st.markdown(
-            f'<div style="font-size:11px;color:{T2};padding:12px 2px;line-height:1.5;">'
-            "No matching news in the selected window."
-            "</div>",
+            f'<div style="font:11px {MONO};color:{T2};padding:14px 2px;line-height:1.5;">No matching news in the selected window.</div>',
             unsafe_allow_html=True,
         )
         return
 
-    items = _mark_new(items)
-    rows_html = []
-    for art in items:
-        sentiment = art.get("sentiment", "neutral")
-        accent = _SENTIMENT_COLORS.get(sentiment, BORDER)
-        slabel = _SENTIMENT_LABELS.get(sentiment, "—")
-        event = html.escape(art.get("event", "NEWS"))
-        event_color = _EVENT_COLORS.get(art.get("event", "NEWS"), T2)
-        source = html.escape(str(art.get("source", "News")))
-        title = html.escape(str(art.get("title", "No title")))
-        href = _safe_href(art.get("link", ""))
-        tag = "MACRO" if art.get("symbol") == "MACRO" else ("SECTOR" if art.get("symbol") == "SECTOR" else art.get("symbol", "NEWS"))
-        tag = html.escape(str(tag))
-        tag_color = GOLD if art.get("symbol") in {"MACRO", "SECTOR"} else BLUE
-        source_count = int(art.get("source_count", 1) or 1)
-        source_count_html = f" · {source_count} sources" if source_count > 1 else ""
-        new_html = '<span style="color:#FF453A;font-weight:800;">NEW</span>&nbsp;·&nbsp;' if art.get("is_new") else ""
-        impact_ok = show_impact and (impact_symbols is None or art.get("symbol") in impact_symbols)
-        impact_html = _impact_badge(art) if impact_ok else ""
-        impact_block = f'<span style="margin-left:7px;">{impact_html}</span>' if impact_html else ""
-
-        rows_html.append(
-            f'''<a href="{href}" target="_blank" style="text-decoration:none;">
-            <div style="border-left:2px solid {accent};padding:7px 0 7px 10px;margin-bottom:7px;background:linear-gradient(90deg,#0b0b0b,transparent);">
-                <div style="font-size:9px;font-family:{MONO};font-weight:800;letter-spacing:.7px;margin-bottom:3px;">
-                    <span style="color:{event_color};">{event}</span>&nbsp;·&nbsp;<span style="color:{T3};">IMP {art.get('importance',1)}/5</span>
-                </div>
-                <div style="font-size:12px;font-weight:600;color:{IVORY};line-height:1.4;">{title}</div>
-                <div style="font-family:{MONO};font-size:9.5px;color:{T2};margin-top:4px;">
-                    {new_html}<span style="color:{tag_color};font-weight:700;">{tag}</span>&nbsp;·&nbsp;{source}{source_count_html}&nbsp;·&nbsp;{art.get('time_str','—')}&nbsp;·&nbsp;
-                    <span style="color:{accent};">{slabel}</span>{impact_block}
-                </div>
-            </div></a>'''
-        )
-    st.markdown("".join(rows_html), unsafe_allow_html=True)
+    marked = _mark_new(items)
+    html_rows = []
+    active_symbols = impact_symbols or set()
+    for art in marked:
+        should_impact = show_impact and (not active_symbols or art.get("symbol") in active_symbols)
+        html_rows.append(_render_story(art, show_impact=should_impact))
+    st.markdown("".join(html_rows), unsafe_allow_html=True)
 
 
-def _render_controls(watchlist: list[str], current_security: str | None, sector: str | None):
-    # The controls are deliberately compact for a narrow right rail.
-    c1, c2 = st.columns([1.4, 1])
+def _render_controls():
+    c1, c2 = st.columns([1.0, 1.0])
     with c1:
-        days_label = st.selectbox("WINDOW", ["24H", "7D", "30D"], index={1: 0, 7: 1, 30: 2}.get(st.session_state.get("_news_days", 1), 0), key="news_window_v4", label_visibility="collapsed")
+        days_label = st.selectbox(
+            "WINDOW",
+            ["24H", "7D", "30D"],
+            index={1: 0, 7: 1, 30: 2}.get(int(st.session_state.get("_news_days", 1) or 1), 0),
+            key="news_window_v91",
+            label_visibility="collapsed",
+        )
     with c2:
-        st.session_state["_news_days"] = {"24H": 1, "7D": 7, "30D": 30}[days_label]
-    st.text_input("NEWS SEARCH", placeholder="search headlines…", key="_news_search", label_visibility="collapsed")
+        search = st.text_input(
+            "NEWS SEARCH",
+            value=st.session_state.get("_news_search", ""),
+            placeholder="search…",
+            key="news_search_v91",
+            label_visibility="collapsed",
+        )
+    st.session_state["_news_days"] = {"24H": 1, "7D": 7, "30D": 30}[days_label]
+    st.session_state["_news_search"] = search
 
 
 def render_news_rail(
@@ -673,55 +851,83 @@ def render_news_rail(
     current_security: str | None = None,
     sector: str | None = None,
 ):
-    """Render the compact Bloomberg-style news intelligence rail.
-
-    Existing calls such as render_news_rail(watchlist, label=...) continue to work.
-    """
+    """Render the v9.1 right rail: prioritized, context-aware market news."""
     _ensure_news_state()
+
+    # Controls FIRST. This prevents a 7D/30D click from rendering the old
+    # window once before the selected value is stored in session state.
+    _render_controls()
     days = int(st.session_state.get("_news_days", 1) or 1)
+
     refresh_news(watchlist, current_security=current_security, sector=sector, days=days)
-    _render_controls(watchlist, current_security, sector)
-    # Controls can change state only on rerun; use the selected value for this render too.
-    days = int(st.session_state.get("_news_days", days) or days)
-
-    # Compact filter row. Security gets first priority when one is active.
-    options = ["ALL", "WATCHLIST"]
-    if current_security:
-        options.insert(1, "SECURITY")
-    if sector:
-        options.append("SECTOR")
-    options += ["MACRO", "EARNINGS", "CORPORATE", "REGULATORY", "RATING"]
-    options = list(dict.fromkeys(options))
-    default = st.session_state.get("_news_category", "ALL")
-    if default not in options:
-        default = "ALL"
-    category = st.selectbox("FILTER", options, index=options.index(default), key="news_category_v4", label_visibility="collapsed")
-    st.session_state["_news_category"] = category
-
-    tab_all, tab_breaking = st.tabs(["NEWS", "BREAKING"])
-
     combined = _combined_feed(
         watchlist,
-        macro_only=False,
         current_security=current_security,
         sector=sector,
         days=days,
     )
-    filtered = _search_filter(_category_filter(combined, category), st.session_state.get("_news_search", ""))
+    combined = _mark_new(combined)
 
-    # Intraday impact is expensive; calculate it only for the active security.
-    # This keeps the rail responsive even when many watchlist headlines are visible.
-    impact_symbols = {current_security.strip().upper()} if current_security else set()
+    current = (current_security or "").strip().upper()
+    search_query = st.session_state.get("_news_search", "")
 
-    with tab_all:
-        _render_rows(filtered, show_tag=True, show_impact=True, impact_symbols=impact_symbols)
+    options = ["ALL", "WATCHLIST"]
+    if current:
+        options.insert(1, "SECURITY")
+    if sector:
+        options.append("SECTOR")
+    options += ["MACRO", "EARNINGS", "CORPORATE", "REGULATORY", "RATING", "POSITIVE", "NEGATIVE"]
+    options = list(dict.fromkeys(options))
+    default = st.session_state.get("_news_category", "ALL")
+    if default not in options:
+        default = "ALL"
+    category = st.selectbox(
+        "FILTER",
+        options,
+        index=options.index(default),
+        key="news_category_v91",
+        label_visibility="collapsed",
+    )
+    st.session_state["_news_category"] = category
 
-    with tab_breaking:
-        breaking = [x for x in combined if x.get("is_new") or x.get("importance", 0) >= 4]
-        breaking = _search_filter(_category_filter(breaking, category), st.session_state.get("_news_search", ""))
-        _render_rows(breaking[:30], show_tag=True, show_impact=True, impact_symbols=impact_symbols)
+    filtered = _search_filter(_category_filter(combined, category, current), search_query)
+    catalysts = [x for x in combined if x.get("sentiment") in {"strong_positive", "mild_positive"} or x.get("event") in {"ORDER", "CAPEX", "DIVIDEND", "RATING"}]
+    risks = [x for x in combined if x.get("sentiment") in {"strong_negative", "mild_negative"} or x.get("event") in {"REGULATORY", "PROMOTER"}]
+    breaking = [x for x in combined if x.get("is_breaking") or x.get("importance", 0) >= 4]
+
+    # Compact desk metrics make the rail useful without turning it into a card dashboard.
+    story_count = len(combined)
+    source_count = len({str(x.get("source", "News")) for x in combined})
+    new_count = sum(bool(x.get("is_new")) for x in combined)
+    event_counts = Counter(x.get("event", "NEWS") for x in combined)
+    st.markdown(
+        f'''<div style="border-top:1px solid {BORDER};border-bottom:1px solid {BORDER};padding:7px 0;margin:8px 0 6px;">
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px;text-align:center;font:8px {MONO};">
+          <div><div style="color:{GOLD};font-weight:800;">STORIES</div><div style="color:{IVORY};font-size:12px;">{story_count}</div></div>
+          <div><div style="color:{RED};font-weight:800;">NEW</div><div style="color:{IVORY};font-size:12px;">{new_count}</div></div>
+          <div><div style="color:{GREEN};font-weight:800;">CATALYST</div><div style="color:{IVORY};font-size:12px;">{len(catalysts)}</div></div>
+          <div><div style="color:{BLUE};font-weight:800;">SOURCES</div><div style="color:{IVORY};font-size:12px;">{source_count}</div></div>
+        </div>
+        </div>''',
+        unsafe_allow_html=True,
+    )
+
+    # A tiny event tape gives the user a quick read on what is driving today's rail.
+    tape = " · ".join(f"{k} {v}" for k, v in event_counts.most_common(4))
+    if tape:
+        st.markdown(f'<div style="font:8px {MONO};color:{T3};margin:3px 0 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">TAPE · {html.escape(tape)}</div>', unsafe_allow_html=True)
+
+    tab_top, tab_break, tab_cat, tab_risk = st.tabs(["TOP", "BREAK", "CATALYST", "RISK"])
+    impact_symbols = {current} if current else set()
+    with tab_top:
+        _render_rows(filtered[:24], show_tag=True, show_impact=True, impact_symbols=impact_symbols)
+    with tab_break:
+        _render_rows(_search_filter(_category_filter(breaking, category, current), search_query)[:20], show_tag=True, show_impact=True, impact_symbols=impact_symbols)
+    with tab_cat:
+        _render_rows(_search_filter(_category_filter(catalysts, category, current), search_query)[:20], show_tag=True, show_impact=True, impact_symbols=impact_symbols)
+    with tab_risk:
+        _render_rows(_search_filter(_category_filter(risks, category, current), search_query)[:20], show_tag=True, show_impact=True, impact_symbols=impact_symbols)
 
 
-# Backwards-compatible aliases
 news_panel = render_news_rail
 news_box = render_news_rail
