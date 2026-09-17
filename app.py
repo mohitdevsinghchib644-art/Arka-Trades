@@ -9,7 +9,6 @@ import re
 import json
 import math
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from supabase import create_client, Client
 from news_feed import render_news_rail, get_news_dot, _ensure_news_state, refresh_news, _fetch_news_for_stock
 from arka_ai import render_arka_ai
@@ -204,7 +203,7 @@ def icon_box(name, color=None, size=32):
 for k, v in {"logged_in":False,"disclaimer_done":False,"show_login":False,"page":"home",
     "profile":{"name":"Trader","email":"","phone":""},"profile_photo":None,"watchlist":[],
     "admin_watchlist":[],"alerts":{},"alert_fired":set(),"db_loaded":False,"is_admin":False,
-    "active_news_source":"admin","show_news_rail":True,"active_security":"","data_refresh_nonce":0,"last_data_refresh":None,"chart_tf":"6M"}.items():
+    "active_news_source":"admin","show_news_rail":True,"active_security":""}.items():
     if k not in st.session_state: st.session_state[k] = v
 
 if not st.session_state.db_loaded:
@@ -252,14 +251,29 @@ hr{{border-color:#202020 !important;}}
 .brand-name{{font-size:12px;font-weight:700;letter-spacing:1.3px;color:#eee;}}
 .brand-sub{{font-family:'JetBrains Mono',monospace;font-size:7px;letter-spacing:1.5px;color:#666;margin-top:2px;}}
 .brand-status{{font-family:'JetBrains Mono',monospace;font-size:8px;letter-spacing:1px;color:{GREEN};display:flex;align-items:center;gap:6px;}}
+.brand-status-wide{{justify-content:flex-end;height:34px;}}
+.module-top-title{{height:34px;display:flex;align-items:center;justify-content:center;gap:9px;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;letter-spacing:1.2px;color:#e8e8e8;border-bottom:1px solid #202020;}}
+.module-top-title span{{color:{AMBER};font-size:9px;}}
+.module-top-title small{{font-size:7px;color:#555;letter-spacing:1px;font-weight:500;}}
+.module-directory-spacer{{height:22px;border-bottom:1px solid #181818;margin-bottom:10px;}}
+.module-directory-title{{font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:1.4px;color:{AMBER};border-top:1px solid #292929;border-bottom:1px solid #202020;padding:10px 7px;margin-bottom:7px;}}
+.module-directory-card{{background:#090909;border:1px solid #242424;border-top:2px solid #252525;padding:11px 12px;min-height:158px;margin-bottom:8px;}}
+.module-dir-code{{font-family:'JetBrains Mono',monospace;color:{AMBER};font-size:9px;font-weight:700;}}
+.module-dir-label{{font-family:'JetBrains Mono',monospace;color:#eee;font-size:11px;font-weight:700;letter-spacing:.5px;margin:4px 0 7px;}}
+.module-dir-purpose{{font-size:10px;color:#888;line-height:1.55;min-height:48px;}}
+.module-dir-meta{{display:flex;justify-content:space-between;border-top:1px solid #191919;padding-top:7px;margin-top:7px;font-family:'JetBrains Mono',monospace;font-size:8px;color:#555;}}
+.module-dir-meta b{{color:{AMBER};font-weight:700;}}
+.module-dir-use{{margin-top:6px;font-size:9px;color:#aaa;line-height:1.5;}}
+.module-dir-use span{{font-family:'JetBrains Mono',monospace;color:#555;margin-right:7px;font-size:8px;}}
+
 .market-strip{{border-bottom:1px solid #202020;background:#050505;}}
-.market-row{{display:grid;grid-template-columns:70px repeat(6,minmax(120px,1fr));min-height:30px;border-bottom:1px solid #161616;}}
+.market-row{{display:grid;grid-template-columns:82px repeat(6,minmax(145px,1fr));min-height:43px;border-bottom:1px solid #161616;}}
 .market-row:last-child{{border-bottom:0;}}
-.market-row-label{{font-family:'JetBrains Mono',monospace;font-size:8px;color:#666;display:flex;align-items:center;padding:0 8px;letter-spacing:1px;text-transform:uppercase;}}
-.market-cell{{border-left:1px solid #161616;padding:4px 7px;display:flex;align-items:center;justify-content:space-between;gap:6px;min-width:0;}}
-.market-cell .m-name{{font-family:'JetBrains Mono',monospace;font-size:8px;color:#8a8a8a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}}
-.market-cell .m-price{{font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:600;color:#e6e6e6;white-space:nowrap;}}
-.market-cell .m-chg{{font-family:'JetBrains Mono',monospace;font-size:8px;font-weight:600;white-space:nowrap;}}
+.market-row-label{{font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;color:#666;display:flex;align-items:center;padding:0 8px;letter-spacing:1px;text-transform:uppercase;}}
+.market-cell{{border-left:1px solid #161616;padding:7px 10px;display:flex;align-items:center;justify-content:space-between;gap:6px;min-width:0;}}
+.market-cell .m-name{{font-family:'JetBrains Mono',monospace;font-size:10px;color:#8a8a8a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}}
+.market-cell .m-price{{font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;color:#e6e6e6;white-space:nowrap;}}
+.market-cell .m-chg{{font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:600;white-space:nowrap;}}
 .command-wrap{{padding:9px 0 7px;background:#050505;border-bottom:1px solid #202020;}}
 .command-label{{font-family:'JetBrains Mono',monospace;font-size:8px;color:{AMBER};letter-spacing:1.4px;margin:0 0 4px 4px;text-transform:uppercase;}}
 .command-hint{{font-family:'JetBrains Mono',monospace;font-size:8px;color:#555;text-align:right;margin-top:-24px;margin-right:9px;pointer-events:none;}}
@@ -284,9 +298,9 @@ hr{{border-color:#202020 !important;}}
 .module-code{{font-family:'JetBrains Mono',monospace;color:{AMBER};font-size:8px;font-weight:700;}}
 .module-label{{font-size:9px;color:#cfcfcf;margin-top:3px;}}
 .monitor-grid{{display:grid;grid-template-columns:1.15fr 1fr 1fr;gap:8px;margin-top:8px;}}
-.monitor-panel{{background:#090909;border:1px solid #242424;min-height:145px;}}
-.monitor-head{{height:30px;border-bottom:1px solid #202020;padding:0 9px;display:flex;align-items:center;justify-content:space-between;font-family:'JetBrains Mono',monospace;font-size:8px;color:{AMBER};letter-spacing:1px;}}
-.monitor-row{{display:grid;grid-template-columns:1fr 72px 62px;gap:5px;padding:6px 9px;border-bottom:1px solid #161616;font-family:'JetBrains Mono',monospace;font-size:9px;}}
+.monitor-panel{{background:#090909;border:1px solid #242424;min-height:205px;}}
+.monitor-head{{height:38px;border-bottom:1px solid #202020;padding:0 9px;display:flex;align-items:center;justify-content:space-between;font-family:'JetBrains Mono',monospace;font-size:8px;color:{AMBER};letter-spacing:1px;}}
+.monitor-row{{display:grid;grid-template-columns:1fr 88px 70px;gap:7px;padding:9px 11px;border-bottom:1px solid #161616;font-family:'JetBrains Mono',monospace;font-size:10px;}}
 .monitor-row span:first-child{{color:#aaa;}}
 .monitor-row span:nth-child(2){{text-align:right;color:#ddd;}}
 .monitor-row span:last-child{{text-align:right;}}
@@ -336,70 +350,25 @@ def get_static(sym):
                 "spark": [float(x) for x in h["Close"].tail(12).tolist()]}
     except: return None
 
-@st.cache_data(ttl=15, show_spinner=False)
-def get_price(sym):
-    """Short-lived quote cache."""
-    try:
-        ticker = yf.Ticker(sym + ".NS")
-        intra = ticker.history(period="1d", interval="1m", auto_adjust=False)
-        daily = ticker.history(period="5d", interval="1d", auto_adjust=False)
-        if intra.empty or len(daily) < 2:
-            return None
-        cur = float(intra["Close"].dropna().iloc[-1])
-        prev_close = float(daily["Close"].dropna().iloc[-2])
-        if not _values_are_sane(cur, prev_close):
-            return None
-        return {"price": cur, "chg": ((cur-prev_close)/prev_close)*100, "prev_close": prev_close}
-    except Exception:
-        return None
-
-@st.cache_data(ttl=45, show_spinner=False)
-def get_prices_bulk(symbols_tuple):
-    symbols = list(dict.fromkeys(symbols_tuple or ()))
-    out = {}
-    if not symbols:
-        return out
-    with ThreadPoolExecutor(max_workers=min(8, len(symbols))) as ex:
-        futures = {ex.submit(get_price, s): s for s in symbols}
-        for fut in as_completed(futures):
-            sym = futures[fut]
-            try:
-                val = fut.result()
-                if val: out[sym] = val
-            except Exception:
-                pass
-    return out
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def get_chart_history(sym, period):
+@st.cache_data(ttl=30, show_spinner=False)
+def get_daily_history(sym, period="6mo"):
     try:
         h = yf.Ticker(sym + ".NS").history(period=period, interval="1d", auto_adjust=False)
-        return h if h is not None and not h.empty else None
+        return h if h is not None and not h.empty else pd.DataFrame()
     except Exception:
-        return None
+        return pd.DataFrame()
 
-@st.cache_data(ttl=900, show_spinner=False)
-def get_security_meta(sym):
+@st.cache_data(ttl=10, show_spinner=False)
+def get_price(sym):
     try:
-        resolved = resolve_symbol(sym)
-    except Exception:
-        resolved = None
-    if not resolved:
-        return None
-    name_ = resolved.get("name", sym)
-    url_ = resolved.get("url")
-    try:
-        summary = get_summary(sym, url=url_)
-        data = summary.get("data") or {}
-    except Exception:
-        data = {}
-    try:
-        sector = get_sector_info(sym, url=url_)
-        sec = sector.get("data") or {}
-    except Exception:
-        sec = {}
-    return {"resolved": resolved, "name": name_, "summary": data, "sector": sec}
-
+        intra = yf.Ticker(sym+".NS").history(period="1d", interval="1m")
+        if intra.empty: return None
+        cur = float(intra["Close"].iloc[-1])
+        daily = yf.Ticker(sym+".NS").history(period="5d", interval="1d")
+        if len(daily) < 2: return None
+        prev_close = float(daily["Close"].iloc[-2])
+        return {"price": cur, "chg": ((cur-prev_close)/prev_close)*100, "prev_close": prev_close}
+    except: return None
 
 def _values_are_sane(cur, pc):
     try:
@@ -653,10 +622,10 @@ if not st.session_state.logged_in:
                 ph = st.empty()
                 if ok:
                     if u.strip()=="ADMIN4477MAX" and p.strip()=="MOHIT1":
-                        ph.success("Welcome, Admin!"); time.sleep(0.8)
+                        ph.success("Welcome, Admin!")
                         st.session_state.logged_in = True; st.session_state.is_admin = True; st.rerun()
                     elif u.strip().lower()=="max trades" and p.strip().lower()=="max":
-                        ph.success("Login successful."); time.sleep(0.8)
+                        ph.success("Login successful.")
                         st.session_state.logged_in = True; st.session_state.is_admin = False; st.rerun()
                     else:
                         ph.error("Invalid username or password.")
@@ -912,66 +881,107 @@ def _market_cell(label, data):
     return f'<div class="market-cell"><span class="m-name">{label}</span><span class="m-price">—</span><span class="m-chg" style="color:#555">—</span></div>'
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def get_indices_bulk(items):
-    results = {}
-    def fetch(item):
-        label, sym, fb = item
-        return label, get_index(sym, fb)
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        futures = [ex.submit(fetch, item) for item in items]
-        for fut in as_completed(futures):
-            try:
-                label, data = fut.result(); results[label] = data
-            except Exception:
-                pass
-    return results
 
-def _render_terminal_header():
+MODULE_INFO = [
+    ("F2", "WATCHLIST SCANNER", "Scan your saved universe for PDH/PDL breaks, momentum, RSI and volume conditions.", "High", "Fast daily trade discovery from your own symbols."),
+    ("F3", "ALERTS", "Monitor price, PDH and PDL conditions and deliver configured Telegram notifications.", "High", "Prevents you from having to watch every level manually."),
+    ("F4", "RESEARCH", "Deep company workspace covering financials, earnings, valuation, ownership, peers, risk, news and technicals.", "Core", "Use before making a research decision; keeps company context in one place."),
+    ("F5", "ARKA AI", "AI-assisted chart and market analysis that works with the currently selected security context.", "Advanced", "Turns terminal data and your trading rules into an analysis workflow."),
+    ("F6", "SMART SCREENER", "Build rule-based screens using price, trend, RSI, volume and fundamental conditions.", "High", "Finds candidates across a universe instead of checking stocks one by one."),
+    ("F7", "MARKET BREADTH", "See advancing/declining participation, breadth ratios and market-level internals.", "Core", "Provides market context before interpreting an individual stock signal."),
+]
+
+
+def _go_home():
+    st.session_state.page = "home"
+    st.session_state["show_news_rail"] = True
+    st.rerun()
+
+
+def _render_compact_module_header(title, code=""):
+    c1, c2, c3 = st.columns([2.4, 5.5, 1.5])
+    with c1:
+        if st.button("▲  ARKA TRADES", key=f"brand_home_{code}_{title}", use_container_width=True):
+            _go_home()
+    with c2:
+        st.markdown(
+            f'<div class="module-top-title"><span>{code}</span>{title.upper()}<small>ARKA MARKET TERMINAL</small></div>',
+            unsafe_allow_html=True,
+        )
+    with c3:
+        if st.button("← BACK TO TERMINAL", key=f"back_terminal_{code}_{title}", use_container_width=True):
+            _go_home()
+
+
+def _render_module_directory():
+    st.markdown('<div class="module-directory-spacer"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="module-directory-title">TERMINAL MODULE DIRECTORY · PURPOSE / IMPORTANCE / USE</div>', unsafe_allow_html=True)
+    cols = st.columns(3)
+    for i, (code, label, purpose, importance, use) in enumerate(MODULE_INFO):
+        with cols[i % 3]:
+            st.markdown(
+                f'''<div class="module-directory-card">
+                    <div class="module-dir-code">{code}</div>
+                    <div class="module-dir-label">{label}</div>
+                    <div class="module-dir-purpose">{purpose}</div>
+                    <div class="module-dir-meta"><span>IMPORTANCE</span><b>{importance}</b></div>
+                    <div class="module-dir-use"><span>USE FOR</span>{use}</div>
+                </div>''', unsafe_allow_html=True)
+
+
+def _render_terminal_brandbar():
+    c1, c2 = st.columns([2.2, 7.8])
+    with c1:
+        if st.button("▲  ARKA TRADES", key="brand_home_terminal", use_container_width=True):
+            _go_home()
+    with c2:
+        st.markdown('<div class="brand-status brand-status-wide"><span class="pulse-dot"></span> LIVE MARKET DATA · TERMINAL</div>', unsafe_allow_html=True)
+
+def _render_terminal_header(show_indices=True):
     india = [("NIFTY 50", "^NSEI", None), ("BANK NIFTY", "^NSEBANK", None), ("SENSEX", "^BSESN", None), ("NIFTY IT", "^CNXIT", None), ("NIFTY AUTO", "^CNXAUTO", None), ("MIDCAP 100", MIDCAP_CANDIDATES[0], MIDCAP_CANDIDATES[1:])]
     global_ = [("S&P 500", "^GSPC", None), ("NASDAQ", "^IXIC", None), ("DOW", "^DJI", None), ("DAX", "^GDAXI", None), ("FTSE", "^FTSE", None), ("NIKKEI", "^N225", None)]
     st.markdown('<div class="terminal-shell">', unsafe_allow_html=True)
-    st.markdown(f'''<div class="terminal-brandbar"><div class="brand-left"><div class="brand-mark">{icon("trend",15,"#000")}</div><div><div class="brand-name">ARKA TRADES</div><div class="brand-sub">MARKET TERMINAL · EQUITIES</div></div></div><div class="brand-status"><span class="pulse-dot"></span> LIVE MARKET DATA</div></div>''', unsafe_allow_html=True)
-    for title, items in (("INDIA", india), ("GLOBAL", global_)):
-        idx_data = get_indices_bulk(tuple(items))
-        cells = ''.join(_market_cell(label, idx_data.get(label)) for label, sym, fb in items)
-        st.markdown(f'<div class="market-strip"><div class="market-row"><div class="market-row-label">{title}</div>{cells}</div></div>', unsafe_allow_html=True)
+    _render_terminal_brandbar()
+    if show_indices:
+        for title, items in (("INDIA", india), ("GLOBAL", global_)):
+            cells = ''.join(_market_cell(label, get_index(sym, fb)) for label, sym, fb in items)
+            st.markdown(f'<div class="market-strip"><div class="market-row"><div class="market-row-label">{title}</div>{cells}</div></div>', unsafe_allow_html=True)
     st.markdown('<div class="command-wrap"><div class="command-label">SECURITY / INDEX / COMPANY SEARCH</div>', unsafe_allow_html=True)
-    q = st.text_input("Security search", value=st.session_state.get("security_search", ""), placeholder="Type ticker or company name  ·  e.g. RELIANCE", label_visibility="collapsed", key="security_search")
-    st.markdown('<div class="command-hint">LOAD SECURITY →</div></div>', unsafe_allow_html=True)
-    suggestions = _security_candidates(q)
-    sc1, sc2 = st.columns([5.7, 1])
-    with sc1:
-        labels = [f"{s} · NSE EQUITY" for s in suggestions]
-        selected = st.selectbox("Matches", labels, index=0 if labels else None, placeholder="Select a matching security…", label_visibility="collapsed", key="security_dropdown_v5") if labels else None
-    with sc2:
-        search_clicked = st.button("LOAD", type="primary", use_container_width=True, key="global_security_search_v5")
+    with st.form("security_command_v9", clear_on_submit=False):
+        q = st.text_input("Security search", value=st.session_state.get("security_search_v9", ""), placeholder="Type ticker or company name · e.g. RELIANCE", label_visibility="collapsed")
+        suggestions = _security_candidates(q)
+        sc1, sc2 = st.columns([5.7, 1])
+        with sc1:
+            labels = [f"{s} · NSE EQUITY" for s in suggestions]
+            selected = st.selectbox("Matches", labels, index=0 if labels else None, placeholder="Select a matching security…", label_visibility="collapsed", key="security_dropdown_v9") if labels else None
+        with sc2:
+            search_clicked = st.form_submit_button("LOAD", type="primary", use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
     if search_clicked:
-        if selected:
-            _open_security(selected.split(" · " )[0].strip())
-        elif q.strip():
-            with st.spinner("Resolving security…"):
+        raw = (q or "").strip()
+        chosen = selected.split(" · ")[0].strip() if selected else raw
+        if not chosen:
+            st.warning("Enter a ticker or company name first.")
+        else:
+            # Prefer the selected dropdown result. For unknown/company-name queries,
+            # resolve through the existing provider and retain the requested text as fallback.
+            candidate = chosen.upper()
+            if candidate not in _security_candidates(candidate):
                 try:
-                    resolved = resolve_symbol(q.strip())
+                    resolved = resolve_symbol(raw)
                 except Exception:
                     resolved = None
-            if resolved:
-                _open_security(q.strip())
-            else:
-                st.error(f"No security found for '{q.strip().upper()}'.")
-    st.markdown('</div>', unsafe_allow_html=True)
-    r1, r2, r3 = st.columns([1, 1, 8])
-    with r1:
-        if st.button("↻ REFRESH DATA", key="terminal_refresh_v9", use_container_width=True):
-            st.session_state["data_refresh_nonce"] = st.session_state.get("data_refresh_nonce", 0) + 1
-            st.session_state["last_data_refresh"] = datetime.now().strftime("%H:%M:%S")
-            st.cache_data.clear()
-            st.rerun()
-    with r2:
-        st.caption(f"DATA {st.session_state.get('last_data_refresh') or 'CACHE'}")
-    with r3:
-        st.caption("Quotes are cached briefly to keep the terminal responsive; research/news modules load independently.")
+                if resolved:
+                    # Screener's company URL contains the canonical ticker even
+                    # when the user searched by the full company name.
+                    url = str(resolved.get("url", ""))
+                    m = re.search(r"/company/([^/]+)", url, flags=re.I)
+                    candidate = m.group(1).upper() if m else candidate
+            _open_security(candidate)
 
+
+def _render_module_page_header(title, code):
+    _render_compact_module_header(title, code)
 
 def _render_module_dock(active=None):
     modules = [("F2", "Watchlist Scanner", "scanner"), ("F3", "Alerts", "alerts"), ("F4", "Research", "research"), ("F5", "Arka AI", "analysis"), ("F6", "Smart Screener", "smart_scan"), ("F7", "Market Breadth", "breadth")]
@@ -980,10 +990,8 @@ def _render_module_dock(active=None):
     cols = st.columns(len(modules))
     for col, (code, label, target) in zip(cols, modules):
         with col:
-            is_active = st.session_state.get("page") == target
-            border = AMBER if is_active else BORDER
-            st.markdown(f'<div class="module-cell" style="border-top:2px solid {border};"><div class="module-code">{code}</div><div class="module-label">{label}</div></div>', unsafe_allow_html=True)
-            if st.button("ACTIVE" if is_active else "OPEN", key=f"module_v5_{target}", use_container_width=True):
+            st.markdown(f'<div class="module-cell"><div class="module-code">{code}</div><div class="module-label">{label}</div></div>', unsafe_allow_html=True)
+            if st.button("OPEN", key=f"module_v5_{target}", use_container_width=True):
                 st.session_state.page = target
                 sym = st.session_state.get("active_security")
                 if sym:
@@ -1024,16 +1032,37 @@ def _render_security_chart(symbol: str):
 
 def _render_security_workspace(symbol: str):
     symbol = symbol.upper().strip()
-    meta = get_security_meta(symbol)
-    if not meta:
+    try:
+        resolved = resolve_symbol(symbol)
+    except Exception:
+        resolved = None
+    if not resolved:
         st.error(f"Could not resolve {symbol}.")
         return
-    resolved = meta["resolved"]; name_ = meta["name"]; s = meta["summary"]; sec = meta["sector"]
 
-    quote = get_price(symbol) or {}
-    price = quote.get("price", s.get("current_price"))
-    prev = quote.get("prev_close")
-    chg = quote.get("chg")
+    name_ = resolved.get("name", symbol)
+    url_ = resolved.get("url")
+    try:
+        summary = get_summary(symbol, url=url_)
+        s = summary.get("data") or {}
+    except Exception:
+        summary, s = {}, {}
+    try:
+        sector = get_sector_info(symbol, url=url_)
+        sec = sector.get("data") or {}
+    except Exception:
+        sec = {}
+
+    price = s.get("current_price")
+    prev = None
+    try:
+        daily = get_daily_history(symbol, "5d")
+        if len(daily) >= 2:
+            price = float(daily["Close"].iloc[-1])
+            prev = float(daily["Close"].iloc[-2])
+    except Exception:
+        pass
+    chg = ((price - prev) / prev * 100) if price is not None and prev else None
     chg_c = GREEN if (chg or 0) >= 0 else RED
 
     st.markdown(f"""
@@ -1056,7 +1085,10 @@ def _render_security_workspace(symbol: str):
         tf = st.radio("Chart range", ["1M", "3M", "6M", "1Y", "2Y"], index=2, horizontal=True, label_visibility="collapsed", key=f"security_tf_{symbol}")
         # Reuse the chart renderer with period mapping by fetching locally for accurate selected range.
         period_map = {"1M":"1mo", "3M":"3mo", "6M":"6mo", "1Y":"1y", "2Y":"2y"}
-        hist = get_chart_history(symbol, period_map[tf])
+        try:
+            hist = get_daily_history(symbol, period_map[tf])
+        except Exception:
+            hist = None
         if hist is not None and not hist.empty:
             try:
                 import plotly.graph_objects as go
@@ -1074,12 +1106,11 @@ def _render_security_workspace(symbol: str):
         else:
             st.warning("Chart data unavailable.")
 
-        static = get_static(symbol) or {}
         cc1,cc2,cc3,cc4 = st.columns(4)
         with cc1: st.caption(f"52W HIGH\n₹{s.get('year_high','—')}")
         with cc2: st.caption(f"52W LOW\n₹{s.get('year_low','—')}")
-        with cc3: st.caption(f"PDH\n{static.get('pdh','—')}")
-        with cc4: st.caption(f"PDL\n{static.get('pdl','—')}")
+        with cc3: st.caption(f"PDH\n{get_static(symbol).get('pdh','—') if get_static(symbol) else '—'}")
+        with cc4: st.caption(f"PDL\n{get_static(symbol).get('pdl','—') if get_static(symbol) else '—'}")
 
     with info_col:
         st.markdown('<div class="panel-title">COMPANY OVERVIEW</div>', unsafe_allow_html=True)
@@ -1109,40 +1140,24 @@ def _render_security_workspace(symbol: str):
 
 
 def _render_dashboard():
-    """Fast market-monitor home. Expensive data is batched/cached once per rerun."""
-    wl = list(dict.fromkeys(st.session_state.get("watchlist", [])))[:12]
-    all_syms = list(dict.fromkeys(st.session_state.get("admin_watchlist", []) + wl))[:24]
-    prices = get_prices_bulk(tuple(all_syms))
+    wl = st.session_state.get("watchlist", [])[:8]
     rows = []
     for sym in wl:
-        d = prices.get(sym)
+        d = get_price(sym)
         if d:
             c = GREEN if d["chg"] >= 0 else RED
             rows.append(f'<div class="monitor-row"><span>{sym}</span><span>₹{d["price"]:,.2f}</span><span style="color:{c}">{d["chg"]:+.2f}%</span></div>')
     watch_html = ''.join(rows) if rows else '<div style="padding:10px;color:#666;font-size:9px;font-family:JetBrains Mono,monospace;">NO WATCHLIST LOADED · OPEN WATCHLIST SCANNER</div>'
-    adv = sum(d["chg"] > 0.05 for d in prices.values())
-    dec = sum(d["chg"] < -0.05 for d in prices.values())
-    flat = len(prices) - adv - dec
-    ratio = (adv / dec) if dec else (float(adv) if adv else 0)
-    mmi = get_mmi()
-    mmi_score = mmi.get("score", "—")
-    mmi_zone = mmi.get("zone", "—")
-    st.markdown(f'''<div class="monitor-grid">
-      <div class="monitor-panel"><div class="monitor-head"><span>WATCHLIST MONITOR</span><span>{len(wl)} NAMES</span></div>{watch_html}</div>
-      <div class="monitor-panel"><div class="monitor-head"><span>MARKET INTERNALS</span><span>LIVE SAMPLE</span></div>
-        <div class="monitor-row"><span>ADVANCING</span><span>{adv}</span><span class="small-positive">▲</span></div>
-        <div class="monitor-row"><span>DECLINING</span><span>{dec}</span><span class="small-negative">▼</span></div>
-        <div class="monitor-row"><span>UNCHANGED</span><span>{flat}</span><span style="color:#777">—</span></div>
-        <div class="monitor-row"><span>A/D RATIO</span><span>{ratio:.2f}</span><span style="color:#888">RATIO</span></div>
-        <div class="monitor-row"><span>MARKET MOOD</span><span>{mmi_score}</span><span style="color:{AMBER}">{mmi_zone}</span></div>
-      </div>
-      <div class="monitor-panel"><div class="monitor-head"><span>TERMINAL FUNCTIONS</span><span>F2–F7</span></div>
-        <div class="monitor-row"><span>SEARCH SECURITY</span><span>CMD</span><span style="color:{AMBER}">LOAD</span></div>
-        <div class="monitor-row"><span>RESEARCH</span><span>F4</span><span style="color:{AMBER}">OPEN</span></div>
-        <div class="monitor-row"><span>ARKA AI</span><span>F5</span><span style="color:{AMBER}">OPEN</span></div>
-        <div class="monitor-row"><span>SCREENER</span><span>F6</span><span style="color:{AMBER}">OPEN</span></div>
-        <div class="monitor-row"><span>DATA CACHE</span><span>15–45s</span><span style="color:{GREEN}">READY</span></div>
-      </div></div>''', unsafe_allow_html=True)
+    all_syms = list(dict.fromkeys(st.session_state.get("admin_watchlist", []) + wl))[:30]
+    adv = dec = flat = 0
+    for sym in all_syms:
+        d = get_price(sym)
+        if not d: continue
+        if d["chg"] > 0.05: adv += 1
+        elif d["chg"] < -0.05: dec += 1
+        else: flat += 1
+    ratio = (adv/dec) if dec else (float(adv) if adv else 0)
+    st.markdown(f'''<div class="monitor-grid"><div class="monitor-panel"><div class="monitor-head"><span>WATCHLIST MONITOR</span><span>{len(wl)} NAMES</span></div>{watch_html}</div><div class="monitor-panel"><div class="monitor-head"><span>MARKET INTERNALS</span><span>WATCHLIST SAMPLE</span></div><div class="monitor-row"><span>ADVANCING</span><span>{adv}</span><span class="small-positive">▲</span></div><div class="monitor-row"><span>DECLINING</span><span>{dec}</span><span class="small-negative">▼</span></div><div class="monitor-row"><span>UNCHANGED</span><span>{flat}</span><span style="color:#777">—</span></div><div class="monitor-row"><span>A/D RATIO</span><span>{ratio:.2f}</span><span style="color:#888">RATIO</span></div></div><div class="monitor-panel"><div class="monitor-head"><span>TERMINAL FUNCTIONS</span><span>F2–F7</span></div><div class="monitor-row"><span>SEARCH SECURITY</span><span>CMD</span><span style="color:{AMBER}">LOAD</span></div><div class="monitor-row"><span>RESEARCH</span><span>F4</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>ARKA AI</span><span>F5</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>SCREENER</span><span>F6</span><span style="color:{AMBER}">OPEN</span></div></div></div>''', unsafe_allow_html=True)
     _render_module_dock(active=None)
 
 
@@ -1159,8 +1174,16 @@ def _news_watchlist_for_rail():
 if "active_security" not in st.session_state:
     st.session_state["active_security"] = ""
 
-# Header / search stays above every authenticated page.
-_render_terminal_header()
+# The market header belongs to the terminal/home/security workspace only.
+# Modules deliberately switch to a compact header so the user can navigate back
+# without carrying the index strip through every workspace.
+pg = st.session_state.page
+if pg in {"home", "security"}:
+    _render_terminal_header(show_indices=True)
+else:
+    module_titles = {"scanner":("WATCHLIST SCANNER","F2"),"alerts":("ALERTS","F3"),"research":("RESEARCH","F4"),"analysis":("ARKA AI","F5"),"smart_scan":("SMART SCREENER","F6"),"breadth":("MARKET BREADTH","F7")}
+    if pg in module_titles:
+        _render_module_page_header(*module_titles[pg])
 
 # News rail toggle: the rail stays on the RIGHT, in the same location.
 tg1, tg2 = st.columns([8.8, 1.2])
@@ -1177,9 +1200,9 @@ else:
     right_rail = None
 
 with center:
-    pg = st.session_state.page
     if pg == "home":
         _render_dashboard()
+        _render_module_directory()
     elif pg == "security":
         active = st.session_state.get("active_security", "")
         if not active:
@@ -1198,27 +1221,23 @@ with center:
         def render_scan_results(syms, key_prefix=""):
             sc1,sc2,sc3,sc4 = st.columns([1,1,1,2])
             filt = sc1.selectbox("Show",["All","Above PDH","Below PDL","In Range"], key=f"filt_v4_{key_prefix}")
-            l10 = sc2.checkbox("10s Live", key=f"l10_v4_{key_prefix}")
-            l60 = sc3.checkbox("60s Auto", key=f"l60_v4_{key_prefix}")
+            refresh_now = sc2.button("Refresh Data", key=f"refresh_scan_{key_prefix}")
+            sc3.caption("Cached quotes")
+            sc4.caption("No blocking auto-refresh")
             scanbtn = sc4.button("Run Scan", use_container_width=True, type="primary", key=f"scan_v4_{key_prefix}")
             if scanbtn:
                 st.session_state["active_news_source"] = key_prefix
                 results,failed=[],[]
-                prices = get_prices_bulk(tuple(syms))
-                with ThreadPoolExecutor(max_workers=8) as ex:
-                    futures = {ex.submit(get_static, sym): sym for sym in syms}
-                    for fut in as_completed(futures):
-                        sym = futures[fut]
-                        try: st_ = fut.result()
-                        except Exception: st_ = None
-                        lv = prices.get(sym)
-                        if st_ and lv:
-                            cur=lv["price"]; chg=lv["chg"]
-                            cls="g" if cur>st_["pdh"] else "r" if cur<st_["pdl"] else "n"
-                            results.append({"sym":sym,"cur":cur,"chg":chg,"pdh":st_["pdh"],"pdl":st_["pdl"],"rsi":st_["rsi"],"cls":cls,"spark":st_.get("spark",[])})
-                        else: failed.append(sym)
-                results.sort(key=lambda x: syms.index(x["sym"]) if x["sym"] in syms else 999)
-                check_alerts(results)
+                bar=st.progress(0,text="Scanning...")
+                for i,sym in enumerate(syms):
+                    st_=get_static(sym); lv=get_price(sym)
+                    if st_ and lv:
+                        cur=lv["price"]; chg=lv["chg"]
+                        cls="g" if cur>st_["pdh"] else "r" if cur<st_["pdl"] else "n"
+                        results.append({"sym":sym,"cur":cur,"chg":chg,"pdh":st_["pdh"],"pdl":st_["pdl"],"rsi":st_["rsi"],"cls":cls,"spark":st_.get("spark",[])})
+                    else: failed.append(sym)
+                    bar.progress((i+1)/len(syms),text=f"Fetching {sym}...")
+                bar.empty(); check_alerts(results)
                 st.session_state[f"results_{key_prefix}"]=results; st.session_state[f"failed_{key_prefix}"]=failed
             results=st.session_state.get(f"results_{key_prefix}",[]); failed=st.session_state.get(f"failed_{key_prefix}",[])
             if results:
@@ -1238,8 +1257,8 @@ with center:
                     with cols7[i%4]:
                         if st.button("OPEN",key=f"open_scan_{key_prefix}_{s['sym']}",use_container_width=True): _open_security(s["sym"])
                 if failed: st.caption(f"Skipped: {', '.join(failed)}")
-                if l10 or l60:
-                    st.caption("Live refresh mode is non-blocking in V9. Use REFRESH DATA for a fresh cycle.")
+                if refresh_now:
+                    st.cache_data.clear(); st.rerun()
         tab1,tab2=st.tabs(["Arka Watchlist","Your Watchlist"])
         with tab1:
             if IS_ADMIN:
@@ -1324,6 +1343,9 @@ with center:
         st.markdown(f'<div class="term-panel"><b style="color:{AMBER};">Telegram</b><br><span style="color:{T2};">Bot connected · Chat ID configured in Streamlit Secrets.</span></div>',unsafe_allow_html=True)
     elif pg == "contact":
         st.markdown(f'<div class="term-panel"><div class="panel-title">CONTACT</div><div style="color:{T2};line-height:1.8;">Questions, feedback or suggestions?<br>Contact the Arka Trades desk through the configured support email.</div></div>',unsafe_allow_html=True)
+
+    if pg in {"scanner", "alerts", "research", "analysis", "smart_scan", "breadth"}:
+        _render_module_directory()
 
 # ── RIGHT NEWS RAIL: deliberately kept in the same right-side position ──
 if right_rail is not None:
