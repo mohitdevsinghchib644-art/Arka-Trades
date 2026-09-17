@@ -1256,3 +1256,4 @@ if right_rail is not None:
             st.markdown(f'<div style="font-size:11px;color:{T2};padding:8px 4px;">Macro/global news updates below. Add a watchlist in Scanner for stock-specific news.</div>',unsafe_allow_html=True)
         render_news_rail(watchlist_for_news, label=rail_label)
         st.markdown("</div></div>", unsafe_allow_html=True)
+
