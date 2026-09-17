@@ -1254,6 +1254,10 @@ if right_rail is not None:
         watchlist_for_news, rail_label = _news_watchlist_for_rail()
         if not watchlist_for_news:
             st.markdown(f'<div style="font-size:11px;color:{T2};padding:8px 4px;">Macro/global news updates below. Add a watchlist in Scanner for stock-specific news.</div>',unsafe_allow_html=True)
-        render_news_rail(watchlist_for_news, label=rail_label)
+        render_news_rail(
+            watchlist_for_news,
+            label=rail_label,
+            current_security=st.session_state.get("active_security") or None,
+            sector=st.session_state.get("active_sector"),
+        )
         st.markdown("</div></div>", unsafe_allow_html=True)
-
