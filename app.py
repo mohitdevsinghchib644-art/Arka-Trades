@@ -9,6 +9,7 @@ import re
 import json
 import math
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from supabase import create_client, Client
 from news_feed import render_news_rail, get_news_dot, _ensure_news_state, refresh_news, _fetch_news_for_stock
 from arka_ai import render_arka_ai
@@ -203,7 +204,7 @@ def icon_box(name, color=None, size=32):
 for k, v in {"logged_in":False,"disclaimer_done":False,"show_login":False,"page":"home",
     "profile":{"name":"Trader","email":"","phone":""},"profile_photo":None,"watchlist":[],
     "admin_watchlist":[],"alerts":{},"alert_fired":set(),"db_loaded":False,"is_admin":False,
-    "active_news_source":"admin","show_news_rail":True,"active_security":""}.items():
+    "active_news_source":"admin","show_news_rail":True,"active_security":"","data_refresh_nonce":0,"last_data_refresh":None,"chart_tf":"6M"}.items():
     if k not in st.session_state: st.session_state[k] = v
 
 if not st.session_state.db_loaded:
@@ -335,17 +336,70 @@ def get_static(sym):
                 "spark": [float(x) for x in h["Close"].tail(12).tolist()]}
     except: return None
 
-@st.cache_data(ttl=10, show_spinner=False)
+@st.cache_data(ttl=15, show_spinner=False)
 def get_price(sym):
+    """Short-lived quote cache."""
     try:
-        intra = yf.Ticker(sym+".NS").history(period="1d", interval="1m")
-        if intra.empty: return None
-        cur = float(intra["Close"].iloc[-1])
-        daily = yf.Ticker(sym+".NS").history(period="5d", interval="1d")
-        if len(daily) < 2: return None
-        prev_close = float(daily["Close"].iloc[-2])
+        ticker = yf.Ticker(sym + ".NS")
+        intra = ticker.history(period="1d", interval="1m", auto_adjust=False)
+        daily = ticker.history(period="5d", interval="1d", auto_adjust=False)
+        if intra.empty or len(daily) < 2:
+            return None
+        cur = float(intra["Close"].dropna().iloc[-1])
+        prev_close = float(daily["Close"].dropna().iloc[-2])
+        if not _values_are_sane(cur, prev_close):
+            return None
         return {"price": cur, "chg": ((cur-prev_close)/prev_close)*100, "prev_close": prev_close}
-    except: return None
+    except Exception:
+        return None
+
+@st.cache_data(ttl=45, show_spinner=False)
+def get_prices_bulk(symbols_tuple):
+    symbols = list(dict.fromkeys(symbols_tuple or ()))
+    out = {}
+    if not symbols:
+        return out
+    with ThreadPoolExecutor(max_workers=min(8, len(symbols))) as ex:
+        futures = {ex.submit(get_price, s): s for s in symbols}
+        for fut in as_completed(futures):
+            sym = futures[fut]
+            try:
+                val = fut.result()
+                if val: out[sym] = val
+            except Exception:
+                pass
+    return out
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_chart_history(sym, period):
+    try:
+        h = yf.Ticker(sym + ".NS").history(period=period, interval="1d", auto_adjust=False)
+        return h if h is not None and not h.empty else None
+    except Exception:
+        return None
+
+@st.cache_data(ttl=900, show_spinner=False)
+def get_security_meta(sym):
+    try:
+        resolved = resolve_symbol(sym)
+    except Exception:
+        resolved = None
+    if not resolved:
+        return None
+    name_ = resolved.get("name", sym)
+    url_ = resolved.get("url")
+    try:
+        summary = get_summary(sym, url=url_)
+        data = summary.get("data") or {}
+    except Exception:
+        data = {}
+    try:
+        sector = get_sector_info(sym, url=url_)
+        sec = sector.get("data") or {}
+    except Exception:
+        sec = {}
+    return {"resolved": resolved, "name": name_, "summary": data, "sector": sec}
+
 
 def _values_are_sane(cur, pc):
     try:
@@ -858,13 +912,29 @@ def _market_cell(label, data):
     return f'<div class="market-cell"><span class="m-name">{label}</span><span class="m-price">—</span><span class="m-chg" style="color:#555">—</span></div>'
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def get_indices_bulk(items):
+    results = {}
+    def fetch(item):
+        label, sym, fb = item
+        return label, get_index(sym, fb)
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        futures = [ex.submit(fetch, item) for item in items]
+        for fut in as_completed(futures):
+            try:
+                label, data = fut.result(); results[label] = data
+            except Exception:
+                pass
+    return results
+
 def _render_terminal_header():
     india = [("NIFTY 50", "^NSEI", None), ("BANK NIFTY", "^NSEBANK", None), ("SENSEX", "^BSESN", None), ("NIFTY IT", "^CNXIT", None), ("NIFTY AUTO", "^CNXAUTO", None), ("MIDCAP 100", MIDCAP_CANDIDATES[0], MIDCAP_CANDIDATES[1:])]
     global_ = [("S&P 500", "^GSPC", None), ("NASDAQ", "^IXIC", None), ("DOW", "^DJI", None), ("DAX", "^GDAXI", None), ("FTSE", "^FTSE", None), ("NIKKEI", "^N225", None)]
     st.markdown('<div class="terminal-shell">', unsafe_allow_html=True)
     st.markdown(f'''<div class="terminal-brandbar"><div class="brand-left"><div class="brand-mark">{icon("trend",15,"#000")}</div><div><div class="brand-name">ARKA TRADES</div><div class="brand-sub">MARKET TERMINAL · EQUITIES</div></div></div><div class="brand-status"><span class="pulse-dot"></span> LIVE MARKET DATA</div></div>''', unsafe_allow_html=True)
     for title, items in (("INDIA", india), ("GLOBAL", global_)):
-        cells = ''.join(_market_cell(label, get_index(sym, fb)) for label, sym, fb in items)
+        idx_data = get_indices_bulk(tuple(items))
+        cells = ''.join(_market_cell(label, idx_data.get(label)) for label, sym, fb in items)
         st.markdown(f'<div class="market-strip"><div class="market-row"><div class="market-row-label">{title}</div>{cells}</div></div>', unsafe_allow_html=True)
     st.markdown('<div class="command-wrap"><div class="command-label">SECURITY / INDEX / COMPANY SEARCH</div>', unsafe_allow_html=True)
     q = st.text_input("Security search", value=st.session_state.get("security_search", ""), placeholder="Type ticker or company name  ·  e.g. RELIANCE", label_visibility="collapsed", key="security_search")
@@ -890,6 +960,17 @@ def _render_terminal_header():
             else:
                 st.error(f"No security found for '{q.strip().upper()}'.")
     st.markdown('</div>', unsafe_allow_html=True)
+    r1, r2, r3 = st.columns([1, 1, 8])
+    with r1:
+        if st.button("↻ REFRESH DATA", key="terminal_refresh_v9", use_container_width=True):
+            st.session_state["data_refresh_nonce"] = st.session_state.get("data_refresh_nonce", 0) + 1
+            st.session_state["last_data_refresh"] = datetime.now().strftime("%H:%M:%S")
+            st.cache_data.clear()
+            st.rerun()
+    with r2:
+        st.caption(f"DATA {st.session_state.get('last_data_refresh') or 'CACHE'}")
+    with r3:
+        st.caption("Quotes are cached briefly to keep the terminal responsive; research/news modules load independently.")
 
 
 def _render_module_dock(active=None):
@@ -899,8 +980,10 @@ def _render_module_dock(active=None):
     cols = st.columns(len(modules))
     for col, (code, label, target) in zip(cols, modules):
         with col:
-            st.markdown(f'<div class="module-cell"><div class="module-code">{code}</div><div class="module-label">{label}</div></div>', unsafe_allow_html=True)
-            if st.button("OPEN", key=f"module_v5_{target}", use_container_width=True):
+            is_active = st.session_state.get("page") == target
+            border = AMBER if is_active else BORDER
+            st.markdown(f'<div class="module-cell" style="border-top:2px solid {border};"><div class="module-code">{code}</div><div class="module-label">{label}</div></div>', unsafe_allow_html=True)
+            if st.button("ACTIVE" if is_active else "OPEN", key=f"module_v5_{target}", use_container_width=True):
                 st.session_state.page = target
                 sym = st.session_state.get("active_security")
                 if sym:
@@ -941,37 +1024,16 @@ def _render_security_chart(symbol: str):
 
 def _render_security_workspace(symbol: str):
     symbol = symbol.upper().strip()
-    try:
-        resolved = resolve_symbol(symbol)
-    except Exception:
-        resolved = None
-    if not resolved:
+    meta = get_security_meta(symbol)
+    if not meta:
         st.error(f"Could not resolve {symbol}.")
         return
+    resolved = meta["resolved"]; name_ = meta["name"]; s = meta["summary"]; sec = meta["sector"]
 
-    name_ = resolved.get("name", symbol)
-    url_ = resolved.get("url")
-    try:
-        summary = get_summary(symbol, url=url_)
-        s = summary.get("data") or {}
-    except Exception:
-        summary, s = {}, {}
-    try:
-        sector = get_sector_info(symbol, url=url_)
-        sec = sector.get("data") or {}
-    except Exception:
-        sec = {}
-
-    price = s.get("current_price")
-    prev = None
-    try:
-        daily = yf.Ticker(symbol + ".NS").history(period="5d", interval="1d")
-        if len(daily) >= 2:
-            price = float(daily["Close"].iloc[-1])
-            prev = float(daily["Close"].iloc[-2])
-    except Exception:
-        pass
-    chg = ((price - prev) / prev * 100) if price is not None and prev else None
+    quote = get_price(symbol) or {}
+    price = quote.get("price", s.get("current_price"))
+    prev = quote.get("prev_close")
+    chg = quote.get("chg")
     chg_c = GREEN if (chg or 0) >= 0 else RED
 
     st.markdown(f"""
@@ -994,10 +1056,7 @@ def _render_security_workspace(symbol: str):
         tf = st.radio("Chart range", ["1M", "3M", "6M", "1Y", "2Y"], index=2, horizontal=True, label_visibility="collapsed", key=f"security_tf_{symbol}")
         # Reuse the chart renderer with period mapping by fetching locally for accurate selected range.
         period_map = {"1M":"1mo", "3M":"3mo", "6M":"6mo", "1Y":"1y", "2Y":"2y"}
-        try:
-            hist = yf.Ticker(symbol + ".NS").history(period=period_map[tf], interval="1d")
-        except Exception:
-            hist = None
+        hist = get_chart_history(symbol, period_map[tf])
         if hist is not None and not hist.empty:
             try:
                 import plotly.graph_objects as go
@@ -1015,11 +1074,12 @@ def _render_security_workspace(symbol: str):
         else:
             st.warning("Chart data unavailable.")
 
+        static = get_static(symbol) or {}
         cc1,cc2,cc3,cc4 = st.columns(4)
         with cc1: st.caption(f"52W HIGH\n₹{s.get('year_high','—')}")
         with cc2: st.caption(f"52W LOW\n₹{s.get('year_low','—')}")
-        with cc3: st.caption(f"PDH\n{get_static(symbol).get('pdh','—') if get_static(symbol) else '—'}")
-        with cc4: st.caption(f"PDL\n{get_static(symbol).get('pdl','—') if get_static(symbol) else '—'}")
+        with cc3: st.caption(f"PDH\n{static.get('pdh','—')}")
+        with cc4: st.caption(f"PDL\n{static.get('pdl','—')}")
 
     with info_col:
         st.markdown('<div class="panel-title">COMPANY OVERVIEW</div>', unsafe_allow_html=True)
@@ -1049,24 +1109,40 @@ def _render_security_workspace(symbol: str):
 
 
 def _render_dashboard():
-    wl = st.session_state.get("watchlist", [])[:8]
+    """Fast market-monitor home. Expensive data is batched/cached once per rerun."""
+    wl = list(dict.fromkeys(st.session_state.get("watchlist", [])))[:12]
+    all_syms = list(dict.fromkeys(st.session_state.get("admin_watchlist", []) + wl))[:24]
+    prices = get_prices_bulk(tuple(all_syms))
     rows = []
     for sym in wl:
-        d = get_price(sym)
+        d = prices.get(sym)
         if d:
             c = GREEN if d["chg"] >= 0 else RED
             rows.append(f'<div class="monitor-row"><span>{sym}</span><span>₹{d["price"]:,.2f}</span><span style="color:{c}">{d["chg"]:+.2f}%</span></div>')
     watch_html = ''.join(rows) if rows else '<div style="padding:10px;color:#666;font-size:9px;font-family:JetBrains Mono,monospace;">NO WATCHLIST LOADED · OPEN WATCHLIST SCANNER</div>'
-    all_syms = list(dict.fromkeys(st.session_state.get("admin_watchlist", []) + wl))[:30]
-    adv = dec = flat = 0
-    for sym in all_syms:
-        d = get_price(sym)
-        if not d: continue
-        if d["chg"] > 0.05: adv += 1
-        elif d["chg"] < -0.05: dec += 1
-        else: flat += 1
-    ratio = (adv/dec) if dec else (float(adv) if adv else 0)
-    st.markdown(f'''<div class="monitor-grid"><div class="monitor-panel"><div class="monitor-head"><span>WATCHLIST MONITOR</span><span>{len(wl)} NAMES</span></div>{watch_html}</div><div class="monitor-panel"><div class="monitor-head"><span>MARKET INTERNALS</span><span>WATCHLIST SAMPLE</span></div><div class="monitor-row"><span>ADVANCING</span><span>{adv}</span><span class="small-positive">▲</span></div><div class="monitor-row"><span>DECLINING</span><span>{dec}</span><span class="small-negative">▼</span></div><div class="monitor-row"><span>UNCHANGED</span><span>{flat}</span><span style="color:#777">—</span></div><div class="monitor-row"><span>A/D RATIO</span><span>{ratio:.2f}</span><span style="color:#888">RATIO</span></div></div><div class="monitor-panel"><div class="monitor-head"><span>TERMINAL FUNCTIONS</span><span>F2–F7</span></div><div class="monitor-row"><span>SEARCH SECURITY</span><span>CMD</span><span style="color:{AMBER}">LOAD</span></div><div class="monitor-row"><span>RESEARCH</span><span>F4</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>ARKA AI</span><span>F5</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>SCREENER</span><span>F6</span><span style="color:{AMBER}">OPEN</span></div></div></div>''', unsafe_allow_html=True)
+    adv = sum(d["chg"] > 0.05 for d in prices.values())
+    dec = sum(d["chg"] < -0.05 for d in prices.values())
+    flat = len(prices) - adv - dec
+    ratio = (adv / dec) if dec else (float(adv) if adv else 0)
+    mmi = get_mmi()
+    mmi_score = mmi.get("score", "—")
+    mmi_zone = mmi.get("zone", "—")
+    st.markdown(f'''<div class="monitor-grid">
+      <div class="monitor-panel"><div class="monitor-head"><span>WATCHLIST MONITOR</span><span>{len(wl)} NAMES</span></div>{watch_html}</div>
+      <div class="monitor-panel"><div class="monitor-head"><span>MARKET INTERNALS</span><span>LIVE SAMPLE</span></div>
+        <div class="monitor-row"><span>ADVANCING</span><span>{adv}</span><span class="small-positive">▲</span></div>
+        <div class="monitor-row"><span>DECLINING</span><span>{dec}</span><span class="small-negative">▼</span></div>
+        <div class="monitor-row"><span>UNCHANGED</span><span>{flat}</span><span style="color:#777">—</span></div>
+        <div class="monitor-row"><span>A/D RATIO</span><span>{ratio:.2f}</span><span style="color:#888">RATIO</span></div>
+        <div class="monitor-row"><span>MARKET MOOD</span><span>{mmi_score}</span><span style="color:{AMBER}">{mmi_zone}</span></div>
+      </div>
+      <div class="monitor-panel"><div class="monitor-head"><span>TERMINAL FUNCTIONS</span><span>F2–F7</span></div>
+        <div class="monitor-row"><span>SEARCH SECURITY</span><span>CMD</span><span style="color:{AMBER}">LOAD</span></div>
+        <div class="monitor-row"><span>RESEARCH</span><span>F4</span><span style="color:{AMBER}">OPEN</span></div>
+        <div class="monitor-row"><span>ARKA AI</span><span>F5</span><span style="color:{AMBER}">OPEN</span></div>
+        <div class="monitor-row"><span>SCREENER</span><span>F6</span><span style="color:{AMBER}">OPEN</span></div>
+        <div class="monitor-row"><span>DATA CACHE</span><span>15–45s</span><span style="color:{GREEN}">READY</span></div>
+      </div></div>''', unsafe_allow_html=True)
     _render_module_dock(active=None)
 
 
@@ -1128,16 +1204,21 @@ with center:
             if scanbtn:
                 st.session_state["active_news_source"] = key_prefix
                 results,failed=[],[]
-                bar=st.progress(0,text="Scanning...")
-                for i,sym in enumerate(syms):
-                    st_=get_static(sym); lv=get_price(sym)
-                    if st_ and lv:
-                        cur=lv["price"]; chg=lv["chg"]
-                        cls="g" if cur>st_["pdh"] else "r" if cur<st_["pdl"] else "n"
-                        results.append({"sym":sym,"cur":cur,"chg":chg,"pdh":st_["pdh"],"pdl":st_["pdl"],"rsi":st_["rsi"],"cls":cls,"spark":st_.get("spark",[])})
-                    else: failed.append(sym)
-                    bar.progress((i+1)/len(syms),text=f"Fetching {sym}...")
-                bar.empty(); check_alerts(results)
+                prices = get_prices_bulk(tuple(syms))
+                with ThreadPoolExecutor(max_workers=8) as ex:
+                    futures = {ex.submit(get_static, sym): sym for sym in syms}
+                    for fut in as_completed(futures):
+                        sym = futures[fut]
+                        try: st_ = fut.result()
+                        except Exception: st_ = None
+                        lv = prices.get(sym)
+                        if st_ and lv:
+                            cur=lv["price"]; chg=lv["chg"]
+                            cls="g" if cur>st_["pdh"] else "r" if cur<st_["pdl"] else "n"
+                            results.append({"sym":sym,"cur":cur,"chg":chg,"pdh":st_["pdh"],"pdl":st_["pdl"],"rsi":st_["rsi"],"cls":cls,"spark":st_.get("spark",[])})
+                        else: failed.append(sym)
+                results.sort(key=lambda x: syms.index(x["sym"]) if x["sym"] in syms else 999)
+                check_alerts(results)
                 st.session_state[f"results_{key_prefix}"]=results; st.session_state[f"failed_{key_prefix}"]=failed
             results=st.session_state.get(f"results_{key_prefix}",[]); failed=st.session_state.get(f"failed_{key_prefix}",[])
             if results:
@@ -1157,8 +1238,8 @@ with center:
                     with cols7[i%4]:
                         if st.button("OPEN",key=f"open_scan_{key_prefix}_{s['sym']}",use_container_width=True): _open_security(s["sym"])
                 if failed: st.caption(f"Skipped: {', '.join(failed)}")
-                if l10: time.sleep(10); st.cache_data.clear(); st.rerun()
-                elif l60: time.sleep(60); st.cache_data.clear(); st.rerun()
+                if l10 or l60:
+                    st.caption("Live refresh mode is non-blocking in V9. Use REFRESH DATA for a fresh cycle.")
         tab1,tab2=st.tabs(["Arka Watchlist","Your Watchlist"])
         with tab1:
             if IS_ADMIN:
@@ -1254,10 +1335,5 @@ if right_rail is not None:
         watchlist_for_news, rail_label = _news_watchlist_for_rail()
         if not watchlist_for_news:
             st.markdown(f'<div style="font-size:11px;color:{T2};padding:8px 4px;">Macro/global news updates below. Add a watchlist in Scanner for stock-specific news.</div>',unsafe_allow_html=True)
-        render_news_rail(
-            watchlist_for_news,
-            label=rail_label,
-            current_security=st.session_state.get("active_security") or None,
-            sector=st.session_state.get("active_sector"),
-        )
+        render_news_rail(watchlist_for_news, label=rail_label)
         st.markdown("</div></div>", unsafe_allow_html=True)
