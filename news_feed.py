@@ -26,6 +26,7 @@ import html
 import re
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 from urllib.parse import quote_plus, urlparse
@@ -52,7 +53,10 @@ BLUE = "#5AC8FA"
 MONO = "'JetBrains Mono',monospace"
 
 NEWS_EXPIRE = 20
+NEWS_FETCH_TTL = 300
 MAX_COMBINED_ITEMS = 60
+MAX_SECURITY_REFRESH = 12
+MAX_FETCH_WORKERS = 6
 DEFAULT_DAYS = 1
 
 # ---------------------------------------------------------------------------
@@ -301,7 +305,9 @@ def _rss_url(query: str, days: int = 1) -> str:
     )
 
 
-def _fetch_query(query: str, symbol: str, is_macro: bool = False, query_kind: str = "company", days: int = 1) -> list[dict]:
+@st.cache_data(ttl=NEWS_FETCH_TTL, show_spinner=False)
+def _fetch_query_cached(query: str, symbol: str, is_macro: bool = False, query_kind: str = "company", days: int = 1) -> list[dict]:
+    """Cached network boundary: one RSS request is shared across reruns/users."""
     try:
         feed = feedparser.parse(_rss_url(query, days=days))
         out = []
@@ -316,34 +322,39 @@ def _fetch_query(query: str, symbol: str, is_macro: bool = False, query_kind: st
         return []
 
 
+def _fetch_query(query: str, symbol: str, is_macro: bool = False, query_kind: str = "company", days: int = 1) -> list[dict]:
+    return _fetch_query_cached(query, symbol, is_macro, query_kind, days)
+
+
 def _fetch_news_for_stock(symbol: str, days: int = 1) -> list[dict]:
-    """Fetch company/security news. Backward-compatible with the old one-arg call."""
+    """Fetch company/security news with a single cached RSS request."""
     symbol = (symbol or "").strip().upper()
     if not symbol:
         return []
-    queries = [
-        (f"{symbol} NSE India stock", "company"),
-        (f"{symbol} results earnings order stake promoter", "company"),
-    ]
-    combined = []
-    for query, kind in queries:
-        combined.extend(_fetch_query(query, symbol, query_kind=kind, days=days))
-    return _dedupe_articles(combined)
+    query = f"{symbol} NSE India stock results earnings order stake promoter"
+    return _dedupe_articles(_fetch_query_cached(query, symbol, query_kind="company", days=days))
 
 
 def _fetch_macro_news(days: int = 1) -> list[dict]:
-    results = []
-    for q in _MACRO_QUERIES:
-        results.extend(_fetch_query(q, "MACRO", is_macro=True, query_kind="macro", days=days))
+    # Keep macro coverage broad, but fetch concurrently and cache each feed.
+    with ThreadPoolExecutor(max_workers=MAX_FETCH_WORKERS) as ex:
+        futures = [ex.submit(_fetch_query_cached, q, "MACRO", True, "macro", days) for q in _MACRO_QUERIES]
+        results = []
+        for f in as_completed(futures):
+            try:
+                results.extend(f.result())
+            except Exception:
+                pass
     return _dedupe_articles(results)
 
 
+@st.cache_data(ttl=NEWS_FETCH_TTL, show_spinner=False)
 def _fetch_sector_news(sector: str, days: int = 1) -> list[dict]:
     sector = (sector or "").strip()
     if not sector:
         return []
     query = _SECTOR_QUERY_TERMS.get(sector.lower(), f"India {sector} stocks")
-    return _fetch_query(query, "SECTOR", query_kind="sector", days=days)
+    return _fetch_query_cached(query, "SECTOR", query_kind="sector", days=days)
 
 
 def _dedupe_articles(items: list[dict]) -> list[dict]:
@@ -414,23 +425,37 @@ def _mark_new(items: list[dict]) -> list[dict]:
 
 
 def refresh_news(watchlist: list[str], current_security: str | None = None, sector: str | None = None, days: int = 1):
-    """Refresh watchlist/current-security/macro/sector feeds with a 20-min TTL."""
+    """Refresh news without blocking the app on dozens of serial network calls."""
     _ensure_news_state()
     days = max(1, min(int(days or 1), 30))
     now = time.time()
     symbols = list(dict.fromkeys([s.strip().upper() for s in (watchlist or []) if s]))
     if current_security:
         cs = current_security.strip().upper()
-        if cs and cs not in symbols:
+        if cs:
+            if cs in symbols:
+                symbols.remove(cs)
             symbols.insert(0, cs)
+    # The rail is narrow; prioritize the active security, then the first part of the watchlist.
+    symbols = symbols[:MAX_SECURITY_REFRESH]
 
-    for sym in symbols[:30]:
+    jobs = []
+    for sym in symbols:
         cache_key = f"SEC:{sym}:{days}"
         last = st.session_state["_news_fetched"].get(cache_key, 0)
         if now - last > NEWS_EXPIRE * 60:
-            articles = _fetch_news_for_stock(sym, days=days)
-            st.session_state["_news_cache"][cache_key] = articles
-            st.session_state["_news_fetched"][cache_key] = now
+            jobs.append((cache_key, sym))
+
+    if jobs:
+        with ThreadPoolExecutor(max_workers=MAX_FETCH_WORKERS) as ex:
+            future_map = {ex.submit(_fetch_news_for_stock, sym, days): (key, sym) for key, sym in jobs}
+            for future in as_completed(future_map):
+                key, sym = future_map[future]
+                try:
+                    st.session_state["_news_cache"][key] = future.result()
+                except Exception:
+                    st.session_state["_news_cache"][key] = []
+                st.session_state["_news_fetched"][key] = now
 
     macro_key = f"MACRO:{days}"
     macro_last = st.session_state["_news_fetched"].get(macro_key, 0)
@@ -514,41 +539,49 @@ def _search_filter(items: list[dict], query: str) -> list[dict]:
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _intraday_price_impact(symbol: str, pub_dt_iso: str):
-    """Best-effort move from nearest post-headline 1m price to latest price.
-
-    If intraday data is unavailable, return None rather than inventing a move.
-    """
+@st.cache_data(ttl=300, show_spinner=False)
+def _intraday_closes(symbol: str):
+    """Fetch intraday prices once per symbol, not once per headline."""
     try:
         sym = (symbol or "").strip().upper()
         if not sym or sym in {"MACRO", "SECTOR"}:
-            return None
-        dt = datetime.fromisoformat(pub_dt_iso)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=IST)
-        # Indian equities use Yahoo's .NS suffix for NSE pricing.
+            return []
         ticker = sym if "." in sym else f"{sym}.NS"
         df = yf.download(ticker, period="1d", interval="1m", progress=False, auto_adjust=False, threads=False)
         if df is None or df.empty:
-            return None
+            return []
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         if "Close" not in df.columns:
-            return None
+            return []
         series = pd.to_numeric(df["Close"], errors="coerce").dropna()
         if series.empty:
-            return None
+            return []
         idx = pd.to_datetime(series.index)
         if getattr(idx, "tz", None) is None:
             idx = idx.tz_localize("UTC").tz_convert(IST)
         else:
             idx = idx.tz_convert(IST)
-        series.index = idx
-        after = series[series.index >= dt.astimezone(IST)]
-        if after.empty:
+        return [(ts.isoformat(), float(v)) for ts, v in zip(idx, series.to_numpy())]
+    except Exception:
+        return []
+
+
+def _intraday_price_impact(symbol: str, pub_dt_iso: str):
+    """Best-effort move from nearest post-headline 1m price to latest price."""
+    try:
+        points = _intraday_closes(symbol)
+        if not points:
             return None
-        start = float(after.iloc[0])
-        end = float(series.iloc[-1])
+        dt = datetime.fromisoformat(pub_dt_iso)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=IST)
+        target = dt.astimezone(IST)
+        after = [(ts, price) for ts, price in points if datetime.fromisoformat(ts) >= target]
+        if not after:
+            return None
+        start = float(after[0][1])
+        end = float(points[-1][1])
         if start <= 0:
             return None
         return {"pct": (end / start - 1) * 100, "start": start, "end": end}
@@ -577,7 +610,7 @@ def _safe_href(url: str) -> str:
     return "#"
 
 
-def _render_rows(items: list[dict], show_tag: bool = True, show_impact: bool = True):
+def _render_rows(items: list[dict], show_tag: bool = True, show_impact: bool = True, impact_symbols: set[str] | None = None):
     if not items:
         st.markdown(
             f'<div style="font-size:11px;color:{T2};padding:12px 2px;line-height:1.5;">'
@@ -604,7 +637,8 @@ def _render_rows(items: list[dict], show_tag: bool = True, show_impact: bool = T
         source_count = int(art.get("source_count", 1) or 1)
         source_count_html = f" · {source_count} sources" if source_count > 1 else ""
         new_html = '<span style="color:#FF453A;font-weight:800;">NEW</span>&nbsp;·&nbsp;' if art.get("is_new") else ""
-        impact_html = _impact_badge(art) if show_impact else ""
+        impact_ok = show_impact and (impact_symbols is None or art.get("symbol") in impact_symbols)
+        impact_html = _impact_badge(art) if impact_ok else ""
         impact_block = f'<span style="margin-left:7px;">{impact_html}</span>' if impact_html else ""
 
         rows_html.append(
@@ -675,13 +709,17 @@ def render_news_rail(
     )
     filtered = _search_filter(_category_filter(combined, category), st.session_state.get("_news_search", ""))
 
+    # Intraday impact is expensive; calculate it only for the active security.
+    # This keeps the rail responsive even when many watchlist headlines are visible.
+    impact_symbols = {current_security.strip().upper()} if current_security else set()
+
     with tab_all:
-        _render_rows(filtered, show_tag=True, show_impact=True)
+        _render_rows(filtered, show_tag=True, show_impact=True, impact_symbols=impact_symbols)
 
     with tab_breaking:
         breaking = [x for x in combined if x.get("is_new") or x.get("importance", 0) >= 4]
         breaking = _search_filter(_category_filter(breaking, category), st.session_state.get("_news_search", ""))
-        _render_rows(breaking[:30], show_tag=True, show_impact=True)
+        _render_rows(breaking[:30], show_tag=True, show_impact=True, impact_symbols=impact_symbols)
 
 
 # Backwards-compatible aliases
