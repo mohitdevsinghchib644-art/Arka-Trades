@@ -1,12 +1,13 @@
 """
-Arka Trades — F7 Market Breadth UI
+Arka Trades — F7 Market Breadth page.
 
-DAILY / EOD ONLY.
+Source: Chartink dashboard 86550.
 
-Performance rule:
-The page must render from local history immediately. It must NOT perform
-network requests just because the user opens F7 or changes the history
-lookback selector.
+Important performance design:
+- No network request on page open.
+- No network request when changing lookback.
+- Chartink is queried only from the explicit SYNC CHARTINK button.
+- Historical rows are read from local cache.
 """
 
 from __future__ import annotations
@@ -14,65 +15,66 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from breadth_engine import (
-    get_nse_universe,
-    get_latest_history_snapshot,
-    load_history,
-    update_today,
-    append_history,
-    backfill_history_from_bhavcopy,
-    compute_ad_line_and_mcclellan,
-)
+from breadth_engine import load_history, sync_chartink
 
 
 # ---------------------------------------------------------------------
 # CSS
 # ---------------------------------------------------------------------
 
-def _css():
+def _css() -> None:
     st.markdown(
         """
         <style>
-        .stApp { background:#050505; color:#d8dce1; }
-        .block-container { padding-top:.55rem; padding-left:.55rem; padding-right:.55rem; max-width:100%; }
-        section[data-testid="stSidebar"] { display:none; }
-        .breadth-top {
-            height:38px; border-top:1px solid #24282d; border-bottom:1px solid #24282d;
-            display:flex; align-items:center; justify-content:space-between;
-            padding:0 10px; font-family:monospace; margin-bottom:10px;
-        }
-        .brand { font-size:12px; font-weight:700; color:#e8ebee; }
-        .module { font-size:11px; font-weight:700; letter-spacing:1px; color:#e7a51a; }
-        .status { font-size:9px; letter-spacing:.8px; color:#4e8b59; }
-        .title { font:700 18px monospace; letter-spacing:.4px; color:#e6e9ec; margin:6px 0 2px; }
-        .subtitle { font:10px monospace; letter-spacing:.45px; color:#727b85; margin-bottom:12px; }
-        .panel-title {
-            font:700 10px monospace; letter-spacing:1px; color:#bfc4ca;
-            border-bottom:1px solid #24292e; padding-bottom:7px; margin:16px 0 8px;
-        }
-        .metric {
-            background:#090a0c; border:1px solid #252a30; padding:10px 12px; min-height:74px;
-        }
-        .metric-label { font:9px monospace; letter-spacing:.7px; color:#737c86; }
-        .metric-value { font:700 22px monospace; color:#e9ecef; margin-top:5px; }
-        .metric-sub { font:9px monospace; color:#68717b; margin-top:5px; }
-        .info {
-            border-top:1px solid #22272c; border-bottom:1px solid #22272c;
-            padding:7px 9px; font:9px monospace; color:#6f7882; margin:8px 0 10px;
-        }
-        .warn {
-            border:1px solid #51451f; background:#0d0c08; color:#c5aa54;
-            padding:10px 12px; font:10px monospace; margin:8px 0;
-        }
-        .good { color:#55a96a; }
-        .bad { color:#d35b5b; }
-        .flat { color:#9aa1a9; }
-        .stButton > button {
-            border:1px solid #353b42; background:#0b0d10; color:#d4d8dc;
-            border-radius:1px; font:10px monospace; min-height:32px;
-        }
-        .stButton > button:hover { border-color:#e7a51a; color:#e7a51a; }
-        div[data-baseweb="select"] > div { background:#090a0c; border-color:#30353b; border-radius:1px; }
+        .stApp{background:#050505;color:#d7dbe0;}
+        .block-container{padding:8px 8px 28px 8px;max-width:100%;}
+        section[data-testid="stSidebar"]{display:none;}
+
+        .bt-top{height:36px;border-top:1px solid #24282d;border-bottom:1px solid #24282d;
+                display:flex;align-items:center;justify-content:space-between;padding:0 10px;
+                margin-bottom:12px;font-family:monospace;}
+        .bt-brand{font-size:12px;font-weight:700;letter-spacing:.5px;color:#e7ebef;}
+        .bt-module{font-size:11px;font-weight:700;letter-spacing:1px;color:#e7a51a;}
+        .bt-status{font-size:9px;letter-spacing:.7px;color:#4c8758;}
+
+        .bt-title{font:700 18px monospace;letter-spacing:.5px;color:#e5e8eb;margin:4px 0 2px;}
+        .bt-sub{font:10px monospace;letter-spacing:.45px;color:#6f7882;margin-bottom:12px;}
+        .bt-info{border-top:1px solid #24292e;border-bottom:1px solid #24292e;
+                 padding:7px 9px;font:9px monospace;color:#717a84;letter-spacing:.3px;}
+
+        .bt-card{background:#090a0c;border:1px solid #252a30;padding:10px 12px;min-height:72px;}
+        .bt-label{font:9px monospace;letter-spacing:.7px;color:#737c86;}
+        .bt-value{font:700 22px monospace;color:#e9ecef;margin-top:5px;}
+        .bt-meta{font:9px monospace;color:#68717b;margin-top:5px;}
+        .bt-up{color:#55a96a;}
+        .bt-down{color:#d35b5b;}
+        .bt-flat{color:#9aa1a9;}
+
+        .bt-table-wrap{overflow-x:auto;border:1px solid #252a30;background:#08090b;}
+        .bt-table{border-collapse:collapse;width:100%;font-family:monospace;table-layout:fixed;}
+        .bt-table th,.bt-table td{border-right:1px solid #24292e;border-bottom:1px solid #24292e;
+                                  padding:7px 8px;white-space:nowrap;font-size:10px;}
+        .bt-table thead tr.group th{background:#111318;color:#e4a31c;font-weight:700;text-align:center;
+                                    letter-spacing:.4px;font-size:10px;}
+        .bt-table thead tr.sub th{background:#0c0e11;color:#737c86;font-weight:700;text-align:right;font-size:9px;}
+        .bt-table thead tr.sub th.date{text-align:left;}
+        .bt-table tbody td{color:#d7dbe0;text-align:right;}
+        .bt-table tbody td.date{text-align:left;color:#d7dbe0;font-weight:600;}
+        .bt-table tbody tr:nth-child(even){background:#0a0b0e;}
+        .bt-table tbody tr:hover{background:#101318;}
+        .bt-delta-up{color:#55a96a;}
+        .bt-delta-down{color:#d35b5b;}
+        .bt-delta-flat{color:#858d96;}
+
+        .bt-warn{border:1px solid #544511;background:#0d0b06;color:#d8b52d;
+                 padding:10px;font:10px monospace;margin:10px 0;}
+        .bt-error{border:1px solid #642f2f;background:#150909;color:#e36a6a;
+                  padding:10px;font:10px monospace;margin:10px 0;white-space:pre-wrap;}
+
+        .stButton>button{border:1px solid #353b42;background:#0b0d10;color:#d4d8dc;
+                         border-radius:1px;font:10px monospace;min-height:32px;}
+        .stButton>button:hover{border-color:#e7a51a;color:#e7a51a;background:#0d0f11;}
+        div[data-baseweb="select"]>div{background:#090a0c;border-color:#30353b;border-radius:1px;}
         </style>
         """,
         unsafe_allow_html=True,
@@ -80,41 +82,52 @@ def _css():
 
 
 # ---------------------------------------------------------------------
-# FORMAT HELPERS
+# FORMATTING
 # ---------------------------------------------------------------------
 
-def _signed_int(value) -> str:
-    if pd.isna(value):
-        return "—"
-    v = int(round(float(value)))
-    return f"+{v}" if v > 0 else str(v)
+def _fmt(v) -> str:
+    try:
+        if pd.isna(v):
+            return "-"
+        return f"{int(round(float(v))):,}"
+    except Exception:
+        return "-"
 
 
-def _signed_pp(value) -> str:
-    if pd.isna(value):
-        return "—"
-    v = float(value)
-    return f"+{v:.1f}" if v > 0 else f"{v:.1f}"
+def _delta(v) -> str:
+    try:
+        if pd.isna(v):
+            return "-"
+        n = int(round(float(v)))
+        if n > 0:
+            return f"+{n:,}"
+        return f"{n:,}"
+    except Exception:
+        return "-"
 
 
-def _delta_class(value) -> str:
-    if pd.isna(value):
-        return "flat"
-    if float(value) > 0:
-        return "good"
-    if float(value) < 0:
-        return "bad"
-    return "flat"
+def _delta_class(v) -> str:
+    try:
+        if pd.isna(v):
+            return "bt-delta-flat"
+        n = float(v)
+        if n > 0:
+            return "bt-delta-up"
+        if n < 0:
+            return "bt-delta-down"
+        return "bt-delta-flat"
+    except Exception:
+        return "bt-delta-flat"
 
 
 # ---------------------------------------------------------------------
-# CURRENT METRICS
+# SUMMARY
 # ---------------------------------------------------------------------
 
-def _render_current_cards(history: pd.DataFrame):
+def _render_summary(history: pd.DataFrame) -> None:
     if history.empty:
         st.markdown(
-            '<div class="warn">NO DAILY BREADTH HISTORY YET · USE BACKFILL 20D TO INITIALISE THE SERIES</div>',
+            '<div class="bt-warn">NO CHARTINK BREADTH HISTORY STORED. USE SYNC CHARTINK.</div>',
             unsafe_allow_html=True,
         )
         return
@@ -122,44 +135,53 @@ def _render_current_cards(history: pd.DataFrame):
     latest = history.iloc[-1]
     previous = history.iloc[-2] if len(history) >= 2 else None
 
-    vals = []
-    for ma in (20, 50, 200):
-        col = f"above_{ma}dma"
-        pct_col = f"above_{ma}dma_pct"
-        now = float(latest[col])
-        pct = float(latest[pct_col]) if pd.notna(latest[pct_col]) else 0.0
-        delta = now - float(previous[col]) if previous is not None else None
-        vals.append((ma, now, pct, delta))
-
     cols = st.columns(4)
 
-    for i, (ma, count, pct, delta) in enumerate(vals):
-        with cols[i]:
-            delta_text = _signed_int(delta) if delta is not None else "—"
-            delta_class = _delta_class(delta) if delta is not None else "flat"
+    for col, ma in zip(cols[:3], (20, 50, 200)):
+        above = latest.get(f"above_{ma}dma")
+        below = latest.get(f"below_{ma}dma")
+
+        total = 0
+        try:
+            total = int(above) + int(below)
+        except Exception:
+            pass
+
+        pct = (float(above) / total * 100) if total and pd.notna(above) else 0.0
+
+        if previous is not None:
+            try:
+                d = int(above) - int(previous.get(f"above_{ma}dma"))
+            except Exception:
+                d = None
+        else:
+            d = None
+
+        dtext = "-" if d is None else _delta(d)
+        dclass = "bt-delta-flat" if d is None else _delta_class(d)
+
+        with col:
             st.markdown(
                 f"""
-                <div class="metric">
-                    <div class="metric-label">STOCKS ABOVE {ma} DMA</div>
-                    <div class="metric-value">{int(count)}</div>
-                    <div class="metric-sub">{pct:.1f}% · <span class="{delta_class}">Δ {delta_text} stocks</span></div>
+                <div class="bt-card">
+                    <div class="bt-label">ABOVE {ma} DMA</div>
+                    <div class="bt-value">{_fmt(above)}</div>
+                    <div class="bt-meta">
+                        {pct:.1f}% OF {total:,} · <span class="{dclass}">DELTA {dtext}</span>
+                    </div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
 
     with cols[3]:
-        universe = max(
-            int(latest.get("above_200dma_denom", 0) or 0),
-            int(latest.get("above_50dma_denom", 0) or 0),
-            int(latest.get("above_20dma_denom", 0) or 0),
-        )
+        date_text = pd.Timestamp(latest["date"]).strftime("%d %b %Y")
         st.markdown(
             f"""
-            <div class="metric">
-                <div class="metric-label">ELIGIBLE NSE STOCKS</div>
-                <div class="metric-value">{universe}</div>
-                <div class="metric-sub">LAST SESSION · {pd.Timestamp(latest['date']).strftime('%d %b %Y')}</div>
+            <div class="bt-card">
+                <div class="bt-label">LATEST CHARTINK SESSION</div>
+                <div class="bt-value">{date_text}</div>
+                <div class="bt-meta">ROWS STORED · {len(history):,}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -167,98 +189,114 @@ def _render_current_cards(history: pd.DataFrame):
 
 
 # ---------------------------------------------------------------------
-# HISTORY TABLE
+# GROUPED TABLE
 # ---------------------------------------------------------------------
 
-def _render_history_table(history: pd.DataFrame, lookback: int):
+def _render_grouped_table(history: pd.DataFrame, lookback: int) -> None:
     if history.empty:
         return
 
-    df = history.sort_values("date", ascending=False).head(lookback).copy()
+    df = history.sort_values("date").tail(lookback).copy()
 
-    # Counts / percentages are already in history. Changes are calculated
-    # from the full ascending series BEFORE truncation so the first visible
-    # row has the correct previous-session delta.
-    full = history.sort_values("date").copy()
     for ma in (20, 50, 200):
-        col = f"above_{ma}dma"
-        pct = f"above_{ma}dma_pct"
-        full[f"{ma}d_count_delta"] = full[col].diff()
-        full[f"{ma}d_pp_delta"] = full[pct].diff()
+        df[f"above_{ma}_delta"] = df[f"above_{ma}dma"].diff()
+        df[f"below_{ma}_delta"] = df[f"below_{ma}dma"].diff()
 
-    df = full.tail(lookback).sort_values("date", ascending=False).copy()
+    df = df.sort_values("date", ascending=False)
 
-    out = pd.DataFrame({
-        "DATE": df["date"].dt.strftime("%d %b %Y"),
-        ">20D": df["above_20dma"].astype("Int64"),
-        "Δ20D": df["20d_count_delta"].map(_signed_int),
-        "20D %": df["above_20dma_pct"].map(lambda x: f"{x:.1f}%" if pd.notna(x) else "—"),
-        "Δ20D pp": df["20d_pp_delta"].map(_signed_pp),
-        ">50D": df["above_50dma"].astype("Int64"),
-        "Δ50D": df["50d_count_delta"].map(_signed_int),
-        "50D %": df["above_50dma_pct"].map(lambda x: f"{x:.1f}%" if pd.notna(x) else "—"),
-        "Δ50D pp": df["50d_pp_delta"].map(_signed_pp),
-        ">200D": df["above_200dma"].astype("Int64"),
-        "Δ200D": df["200d_count_delta"].map(_signed_int),
-        "200D %": df["above_200dma_pct"].map(lambda x: f"{x:.1f}%" if pd.notna(x) else "—"),
-        "Δ200D pp": df["200d_pp_delta"].map(_signed_pp),
-    })
+    body = []
 
-    st.dataframe(
-        out,
-        use_container_width=True,
-        hide_index=True,
-        height=min(620, 43 + len(out) * 34),
-    )
+    for _, r in df.iterrows():
+        date_text = pd.Timestamp(r["date"]).strftime("%d %b %Y")
+        cells = [f'<td class="date">{date_text}</td>']
 
+        for ma in (20, 50, 200):
+            cells.append(f'<td>{_fmt(r[f"above_{ma}dma"])}</td>')
+            cells.append(
+                f'<td><span class="{_delta_class(r[f"above_{ma}_delta"])}">'
+                f'{_delta(r[f"above_{ma}_delta"])}</span></td>'
+            )
+            cells.append(f'<td>{_fmt(r[f"below_{ma}dma"])}</td>')
+            cells.append(
+                f'<td><span class="{_delta_class(r[f"below_{ma}_delta"])}">'
+                f'{_delta(r[f"below_{ma}_delta"])}</span></td>'
+            )
 
-# ---------------------------------------------------------------------
-# MAIN RENDER FUNCTION — REQUIRED BY app.py
-# ---------------------------------------------------------------------
-
-def render_market_breadth():
-    """
-    Main F7 entry point.
-
-    Deliberately NO network call here. This function must be cheap enough to
-    render immediately when the user taps F7, and changing the lookback must
-    only filter already-loaded history.
-    """
-
-    _css()
+        body.append("<tr>" + "".join(cells) + "</tr>")
 
     st.markdown(
-        """
-        <div class="breadth-top">
-            <div class="brand">▲ ARKA TRADES</div>
-            <div class="module">F7&nbsp;&nbsp; MARKET BREADTH</div>
-            <div class="status">● DAILY EOD · NSE EQUITIES</div>
+        f"""
+        <div class="bt-table-wrap">
+            <table class="bt-table">
+                <thead>
+                    <tr class="group">
+                        <th rowspan="2">DATE</th>
+                        <th colspan="2">ABOVE 20DMA</th>
+                        <th colspan="2">BELOW 20DMA</th>
+                        <th colspan="2">ABOVE 50DMA</th>
+                        <th colspan="2">BELOW 50DMA</th>
+                        <th colspan="2">ABOVE 200DMA</th>
+                        <th colspan="2">BELOW 200DMA</th>
+                    </tr>
+                    <tr class="sub">
+                        <th>COUNT</th><th>DELTA</th>
+                        <th>COUNT</th><th>DELTA</th>
+                        <th>COUNT</th><th>DELTA</th>
+                        <th>COUNT</th><th>DELTA</th>
+                        <th>COUNT</th><th>DELTA</th>
+                        <th>COUNT</th><th>DELTA</th>
+                    </tr>
+                </thead>
+                <tbody>{''.join(body)}</tbody>
+            </table>
+        </div>
+        <div class="bt-info" style="margin-top:8px;">
+            DELTA = CHANGE IN STOCK COUNT VS PREVIOUS CHARTINK BREADTH SESSION.
+            DATA SOURCE = CHARTINK DASHBOARD 86550.
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    st.markdown('<div class="title">MARKET BREADTH</div>', unsafe_allow_html=True)
+
+# ---------------------------------------------------------------------
+# MAIN ENTRY POINT
+# ---------------------------------------------------------------------
+
+def render_market_breadth() -> None:
+    _css()
+
     st.markdown(
-        '<div class="subtitle">DAILY MARKET PARTICIPATION · 20 / 50 / 200 DMA · COMPLETED NSE TRADING SESSIONS</div>',
+        """
+        <div class="bt-top">
+            <div class="bt-brand">ARKA TRADES</div>
+            <div class="bt-module">F7 MARKET BREADTH</div>
+            <div class="bt-status">CHARTINK · DAILY EOD</div>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
 
-    # IMPORTANT: this is only a local file read, so F7 opens immediately.
-    history = load_history()
+    st.markdown(
+        '<div class="bt-title">MARKET BREADTH</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="bt-sub">DAILY MARKET PARTICIPATION · SOURCE: CHARTINK DASHBOARD 86550 · 20 / 50 / 200 DMA</div>',
+        unsafe_allow_html=True,
+    )
 
-    # Controls. Lookback selector NEVER triggers market-data download.
-    c1, c2, c3, c4 = st.columns([1.05, 1.15, 1.0, 3.4])
+    c1, c2, c3, c4 = st.columns([1.2, 1.0, 1.0, 3.5])
 
     with c1:
-        update_btn = st.button(
-            "UPDATE TODAY",
+        sync_btn = st.button(
+            "SYNC CHARTINK",
             use_container_width=True,
         )
 
     with c2:
-        backfill_btn = st.button(
-            "BACKFILL 20D",
+        clear_btn = st.button(
+            "CLEAR LOCAL",
             use_container_width=True,
         )
 
@@ -266,170 +304,84 @@ def render_market_breadth():
         lookback = st.selectbox(
             "LOOKBACK",
             [20, 50, 90, 180],
-            index=1,
+            index=0,
             label_visibility="collapsed",
         )
 
     with c4:
         st.markdown(
-            '<div class="info" style="margin-top:0;">DAILY ONLY · NO INTRADAY REFRESH · Δ = CHANGE VS PREVIOUS TRADING SESSION · SELECTING LOOKBACK DOES NOT FETCH DATA</div>',
+            '<div class="bt-info">NO NETWORK REQUEST ON PAGE OPEN OR LOOKBACK CHANGE. SYNC IS THE ONLY CHARTINK REQUEST.</div>',
             unsafe_allow_html=True,
         )
 
-    # -----------------------------------------------------------------
-    # EXPLICIT UPDATE
-    # -----------------------------------------------------------------
-    if update_btn:
-        with st.spinner("Updating completed NSE session…"):
-            try:
-                symbols, source = get_nse_universe()
-                result = update_today(symbols)
-            except Exception as exc:
-                result = {"error": str(exc)}
-                source = "unavailable"
-
-        if result.get("error"):
-            st.error(result["error"])
-        else:
-            st.success(
-                f"Updated {result.get('date', 'latest session')} · {result.get('source', source)}"
-            )
+    if clear_btn:
+        from breadth_engine import HISTORY_FILE
+        try:
+            HISTORY_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
         st.rerun()
 
-    # -----------------------------------------------------------------
-    # EXPLICIT BACKFILL
-    # -----------------------------------------------------------------
-    if backfill_btn:
-        with st.spinner("Building 20 trading sessions of daily breadth…"):
+    if sync_btn:
+        with st.spinner("Syncing Market Breadth from Chartink..."):
             try:
-                symbols, source = get_nse_universe()
-                result = backfill_history_from_bhavcopy(
-                    symbols,
-                    days=20,
+                result = sync_chartink(force=True)
+                st.success(
+                    f"Chartink synced · {result['rows']} source rows · "
+                    f"latest {result['latest_date']}"
                 )
             except Exception as exc:
-                result = {
-                    "days_written": 0,
-                    "error": str(exc),
-                }
-                source = "unavailable"
-
-        if result.get("days_written", 0) > 0:
-            st.success(
-                f"Built {result['days_written']} sessions "
-                f"({result['date_range'][0]} → {result['date_range'][1]})."
-            )
-        else:
-            st.error(
-                result.get(
-                    "error",
-                    "Backfill failed.",
+                st.markdown(
+                    f'<div class="bt-error">CHARTINK SYNC FAILED\n\n{exc}</div>',
+                    unsafe_allow_html=True,
                 )
-            )
-        st.rerun()
+                return
 
-    # -----------------------------------------------------------------
-    # REFRESH LOCAL HISTORY ONLY
-    # -----------------------------------------------------------------
     history = load_history()
 
-    _render_current_cards(history)
-
     if history.empty:
+        _render_summary(history)
         st.markdown(
-            '<div class="warn">THE UI IS READY. NO NETWORK REQUEST WAS MADE ON PAGE OPEN. PRESS BACKFILL 20D ONCE TO BUILD THE FIRST DAILY SERIES.</div>',
+            '<div class="bt-warn">THE LOCAL DATABASE IS EMPTY. PRESS SYNC CHARTINK ONCE TO IMPORT THE DAILY SERIES FROM DASHBOARD 86550.</div>',
             unsafe_allow_html=True,
         )
         return
 
-    latest_date = history.iloc[-1]["date"]
-    last_dt = pd.Timestamp(latest_date).strftime("%d %b %Y")
+    _render_summary(history)
 
     st.markdown(
-        f'<div class="info">LAST STORED SESSION · {last_dt} · HISTORY ROWS · {len(history)} · DAILY / EOD</div>',
+        '<div class="bt-title" style="font-size:12px;margin-top:18px;">DAILY MA BREADTH HISTORY</div>',
         unsafe_allow_html=True,
     )
 
-    # -----------------------------------------------------------------
-    # DAILY TABLE
-    # -----------------------------------------------------------------
-    st.markdown(
-        '<div class="panel-title">DAILY MA BREADTH HISTORY</div>',
-        unsafe_allow_html=True,
-    )
-    _render_history_table(history, lookback)
+    _render_grouped_table(history, lookback)
 
-    # -----------------------------------------------------------------
-    # TREND CHART — LOCAL DATA ONLY
-    # -----------------------------------------------------------------
     st.markdown(
-        '<div class="panel-title">MA PARTICIPATION TREND</div>',
+        '<div class="bt-title" style="font-size:12px;margin-top:18px;">PARTICIPATION TREND</div>',
         unsafe_allow_html=True,
     )
 
-    chart = history.sort_values("date").tail(lookback).set_index("date")
-    chart = chart[
-        [
-            "above_20dma_pct",
-            "above_50dma_pct",
-            "above_200dma_pct",
-        ]
-    ].copy()
-    chart.columns = [
-        "Above 20 DMA %",
-        "Above 50 DMA %",
-        "Above 200 DMA %",
-    ]
+    chart = history.sort_values("date").tail(lookback).copy()
+    chart = chart.set_index("date")
+
+    for ma in (20, 50, 200):
+        above = pd.to_numeric(chart[f"above_{ma}dma"], errors="coerce")
+        below = pd.to_numeric(chart[f"below_{ma}dma"], errors="coerce")
+        denom = (above + below).replace(0, pd.NA)
+        chart[f"Above {ma}DMA %"] = above / denom * 100
 
     st.line_chart(
-        chart,
-        height=290,
+        chart[[
+            "Above 20DMA %",
+            "Above 50DMA %",
+            "Above 200DMA %",
+        ]],
+        height=280,
         use_container_width=True,
     )
 
-    # -----------------------------------------------------------------
-    # MARKET INTERNALS
-    # -----------------------------------------------------------------
+    source = history.iloc[-1].get("source", "Chartink dashboard 86550")
     st.markdown(
-        '<div class="panel-title">MARKET INTERNALS</div>',
-        unsafe_allow_html=True,
-    )
-
-    internals = compute_ad_line_and_mcclellan(
-        history.sort_values("date").tail(lookback)
-    )
-    latest = internals.iloc[-1]
-
-    i1, i2, i3, i4 = st.columns(4)
-    cards = [
-        ("ADVANCES", int(latest["advances"])),
-        ("DECLINES", int(latest["declines"])),
-        (
-            "NET ADVANCES",
-            int(latest["advances"] - latest["declines"]),
-        ),
-        (
-            "MCCLELLAN",
-            f"{float(latest['mcclellan']):.1f}",
-        ),
-    ]
-
-    for col, (label, value) in zip([i1, i2, i3, i4], cards):
-        with col:
-            st.markdown(
-                f"""
-                <div class="metric">
-                    <div class="metric-label">{label}</div>
-                    <div class="metric-value">{value}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-    # -----------------------------------------------------------------
-    # FOOTER
-    # -----------------------------------------------------------------
-    st.markdown(
-        '<div class="info">DATA MODEL · DAILY CLOSES · SIMPLE MOVING AVERAGE · ONE OBSERVATION PER COMPLETED NSE SESSION · LOOKBACK IS A DISPLAY FILTER ONLY</div>',
+        f'<div class="bt-info">SOURCE · {source} · DAILY / EOD · LOCAL HISTORY {len(history):,} ROWS</div>',
         unsafe_allow_html=True,
     )
