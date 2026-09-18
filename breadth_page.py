@@ -1,25 +1,17 @@
-"""
-breadth_page.py — Daily Market Breadth for Arka Trades.
-
-Purpose:
-    Track how many NSE stocks are above their 20 / 50 / 200 DMA
-    on each trading day and show the day-over-day change.
-
-Example:
-
-Date          >20 DMA     Δ20      >50 DMA     Δ50      >200 DMA    Δ200
-18 Sep 2026    1421       +86       1237       +43        984        +21
-17 Sep 2026    1335       -12       1194       +17        963         +8
-16 Sep 2026    1347       +51       1177       +32        955         -4
-
-The purpose is NOT to create an arbitrary market score.
-
-It is a historical participation monitor:
-    - Are more stocks moving above the 20 DMA?
-    - Is participation expanding through the 50 DMA?
-    - Is long-term participation improving through the 200 DMA?
-    - How quickly is the breadth changing?
-"""
+# breadth_page.py
+# Arka Trades — F7 Market Breadth
+# DAILY / EOD MARKET BREADTH
+#
+# Requires:
+#   breadth_engine.py
+#
+# Main data:
+#   NSE equities
+#   20 DMA / 50 DMA / 200 DMA
+#   Daily historical participation
+#
+# IMPORTANT:
+# This page is DAILY only. It does not run intraday refresh logic.
 
 import streamlit as st
 import pandas as pd
@@ -30,251 +22,491 @@ from breadth_engine import (
     append_history,
     load_history,
     backfill_history_from_bhavcopy,
-    _eod_cache_key,
+    compute_ad_line_and_mcclellan,
 )
 
 
-# ================================================================
-# TERMINAL PALETTE
-# ================================================================
+# ═════════════════════════════════════════════════════════════════════
+# PAGE CONFIG
+# ═════════════════════════════════════════════════════════════════════
 
-BG = "#05070A"
-PANEL = "#0B0F14"
-PANEL_2 = "#10151C"
-BORDER = "#202832"
-
-TEXT = "#E7EBF0"
-MUTED = "#7F8A99"
-
-GREEN = "#30D158"
-RED = "#FF453A"
-AMBER = "#FF9F0A"
-BLUE = "#3B82F6"
+st.set_page_config(
+    page_title="Arka Trades — Market Breadth",
+    page_icon="",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
 
-# ================================================================
-# HELPERS
-# ================================================================
+# ═════════════════════════════════════════════════════════════════════
+# TERMINAL CSS
+# ═════════════════════════════════════════════════════════════════════
 
-def _safe_int(value):
-    try:
-        return int(value)
-    except Exception:
-        return 0
-
-
-def _format_change(value):
+st.markdown(
     """
-    Format daily breadth change.
+    <style>
 
-    +86
-    -12
-    0
+    /* ─────────────────────────────────────────────
+       GLOBAL
+    ───────────────────────────────────────────── */
+
+    .stApp {
+        background:#050505;
+        color:#d7dbe0;
+    }
+
+    .block-container {
+        padding-top:0.65rem;
+        padding-left:0.55rem;
+        padding-right:0.55rem;
+        padding-bottom:2rem;
+        max-width:100%;
+    }
+
+    header[data-testid="stHeader"] {
+        background:#050505;
+    }
+
+    section[data-testid="stSidebar"] {
+        display:none;
+    }
+
+    /* ─────────────────────────────────────────────
+       TOP TERMINAL BAR
+    ───────────────────────────────────────────── */
+
+    .terminal-top {
+        height:38px;
+        border-top:1px solid #24282d;
+        border-bottom:1px solid #24282d;
+        display:flex;
+        align-items:center;
+        justify-content:space-between;
+        padding:0 10px;
+        margin-bottom:8px;
+        font-family:monospace;
+    }
+
+    .terminal-brand {
+        font-size:13px;
+        font-weight:700;
+        letter-spacing:.4px;
+        color:#e7ebef;
+    }
+
+    .terminal-module {
+        font-size:11px;
+        letter-spacing:1px;
+        color:#e7a51a;
+        font-weight:700;
+    }
+
+    .terminal-status {
+        font-size:9px;
+        letter-spacing:1px;
+        color:#4d8b58;
+    }
+
+    /* ─────────────────────────────────────────────
+       SECTION TITLES
+    ───────────────────────────────────────────── */
+
+    .section-title {
+        font-family:monospace;
+        font-size:18px;
+        font-weight:700;
+        letter-spacing:.5px;
+        color:#e5e8eb;
+        margin-top:5px;
+        margin-bottom:2px;
+    }
+
+    .section-subtitle {
+        font-family:monospace;
+        font-size:10px;
+        letter-spacing:.5px;
+        color:#6f7882;
+        margin-bottom:12px;
+    }
+
+    .panel-title {
+        font-family:monospace;
+        font-size:11px;
+        font-weight:700;
+        letter-spacing:.7px;
+        color:#c9cdd2;
+        padding-bottom:7px;
+        border-bottom:1px solid #252a2f;
+        margin-bottom:8px;
+    }
+
+    /* ─────────────────────────────────────────────
+       METRIC BLOCKS
+    ───────────────────────────────────────────── */
+
+    .breadth-card {
+        background:#090a0c;
+        border:1px solid #252a30;
+        padding:11px 12px;
+        min-height:83px;
+    }
+
+    .breadth-label {
+        font-family:monospace;
+        font-size:9px;
+        letter-spacing:.8px;
+        color:#737c86;
+        margin-bottom:6px;
+    }
+
+    .breadth-value {
+        font-family:monospace;
+        font-size:23px;
+        line-height:1;
+        font-weight:700;
+        color:#e8ebee;
+    }
+
+    .breadth-meta {
+        font-family:monospace;
+        font-size:9px;
+        color:#69727c;
+        margin-top:8px;
+    }
+
+    .positive {
+        color:#55a96a !important;
+    }
+
+    .negative {
+        color:#d55b5b !important;
+    }
+
+    .neutral {
+        color:#9aa2aa !important;
+    }
+
+    /* ─────────────────────────────────────────────
+       INFO STRIP
+    ───────────────────────────────────────────── */
+
+    .info-strip {
+        border-top:1px solid #22272c;
+        border-bottom:1px solid #22272c;
+        padding:7px 9px;
+        margin:9px 0 12px 0;
+        font-family:monospace;
+        font-size:9px;
+        color:#6e7781;
+        letter-spacing:.25px;
+    }
+
+    /* ─────────────────────────────────────────────
+       TABLE
+    ───────────────────────────────────────────── */
+
+    div[data-testid="stDataFrame"] {
+        border:1px solid #24292e;
+    }
+
+    /* ─────────────────────────────────────────────
+       BUTTONS
+    ───────────────────────────────────────────── */
+
+    .stButton > button {
+        border:1px solid #353b42;
+        background:#0b0d10;
+        color:#d4d8dc;
+        border-radius:1px;
+        font-family:monospace;
+        font-size:10px;
+        min-height:31px;
+    }
+
+    .stButton > button:hover {
+        border-color:#e7a51a;
+        color:#e7a51a;
+        background:#0d0e10;
+    }
+
+    /* ─────────────────────────────────────────────
+       SELECTBOX
+    ───────────────────────────────────────────── */
+
+    div[data-baseweb="select"] > div {
+        background:#090a0c;
+        border-color:#30353b;
+        border-radius:1px;
+        min-height:32px;
+    }
+
+    /* ─────────────────────────────────────────────
+       ALERTS
+    ───────────────────────────────────────────── */
+
+    div[data-testid="stAlert"] {
+        border-radius:1px;
+        font-family:monospace;
+        font-size:10px;
+    }
+
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# TOP BAR
+# ═════════════════════════════════════════════════════════════════════
+
+st.markdown(
     """
-    if value is None:
-        return "—"
-
-    value = _safe_int(value)
-
-    if value > 0:
-        return f"+{value:,}"
-    if value < 0:
-        return f"{value:,}"
-
-    return "0"
+    <div class="terminal-top">
+        <div class="terminal-brand">▲ ARKA TRADES</div>
+        <div class="terminal-module">F7&nbsp;&nbsp; MARKET BREADTH</div>
+        <div class="terminal-status">● EOD MARKET DATA · NSE EQUITIES</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 
-def _change_class(value):
-    """
-    Returns a simple semantic class used for the HTML table.
-    """
-    if value is None:
-        return "neutral"
+# ═════════════════════════════════════════════════════════════════════
+# HEADER
+# ═════════════════════════════════════════════════════════════════════
 
-    value = _safe_int(value)
+st.markdown(
+    '<div class="section-title">MARKET BREADTH</div>',
+    unsafe_allow_html=True,
+)
 
-    if value > 0:
-        return "positive"
-
-    if value < 0:
-        return "negative"
-
-    return "neutral"
-
-
-def _pct_change(current, previous):
-    """
-    Percentage-point style change based on stock counts.
-
-    This is NOT a stock price percentage return.
-
-    Example:
-        1200 / 2000 = 60%
-        1300 / 2000 = 65%
-
-        change = +5.0 percentage points
-    """
-    if current is None or previous is None:
-        return None
-
-    try:
-        return float(current) - float(previous)
-    except Exception:
-        return None
+st.markdown(
+    '<div class="section-subtitle">'
+    'DAILY MARKET PARTICIPATION · NSE EQUITIES · MOVING-AVERAGE BREADTH'
+    '</div>',
+    unsafe_allow_html=True,
+)
 
 
-def _history_with_changes(history):
-    """
-    Prepare historical breadth table.
+# ═════════════════════════════════════════════════════════════════════
+# CONTROLS
+# ═════════════════════════════════════════════════════════════════════
 
-    The dataframe is sorted oldest -> newest for calculations.
+c1, c2, c3, c4 = st.columns(
+    [1.0, 1.0, 1.0, 3.5]
+)
 
-    Daily change:
-        today's count - previous trading day's count
-
-    Then the final dataframe is returned newest -> oldest,
-    matching the way traders normally read a daily breadth table.
-    """
-
-    if history is None or history.empty:
-        return pd.DataFrame()
-
-    df = history.copy()
-
-    if "date" not in df.columns:
-        return pd.DataFrame()
-
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-
-    df = (
-        df.dropna(subset=["date"])
-        .sort_values("date")
-        .drop_duplicates("date", keep="last")
-        .reset_index(drop=True)
+with c1:
+    refresh = st.button(
+        "REFRESH",
+        use_container_width=True,
     )
 
-    required = [
-        "above_20dma",
-        "above_50dma",
-        "above_200dma",
-    ]
+with c2:
+    backfill = st.button(
+        "BACKFILL 20D",
+        use_container_width=True,
+    )
 
-    for col in required:
-        if col not in df.columns:
-            df[col] = 0
+with c3:
+    history_days = st.selectbox(
+        "HISTORY",
+        [20, 50, 90, 180],
+        index=1,
+        label_visibility="collapsed",
+    )
 
-        df[col] = pd.to_numeric(
-            df[col],
-            errors="coerce"
-        ).fillna(0).astype(int)
-
-    # ------------------------------------------------------------
-    # DAILY CHANGE
-    # ------------------------------------------------------------
-
-    df["change_20dma"] = df["above_20dma"].diff()
-    df["change_50dma"] = df["above_50dma"].diff()
-    df["change_200dma"] = df["above_200dma"].diff()
-
-    # Keep first historical day without a previous comparison.
-    df["change_20dma"] = df["change_20dma"].astype("Int64")
-    df["change_50dma"] = df["change_50dma"].astype("Int64")
-    df["change_200dma"] = df["change_200dma"].astype("Int64")
-
-    return df.sort_values("date", ascending=False).reset_index(drop=True)
+with c4:
+    st.markdown(
+        """
+        <div class="info-strip" style="margin-top:0;">
+        DAILY TIMEFRAME · ONE OBSERVATION PER COMPLETED NSE SESSION
+        · Δ = CHANGE VS PREVIOUS TRADING SESSION
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
-def _get_period_change(history, column, sessions):
-    """
-    Return:
-        current value
-        value N sessions ago
-        absolute change
+# ═════════════════════════════════════════════════════════════════════
+# UNIVERSE
+# ═════════════════════════════════════════════════════════════════════
 
-    Example:
-        current >20 DMA = 1421
-        5 sessions ago = 1100
-        change = +321
-    """
+try:
 
-    if history is None or history.empty:
-        return None, None, None
+    symbols, universe_source = get_nse_universe()
 
-    df = history.sort_values("date").reset_index(drop=True)
+except Exception as e:
 
-    if column not in df.columns:
-        return None, None, None
+    st.error(
+        f"Universe error: {e}"
+    )
 
-    if len(df) <= sessions:
-        return None, None, None
+    symbols = []
+
+    universe_source = "unavailable"
+
+
+if not symbols:
+
+    st.error(
+        "No NSE universe available."
+    )
+
+    st.stop()
+
+
+# ═════════════════════════════════════════════════════════════════════
+# BACKFILL
+# ═════════════════════════════════════════════════════════════════════
+
+if backfill:
+
+    with st.spinner(
+        "Backfilling daily breadth history..."
+    ):
+
+        result = backfill_history_from_bhavcopy(
+            symbols,
+            days=20,
+        )
+
+    if result.get("days_written", 0) > 0:
+
+        st.success(
+            f"Backfilled {result['days_written']} "
+            f"trading sessions."
+        )
+
+    else:
+
+        st.warning(
+            result.get(
+                "error",
+                "Backfill did not produce any sessions."
+            )
+        )
+
+
+# ═════════════════════════════════════════════════════════════════════
+# CURRENT SNAPSHOT
+# ═════════════════════════════════════════════════════════════════════
+
+with st.spinner(
+    "Loading daily market breadth..."
+):
 
     try:
-        current = int(df[column].iloc[-1])
-        previous = int(df[column].iloc[-1 - sessions])
-        return current, previous, current - previous
+
+        snapshot = compute_breadth_snapshot(
+            symbols
+        )
+
+    except Exception as e:
+
+        snapshot = {
+            "error": str(e)
+        }
+
+
+if snapshot.get("error"):
+
+    st.error(
+        snapshot["error"]
+    )
+
+    st.stop()
+
+
+# ═════════════════════════════════════════════════════════════════════
+# SAVE CURRENT SESSION
+# ═════════════════════════════════════════════════════════════════════
+
+try:
+
+    append_history(
+        snapshot
+    )
+
+except Exception:
+    pass
+
+
+# ═════════════════════════════════════════════════════════════════════
+# LOAD HISTORY
+# ═════════════════════════════════════════════════════════════════════
+
+history = load_history()
+
+if history.empty:
+
+    st.warning(
+        "No historical breadth records available yet. "
+        "Use BACKFILL 20D to build the daily history."
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════
+# MA PARTICIPATION — CURRENT
+# ═════════════════════════════════════════════════════════════════════
+
+st.markdown(
+    '<div class="panel-title">'
+    'CURRENT MA PARTICIPATION'
+    '</div>',
+    unsafe_allow_html=True,
+)
+
+
+def _pct(
+    value,
+    denominator
+):
+    try:
+
+        if denominator <= 0:
+            return 0.0
+
+        return (
+            float(value)
+            / float(denominator)
+            * 100
+        )
+
     except Exception:
-        return None, None, None
+
+        return 0.0
 
 
-def _render_change(value):
-    if value is None:
-        return '<span class="change neutral">—</span>'
+p20 = _pct(
+    snapshot["above_20dma"],
+    snapshot["above_20dma_denom"],
+)
 
-    value = _safe_int(value)
+p50 = _pct(
+    snapshot["above_50dma"],
+    snapshot["above_50dma_denom"],
+)
 
-    if value > 0:
-        return f'<span class="change positive">+{value:,}</span>'
-
-    if value < 0:
-        return f'<span class="change negative">{value:,}</span>'
-
-    return '<span class="change neutral">0</span>'
+p200 = _pct(
+    snapshot["above_200dma"],
+    snapshot["above_200dma_denom"],
+)
 
 
-# ================================================================
-# HEADER
-# ================================================================
+m1, m2, m3, m4 = st.columns(4)
 
-def _render_header():
+
+with m1:
+
     st.markdown(
         f"""
-        <div style="
-            display:flex;
-            align-items:flex-end;
-            justify-content:space-between;
-            border-bottom:1px solid {BORDER};
-            padding-bottom:12px;
-            margin-bottom:16px;
-        ">
-            <div>
-                <div style="
-                    font-family:'JetBrains Mono',monospace;
-                    font-size:20px;
-                    font-weight:700;
-                    color:{TEXT};
-                    letter-spacing:-0.3px;
-                ">
-                    MARKET BREADTH
-                </div>
-
-                <div style="
-                    margin-top:4px;
-                    font-family:'JetBrains Mono',monospace;
-                    font-size:11px;
-                    color:{MUTED};
-                ">
-                    DAILY MARKET PARTICIPATION · NSE EQUITIES
-                </div>
-            </div>
-
-            <div style="
-                font-family:'JetBrains Mono',monospace;
-                font-size:10px;
-                color:{MUTED};
-                text-align:right;
-            ">
-                TIMEFRAME<br>
-                <span style="color:{TEXT};font-weight:700;">DAILY</span>
+        <div class="breadth-card">
+            <div class="breadth-label">ABOVE 20 DMA</div>
+            <div class="breadth-value">{snapshot["above_20dma"]}</div>
+            <div class="breadth-meta">
+                {p20:.1f}% OF ELIGIBLE STOCKS
             </div>
         </div>
         """,
@@ -282,846 +514,512 @@ def _render_header():
     )
 
 
-# ================================================================
-# TOP SUMMARY
-# ================================================================
+with m2:
 
-def _render_summary(history):
-    if history is None or history.empty:
-        return
+    st.markdown(
+        f"""
+        <div class="breadth-card">
+            <div class="breadth-label">ABOVE 50 DMA</div>
+            <div class="breadth-value">{snapshot["above_50dma"]}</div>
+            <div class="breadth-meta">
+                {p50:.1f}% OF ELIGIBLE STOCKS
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    latest = history.sort_values("date").iloc[-1]
 
-    metrics = [
-        (
-            "ABOVE 20 DMA",
-            _safe_int(latest.get("above_20dma")),
-            latest.get("change_20dma"),
-            BLUE,
-        ),
-        (
-            "ABOVE 50 DMA",
-            _safe_int(latest.get("above_50dma")),
-            latest.get("change_50dma"),
-            AMBER,
-        ),
-        (
-            "ABOVE 200 DMA",
-            _safe_int(latest.get("above_200dma")),
-            latest.get("change_200dma"),
-            GREEN,
-        ),
-    ]
+with m3:
 
-    cols = st.columns(3)
+    st.markdown(
+        f"""
+        <div class="breadth-card">
+            <div class="breadth-label">ABOVE 200 DMA</div>
+            <div class="breadth-value">{snapshot["above_200dma"]}</div>
+            <div class="breadth-meta">
+                {p200:.1f}% OF ELIGIBLE STOCKS
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    for col, (label, value, change, accent) in zip(cols, metrics):
-        if change is None or pd.isna(change):
-            change_text = "—"
-            change_color = MUTED
-        elif int(change) > 0:
-            change_text = f"+{int(change):,}"
-            change_color = GREEN
-        elif int(change) < 0:
-            change_text = f"{int(change):,}"
-            change_color = RED
-        else:
-            change_text = "0"
-            change_color = MUTED
 
-        with col:
-            st.markdown(
-                f"""
-                <div style="
-                    background:{PANEL};
-                    border:1px solid {BORDER};
-                    border-top:2px solid {accent};
-                    padding:13px 15px;
-                    min-height:92px;
-                ">
-                    <div style="
-                        font-family:'JetBrains Mono',monospace;
-                        font-size:10px;
-                        color:{MUTED};
-                        letter-spacing:.8px;
-                    ">
-                        {label}
-                    </div>
+with m4:
 
-                    <div style="
-                        display:flex;
-                        align-items:baseline;
-                        gap:10px;
-                        margin-top:7px;
-                    ">
-                        <div style="
-                            font-family:'JetBrains Mono',monospace;
-                            font-size:24px;
-                            font-weight:700;
-                            color:{TEXT};
-                        ">
-                            {value:,}
-                        </div>
+    st.markdown(
+        f"""
+        <div class="breadth-card">
+            <div class="breadth-label">NSE UNIVERSE</div>
+            <div class="breadth-value">{snapshot["total_stocks"]}</div>
+            <div class="breadth-meta">
+                {snapshot["date"]} · EOD
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-                        <div style="
-                            font-family:'JetBrains Mono',monospace;
-                            font-size:13px;
-                            font-weight:700;
-                            color:{change_color};
-                        ">
-                            {change_text}
-                        </div>
-                    </div>
 
-                    <div style="
-                        margin-top:3px;
-                        font-family:'JetBrains Mono',monospace;
-                        font-size:9px;
-                        color:{MUTED};
-                    ">
-                        vs previous trading session
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
+# ═════════════════════════════════════════════════════════════════════
+# DAILY TABLE
+# ═════════════════════════════════════════════════════════════════════
+
+st.markdown(
+    '<div class="panel-title" style="margin-top:18px;">'
+    'DAILY MA BREADTH HISTORY'
+    '</div>',
+    unsafe_allow_html=True,
+)
+
+
+if not history.empty:
+
+    hist = history.copy()
+
+    hist = (
+        hist
+        .sort_values("date", ascending=False)
+        .head(history_days)
+        .copy()
+    )
+
+    # ─────────────────────────────────────────────
+    # ENSURE PERCENTAGES EXIST
+    # ─────────────────────────────────────────────
+
+    for ma in ["20", "50", "200"]:
+
+        pct_col = f"above_{ma}dma_pct"
+
+        above_col = f"above_{ma}dma"
+
+        denom_col = f"above_{ma}dma_denom"
+
+        if pct_col not in hist.columns:
+
+            denom = pd.to_numeric(
+                hist[denom_col],
+                errors="coerce",
             )
 
+            above = pd.to_numeric(
+                hist[above_col],
+                errors="coerce",
+            )
 
-# ================================================================
-# DAILY BREADTH TABLE
-# ================================================================
+            hist[pct_col] = (
+                above
+                / denom.replace(
+                    0,
+                    pd.NA,
+                )
+                * 100
+            )
 
-def _render_daily_table(history):
+        hist[pct_col] = pd.to_numeric(
+            hist[pct_col],
+            errors="coerce",
+        )
+
+        # Change in percentage points.
+        hist[f"{ma}d_pp"] = (
+            hist[pct_col]
+            .diff(-1)
+        )
+
+        # Change in actual number of stocks.
+        hist[f"{ma}d_count_change"] = (
+            pd.to_numeric(
+                hist[above_col],
+                errors="coerce",
+            )
+            .diff(-1)
+        )
+
+
+    # ─────────────────────────────────────────────
+    # DISPLAY TABLE
+    # ─────────────────────────────────────────────
+
+    display = pd.DataFrame()
+
+    display["DATE"] = hist[
+        "date"
+    ].dt.strftime(
+        "%d %b %Y"
+    )
+
+    display["20D"] = (
+        hist["above_20dma"]
+        .astype("Int64")
+    )
+
+    display["Δ20D"] = (
+        hist["20d_count_change"]
+        .apply(
+            lambda x:
+            "—"
+            if pd.isna(x)
+            else (
+                f"+{int(x)}"
+                if x > 0
+                else str(int(x))
+            )
+        )
+    )
+
+    display["20D %"] = (
+        hist["above_20dma_pct"]
+        .apply(
+            lambda x:
+            "—"
+            if pd.isna(x)
+            else f"{x:.1f}%"
+        )
+    )
+
+    display["Δ20D pp"] = (
+        hist["20d_pp"]
+        .apply(
+            lambda x:
+            "—"
+            if pd.isna(x)
+            else (
+                f"+{x:.1f}"
+                if x > 0
+                else f"{x:.1f}"
+            )
+        )
+    )
+
+    display["50D"] = (
+        hist["above_50dma"]
+        .astype("Int64")
+    )
+
+    display["Δ50D"] = (
+        hist["50d_count_change"]
+        .apply(
+            lambda x:
+            "—"
+            if pd.isna(x)
+            else (
+                f"+{int(x)}"
+                if x > 0
+                else str(int(x))
+            )
+        )
+    )
+
+    display["50D %"] = (
+        hist["above_50dma_pct"]
+        .apply(
+            lambda x:
+            "—"
+            if pd.isna(x)
+            else f"{x:.1f}%"
+        )
+    )
+
+    display["Δ50D pp"] = (
+        hist["50d_pp"]
+        .apply(
+            lambda x:
+            "—"
+            if pd.isna(x)
+            else (
+                f"+{x:.1f}"
+                if x > 0
+                else f"{x:.1f}"
+            )
+        )
+    )
+
+    display["200D"] = (
+        hist["above_200dma"]
+        .astype("Int64")
+    )
+
+    display["Δ200D"] = (
+        hist["200d_count_change"]
+        .apply(
+            lambda x:
+            "—"
+            if pd.isna(x)
+            else (
+                f"+{int(x)}"
+                if x > 0
+                else str(int(x))
+            )
+        )
+    )
+
+    display["200D %"] = (
+        hist["above_200dma_pct"]
+        .apply(
+            lambda x:
+            "—"
+            if pd.isna(x)
+            else f"{x:.1f}%"
+        )
+    )
+
+    display["Δ200D pp"] = (
+        hist["200d_pp"]
+        .apply(
+            lambda x:
+            "—"
+            if pd.isna(x)
+            else (
+                f"+{x:.1f}"
+                if x > 0
+                else f"{x:.1f}"
+            )
+        )
+    )
+
+
+    # ─────────────────────────────────────────────
+    # STYLE
+    # ─────────────────────────────────────────────
+
+    def _style_table(
+        df
+    ):
+
+        return (
+            df.style
+            .format(
+                na_rep="—"
+            )
+            .set_properties(
+                **{
+                    "font-family":
+                        "monospace",
+
+                    "font-size":
+                        "11px",
+
+                    "background-color":
+                        "#08090b",
+
+                    "color":
+                        "#d7dbe0",
+
+                    "border-color":
+                        "#24292e",
+                }
+            )
+        )
+
+
+    st.dataframe(
+        display,
+        use_container_width=True,
+        hide_index=True,
+        height=min(
+            680,
+            44 + len(display) * 35
+        ),
+    )
+
+
+else:
+
     st.markdown(
-        f"""
-        <div style="
-            margin-top:22px;
-            margin-bottom:8px;
-            font-family:'JetBrains Mono',monospace;
-            font-size:12px;
-            font-weight:700;
-            color:{TEXT};
-            letter-spacing:.5px;
-        ">
-            DAILY BREADTH HISTORY
+        """
+        <div class="info-strip">
+        NO DAILY HISTORY AVAILABLE.
+        USE BACKFILL 20D TO BUILD THE HISTORICAL SERIES.
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    if history.empty:
-        st.info("No breadth history available yet.")
-        return
 
-    df = history.copy()
+# ═════════════════════════════════════════════════════════════════════
+# TREND CHART
+# ═════════════════════════════════════════════════════════════════════
 
-    # ------------------------------------------------------------
-    # Display newest first
-    # ------------------------------------------------------------
-
-    rows = []
-
-    for _, row in df.iterrows():
-        date_value = row["date"]
-
-        try:
-            date_text = pd.Timestamp(date_value).strftime("%d %b %Y")
-        except Exception:
-            date_text = str(date_value)
-
-        c20 = row.get("change_20dma")
-        c50 = row.get("change_50dma")
-        c200 = row.get("change_200dma")
-
-        if pd.isna(c20):
-            c20 = None
-        if pd.isna(c50):
-            c50 = None
-        if pd.isna(c200):
-            c200 = None
-
-        rows.append(
-            {
-                "Date": date_text,
-
-                ">20 DMA": f"{_safe_int(row.get('above_20dma')):,}",
-                "Δ 20D": _format_change(c20),
-
-                ">50 DMA": f"{_safe_int(row.get('above_50dma')):,}",
-                "Δ 50D": _format_change(c50),
-
-                ">200 DMA": f"{_safe_int(row.get('above_200dma')):,}",
-                "Δ 200D": _format_change(c200),
-            }
-        )
-
-    # ------------------------------------------------------------
-    # HTML table
-    # ------------------------------------------------------------
-
-    html = f"""
-    <div style="
-        border:1px solid {BORDER};
-        background:{PANEL};
-        overflow-x:auto;
-        margin-bottom:20px;
-    ">
-        <table style="
-            width:100%;
-            border-collapse:collapse;
-            font-family:'JetBrains Mono',monospace;
-            font-size:11px;
-        ">
-            <thead>
-                <tr style="
-                    background:{PANEL_2};
-                    border-bottom:1px solid {BORDER};
-                ">
-                    <th style="
-                        padding:9px 12px;
-                        text-align:left;
-                        color:{MUTED};
-                        font-weight:600;
-                        white-space:nowrap;
-                    ">DATE</th>
-
-                    <th style="
-                        padding:9px 12px;
-                        text-align:right;
-                        color:{MUTED};
-                        font-weight:600;
-                        white-space:nowrap;
-                    ">ABOVE 20 DMA</th>
-
-                    <th style="
-                        padding:9px 12px;
-                        text-align:right;
-                        color:{MUTED};
-                        font-weight:600;
-                        white-space:nowrap;
-                    ">Δ</th>
-
-                    <th style="
-                        padding:9px 12px;
-                        text-align:right;
-                        color:{MUTED};
-                        font-weight:600;
-                        white-space:nowrap;
-                    ">ABOVE 50 DMA</th>
-
-                    <th style="
-                        padding:9px 12px;
-                        text-align:right;
-                        color:{MUTED};
-                        font-weight:600;
-                        white-space:nowrap;
-                    ">Δ</th>
-
-                    <th style="
-                        padding:9px 12px;
-                        text-align:right;
-                        color:{MUTED};
-                        font-weight:600;
-                        white-space:nowrap;
-                    ">ABOVE 200 DMA</th>
-
-                    <th style="
-                        padding:9px 12px;
-                        text-align:right;
-                        color:{MUTED};
-                        font-weight:600;
-                        white-space:nowrap;
-                    ">Δ</th>
-                </tr>
-            </thead>
-
-            <tbody>
-    """
-
-    for index, row in enumerate(rows):
-        border_bottom = (
-            f"border-bottom:1px solid {BORDER};"
-            if index < len(rows) - 1
-            else ""
-        )
-
-        html += f"""
-            <tr style="{border_bottom}">
-                <td style="
-                    padding:9px 12px;
-                    color:{TEXT};
-                    font-weight:{'700' if index == 0 else '500'};
-                    white-space:nowrap;
-                ">
-                    {row['Date']}
-                </td>
-
-                <td style="
-                    padding:9px 12px;
-                    text-align:right;
-                    color:{TEXT};
-                ">
-                    {row['>20 DMA']}
-                </td>
-
-                <td style="
-                    padding:9px 12px;
-                    text-align:right;
-                ">
-                    {_render_change(
-                        None
-                        if row['Δ 20D'] == "—"
-                        else int(row['Δ 20D'].replace(",", "").replace("+", ""))
-                    )}
-                </td>
-
-                <td style="
-                    padding:9px 12px;
-                    text-align:right;
-                    color:{TEXT};
-                ">
-                    {row['>50 DMA']}
-                </td>
-
-                <td style="
-                    padding:9px 12px;
-                    text-align:right;
-                ">
-                    {_render_change(
-                        None
-                        if row['Δ 50D'] == "—"
-                        else int(row['Δ 50D'].replace(",", "").replace("+", ""))
-                    )}
-                </td>
-
-                <td style="
-                    padding:9px 12px;
-                    text-align:right;
-                    color:{TEXT};
-                ">
-                    {row['>200 DMA']}
-                </td>
-
-                <td style="
-                    padding:9px 12px;
-                    text-align:right;
-                ">
-                    {_render_change(
-                        None
-                        if row['Δ 200D'] == "—"
-                        else int(row['Δ 200D'].replace(",", "").replace("+", ""))
-                    )}
-                </td>
-            </tr>
-        """
-
-    html += """
-            </tbody>
-        </table>
-    </div>
-    """
-
-    st.markdown(html, unsafe_allow_html=True)
-
-
-# ================================================================
-# BREADTH TREND CHART
-# ================================================================
-
-def _render_trend_chart(history):
-    if history is None or history.empty:
-        return
+if not history.empty:
 
     st.markdown(
-        f"""
-        <div style="
-            margin-top:18px;
-            margin-bottom:8px;
-            font-family:'JetBrains Mono',monospace;
-            font-size:12px;
-            font-weight:700;
-            color:{TEXT};
-            letter-spacing:.5px;
-        ">
-            MARKET BREADTH TREND
-        </div>
-
-        <div style="
-            font-family:'JetBrains Mono',monospace;
-            font-size:10px;
-            color:{MUTED};
-            margin-bottom:10px;
-        ">
-            NUMBER OF NSE STOCKS ABOVE MOVING AVERAGE
-        </div>
-        """,
+        '<div class="panel-title" style="margin-top:18px;">'
+        'MA PARTICIPATION TREND'
+        '</div>',
         unsafe_allow_html=True,
     )
 
     chart_df = history.copy()
 
-    chart_df["date"] = pd.to_datetime(
-        chart_df["date"],
-        errors="coerce"
-    )
-
     chart_df = (
         chart_df
-        .dropna(subset=["date"])
         .sort_values("date")
+        .tail(history_days)
         .set_index("date")
     )
 
-    chart_df = chart_df[
-        [
-            "above_20dma",
-            "above_50dma",
-            "above_200dma",
+    chart_cols = [
+        c for c in [
+            "above_20dma_pct",
+            "above_50dma_pct",
+            "above_200dma_pct",
         ]
-    ].rename(
-        columns={
-            "above_20dma": ">20 DMA",
-            "above_50dma": ">50 DMA",
-            "above_200dma": ">200 DMA",
-        }
-    )
-
-    if chart_df.empty:
-        return
-
-    st.line_chart(
-        chart_df,
-        height=360,
-        use_container_width=True,
-    )
-
-
-# ================================================================
-# PERIOD CHANGE
-# ================================================================
-
-def _render_period_change(history):
-    st.markdown(
-        f"""
-        <div style="
-            margin-top:20px;
-            margin-bottom:8px;
-            font-family:'JetBrains Mono',monospace;
-            font-size:12px;
-            font-weight:700;
-            color:{TEXT};
-            letter-spacing:.5px;
-        ">
-            BREADTH CHANGE
-        </div>
-
-        <div style="
-            font-family:'JetBrains Mono',monospace;
-            font-size:10px;
-            color:{MUTED};
-            margin-bottom:10px;
-        ">
-            CHANGE IN NUMBER OF STOCKS ABOVE EACH MOVING AVERAGE
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    periods = [
-        ("1D", 1),
-        ("3D", 3),
-        ("5D", 5),
-        ("10D", 10),
-        ("20D", 20),
+        if c in chart_df.columns
     ]
 
-    cols = st.columns(len(periods))
+    if chart_cols:
 
-    for col, (label, sessions) in zip(cols, periods):
+        chart_display = chart_df[
+            chart_cols
+        ].copy()
 
-        with col:
-
-            values = []
-
-            for column in [
-                "above_20dma",
-                "above_50dma",
-                "above_200dma",
-            ]:
-                current, previous, change = _get_period_change(
-                    history,
-                    column,
-                    sessions,
-                )
-
-                values.append(change)
-
-            c20, c50, c200 = values
-
-            def value_html(value):
-                if value is None:
-                    return (
-                        f'<span style="color:{MUTED};">—</span>'
-                    )
-
-                value = int(value)
-
-                if value > 0:
-                    color = GREEN
-                    prefix = "+"
-                elif value < 0:
-                    color = RED
-                    prefix = ""
-                else:
-                    color = MUTED
-                    prefix = ""
-
-                return (
-                    f'<span style="color:{color};">'
-                    f'{prefix}{value:,}'
-                    f'</span>'
-                )
-
-            st.markdown(
-                f"""
-                <div style="
-                    background:{PANEL};
-                    border:1px solid {BORDER};
-                    padding:12px 13px;
-                    min-height:115px;
-                ">
-                    <div style="
-                        font-family:'JetBrains Mono',monospace;
-                        font-size:10px;
-                        font-weight:700;
-                        color:{TEXT};
-                        margin-bottom:10px;
-                    ">
-                        {label}
-                    </div>
-
-                    <div style="
-                        font-family:'JetBrains Mono',monospace;
-                        font-size:10px;
-                        color:{MUTED};
-                        line-height:2;
-                    ">
-                        <div>
-                            20 DMA&nbsp;&nbsp;
-                            <b style="font-size:11px;">
-                                {value_html(c20)}
-                            </b>
-                        </div>
-
-                        <div>
-                            50 DMA&nbsp;&nbsp;
-                            <b style="font-size:11px;">
-                                {value_html(c50)}
-                            </b>
-                        </div>
-
-                        <div>
-                            200 DMA
-                            <b style="font-size:11px;">
-                                {value_html(c200)}
-                            </b>
-                        </div>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
+        chart_display.columns = [
+            c.replace(
+                "above_",
+                "Above "
             )
+            .replace(
+                "dma_pct",
+                " DMA %"
+            )
+            for c in chart_display.columns
+        ]
+
+        st.line_chart(
+            chart_display,
+            height=300,
+            use_container_width=True,
+        )
 
 
-# ================================================================
-# DATA SOURCE / STATUS
-# ================================================================
+# ═════════════════════════════════════════════════════════════════════
+# ADVANCE / DECLINE
+# ═════════════════════════════════════════════════════════════════════
 
-def _render_status(snapshot, universe_source, history):
-    if snapshot is None:
-        return
-
-    source = snapshot.get("source", "Unknown")
-
-    if "Bhavcopy" in source:
-        source_color = GREEN
-    elif "fallback" in source.lower():
-        source_color = AMBER
-    else:
-        source_color = MUTED
-
-    date_text = snapshot.get("date", "Unknown")
+if not history.empty:
 
     st.markdown(
-        f"""
-        <div style="
-            display:flex;
-            justify-content:space-between;
-            align-items:center;
-            margin-top:16px;
-            padding:8px 11px;
-            background:{PANEL};
-            border:1px solid {BORDER};
-            font-family:'JetBrains Mono',monospace;
-            font-size:9px;
-            color:{MUTED};
-        ">
-            <div>
-                DATA DATE:
-                <span style="color:{TEXT};">
-                    {date_text}
-                </span>
-            </div>
-
-            <div>
-                HISTORY:
-                <span style="color:{TEXT};">
-                    {len(history)} sessions
-                </span>
-            </div>
-
-            <div>
-                SOURCE:
-                <span style="color:{source_color};">
-                    {source}
-                </span>
-            </div>
-
-            <div>
-                STOCKS:
-                <span style="color:{TEXT};">
-                    {_safe_int(snapshot.get("total_stocks")):,}
-                </span>
-            </div>
-        </div>
-        """,
+        '<div class="panel-title" style="margin-top:18px;">'
+        'MARKET INTERNALS'
+        '</div>',
         unsafe_allow_html=True,
     )
 
+    internal = history.copy()
 
-# ================================================================
-# MAIN PAGE
-# ================================================================
-
-def render_market_breadth():
-
-    _render_header()
-
-    # ------------------------------------------------------------
-    # CONTROLS
-    # ------------------------------------------------------------
-
-    refresh_col, backfill_col, spacer = st.columns([1, 1, 4])
-
-    with refresh_col:
-        run_scan = st.button(
-            "REFRESH",
-            use_container_width=True,
-            help=(
-                "Refresh the current daily breadth snapshot. "
-                "The engine resolves the latest completed NSE trading session."
-            ),
-        )
-
-    with backfill_col:
-        run_backfill = st.button(
-            "BACKFILL 20D",
-            use_container_width=True,
-            help=(
-                "Build the recent daily breadth history using the "
-                "NSE price history already fetched by the breadth engine."
-            ),
-        )
-
-    st.caption(
-        "Daily timeframe · One breadth observation per completed NSE trading session · "
-        "Δ = change versus previous trading session"
+    internal = (
+        internal
+        .sort_values("date")
+        .tail(history_days)
     )
 
-    # ------------------------------------------------------------
-    # MANUAL REFRESH
-    # ------------------------------------------------------------
+    internal = compute_ad_line_and_mcclellan(
+        internal
+    )
 
-    if run_scan:
-        st.session_state.pop("breadth_snapshot", None)
-        st.session_state.pop("breadth_session_key", None)
+    x1, x2, x3, x4 = st.columns(4)
 
-    # ------------------------------------------------------------
-    # BACKFILL
-    # ------------------------------------------------------------
+    latest = internal.iloc[-1]
 
-    if run_backfill:
+    with x1:
 
-        with st.spinner(
-            "Building the last 20 trading sessions of market breadth..."
+        st.markdown(
+            f"""
+            <div class="breadth-card">
+                <div class="breadth-label">ADVANCES</div>
+                <div class="breadth-value">
+                    {int(latest["advances"])}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with x2:
+
+        st.markdown(
+            f"""
+            <div class="breadth-card">
+                <div class="breadth-label">DECLINES</div>
+                <div class="breadth-value">
+                    {int(latest["declines"])}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with x3:
+
+        net = (
+            int(latest["advances"])
+            - int(latest["declines"])
+        )
+
+        sign = "+" if net > 0 else ""
+
+        st.markdown(
+            f"""
+            <div class="breadth-card">
+                <div class="breadth-label">NET ADVANCES</div>
+                <div class="breadth-value">
+                    {sign}{net}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with x4:
+
+        if (
+            "mcclellan" in internal.columns
+            and pd.notna(
+                latest.get("mcclellan")
+            )
         ):
 
-            tickers, universe_source = get_nse_universe()
-
-            summary = backfill_history_from_bhavcopy(
-                tickers,
-                days=20,
+            mc = float(
+                latest["mcclellan"]
             )
 
-        if summary.get("days_written", 0) > 0:
-
-            oldest, newest = summary["date_range"]
-
-            st.success(
-                f"Backfilled {summary['days_written']} trading sessions "
-                f"({oldest} → {newest})."
-            )
+            mc_text = f"{mc:.1f}"
 
         else:
 
-            st.error(
-                summary.get(
-                    "error",
-                    "Unable to backfill breadth history.",
-                )
-            )
+            mc_text = "—"
 
-        # Re-read history after backfill.
-        st.session_state["breadth_history"] = load_history()
-
-    # ------------------------------------------------------------
-    # SESSION BOUNDARY
-    # ------------------------------------------------------------
-
-    current_session_key = _eod_cache_key()
-
-    stored_session_key = st.session_state.get(
-        "breadth_session_key"
-    )
-
-    if (
-        stored_session_key is not None
-        and stored_session_key != current_session_key
-    ):
-
-        st.session_state.pop("breadth_snapshot", None)
-
-        st.toast(
-            "New trading session detected — refreshing daily breadth."
+        st.markdown(
+            f"""
+            <div class="breadth-card">
+                <div class="breadth-label">MCCLELLAN</div>
+                <div class="breadth-value">
+                    {mc_text}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
-    # ------------------------------------------------------------
-    # CURRENT SNAPSHOT
-    # ------------------------------------------------------------
 
-    if "breadth_snapshot" not in st.session_state:
+# ═════════════════════════════════════════════════════════════════════
+# FOOTER / DATA SOURCE
+# ═════════════════════════════════════════════════════════════════════
 
-        with st.spinner(
-            "Computing daily NSE market breadth..."
-        ):
-
-            tickers, universe_source = get_nse_universe()
-
-            snapshot = compute_breadth_snapshot(tickers)
-
-            if "error" not in snapshot:
-                append_history(snapshot)
-
-            st.session_state["breadth_snapshot"] = snapshot
-            st.session_state["breadth_universe_source"] = (
-                universe_source
-            )
-            st.session_state["breadth_session_key"] = (
-                current_session_key
-            )
-
-    # ------------------------------------------------------------
-    # LOAD STATE
-    # ------------------------------------------------------------
-
-    snapshot = st.session_state.get(
-        "breadth_snapshot",
-        {},
-    )
-
-    universe_source = st.session_state.get(
-        "breadth_universe_source",
-        "Unknown",
-    )
-
-    history = load_history()
-
-    # ------------------------------------------------------------
-    # ERROR
-    # ------------------------------------------------------------
-
-    if "error" in snapshot:
-
-        st.error(
-            f"Market breadth computation failed: "
-            f"{snapshot['error']}"
-        )
-
-        st.caption(
-            "Try REFRESH again. The engine uses official NSE Bhavcopy "
-            "data first and yfinance as fallback."
-        )
-
-        return
-
-    # ------------------------------------------------------------
-    # SUMMARY
-    # ------------------------------------------------------------
-
-    _render_summary(history)
-
-    # ------------------------------------------------------------
-    # STATUS
-    # ------------------------------------------------------------
-
-    _render_status(
-        snapshot,
-        universe_source,
-        history,
-    )
-
-    # ------------------------------------------------------------
-    # DAILY TABLE
-    # ------------------------------------------------------------
-
-    _render_daily_table(
-        _history_with_changes(history)
-    )
-
-    # ------------------------------------------------------------
-    # TREND
-    # ------------------------------------------------------------
-
-    _render_trend_chart(history)
-
-    # ------------------------------------------------------------
-    # PERIOD CHANGES
-    # ------------------------------------------------------------
-
-    _render_period_change(history)
-
-    # ------------------------------------------------------------
-    # FOOTNOTE
-    # ------------------------------------------------------------
-
-    st.markdown(
-        f"""
-        <div style="
-            margin-top:18px;
-            padding-top:10px;
-            border-top:1px solid {BORDER};
-            font-family:'JetBrains Mono',monospace;
-            font-size:9px;
-            color:{MUTED};
-            line-height:1.7;
-        ">
-            ABOVE DMA = stocks whose closing price was above the
-            corresponding simple moving average on that trading session.
-            <br>
-            DAILY Δ = current session count minus the previous completed
-            trading session. Stocks without sufficient price history for
-            a particular DMA are excluded from that DMA's denominator.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+st.markdown(
+    f"""
+    <div class="info-strip" style="margin-top:18px;">
+        SOURCE · {universe_source}
+        &nbsp;&nbsp;|&nbsp;&nbsp;
+        TIMEFRAME · DAILY
+        &nbsp;&nbsp;|&nbsp;&nbsp;
+        MA · SIMPLE MOVING AVERAGE
+        &nbsp;&nbsp;|&nbsp;&nbsp;
+        SESSION · COMPLETED NSE TRADING DAY
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
