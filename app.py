@@ -200,7 +200,7 @@ def icon_box(name, color=None, size=32):
             f'border:1px solid {c}33;display:flex;align-items:center;justify-content:center;'
             f'margin-bottom:10px;">{icon(name, 16, c)}</div>')
 
-for k, v in {"logged_in":False,"disclaimer_done":False,"show_login":False,"page":"home",
+for k, v in {"logged_in":False,"disclaimer_done":True,"show_login":False,"page":"home",
     "profile":{"name":"Trader","email":"","phone":""},"profile_photo":None,"watchlist":[],
     "admin_watchlist":[],"alerts":{},"alert_fired":set(),"db_loaded":False,"is_admin":False,
     "active_news_source":"admin","show_news_rail":True,"active_security":""}.items():
@@ -809,39 +809,10 @@ else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=s;}
         Trading involves risk — decisions and outcomes are entirely your own.</div></div>""", unsafe_allow_html=True)
     st.stop()
 
-# ════════════════ DISCLAIMER ═════════════════════════════════
-if not st.session_state.disclaimer_done:
-    st.markdown("<div style='padding:0 16px;'>", unsafe_allow_html=True)
-    _, col, _ = st.columns([1,3,1])
-    with col:
-        st.markdown(f"""<div style="padding:48px 0 20px;text-align:center;">
-            <div style="font-size:30px;font-weight:800;color:{IVORY};">Disclaimer &amp; Terms</div>
-            <div style="font-size:13px;color:{T2};margin-top:6px;margin-bottom:24px;">Read all terms carefully before continuing</div></div>
-        <div style="background:{DARK2};border:1px solid {BORDER};border-radius:0;padding:24px;font-size:13px;color:{T2};line-height:2;max-height:260px;overflow-y:auto;margin-bottom:20px;">
-            <strong style="color:{AMBER}">1. No Financial Advice</strong><br>Arka Trades does not provide financial or investment advice. Educational only.<br><br>
-            <strong style="color:{AMBER}">2. Not SEBI Registered</strong><br>We are not registered with SEBI as investment advisor or research analyst.<br><br>
-            <strong style="color:{AMBER}">3. Personal Responsibility</strong><br>All trading decisions are yours. You bear full responsibility for profits or losses.<br><br>
-            <strong style="color:{AMBER}">4. Data Accuracy</strong><br>Market data may be delayed. We do not guarantee accuracy of any data shown.<br><br>
-            <strong style="color:{AMBER}">5. Personal Use Only</strong><br>For personal educational use only. Not for commercial distribution.</div>""", unsafe_allow_html=True)
-        t1 = st.checkbox("I understand this platform is for educational use only")
-        t2 = st.checkbox("I acknowledge Arka Trades is not SEBI registered")
-        t3 = st.checkbox("I accept full responsibility for my own trading decisions")
-        t4 = st.checkbox("I agree to the Terms and Conditions above")
-        all_ok = t1 and t2 and t3 and t4
-        c1,c2 = st.columns(2)
-        with c1:
-            if st.button("Cancel", use_container_width=True):
-                st.session_state.logged_in = False; st.rerun()
-        with c2:
-            if st.button("Accept and Enter", use_container_width=True, type="primary", disabled=not all_ok):
-                st.session_state.disclaimer_done = True
-                st.toast(f"Welcome back, {name}!"); st.rerun()
-        if not all_ok:
-            st.caption("Accept all 4 terms above to continue")
-    st.markdown("</div>", unsafe_allow_html=True)
-    st.stop()
-
 # ════════════════ MAIN APP ═══════════════════════════════════
+# Terms are presented on the public landing page; authenticated users go
+# directly into the terminal. This avoids a session-reset disclaimer loop.
+
 # ════════════════ MAIN APP — ARKA TERMINAL v4 ════════════════
 # The authenticated workspace is now a single terminal rather than a
 # permanent left-sidebar application. Search is the primary entry point;
@@ -1205,20 +1176,38 @@ else:
     if pg in module_titles:
         _render_module_page_header(*module_titles[pg])
 
-# News rail toggle: the rail stays on the RIGHT, in the same location.
-tg1, tg2 = st.columns([8.8, 1.2])
-with tg2:
-    toggle_label = "HIDE NEWS ▸" if st.session_state.show_news_rail else "◂ SHOW NEWS"
-    if st.button(toggle_label, key="toggle_news_rail_v5", use_container_width=True):
-        st.session_state.show_news_rail = not st.session_state.show_news_rail
-        st.rerun()
+# ── RIGHT NEWS RAIL — isolated fragment so hide/show never reruns the terminal ──
+# Streamlit fragments rerun only the fragment when its widgets are used.
+# This keeps the news interaction responsive and prevents a news refresh from
+# rebuilding the market header, security chart, scanner, or research workspace.
 
 if st.session_state.show_news_rail:
     center, right_rail = st.columns([4.55, 1.15])
 else:
-    center = st.container()
-    right_rail = None
+    center, right_rail = st.columns([4.55, 1.15])
 
+@st.fragment
+def _news_rail_fragment():
+    toggle_label = "HIDE NEWS ▸" if st.session_state.show_news_rail else "◂ SHOW NEWS"
+    if st.button(toggle_label, key="toggle_news_rail_fast", use_container_width=True):
+        st.session_state.show_news_rail = not st.session_state.show_news_rail
+        st.rerun(scope="fragment")
+
+    if not st.session_state.show_news_rail:
+        st.markdown(f'<div class="news-rail-collapsed">MARKET NEWS <span>HIDDEN</span></div>', unsafe_allow_html=True)
+        return
+
+    st.markdown(f"""<div style="position:sticky;top:8px;" class="news-rail" id="arka-news-rail-col">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 4px 8px;border-bottom:1px solid {BORDER};margin-bottom:8px;">
+            <span style="font-family:{MONO};font-size:11px;font-weight:800;color:{AMBER};letter-spacing:1.5px;">MARKET NEWS</span><span class="pulse-dot"></span>
+        </div>""", unsafe_allow_html=True)
+    watchlist_for_news, rail_label = _news_watchlist_for_rail()
+    if not watchlist_for_news:
+        st.markdown(f'<div style="font-size:11px;color:{T2};padding:8px 4px;">Macro/global news updates below. Add a watchlist in Scanner for stock-specific news.</div>',unsafe_allow_html=True)
+    render_news_rail(watchlist_for_news, label=rail_label)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# Render the workspace first. The news fragment is independent of it.
 with center:
     if pg == "home":
         _render_dashboard()
@@ -1231,7 +1220,6 @@ with center:
             _render_security_workspace(active)
     elif pg == "scanner":
         # Keep existing scanner module, now without a sidebar.
-        # This block intentionally mirrors the existing implementation.
         if not st.session_state.admin_watchlist:
             awl = db_load_admin_watchlist()
             if awl: st.session_state.admin_watchlist = awl
@@ -1239,14 +1227,13 @@ with center:
             wl = db_load_watchlist()
             if wl: st.session_state.watchlist = wl
         def render_scan_results(syms, key_prefix=""):
-            sc1,sc2,sc3,sc4 = st.columns([1,1,1,2])
-            filt = sc1.selectbox("Show",["All","Above PDH","Below PDL","In Range"], key=f"filt_v4_{key_prefix}")
-            refresh_now = sc2.button("Refresh Data", key=f"refresh_scan_{key_prefix}")
-            sc3.caption("Cached quotes")
-            sc4.caption("No blocking auto-refresh")
-            scanbtn = sc4.button("Run Scan", use_container_width=True, type="primary", key=f"scan_v4_{key_prefix}")
+            sc1,sc2,sc3,sc4=st.columns([1,1,1,2])
+            filt=sc1.selectbox("Show",["All","Above PDH","Below PDL","In Range"],key=f"filt_v4_{key_prefix}")
+            refresh_after=sc2.checkbox("Refresh after scan",key=f"refresh_after_{key_prefix}")
+            sc3.caption("Cached")
+            scanbtn=sc4.button("Run Scan",use_container_width=True,type="primary",key=f"scan_v4_{key_prefix}")
             if scanbtn:
-                st.session_state["active_news_source"] = key_prefix
+                st.session_state["active_news_source"]=key_prefix
                 results,failed=[],[]
                 bar=st.progress(0,text="Scanning...")
                 for i,sym in enumerate(syms):
@@ -1259,6 +1246,7 @@ with center:
                     bar.progress((i+1)/len(syms),text=f"Fetching {sym}...")
                 bar.empty(); check_alerts(results)
                 st.session_state[f"results_{key_prefix}"]=results; st.session_state[f"failed_{key_prefix}"]=failed
+                if refresh_after: st.toast("Scan completed; cached quotes remain available for fast navigation.")
             results=st.session_state.get(f"results_{key_prefix}",[]); failed=st.session_state.get(f"failed_{key_prefix}",[])
             if results:
                 filtered=results
@@ -1277,8 +1265,6 @@ with center:
                     with cols7[i%4]:
                         if st.button("OPEN",key=f"open_scan_{key_prefix}_{s['sym']}",use_container_width=True): _open_security(s["sym"])
                 if failed: st.caption(f"Skipped: {', '.join(failed)}")
-                if refresh_now:
-                    st.cache_data.clear(); st.rerun()
         tab1,tab2=st.tabs(["Arka Watchlist","Your Watchlist"])
         with tab1:
             if IS_ADMIN:
@@ -1298,7 +1284,6 @@ with center:
             if syms: render_scan_results(syms,"yours_v4")
             else: st.info("Upload your TradingView watchlist above to start scanning.")
     elif pg == "alerts":
-        # Existing alert manager is preserved in a compact terminal wrapper.
         active_alerts={s:a for s,a in st.session_state.alerts.items() if a.get("active")}
         a1,a2,a3=st.columns(3); a1.metric("Active Alerts",len(active_alerts)); a2.metric("Triggered Today",len(st.session_state.alert_fired)); a3.metric("Delivery","Telegram")
         tabs=st.tabs(["Arka Watchlist","Your Watchlist"])
@@ -1306,9 +1291,7 @@ with center:
             for sym in list(dict.fromkeys(watchlist)):
                 a=st.session_state.alerts.get(sym,{}); active=bool(a.get("active"))
                 c1,c2,c3,c4=st.columns([2,1.2,1.4,1])
-                c1.markdown(f"**{sym}**")
-                c2.write("ACTIVE" if active else "INACTIVE")
-                c3.write(a.get("type","—").upper() if active else "—")
+                c1.markdown(f"**{sym}**"); c2.write("ACTIVE" if active else "INACTIVE"); c3.write(a.get("type","—").upper() if active else "—")
                 if c4.button("OFF" if active else "SET",key=f"alertact_{suffix}_{sym}"):
                     if active:
                         del st.session_state.alerts[sym]; db_delete_alert(sym); st.rerun()
@@ -1328,12 +1311,10 @@ with center:
         with tabs[0]: alert_block(st.session_state.get("admin_watchlist",[]),"admin")
         with tabs[1]: alert_block(st.session_state.get("watchlist",[]),"yours")
     elif pg == "research":
-        if st.session_state.get("active_security"):
-            st.session_state["research_last_query"] = st.session_state["active_security"]
-        render_research_page(TERM_TOKENS, news_fetch_fn=_fetch_news_for_stock)
+        if st.session_state.get("active_security"): st.session_state["research_last_query"]=st.session_state["active_security"]
+        render_research_page(TERM_TOKENS,news_fetch_fn=_fetch_news_for_stock)
     elif pg == "analysis":
-        if st.session_state.get("active_security"):
-            st.session_state["m1_ticker"] = st.session_state["active_security"]
+        if st.session_state.get("active_security"): st.session_state["m1_ticker"]=st.session_state["active_security"]
         render_arka_ai()
     elif pg == "smart_scan":
         from smart_scan_page import render_smart_scanner
@@ -1342,8 +1323,7 @@ with center:
         try:
             from breadth_page import render_market_breadth
             render_market_breadth()
-        except Exception as e:
-            st.error(f"Market Breadth module failed to load: {e}")
+        except Exception as e: st.error(f"Market Breadth module failed to load: {e}")
     elif pg == "profile":
         p1,p2=st.columns([1,2])
         with p1:
@@ -1364,19 +1344,5 @@ with center:
     elif pg == "contact":
         st.markdown(f'<div class="term-panel"><div class="panel-title">CONTACT</div><div style="color:{T2};line-height:1.8;">Questions, feedback or suggestions?<br>Contact the Arka Trades desk through the configured support email.</div></div>',unsafe_allow_html=True)
 
-# ── RIGHT NEWS RAIL: deliberately kept in the same right-side position ──
-if right_rail is not None:
-    with right_rail:
-        st.markdown(f"""<div style="position:sticky;top:8px;" class="news-rail" id="arka-news-rail-col">
-            <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 4px 8px;border-bottom:1px solid {BORDER};margin-bottom:8px;">
-                <span style="font-family:{MONO};font-size:11px;font-weight:800;color:{AMBER};letter-spacing:1.5px;">MARKET NEWS</span><span class="pulse-dot"></span>
-            </div><div id="news-rail-inner">""", unsafe_allow_html=True)
-        watchlist_for_news, rail_label = _news_watchlist_for_rail()
-        if not watchlist_for_news:
-            st.markdown(f'<div style="font-size:11px;color:{T2};padding:8px 4px;">Macro/global news updates below. Add a watchlist in Scanner for stock-specific news.</div>',unsafe_allow_html=True)
-        render_news_rail(
-            watchlist_for_news,
-            label=rail_label,
-            current_security=st.session_state.get("active_security") or None,
-        )
-        st.markdown("</div></div>", unsafe_allow_html=True)
+with right_rail:
+    _news_rail_fragment()
