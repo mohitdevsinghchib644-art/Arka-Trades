@@ -52,15 +52,13 @@ MAX_LOCAL_ROWS = 500
 # This query is used only when the dashboard configuration cannot be
 # discovered from the public page. It still executes on Chartink, so the
 # source remains Chartink rather than Yahoo/NSE calculations.
-FALLBACK_QUERY = """
-select
-    groupcount( {cash} 1 where close > sma( close , 20 ) ) as 'Above20dma',
-    groupcount( {cash} 1 where close <= sma( close , 20 ) ) as 'Below20dma',
-    groupcount( {cash} 1 where close > sma( close , 50 ) ) as 'Above50dma',
-    groupcount( {cash} 1 where close <= sma( close , 50 ) ) as 'Below50dma',
-    groupcount( {cash} 1 where close > sma( close , 200 ) ) as 'Above200dma',
-    groupcount( {cash} 1 where close <= sma( close , 200 ) ) as 'Below200dma'
-""".strip()
+FALLBACK_QUERY = """select
+    groupcount( {cash} 1 where latest close > latest sma( close , 20 ) ) as 'Above20dma',
+    groupcount( {cash} 1 where latest close <= latest sma( close , 20 ) ) as 'Below20dma',
+    groupcount( {cash} 1 where latest close > latest sma( close , 50 ) ) as 'Above50dma',
+    groupcount( {cash} 1 where latest close <= latest sma( close , 50 ) ) as 'Below50dma',
+    groupcount( {cash} 1 where latest close > latest sma( close , 200 ) ) as 'Above200dma',
+    groupcount( {cash} 1 where latest close <= latest sma( close , 200 ) ) as 'Below200dma'""".strip()
 
 TARGET_ALIASES = {
     "Above20dma": "above_20dma",
@@ -184,7 +182,7 @@ def _discover_market_breadth_query(html: str) -> Optional[str]:
 # ---------------------------------------------------------------------
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
-def _fetch_chartink_raw_cached(cache_buster: int) -> tuple[dict[str, Any], str]:
+def _fetch_chartink_raw_cached(cache_buster: int) -> tuple[Any, str]:
     """
     One Chartink request per TTL.
 
@@ -225,10 +223,20 @@ def _fetch_chartink_raw_cached(cache_buster: int) -> tuple[dict[str, Any], str]:
     )
     response.raise_for_status()
 
-    payload = response.json()
+    try:
+        payload = response.json()
+    except Exception:
+        snippet = response.text[:500].replace("\n", " ")
+        raise RuntimeError(
+            f"Chartink did not return JSON (HTTP {response.status_code}). Response: {snippet}"
+        )
 
-    if not isinstance(payload, dict):
-        raise RuntimeError("Chartink returned an unexpected response format.")
+    # Chartink has used both object and array-like response envelopes over
+    # time. Do not reject a valid JSON list here; the normalizer handles it.
+    if not isinstance(payload, (dict, list)):
+        raise RuntimeError(
+            f"Chartink returned unsupported JSON type: {type(payload).__name__}"
+        )
 
     return payload, source
 
@@ -324,95 +332,105 @@ def _find_alias_series(obj: Any, aliases: list[str]) -> dict[str, list[Any]]:
     return found
 
 
-def _normalise_chartink_response(payload: dict[str, Any]) -> pd.DataFrame:
-    meta_list = payload.get("metaData") or payload.get("metadata") or []
+def _normalise_chartink_response(payload: Any) -> pd.DataFrame:
+    """Normalize Chartink's trend response.
+
+    The important Chartink shape is:
+        metaData[0].columnAliases
+        metaData[0].tradeTimes
+        groupData[*].results[*][alias] -> series
+
+    Some responses put the same objects under ``data`` or return a list
+    envelope, so those forms are handled too.
+    """
+    root = payload
+    if isinstance(root, list):
+        # Prefer a dict element containing Chartink metadata/groupData.
+        dict_items = [x for x in root if isinstance(x, dict)]
+        if dict_items:
+            root = next(
+                (x for x in dict_items if "metaData" in x or "groupData" in x or "data" in x),
+                dict_items[0],
+            )
+        else:
+            return pd.DataFrame()
+
+    if not isinstance(root, dict):
+        return pd.DataFrame()
+
+    meta_list = root.get("metaData") or root.get("metadata") or []
     meta = meta_list[0] if isinstance(meta_list, list) and meta_list else {}
+    if not isinstance(meta, dict):
+        meta = {}
 
     aliases = _flatten_aliases(meta)
-    aliases = [a for a in aliases if a]
-
     if not aliases:
         aliases = list(TARGET_ALIASES.keys())
 
     times = _normalise_times(
         meta.get("tradeTimes")
         or meta.get("trade_times")
-        or payload.get("tradeTimes")
+        or root.get("tradeTimes")
     )
 
-    raw = _find_alias_series(payload, aliases)
+    # First try the normal Chartink groupData structure.
+    series: dict[str, list[Any]] = {}
+    group_data = root.get("groupData")
+    if group_data is not None:
+        series.update(_find_alias_series(group_data, aliases))
+        if not series:
+            series.update(_find_alias_series(group_data, list(TARGET_ALIASES)))
 
-    # Fallback: find aliases case-insensitively even if Chartink changes their
-    # exact capitalization/spacing.
+    # Then try the generic data field used by some widget versions.
+    if not series and root.get("data") is not None:
+        series.update(_find_alias_series(root.get("data"), aliases))
+        if not series:
+            series.update(_find_alias_series(root.get("data"), list(TARGET_ALIASES)))
+
+    # Finally search the entire response recursively.
+    if not series:
+        series.update(_find_alias_series(root, aliases))
+        if not series:
+            series.update(_find_alias_series(root, list(TARGET_ALIASES)))
+
     canonical: dict[str, list[Any]] = {}
-    for raw_alias, values in raw.items():
-        key = raw_alias.strip().lower().replace(" ", "")
-        if key in ALIASES_LOWER:
-            canonical[ALIASES_LOWER[key]] = values
-
-    if not canonical:
-        # Search under all target aliases explicitly.
-        raw2 = _find_alias_series(payload, list(TARGET_ALIASES))
-        for raw_alias, values in raw2.items():
-            canonical[TARGET_ALIASES.get(raw_alias, raw_alias)] = values
+    for raw_alias, values in series.items():
+        key = str(raw_alias).strip().lower().replace(" ", "")
+        # tolerate Chartink variations such as Above 20dma / above20dma
+        normalized_key = re.sub(r"[^a-z0-9]", "", key)
+        for target, col in ALIASES_LOWER.items():
+            if normalized_key == re.sub(r"[^a-z0-9]", "", target):
+                canonical[col] = list(values)
+                break
 
     if not canonical:
         return pd.DataFrame()
 
-    # Determine the usable series length.
     lengths = [len(v) for v in canonical.values() if isinstance(v, list)]
     if not lengths:
         return pd.DataFrame()
-
     n = min(lengths)
 
+    # Chartink trend data should have one tradeTimes entry per value.
     if len(times) != n:
-        # If the response shape does not provide timestamps, align to the
-        # number of values and leave date blank rather than inventing dates.
-        times = pd.DatetimeIndex([pd.NaT] * n)
-    else:
-        times = times[:n]
+        return pd.DataFrame()
 
-    data: dict[str, Any] = {"date": times}
-
-    for col in (
-        "above_20dma",
-        "below_20dma",
-        "above_50dma",
-        "below_50dma",
-        "above_200dma",
-        "below_200dma",
-    ):
+    data: dict[str, Any] = {"date": times[:n]}
+    for col in TARGET_ALIASES.values():
         values = canonical.get(col)
         if values is None:
             data[col] = [pd.NA] * n
         else:
             data[col] = pd.to_numeric(
-                pd.Series(values[:n]),
-                errors="coerce",
+                pd.Series(values[:n]), errors="coerce"
             ).round().astype("Int64")
 
     df = pd.DataFrame(data)
-
-    # Remove rows which have no DMA counts at all.
-    numeric_cols = [c for c in data if c != "date"]
-    df = df.dropna(
-        subset=numeric_cols,
-        how="all",
-    )
-
-    if "date" in df.columns:
-        df["date"] = pd.to_datetime(
-            df["date"],
-            errors="coerce",
-        )
-        df = df.sort_values("date")
-
-    df = df.drop_duplicates(
-        subset=["date"],
-        keep="last",
-    )
-
+    numeric_cols = list(TARGET_ALIASES.values())
+    df = df.dropna(subset=numeric_cols, how="all")
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["date"])
+    df = df.sort_values("date").drop_duplicates("date", keep="last")
     return df.reset_index(drop=True)
 
 
