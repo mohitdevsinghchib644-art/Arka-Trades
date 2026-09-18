@@ -1,1025 +1,435 @@
-# breadth_page.py
-# Arka Trades — F7 Market Breadth
-# DAILY / EOD MARKET BREADTH
-#
-# Requires:
-#   breadth_engine.py
-#
-# Main data:
-#   NSE equities
-#   20 DMA / 50 DMA / 200 DMA
-#   Daily historical participation
-#
-# IMPORTANT:
-# This page is DAILY only. It does not run intraday refresh logic.
+"""
+Arka Trades — F7 Market Breadth UI
 
-import streamlit as st
+DAILY / EOD ONLY.
+
+Performance rule:
+The page must render from local history immediately. It must NOT perform
+network requests just because the user opens F7 or changes the history
+lookback selector.
+"""
+
+from __future__ import annotations
+
 import pandas as pd
+import streamlit as st
 
 from breadth_engine import (
     get_nse_universe,
-    compute_breadth_snapshot,
-    append_history,
+    get_latest_history_snapshot,
     load_history,
+    update_today,
+    append_history,
     backfill_history_from_bhavcopy,
     compute_ad_line_and_mcclellan,
 )
 
 
-# ═════════════════════════════════════════════════════════════════════
-# PAGE CONFIG
-# ═════════════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------------
+# CSS
+# ---------------------------------------------------------------------
 
-st.set_page_config(
-    page_title="Arka Trades — Market Breadth",
-    page_icon="",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
-
-
-# ═════════════════════════════════════════════════════════════════════
-# TERMINAL CSS
-# ═════════════════════════════════════════════════════════════════════
-
-st.markdown(
-    """
-    <style>
-
-    /* ─────────────────────────────────────────────
-       GLOBAL
-    ───────────────────────────────────────────── */
-
-    .stApp {
-        background:#050505;
-        color:#d7dbe0;
-    }
-
-    .block-container {
-        padding-top:0.65rem;
-        padding-left:0.55rem;
-        padding-right:0.55rem;
-        padding-bottom:2rem;
-        max-width:100%;
-    }
-
-    header[data-testid="stHeader"] {
-        background:#050505;
-    }
-
-    section[data-testid="stSidebar"] {
-        display:none;
-    }
-
-    /* ─────────────────────────────────────────────
-       TOP TERMINAL BAR
-    ───────────────────────────────────────────── */
-
-    .terminal-top {
-        height:38px;
-        border-top:1px solid #24282d;
-        border-bottom:1px solid #24282d;
-        display:flex;
-        align-items:center;
-        justify-content:space-between;
-        padding:0 10px;
-        margin-bottom:8px;
-        font-family:monospace;
-    }
-
-    .terminal-brand {
-        font-size:13px;
-        font-weight:700;
-        letter-spacing:.4px;
-        color:#e7ebef;
-    }
-
-    .terminal-module {
-        font-size:11px;
-        letter-spacing:1px;
-        color:#e7a51a;
-        font-weight:700;
-    }
-
-    .terminal-status {
-        font-size:9px;
-        letter-spacing:1px;
-        color:#4d8b58;
-    }
-
-    /* ─────────────────────────────────────────────
-       SECTION TITLES
-    ───────────────────────────────────────────── */
-
-    .section-title {
-        font-family:monospace;
-        font-size:18px;
-        font-weight:700;
-        letter-spacing:.5px;
-        color:#e5e8eb;
-        margin-top:5px;
-        margin-bottom:2px;
-    }
-
-    .section-subtitle {
-        font-family:monospace;
-        font-size:10px;
-        letter-spacing:.5px;
-        color:#6f7882;
-        margin-bottom:12px;
-    }
-
-    .panel-title {
-        font-family:monospace;
-        font-size:11px;
-        font-weight:700;
-        letter-spacing:.7px;
-        color:#c9cdd2;
-        padding-bottom:7px;
-        border-bottom:1px solid #252a2f;
-        margin-bottom:8px;
-    }
-
-    /* ─────────────────────────────────────────────
-       METRIC BLOCKS
-    ───────────────────────────────────────────── */
-
-    .breadth-card {
-        background:#090a0c;
-        border:1px solid #252a30;
-        padding:11px 12px;
-        min-height:83px;
-    }
-
-    .breadth-label {
-        font-family:monospace;
-        font-size:9px;
-        letter-spacing:.8px;
-        color:#737c86;
-        margin-bottom:6px;
-    }
-
-    .breadth-value {
-        font-family:monospace;
-        font-size:23px;
-        line-height:1;
-        font-weight:700;
-        color:#e8ebee;
-    }
-
-    .breadth-meta {
-        font-family:monospace;
-        font-size:9px;
-        color:#69727c;
-        margin-top:8px;
-    }
-
-    .positive {
-        color:#55a96a !important;
-    }
-
-    .negative {
-        color:#d55b5b !important;
-    }
-
-    .neutral {
-        color:#9aa2aa !important;
-    }
-
-    /* ─────────────────────────────────────────────
-       INFO STRIP
-    ───────────────────────────────────────────── */
-
-    .info-strip {
-        border-top:1px solid #22272c;
-        border-bottom:1px solid #22272c;
-        padding:7px 9px;
-        margin:9px 0 12px 0;
-        font-family:monospace;
-        font-size:9px;
-        color:#6e7781;
-        letter-spacing:.25px;
-    }
-
-    /* ─────────────────────────────────────────────
-       TABLE
-    ───────────────────────────────────────────── */
-
-    div[data-testid="stDataFrame"] {
-        border:1px solid #24292e;
-    }
-
-    /* ─────────────────────────────────────────────
-       BUTTONS
-    ───────────────────────────────────────────── */
-
-    .stButton > button {
-        border:1px solid #353b42;
-        background:#0b0d10;
-        color:#d4d8dc;
-        border-radius:1px;
-        font-family:monospace;
-        font-size:10px;
-        min-height:31px;
-    }
-
-    .stButton > button:hover {
-        border-color:#e7a51a;
-        color:#e7a51a;
-        background:#0d0e10;
-    }
-
-    /* ─────────────────────────────────────────────
-       SELECTBOX
-    ───────────────────────────────────────────── */
-
-    div[data-baseweb="select"] > div {
-        background:#090a0c;
-        border-color:#30353b;
-        border-radius:1px;
-        min-height:32px;
-    }
-
-    /* ─────────────────────────────────────────────
-       ALERTS
-    ───────────────────────────────────────────── */
-
-    div[data-testid="stAlert"] {
-        border-radius:1px;
-        font-family:monospace;
-        font-size:10px;
-    }
-
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-# ═════════════════════════════════════════════════════════════════════
-# TOP BAR
-# ═════════════════════════════════════════════════════════════════════
-
-st.markdown(
-    """
-    <div class="terminal-top">
-        <div class="terminal-brand">▲ ARKA TRADES</div>
-        <div class="terminal-module">F7&nbsp;&nbsp; MARKET BREADTH</div>
-        <div class="terminal-status">● EOD MARKET DATA · NSE EQUITIES</div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-# ═════════════════════════════════════════════════════════════════════
-# HEADER
-# ═════════════════════════════════════════════════════════════════════
-
-st.markdown(
-    '<div class="section-title">MARKET BREADTH</div>',
-    unsafe_allow_html=True,
-)
-
-st.markdown(
-    '<div class="section-subtitle">'
-    'DAILY MARKET PARTICIPATION · NSE EQUITIES · MOVING-AVERAGE BREADTH'
-    '</div>',
-    unsafe_allow_html=True,
-)
-
-
-# ═════════════════════════════════════════════════════════════════════
-# CONTROLS
-# ═════════════════════════════════════════════════════════════════════
-
-c1, c2, c3, c4 = st.columns(
-    [1.0, 1.0, 1.0, 3.5]
-)
-
-with c1:
-    refresh = st.button(
-        "REFRESH",
-        use_container_width=True,
-    )
-
-with c2:
-    backfill = st.button(
-        "BACKFILL 20D",
-        use_container_width=True,
-    )
-
-with c3:
-    history_days = st.selectbox(
-        "HISTORY",
-        [20, 50, 90, 180],
-        index=1,
-        label_visibility="collapsed",
-    )
-
-with c4:
+def _css():
     st.markdown(
         """
-        <div class="info-strip" style="margin-top:0;">
-        DAILY TIMEFRAME · ONE OBSERVATION PER COMPLETED NSE SESSION
-        · Δ = CHANGE VS PREVIOUS TRADING SESSION
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-# ═════════════════════════════════════════════════════════════════════
-# UNIVERSE
-# ═════════════════════════════════════════════════════════════════════
-
-try:
-
-    symbols, universe_source = get_nse_universe()
-
-except Exception as e:
-
-    st.error(
-        f"Universe error: {e}"
-    )
-
-    symbols = []
-
-    universe_source = "unavailable"
-
-
-if not symbols:
-
-    st.error(
-        "No NSE universe available."
-    )
-
-    st.stop()
-
-
-# ═════════════════════════════════════════════════════════════════════
-# BACKFILL
-# ═════════════════════════════════════════════════════════════════════
-
-if backfill:
-
-    with st.spinner(
-        "Backfilling daily breadth history..."
-    ):
-
-        result = backfill_history_from_bhavcopy(
-            symbols,
-            days=20,
-        )
-
-    if result.get("days_written", 0) > 0:
-
-        st.success(
-            f"Backfilled {result['days_written']} "
-            f"trading sessions."
-        )
-
-    else:
-
-        st.warning(
-            result.get(
-                "error",
-                "Backfill did not produce any sessions."
-            )
-        )
-
-
-# ═════════════════════════════════════════════════════════════════════
-# CURRENT SNAPSHOT
-# ═════════════════════════════════════════════════════════════════════
-
-with st.spinner(
-    "Loading daily market breadth..."
-):
-
-    try:
-
-        snapshot = compute_breadth_snapshot(
-            symbols
-        )
-
-    except Exception as e:
-
-        snapshot = {
-            "error": str(e)
+        <style>
+        .stApp { background:#050505; color:#d8dce1; }
+        .block-container { padding-top:.55rem; padding-left:.55rem; padding-right:.55rem; max-width:100%; }
+        section[data-testid="stSidebar"] { display:none; }
+        .breadth-top {
+            height:38px; border-top:1px solid #24282d; border-bottom:1px solid #24282d;
+            display:flex; align-items:center; justify-content:space-between;
+            padding:0 10px; font-family:monospace; margin-bottom:10px;
         }
-
-
-if snapshot.get("error"):
-
-    st.error(
-        snapshot["error"]
+        .brand { font-size:12px; font-weight:700; color:#e8ebee; }
+        .module { font-size:11px; font-weight:700; letter-spacing:1px; color:#e7a51a; }
+        .status { font-size:9px; letter-spacing:.8px; color:#4e8b59; }
+        .title { font:700 18px monospace; letter-spacing:.4px; color:#e6e9ec; margin:6px 0 2px; }
+        .subtitle { font:10px monospace; letter-spacing:.45px; color:#727b85; margin-bottom:12px; }
+        .panel-title {
+            font:700 10px monospace; letter-spacing:1px; color:#bfc4ca;
+            border-bottom:1px solid #24292e; padding-bottom:7px; margin:16px 0 8px;
+        }
+        .metric {
+            background:#090a0c; border:1px solid #252a30; padding:10px 12px; min-height:74px;
+        }
+        .metric-label { font:9px monospace; letter-spacing:.7px; color:#737c86; }
+        .metric-value { font:700 22px monospace; color:#e9ecef; margin-top:5px; }
+        .metric-sub { font:9px monospace; color:#68717b; margin-top:5px; }
+        .info {
+            border-top:1px solid #22272c; border-bottom:1px solid #22272c;
+            padding:7px 9px; font:9px monospace; color:#6f7882; margin:8px 0 10px;
+        }
+        .warn {
+            border:1px solid #51451f; background:#0d0c08; color:#c5aa54;
+            padding:10px 12px; font:10px monospace; margin:8px 0;
+        }
+        .good { color:#55a96a; }
+        .bad { color:#d35b5b; }
+        .flat { color:#9aa1a9; }
+        .stButton > button {
+            border:1px solid #353b42; background:#0b0d10; color:#d4d8dc;
+            border-radius:1px; font:10px monospace; min-height:32px;
+        }
+        .stButton > button:hover { border-color:#e7a51a; color:#e7a51a; }
+        div[data-baseweb="select"] > div { background:#090a0c; border-color:#30353b; border-radius:1px; }
+        </style>
+        """,
+        unsafe_allow_html=True,
     )
 
-    st.stop()
+
+# ---------------------------------------------------------------------
+# FORMAT HELPERS
+# ---------------------------------------------------------------------
+
+def _signed_int(value) -> str:
+    if pd.isna(value):
+        return "—"
+    v = int(round(float(value)))
+    return f"+{v}" if v > 0 else str(v)
 
 
-# ═════════════════════════════════════════════════════════════════════
-# SAVE CURRENT SESSION
-# ═════════════════════════════════════════════════════════════════════
-
-try:
-
-    append_history(
-        snapshot
-    )
-
-except Exception:
-    pass
+def _signed_pp(value) -> str:
+    if pd.isna(value):
+        return "—"
+    v = float(value)
+    return f"+{v:.1f}" if v > 0 else f"{v:.1f}"
 
 
-# ═════════════════════════════════════════════════════════════════════
-# LOAD HISTORY
-# ═════════════════════════════════════════════════════════════════════
-
-history = load_history()
-
-if history.empty:
-
-    st.warning(
-        "No historical breadth records available yet. "
-        "Use BACKFILL 20D to build the daily history."
-    )
+def _delta_class(value) -> str:
+    if pd.isna(value):
+        return "flat"
+    if float(value) > 0:
+        return "good"
+    if float(value) < 0:
+        return "bad"
+    return "flat"
 
 
-# ═════════════════════════════════════════════════════════════════════
-# MA PARTICIPATION — CURRENT
-# ═════════════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------------
+# CURRENT METRICS
+# ---------------------------------------------------------------------
 
-st.markdown(
-    '<div class="panel-title">'
-    'CURRENT MA PARTICIPATION'
-    '</div>',
-    unsafe_allow_html=True,
-)
-
-
-def _pct(
-    value,
-    denominator
-):
-    try:
-
-        if denominator <= 0:
-            return 0.0
-
-        return (
-            float(value)
-            / float(denominator)
-            * 100
+def _render_current_cards(history: pd.DataFrame):
+    if history.empty:
+        st.markdown(
+            '<div class="warn">NO DAILY BREADTH HISTORY YET · USE BACKFILL 20D TO INITIALISE THE SERIES</div>',
+            unsafe_allow_html=True,
         )
+        return
 
-    except Exception:
+    latest = history.iloc[-1]
+    previous = history.iloc[-2] if len(history) >= 2 else None
 
-        return 0.0
-
-
-p20 = _pct(
-    snapshot["above_20dma"],
-    snapshot["above_20dma_denom"],
-)
-
-p50 = _pct(
-    snapshot["above_50dma"],
-    snapshot["above_50dma_denom"],
-)
-
-p200 = _pct(
-    snapshot["above_200dma"],
-    snapshot["above_200dma_denom"],
-)
-
-
-m1, m2, m3, m4 = st.columns(4)
-
-
-with m1:
-
-    st.markdown(
-        f"""
-        <div class="breadth-card">
-            <div class="breadth-label">ABOVE 20 DMA</div>
-            <div class="breadth-value">{snapshot["above_20dma"]}</div>
-            <div class="breadth-meta">
-                {p20:.1f}% OF ELIGIBLE STOCKS
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-with m2:
-
-    st.markdown(
-        f"""
-        <div class="breadth-card">
-            <div class="breadth-label">ABOVE 50 DMA</div>
-            <div class="breadth-value">{snapshot["above_50dma"]}</div>
-            <div class="breadth-meta">
-                {p50:.1f}% OF ELIGIBLE STOCKS
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-with m3:
-
-    st.markdown(
-        f"""
-        <div class="breadth-card">
-            <div class="breadth-label">ABOVE 200 DMA</div>
-            <div class="breadth-value">{snapshot["above_200dma"]}</div>
-            <div class="breadth-meta">
-                {p200:.1f}% OF ELIGIBLE STOCKS
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-with m4:
-
-    st.markdown(
-        f"""
-        <div class="breadth-card">
-            <div class="breadth-label">NSE UNIVERSE</div>
-            <div class="breadth-value">{snapshot["total_stocks"]}</div>
-            <div class="breadth-meta">
-                {snapshot["date"]} · EOD
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-# ═════════════════════════════════════════════════════════════════════
-# DAILY TABLE
-# ═════════════════════════════════════════════════════════════════════
-
-st.markdown(
-    '<div class="panel-title" style="margin-top:18px;">'
-    'DAILY MA BREADTH HISTORY'
-    '</div>',
-    unsafe_allow_html=True,
-)
-
-
-if not history.empty:
-
-    hist = history.copy()
-
-    hist = (
-        hist
-        .sort_values("date", ascending=False)
-        .head(history_days)
-        .copy()
-    )
-
-    # ─────────────────────────────────────────────
-    # ENSURE PERCENTAGES EXIST
-    # ─────────────────────────────────────────────
-
-    for ma in ["20", "50", "200"]:
-
+    vals = []
+    for ma in (20, 50, 200):
+        col = f"above_{ma}dma"
         pct_col = f"above_{ma}dma_pct"
+        now = float(latest[col])
+        pct = float(latest[pct_col]) if pd.notna(latest[pct_col]) else 0.0
+        delta = now - float(previous[col]) if previous is not None else None
+        vals.append((ma, now, pct, delta))
 
-        above_col = f"above_{ma}dma"
+    cols = st.columns(4)
 
-        denom_col = f"above_{ma}dma_denom"
-
-        if pct_col not in hist.columns:
-
-            denom = pd.to_numeric(
-                hist[denom_col],
-                errors="coerce",
+    for i, (ma, count, pct, delta) in enumerate(vals):
+        with cols[i]:
+            delta_text = _signed_int(delta) if delta is not None else "—"
+            delta_class = _delta_class(delta) if delta is not None else "flat"
+            st.markdown(
+                f"""
+                <div class="metric">
+                    <div class="metric-label">STOCKS ABOVE {ma} DMA</div>
+                    <div class="metric-value">{int(count)}</div>
+                    <div class="metric-sub">{pct:.1f}% · <span class="{delta_class}">Δ {delta_text} stocks</span></div>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
 
-            above = pd.to_numeric(
-                hist[above_col],
-                errors="coerce",
-            )
-
-            hist[pct_col] = (
-                above
-                / denom.replace(
-                    0,
-                    pd.NA,
-                )
-                * 100
-            )
-
-        hist[pct_col] = pd.to_numeric(
-            hist[pct_col],
-            errors="coerce",
+    with cols[3]:
+        universe = max(
+            int(latest.get("above_200dma_denom", 0) or 0),
+            int(latest.get("above_50dma_denom", 0) or 0),
+            int(latest.get("above_20dma_denom", 0) or 0),
         )
-
-        # Change in percentage points.
-        hist[f"{ma}d_pp"] = (
-            hist[pct_col]
-            .diff(-1)
-        )
-
-        # Change in actual number of stocks.
-        hist[f"{ma}d_count_change"] = (
-            pd.to_numeric(
-                hist[above_col],
-                errors="coerce",
-            )
-            .diff(-1)
+        st.markdown(
+            f"""
+            <div class="metric">
+                <div class="metric-label">ELIGIBLE NSE STOCKS</div>
+                <div class="metric-value">{universe}</div>
+                <div class="metric-sub">LAST SESSION · {pd.Timestamp(latest['date']).strftime('%d %b %Y')}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
 
-    # ─────────────────────────────────────────────
-    # DISPLAY TABLE
-    # ─────────────────────────────────────────────
+# ---------------------------------------------------------------------
+# HISTORY TABLE
+# ---------------------------------------------------------------------
 
-    display = pd.DataFrame()
+def _render_history_table(history: pd.DataFrame, lookback: int):
+    if history.empty:
+        return
 
-    display["DATE"] = hist[
-        "date"
-    ].dt.strftime(
-        "%d %b %Y"
-    )
+    df = history.sort_values("date", ascending=False).head(lookback).copy()
 
-    display["20D"] = (
-        hist["above_20dma"]
-        .astype("Int64")
-    )
+    # Counts / percentages are already in history. Changes are calculated
+    # from the full ascending series BEFORE truncation so the first visible
+    # row has the correct previous-session delta.
+    full = history.sort_values("date").copy()
+    for ma in (20, 50, 200):
+        col = f"above_{ma}dma"
+        pct = f"above_{ma}dma_pct"
+        full[f"{ma}d_count_delta"] = full[col].diff()
+        full[f"{ma}d_pp_delta"] = full[pct].diff()
 
-    display["Δ20D"] = (
-        hist["20d_count_change"]
-        .apply(
-            lambda x:
-            "—"
-            if pd.isna(x)
-            else (
-                f"+{int(x)}"
-                if x > 0
-                else str(int(x))
-            )
-        )
-    )
+    df = full.tail(lookback).sort_values("date", ascending=False).copy()
 
-    display["20D %"] = (
-        hist["above_20dma_pct"]
-        .apply(
-            lambda x:
-            "—"
-            if pd.isna(x)
-            else f"{x:.1f}%"
-        )
-    )
-
-    display["Δ20D pp"] = (
-        hist["20d_pp"]
-        .apply(
-            lambda x:
-            "—"
-            if pd.isna(x)
-            else (
-                f"+{x:.1f}"
-                if x > 0
-                else f"{x:.1f}"
-            )
-        )
-    )
-
-    display["50D"] = (
-        hist["above_50dma"]
-        .astype("Int64")
-    )
-
-    display["Δ50D"] = (
-        hist["50d_count_change"]
-        .apply(
-            lambda x:
-            "—"
-            if pd.isna(x)
-            else (
-                f"+{int(x)}"
-                if x > 0
-                else str(int(x))
-            )
-        )
-    )
-
-    display["50D %"] = (
-        hist["above_50dma_pct"]
-        .apply(
-            lambda x:
-            "—"
-            if pd.isna(x)
-            else f"{x:.1f}%"
-        )
-    )
-
-    display["Δ50D pp"] = (
-        hist["50d_pp"]
-        .apply(
-            lambda x:
-            "—"
-            if pd.isna(x)
-            else (
-                f"+{x:.1f}"
-                if x > 0
-                else f"{x:.1f}"
-            )
-        )
-    )
-
-    display["200D"] = (
-        hist["above_200dma"]
-        .astype("Int64")
-    )
-
-    display["Δ200D"] = (
-        hist["200d_count_change"]
-        .apply(
-            lambda x:
-            "—"
-            if pd.isna(x)
-            else (
-                f"+{int(x)}"
-                if x > 0
-                else str(int(x))
-            )
-        )
-    )
-
-    display["200D %"] = (
-        hist["above_200dma_pct"]
-        .apply(
-            lambda x:
-            "—"
-            if pd.isna(x)
-            else f"{x:.1f}%"
-        )
-    )
-
-    display["Δ200D pp"] = (
-        hist["200d_pp"]
-        .apply(
-            lambda x:
-            "—"
-            if pd.isna(x)
-            else (
-                f"+{x:.1f}"
-                if x > 0
-                else f"{x:.1f}"
-            )
-        )
-    )
-
-
-    # ─────────────────────────────────────────────
-    # STYLE
-    # ─────────────────────────────────────────────
-
-    def _style_table(
-        df
-    ):
-
-        return (
-            df.style
-            .format(
-                na_rep="—"
-            )
-            .set_properties(
-                **{
-                    "font-family":
-                        "monospace",
-
-                    "font-size":
-                        "11px",
-
-                    "background-color":
-                        "#08090b",
-
-                    "color":
-                        "#d7dbe0",
-
-                    "border-color":
-                        "#24292e",
-                }
-            )
-        )
-
+    out = pd.DataFrame({
+        "DATE": df["date"].dt.strftime("%d %b %Y"),
+        ">20D": df["above_20dma"].astype("Int64"),
+        "Δ20D": df["20d_count_delta"].map(_signed_int),
+        "20D %": df["above_20dma_pct"].map(lambda x: f"{x:.1f}%" if pd.notna(x) else "—"),
+        "Δ20D pp": df["20d_pp_delta"].map(_signed_pp),
+        ">50D": df["above_50dma"].astype("Int64"),
+        "Δ50D": df["50d_count_delta"].map(_signed_int),
+        "50D %": df["above_50dma_pct"].map(lambda x: f"{x:.1f}%" if pd.notna(x) else "—"),
+        "Δ50D pp": df["50d_pp_delta"].map(_signed_pp),
+        ">200D": df["above_200dma"].astype("Int64"),
+        "Δ200D": df["200d_count_delta"].map(_signed_int),
+        "200D %": df["above_200dma_pct"].map(lambda x: f"{x:.1f}%" if pd.notna(x) else "—"),
+        "Δ200D pp": df["200d_pp_delta"].map(_signed_pp),
+    })
 
     st.dataframe(
-        display,
+        out,
         use_container_width=True,
         hide_index=True,
-        height=min(
-            680,
-            44 + len(display) * 35
-        ),
+        height=min(620, 43 + len(out) * 34),
     )
 
 
-else:
+# ---------------------------------------------------------------------
+# MAIN RENDER FUNCTION — REQUIRED BY app.py
+# ---------------------------------------------------------------------
+
+def render_market_breadth():
+    """
+    Main F7 entry point.
+
+    Deliberately NO network call here. This function must be cheap enough to
+    render immediately when the user taps F7, and changing the lookback must
+    only filter already-loaded history.
+    """
+
+    _css()
 
     st.markdown(
         """
-        <div class="info-strip">
-        NO DAILY HISTORY AVAILABLE.
-        USE BACKFILL 20D TO BUILD THE HISTORICAL SERIES.
+        <div class="breadth-top">
+            <div class="brand">▲ ARKA TRADES</div>
+            <div class="module">F7&nbsp;&nbsp; MARKET BREADTH</div>
+            <div class="status">● DAILY EOD · NSE EQUITIES</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-
-# ═════════════════════════════════════════════════════════════════════
-# TREND CHART
-# ═════════════════════════════════════════════════════════════════════
-
-if not history.empty:
-
+    st.markdown('<div class="title">MARKET BREADTH</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="panel-title" style="margin-top:18px;">'
-        'MA PARTICIPATION TREND'
-        '</div>',
+        '<div class="subtitle">DAILY MARKET PARTICIPATION · 20 / 50 / 200 DMA · COMPLETED NSE TRADING SESSIONS</div>',
         unsafe_allow_html=True,
     )
 
-    chart_df = history.copy()
+    # IMPORTANT: this is only a local file read, so F7 opens immediately.
+    history = load_history()
 
-    chart_df = (
-        chart_df
-        .sort_values("date")
-        .tail(history_days)
-        .set_index("date")
+    # Controls. Lookback selector NEVER triggers market-data download.
+    c1, c2, c3, c4 = st.columns([1.05, 1.15, 1.0, 3.4])
+
+    with c1:
+        update_btn = st.button(
+            "UPDATE TODAY",
+            use_container_width=True,
+        )
+
+    with c2:
+        backfill_btn = st.button(
+            "BACKFILL 20D",
+            use_container_width=True,
+        )
+
+    with c3:
+        lookback = st.selectbox(
+            "LOOKBACK",
+            [20, 50, 90, 180],
+            index=1,
+            label_visibility="collapsed",
+        )
+
+    with c4:
+        st.markdown(
+            '<div class="info" style="margin-top:0;">DAILY ONLY · NO INTRADAY REFRESH · Δ = CHANGE VS PREVIOUS TRADING SESSION · SELECTING LOOKBACK DOES NOT FETCH DATA</div>',
+            unsafe_allow_html=True,
+        )
+
+    # -----------------------------------------------------------------
+    # EXPLICIT UPDATE
+    # -----------------------------------------------------------------
+    if update_btn:
+        with st.spinner("Updating completed NSE session…"):
+            try:
+                symbols, source = get_nse_universe()
+                result = update_today(symbols)
+            except Exception as exc:
+                result = {"error": str(exc)}
+                source = "unavailable"
+
+        if result.get("error"):
+            st.error(result["error"])
+        else:
+            st.success(
+                f"Updated {result.get('date', 'latest session')} · {result.get('source', source)}"
+            )
+        st.rerun()
+
+    # -----------------------------------------------------------------
+    # EXPLICIT BACKFILL
+    # -----------------------------------------------------------------
+    if backfill_btn:
+        with st.spinner("Building 20 trading sessions of daily breadth…"):
+            try:
+                symbols, source = get_nse_universe()
+                result = backfill_history_from_bhavcopy(
+                    symbols,
+                    days=20,
+                )
+            except Exception as exc:
+                result = {
+                    "days_written": 0,
+                    "error": str(exc),
+                }
+                source = "unavailable"
+
+        if result.get("days_written", 0) > 0:
+            st.success(
+                f"Built {result['days_written']} sessions "
+                f"({result['date_range'][0]} → {result['date_range'][1]})."
+            )
+        else:
+            st.error(
+                result.get(
+                    "error",
+                    "Backfill failed.",
+                )
+            )
+        st.rerun()
+
+    # -----------------------------------------------------------------
+    # REFRESH LOCAL HISTORY ONLY
+    # -----------------------------------------------------------------
+    history = load_history()
+
+    _render_current_cards(history)
+
+    if history.empty:
+        st.markdown(
+            '<div class="warn">THE UI IS READY. NO NETWORK REQUEST WAS MADE ON PAGE OPEN. PRESS BACKFILL 20D ONCE TO BUILD THE FIRST DAILY SERIES.</div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    latest_date = history.iloc[-1]["date"]
+    last_dt = pd.Timestamp(latest_date).strftime("%d %b %Y")
+
+    st.markdown(
+        f'<div class="info">LAST STORED SESSION · {last_dt} · HISTORY ROWS · {len(history)} · DAILY / EOD</div>',
+        unsafe_allow_html=True,
     )
 
-    chart_cols = [
-        c for c in [
+    # -----------------------------------------------------------------
+    # DAILY TABLE
+    # -----------------------------------------------------------------
+    st.markdown(
+        '<div class="panel-title">DAILY MA BREADTH HISTORY</div>',
+        unsafe_allow_html=True,
+    )
+    _render_history_table(history, lookback)
+
+    # -----------------------------------------------------------------
+    # TREND CHART — LOCAL DATA ONLY
+    # -----------------------------------------------------------------
+    st.markdown(
+        '<div class="panel-title">MA PARTICIPATION TREND</div>',
+        unsafe_allow_html=True,
+    )
+
+    chart = history.sort_values("date").tail(lookback).set_index("date")
+    chart = chart[
+        [
             "above_20dma_pct",
             "above_50dma_pct",
             "above_200dma_pct",
         ]
-        if c in chart_df.columns
+    ].copy()
+    chart.columns = [
+        "Above 20 DMA %",
+        "Above 50 DMA %",
+        "Above 200 DMA %",
     ]
 
-    if chart_cols:
+    st.line_chart(
+        chart,
+        height=290,
+        use_container_width=True,
+    )
 
-        chart_display = chart_df[
-            chart_cols
-        ].copy()
-
-        chart_display.columns = [
-            c.replace(
-                "above_",
-                "Above "
-            )
-            .replace(
-                "dma_pct",
-                " DMA %"
-            )
-            for c in chart_display.columns
-        ]
-
-        st.line_chart(
-            chart_display,
-            height=300,
-            use_container_width=True,
-        )
-
-
-# ═════════════════════════════════════════════════════════════════════
-# ADVANCE / DECLINE
-# ═════════════════════════════════════════════════════════════════════
-
-if not history.empty:
-
+    # -----------------------------------------------------------------
+    # MARKET INTERNALS
+    # -----------------------------------------------------------------
     st.markdown(
-        '<div class="panel-title" style="margin-top:18px;">'
-        'MARKET INTERNALS'
-        '</div>',
+        '<div class="panel-title">MARKET INTERNALS</div>',
         unsafe_allow_html=True,
     )
 
-    internal = history.copy()
-
-    internal = (
-        internal
-        .sort_values("date")
-        .tail(history_days)
+    internals = compute_ad_line_and_mcclellan(
+        history.sort_values("date").tail(lookback)
     )
+    latest = internals.iloc[-1]
 
-    internal = compute_ad_line_and_mcclellan(
-        internal
-    )
+    i1, i2, i3, i4 = st.columns(4)
+    cards = [
+        ("ADVANCES", int(latest["advances"])),
+        ("DECLINES", int(latest["declines"])),
+        (
+            "NET ADVANCES",
+            int(latest["advances"] - latest["declines"]),
+        ),
+        (
+            "MCCLELLAN",
+            f"{float(latest['mcclellan']):.1f}",
+        ),
+    ]
 
-    x1, x2, x3, x4 = st.columns(4)
-
-    latest = internal.iloc[-1]
-
-    with x1:
-
-        st.markdown(
-            f"""
-            <div class="breadth-card">
-                <div class="breadth-label">ADVANCES</div>
-                <div class="breadth-value">
-                    {int(latest["advances"])}
+    for col, (label, value) in zip([i1, i2, i3, i4], cards):
+        with col:
+            st.markdown(
+                f"""
+                <div class="metric">
+                    <div class="metric-label">{label}</div>
+                    <div class="metric-value">{value}</div>
                 </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with x2:
-
-        st.markdown(
-            f"""
-            <div class="breadth-card">
-                <div class="breadth-label">DECLINES</div>
-                <div class="breadth-value">
-                    {int(latest["declines"])}
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with x3:
-
-        net = (
-            int(latest["advances"])
-            - int(latest["declines"])
-        )
-
-        sign = "+" if net > 0 else ""
-
-        st.markdown(
-            f"""
-            <div class="breadth-card">
-                <div class="breadth-label">NET ADVANCES</div>
-                <div class="breadth-value">
-                    {sign}{net}
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with x4:
-
-        if (
-            "mcclellan" in internal.columns
-            and pd.notna(
-                latest.get("mcclellan")
-            )
-        ):
-
-            mc = float(
-                latest["mcclellan"]
+                """,
+                unsafe_allow_html=True,
             )
 
-            mc_text = f"{mc:.1f}"
-
-        else:
-
-            mc_text = "—"
-
-        st.markdown(
-            f"""
-            <div class="breadth-card">
-                <div class="breadth-label">MCCLELLAN</div>
-                <div class="breadth-value">
-                    {mc_text}
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-
-# ═════════════════════════════════════════════════════════════════════
-# FOOTER / DATA SOURCE
-# ═════════════════════════════════════════════════════════════════════
-
-st.markdown(
-    f"""
-    <div class="info-strip" style="margin-top:18px;">
-        SOURCE · {universe_source}
-        &nbsp;&nbsp;|&nbsp;&nbsp;
-        TIMEFRAME · DAILY
-        &nbsp;&nbsp;|&nbsp;&nbsp;
-        MA · SIMPLE MOVING AVERAGE
-        &nbsp;&nbsp;|&nbsp;&nbsp;
-        SESSION · COMPLETED NSE TRADING DAY
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+    # -----------------------------------------------------------------
+    # FOOTER
+    # -----------------------------------------------------------------
+    st.markdown(
+        '<div class="info">DATA MODEL · DAILY CLOSES · SIMPLE MOVING AVERAGE · ONE OBSERVATION PER COMPLETED NSE SESSION · LOOKBACK IS A DISPLAY FILTER ONLY</div>',
+        unsafe_allow_html=True,
+    )
