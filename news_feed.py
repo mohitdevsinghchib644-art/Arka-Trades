@@ -528,6 +528,39 @@ def _mark_new(items: list[dict]) -> list[dict]:
     return items
 
 
+def _rotating_batch(symbols: list[str], batch_size: int, current: str | None = None) -> list[str]:
+    """Pick up to batch_size symbols to actively refresh this cycle.
+
+    Without this, refresh_news always took the first `batch_size` symbols
+    of the watchlist — meaning whichever stocks happened to be first in
+    the uploaded list permanently owned all per-stock news coverage, and
+    everything after position `batch_size` never got fetched, ever, with
+    no indication that was happening. This rotates the batch by a time
+    epoch matching NEWS_EXPIRE_MIN, so a different slice of the watchlist
+    gets refreshed each cycle and coverage works its way through the
+    whole list over time. The active security (if any) is always pinned
+    into every batch, since it should never lose coverage to rotation.
+    """
+    symbols = list(dict.fromkeys(symbols))
+    if not symbols:
+        return []
+    current = (current or "").strip().upper()
+    pinned = [current] if current and current in symbols else []
+    rest = [s for s in symbols if s not in pinned]
+    if not rest:
+        return pinned[:batch_size]
+    slots = max(1, batch_size - len(pinned))
+    if len(rest) <= slots:
+        return pinned + rest
+    n_batches = -(-len(rest) // slots)  # ceil division
+    epoch = int(time.time() // (NEWS_EXPIRE_MIN * 60))
+    offset = (epoch % n_batches) * slots
+    batch = rest[offset:offset + slots]
+    if len(batch) < slots:
+        batch += rest[: slots - len(batch)]  # wrap around to the start
+    return pinned + batch
+
+
 def refresh_news(
     watchlist: list[str],
     current_security: str | None = None,
@@ -539,11 +572,9 @@ def refresh_news(
     days = max(1, min(int(days or 1), 30))
     now = time.time()
 
-    symbols = list(dict.fromkeys([str(s).strip().upper() for s in (watchlist or []) if str(s).strip()]))
+    all_symbols = list(dict.fromkeys([str(s).strip().upper() for s in (watchlist or []) if str(s).strip()]))
     current = (current_security or "").strip().upper()
-    if current:
-        symbols = [current] + [s for s in symbols if s != current]
-    symbols = symbols[:MAX_SECURITY_REFRESH]
+    symbols = _rotating_batch(all_symbols, MAX_SECURITY_REFRESH, current)
 
     jobs = []
     for sym in symbols:
@@ -602,9 +633,15 @@ def _combined_feed(
     if current:
         symbols = [current] + [s for s in symbols if s != current]
 
+    # FIX: this used to slice to [:MAX_SECURITY_REFRESH] here too, which
+    # meant even a symbol that WAS fetched (in an earlier rotation cycle,
+    # see _rotating_batch) and sitting right there in cache would never be
+    # read back — coverage was capped on both the fetch side and the read
+    # side. Reading cache is just dict lookups, free either way, so the
+    # only side that needs the cap is the one making network calls.
     keys = []
     if not macro_only:
-        keys.extend(f"SEC:{s}:{days}" for s in symbols[:MAX_SECURITY_REFRESH])
+        keys.extend(f"SEC:{s}:{days}" for s in symbols)
         if sector:
             keys.append(f"SECTOR:{sector}:{days}")
     keys.append(f"MACRO:{days}")
@@ -723,9 +760,10 @@ def _intraday_price_impact(symbol: str, pub_dt_iso: str):
             dt = dt.replace(tzinfo=IST)
         target = dt.astimezone(IST)
         after = [
-            (datetime.fromisoformat(ts), price)
+            (parsed_ts, price)
             for ts, price in points
-            if datetime.fromisoformat(ts) >= target
+            for parsed_ts in (datetime.fromisoformat(ts),)
+            if parsed_ts >= target
         ]
         if not after:
             return None
@@ -816,9 +854,15 @@ def _render_rows(items: list[dict], show_tag: bool = True, show_impact: bool = F
 
     marked = _mark_new(items)
     html_rows = []
+    # FIX: an empty impact_symbols set means "no active security to scope
+    # to" — that must mean NO impact badges, not badges for everyone. The
+    # previous `not active_symbols or ...` read the empty case backwards,
+    # so every article got an intraday yf.download() triggered for it
+    # whenever no security was loaded (which, before the render_news_rail
+    # call site was wired up, was always).
     active_symbols = impact_symbols or set()
     for art in marked:
-        should_impact = show_impact and (not active_symbols or art.get("symbol") in active_symbols)
+        should_impact = show_impact and bool(active_symbols) and art.get("symbol") in active_symbols
         html_rows.append(_render_story(art, show_impact=should_impact))
     st.markdown("".join(html_rows), unsafe_allow_html=True)
 
@@ -843,6 +887,26 @@ def _render_controls():
         )
     st.session_state["_news_days"] = {"24H": 1, "7D": 7, "30D": 30}[days_label]
     st.session_state["_news_search"] = search
+
+
+def _coverage_note(watchlist: list[str], current: str, days: int, T_mono: str = MONO) -> str:
+    """A one-line, honest readout of how much of the watchlist actually has
+    per-stock news right now vs. macro-only coverage — so the rotating
+    4-symbol refresh (see _rotating_batch) isn't a silent mystery."""
+    symbols = list(dict.fromkeys([str(s).strip().upper() for s in (watchlist or []) if str(s).strip()]))
+    if not symbols:
+        return ""
+    fetched = st.session_state.get("_news_fetched", {})
+    covered = sum(1 for s in symbols if fetched.get(f"SEC:{s}:{days}", 0) > 0)
+    total = len(symbols)
+    if covered >= total:
+        return ""
+    return (
+        f'<div style="font:8px {T_mono};color:{T3};margin:2px 0 6px;">'
+        f'COVERAGE · {covered} of {total} watchlist symbols refreshed so far'
+        f' · rotates {MAX_SECURITY_REFRESH} at a time every {NEWS_EXPIRE_MIN} min'
+        f'{" · " + current + " always included" if current else ""}</div>'
+    )
 
 
 def render_news_rail(
@@ -870,6 +934,10 @@ def render_news_rail(
 
     current = (current_security or "").strip().upper()
     search_query = st.session_state.get("_news_search", "")
+
+    coverage_html = _coverage_note(watchlist, current, days)
+    if coverage_html:
+        st.markdown(coverage_html, unsafe_allow_html=True)
 
     options = ["ALL", "WATCHLIST"]
     if current:
