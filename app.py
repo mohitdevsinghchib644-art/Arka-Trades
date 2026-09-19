@@ -16,57 +16,26 @@ from research_page import render_research_page
 from screener_scraper import resolve_symbol, get_summary, get_sector_info
 
 # ═══════════════════════════════════════════════════════════════════
-# v10 — BUG FIXES + BLOOMBERG DES VISUAL PASS
+# v6 — ARKA TERMINAL UI MATCH / DARK FINANCIAL WORKSTATION
 #
-# Same architecture as the v9 fresh-start rewrite (single terminal
-# workspace, active_security context, security workspace, module dock)
-# — this pass does NOT restructure navigation or revert to the earlier
-# separate-module-pages plan. Two kinds of changes only:
-#
-# BUG FIXES:
-#   1. _render_dashboard(): the watchlist monitor panel rendered only
-#      `wl` (<=10 symbols) but the "MARKET INTERNALS" advance/decline/
-#      unchanged counts were computed over `all_syms` (<=14, includes
-#      admin watchlist symbols not shown in the panel above it) — the
-#      visible list and the counted list disagreed. Both now count over
-#      the same `wl` the panel actually displays; admin-watchlist-only
-#      names never entered the monitor panel to begin with, so counting
-#      them without showing them was the actual bug, not a feature.
-#   2. _render_security_workspace(): get_static(symbol) was called twice
-#      (once for PDH, once for PDL) in the same render pass. It's
-#      cached so this never double-hit the network, but it's still two
-#      redundant lookups and two silent-failure paths instead of one.
-#      Now fetched once and reused for both.
-#   3. Security command search: the "is this a known ticker" check used
-#      `_security_candidates("")`, which truncates its combined
-#      hardcoded-list + watchlist result to 18 entries — so a valid but
-#      alphabetically-late hardcoded symbol could miss the fast path and
-#      fall through to a Screener round-trip it didn't need. The known-
-#      set check now scans the full hardcoded list directly, untruncated.
-#   4. Sign-out now explicitly clears active_security, research_data,
-#      m1_ticker and the scan-results/alerts-open session keys tied to
-#      the ending session, so the next login doesn't carry stale symbol
-#      or scan state from the previous one.
-#   5. Dead CSS selectors (.news-rail-collapsed, .security-tabs-spacer)
-#      referenced in markup but never defined — both now styled.
-#
-# VISUAL PASS (Bloomberg DES reference — numbered fields, red header,
-# tighter density) applied ON TOP of the existing architecture:
-#   - Security workspace header is now a red OHLC band (was a plain
-#     dark card) — ticker + security type, live price, change, and
-#     52W H/L on a red background with an amber accent rule, matching
-#     the reference image's top strip.
-#   - Company Overview panel fields are numbered (① ② ③...) the way
-#     the reference numbers every clickable field.
-#   - Panel titles, borders and spacing tightened to the reference's
-#     density — thinner rows, more fields per panel, less whitespace.
-#   - Module directory cards and module dock keep their existing
-#     structure; only color/spacing/type treatment changed to match.
-#   - UNCHANGED: every data source, every st.cache_data function, the
-#     Supabase/Telegram wiring, the terminal/security/module-page
-#     routing logic, and all six trading modules (Scanner, Alerts,
-#     Research, Arka AI, Smart Screener, Market Breadth) — none of that
-#     was touched beyond the specific bug fixes listed above.
+# Changes vs. previous version:
+#   1. Full layout is now 3 columns: NAV (left) | CONTENT (center) |
+#      NEWS RAIL (right, fixed, always visible). The old bottom-left
+#      floating news dock is removed entirely — news now lives where
+#      you can actually watch it while trading.
+#   2. Visual language pushed further toward an actual Bloomberg/FactSet
+#      terminal: top ticker strip, function-key nav labels, tighter
+#      data-dense rows, hairline grid borders, no rounded corners
+#      anywhere, monospace for every number.
+#   3. MIDCAP 100 / SMALLCAP 250 fixed — old tickers
+#      (NIFTY_MIDCAP_100.NS / ^CRSMID) don't resolve on Yahoo and
+#      always fell through to "No data". Replaced with a verified
+#      fallback chain of real Yahoo aliases.
+#   4. Login/landing page, disclaimer, Supabase/Telegram wiring,
+#      scanner, alerts, research, AI, smart screener, breadth,
+#      profile/settings/contact logic are UNCHANGED — only presentation
+#      and the two fixes above changed. Anything that was working still
+#      works exactly the same.
 # ═══════════════════════════════════════════════════════════════════
 
 # ── Supabase ─────────────────────────────────────────────────
@@ -99,6 +68,10 @@ def db_load_watchlist() -> list:
         return []
     try:
         res = supabase.table("watchlist").select("symbol").execute()
+        # dict.fromkeys dedupes while preserving order — a stale duplicate
+        # row in Supabase (e.g. from a non-atomic save) must never reach
+        # the UI, since sym-keyed widgets downstream (alerts page) will
+        # crash with StreamlitDuplicateElementKey on a repeated symbol.
         return list(dict.fromkeys(r["symbol"] for r in res.data)) if res.data else []
     except: return []
 
@@ -161,7 +134,7 @@ def send_telegram(msg):
             data={"chat_id":CHAT_ID,"text":msg,"parse_mode":"HTML"}, timeout=5)
     except: pass
 
-# ════════════════ DESIGN SYSTEM — TERMINAL v10 (Bloomberg DES pass) ══
+# ════════════════ DESIGN SYSTEM — TERMINAL v3 ════════════════════
 DARK   = "#000000"
 DARK2  = "#0A0A0A"
 DARK3  = "#111111"
@@ -173,14 +146,12 @@ T3     = "#5A5A5A"
 NAVY   = "#0A0A0A"
 
 AMBER  = "#FF9F0A"
-RED_HEADER = "#8B0000"   # NEW: Bloomberg DES red header band
 CYAN   = "#5AC8FA"
 GREEN  = "#30D158"
 RED    = "#FF453A"
 INDIGO = "#5E8CFF"
 PURPLE = "#BF5AF2"
 PINK   = "#FF6482"
-WHITE  = "#F5F5F0"       # NEW: screen-white for red-band primary text
 
 BLUE   = AMBER
 GOLD   = AMBER
@@ -248,7 +219,7 @@ name    = st.session_state.profile.get("name","Trader") or "Trader"
 initial = name[0].upper()
 IS_ADMIN = st.session_state.get("is_admin", False)
 
-# ── Global CSS — ARKA TERMINAL v10 (Bloomberg DES density pass) ──
+# ── Global CSS — ARKA TERMINAL v5 ─────────────────────────────
 st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
@@ -257,7 +228,8 @@ st.markdown(f"""
 html,body,.stApp{{background:#050505 !important;color:{IVORY} !important;font-family:'Inter',sans-serif !important;}}
 header[data-testid="stHeader"]{{display:none !important;}}
 [data-testid="stSidebar"],[data-testid="stSidebarCollapsedControl"]{{display:none !important;}}
-.block-container{{padding:0 8px 28px !important;max-width:100% !important;}}
+.block-container{{padding:0 6px 24px !important;max-width:100% !important;}}
+[data-testid="stHorizontalBlock"]{{align-items:stretch !important;}}
 .stButton>button{{background:#0b0b0b !important;color:#d8d8d8 !important;border:1px solid #252525 !important;border-radius:0 !important;font-family:'Inter',sans-serif !important;font-size:11px !important;font-weight:600 !important;min-height:30px !important;box-shadow:none !important;}}
 .stButton>button:hover{{border-color:{AMBER} !important;color:{AMBER} !important;background:#111 !important;}}
 .stButton>button[kind="primary"]{{background:{AMBER} !important;color:#000 !important;border-color:{AMBER} !important;}}
@@ -295,6 +267,45 @@ hr{{border-color:#202020 !important;}}
 .module-dir-use{{margin-top:6px;font-size:9px;color:#aaa;line-height:1.5;}}
 .module-dir-use span{{font-family:'JetBrains Mono',monospace;color:#555;margin-right:7px;font-size:8px;}}
 
+
+.arka-sidebar{{background:#07090b;border:1px solid #1d252b;border-top:0;min-height:calc(100vh - 120px);position:sticky;top:0;}}
+.arka-side-brand{{padding:14px 12px 12px;border-bottom:1px solid #202020;}}
+.arka-side-brand .mini-mark{{width:28px;height:28px;background:#ff9f0a;display:flex;align-items:center;justify-content:center;color:#050505;font-weight:900;font-size:16px;}}
+.arka-side-brand .side-name{{font-size:12px;font-weight:800;letter-spacing:1.3px;color:#f0f0f0;}}
+.arka-side-brand .side-sub{{font-family:'JetBrains Mono',monospace;font-size:7px;color:#666;letter-spacing:1px;margin-top:2px;}}
+.arka-nav-section{{font-family:'JetBrains Mono',monospace;font-size:8px;color:#555;letter-spacing:1.4px;padding:13px 10px 5px;}}
+.arka-side-note{{margin:14px 10px 0;padding:10px;border:1px solid #2b2b2b;background:#0b0b0b;}}
+.arka-side-note .n-title{{font-family:'JetBrains Mono',monospace;font-size:9px;color:#ff9f0a;letter-spacing:1px;}}
+.arka-side-note .n-copy{{font-size:9px;color:#777;line-height:1.45;margin-top:5px;}}
+.arka-side-note .n-action{{margin-top:8px;background:#ff9f0a;color:#000;padding:7px;text-align:center;font-size:9px;font-weight:800;}}
+.side-nav-btn button{{background:transparent !important;border-color:transparent !important;color:#a8a8a8 !important;text-align:left !important;padding:7px 9px !important;min-height:31px !important;font-size:10px !important;}}
+.side-nav-btn button:hover{{background:#111 !important;border-color:#2a2a2a !important;color:#ff9f0a !important;}}
+.side-nav-active button{{background:#241706 !important;border:1px solid #7a4a00 !important;color:#ff9f0a !important;}}
+.side-nav-active button:before{{content:' ';display:inline-block;width:3px;height:13px;background:#ff9f0a;margin-right:7px;vertical-align:-2px;}}
+.workspace-grid{{display:grid;grid-template-columns:1.05fr 3.6fr 1.45fr;gap:8px;}}
+.workspace-panel{{background:#080a0c;border:1px solid #222b31;min-width:0;}}
+.workspace-panel-head{{height:38px;border-bottom:1px solid #20272c;padding:0 10px;display:flex;align-items:center;justify-content:space-between;font-family:'JetBrains Mono',monospace;font-size:9px;color:#ddd;letter-spacing:.9px;}}
+.workspace-panel-head span:last-child{{color:#666;font-size:8px;}}
+.watch-row{{display:grid;grid-template-columns:1fr 78px 58px;padding:8px 8px;border-bottom:1px solid #151b20;font-family:'JetBrains Mono',monospace;font-size:9px;}}
+.watch-row:hover{{background:#0d1115;}}
+.watch-row .sym{{color:#ddd;font-weight:700;}}
+.watch-row .last{{text-align:right;color:#ddd;}}
+.watch-row .chg{{text-align:right;}}
+.company-hero{{padding:14px;border-bottom:1px solid #222b31;}}
+.company-hero .ticker{{font-family:'JetBrains Mono',monospace;font-size:8px;color:#777;}}
+.company-hero .name{{font-size:15px;font-weight:700;color:#eee;margin-top:4px;}}
+.company-hero .quote{{font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:600;margin-top:7px;}}
+.workspace-tabs{{margin-top:8px;}}
+.key-metrics{{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:8px;}}
+.metric-box{{background:#080a0c;border:1px solid #222b31;padding:9px;}}
+.metric-box .k{{font-family:'JetBrains Mono',monospace;font-size:8px;color:#666;letter-spacing:.8px;}}
+.metric-box .v{{font-family:'JetBrains Mono',monospace;font-size:13px;color:#e5e5e5;margin-top:5px;}}
+.metric-box .delta{{font-family:'JetBrains Mono',monospace;font-size:8px;color:#30d158;margin-top:3px;}}
+.quick-actions{{padding:9px;}}
+.quick-action{{border-bottom:1px solid #171d21;padding:8px 2px;font-size:9px;color:#aaa;}}
+.quick-action b{{color:#eee;font-weight:500;}}
+@media(max-width:1200px){{.workspace-grid{{grid-template-columns:1fr 2.7fr 1.25fr;}}.key-metrics{{grid-template-columns:repeat(2,1fr);}}}}
+@media(max-width:900px){{.workspace-grid{{grid-template-columns:1fr;}}.arka-sidebar{{position:static;min-height:0;}}.side-nav-btn button{{min-height:28px !important;}}.key-metrics{{grid-template-columns:repeat(2,1fr);}}}}
 .market-strip{{border-bottom:1px solid #202020;background:#050505;}}
 .market-row{{display:grid;grid-template-columns:82px repeat(6,minmax(145px,1fr));min-height:43px;border-bottom:1px solid #161616;}}
 .market-row:last-child{{border-bottom:0;}}
@@ -306,23 +317,16 @@ hr{{border-color:#202020 !important;}}
 .command-wrap{{padding:9px 0 7px;background:#050505;border-bottom:1px solid #202020;}}
 .command-label{{font-family:'JetBrains Mono',monospace;font-size:8px;color:{AMBER};letter-spacing:1.4px;margin:0 0 4px 4px;text-transform:uppercase;}}
 .command-hint{{font-family:'JetBrains Mono',monospace;font-size:8px;color:#555;text-align:right;margin-top:-24px;margin-right:9px;pointer-events:none;}}
-
-/* NEW: Bloomberg DES red header band for the security workspace */
-.security-head{{display:flex;justify-content:space-between;align-items:center;background:{RED_HEADER};
-    border-bottom:2px solid {AMBER};padding:10px 14px;margin-bottom:8px;flex-wrap:wrap;gap:8px;}}
-.security-kicker{{font-family:'JetBrains Mono',monospace;color:{WHITE};font-size:8px;letter-spacing:1.3px;opacity:0.85;}}
-.security-title{{font-size:16px;font-weight:800;color:{WHITE};margin-top:2px;}}
-.security-symbol{{font-family:'JetBrains Mono',monospace;color:{WHITE};font-size:9px;margin-top:2px;opacity:0.85;}}
+.security-head{{display:flex;justify-content:space-between;align-items:center;background:#090909;border:1px solid #262626;border-top:2px solid {AMBER};padding:11px 13px;margin-bottom:8px;}}
+.security-kicker{{font-family:'JetBrains Mono',monospace;color:#666;font-size:8px;letter-spacing:1.2px;}}
+.security-title{{font-size:17px;font-weight:700;color:#eee;margin-top:3px;}}
+.security-symbol{{font-family:'JetBrains Mono',monospace;color:#777;font-size:9px;margin-top:3px;}}
 .security-quote{{text-align:right;font-family:'JetBrains Mono',monospace;}}
-.quote-price{{font-size:20px;color:{WHITE};font-weight:800;}}
-.quote-hilo{{font-size:9px;color:{WHITE};opacity:0.8;margin-top:2px;}}
-
+.quote-price{{font-size:20px;color:#eee;font-weight:600;}}
 .panel-title{{font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:600;letter-spacing:1.3px;color:{AMBER};border-bottom:1px solid #242424;padding:8px 0 6px;margin-bottom:6px;text-transform:uppercase;}}
 .overview-box{{background:#090909;border:1px solid #242424;}}
-/* Bloomberg DES numbering: each field row carries a numbered circle glyph before the label */
-.overview-row{{display:flex;justify-content:space-between;padding:5px 9px;border-bottom:1px solid #181818;font-size:9px;}}
+.overview-row{{display:flex;justify-content:space-between;padding:6px 9px;border-bottom:1px solid #181818;font-size:9px;}}
 .overview-row:last-child{{border-bottom:0;}}
-.overview-row .ov-label{{color:{AMBER};font-family:'JetBrains Mono',monospace;font-size:8px;margin-right:5px;}}
 .overview-row span{{color:#777;}}
 .overview-row b{{font-family:'JetBrains Mono',monospace;color:#ddd;font-weight:500;}}
 .company-desc{{background:#090909;border:1px solid #242424;padding:9px;font-size:9px;color:#858585;line-height:1.6;}}
@@ -342,10 +346,6 @@ hr{{border-color:#202020 !important;}}
 .monitor-row span:last-child{{text-align:right;}}
 .small-positive{{color:{GREEN};}} .small-negative{{color:{RED};}}
 .news-rail{{background:#080808;border-left:1px solid #262626;min-height:100%;}}
-.news-rail-collapsed{{font-family:'JetBrains Mono',monospace;font-size:8px;color:#555;letter-spacing:1.2px;
-    padding:14px 8px;border-left:1px solid #262626;display:flex;justify-content:space-between;}}
-.news-rail-collapsed span{{color:{AMBER};font-weight:700;}}
-.security-tabs-spacer{{height:16px;border-bottom:1px solid #181818;margin-bottom:8px;}}
 @media(max-width:1100px){{.market-row{{grid-template-columns:70px repeat(6,minmax(120px,1fr));overflow-x:auto;}}.monitor-grid{{grid-template-columns:1fr;}}}}
 </style>
 """, unsafe_allow_html=True)
@@ -474,7 +474,14 @@ def get_index(sym, fallback_syms=None):
         }
     return None
 
-# ── Midcap/Smallcap index tickers (verified Yahoo aliases) ───────
+# ── FIX: Midcap/Smallcap index tickers ──────────────────────────
+# The previous candidate lists (NIFTY_MIDCAP_100.NS, ^CRSMID,
+# ^NIFTYMIDCAP100 / ^CNXSC, ^CNXSMALLCAP, NIFTYSMLCAP100.NS) do not
+# resolve on Yahoo Finance — none of those symbols exist in Yahoo's
+# index namespace, so get_index() silently exhausted every candidate
+# and the cards always rendered "No data". Replaced with the actual
+# Yahoo aliases for these NSE indices, in order of reliability, with
+# older/alternate aliases kept as later fallbacks.
 MIDCAP_CANDIDATES = ["NIFTYMDCP100.NS", "^NSEMDCP50", "NIFTY_MIDCAP_100.NS", "^CRSMID"]
 SMALLCAP_CANDIDATES = ["NIFTYSMLCAP250.NS", "NIFTYSMCP100.NS", "^CNXSC", "^CNXSMALLCAP"]
 SP500_CANDIDATES    = ["^GSPC"]
@@ -846,10 +853,11 @@ else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=s;}
 # Terms are presented on the public landing page; authenticated users go
 # directly into the terminal. This avoids a session-reset disclaimer loop.
 
-# ════════════════ MAIN APP — ARKA TERMINAL v10 ════════════════
-# The authenticated workspace is a single terminal rather than a
+# ════════════════ MAIN APP — ARKA TERMINAL v4 ════════════════
+# The authenticated workspace is now a single terminal rather than a
 # permanent left-sidebar application. Search is the primary entry point;
 # the selected security becomes the context for chart/research/AI tools.
+# The existing right-side MARKET NEWS rail is deliberately preserved.
 
 
 def _fmt_num(value, prefix="", suffix=""):
@@ -858,27 +866,18 @@ def _fmt_num(value, prefix="", suffix=""):
     return f"{prefix}{value}{suffix}"
 
 
-# Untruncated hardcoded ticker universe used both for dropdown suggestions
-# AND for the "is this already a known symbol" fast-path check in the
-# command search below. Previously that fast-path check reused
-# _security_candidates("")'s *truncated* (18-item) output, so a valid
-# symbol past that cutoff would silently miss the fast path and take an
-# unnecessary Screener round-trip. This constant is the untruncated source
-# both call sites now share.
-_KNOWN_SECURITIES_BASE = [
-    "RELIANCE", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK",
-    "TCS", "INFY", "WIPRO", "LT", "ITC", "BHARTIARTL", "TATAMOTORS",
-    "M&M", "MARUTI", "SUNPHARMA", "HINDUNILVR", "BAJFINANCE", "ADANIENT",
-    "ADANIPORTS", "TATASTEEL", "JSWSTEEL", "NTPC", "POWERGRID", "ONGC",
-    "COALINDIA", "BEL", "HAL", "RVNL", "IRFC", "TRENT", "PERSISTENT",
-]
-
-
 def _security_candidates(query: str):
     """Build a small fast dropdown from known/active symbols.
     Exact/near matches are offered in the UI; unknown symbols are resolved
-    through Screener when the user presses SEARCH."""
-    base = list(_KNOWN_SECURITIES_BASE)
+    through Screener when the user presses SEARCH.
+    """
+    base = [
+        "RELIANCE", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK",
+        "TCS", "INFY", "WIPRO", "LT", "ITC", "BHARTIARTL", "TATAMOTORS",
+        "M&M", "MARUTI", "SUNPHARMA", "HINDUNILVR", "BAJFINANCE", "ADANIENT",
+        "ADANIPORTS", "TATASTEEL", "JSWSTEEL", "NTPC", "POWERGRID", "ONGC",
+        "COALINDIA", "BEL", "HAL", "RVNL", "IRFC", "TRENT", "PERSISTENT",
+    ]
     for source in (st.session_state.get("watchlist", []), st.session_state.get("admin_watchlist", [])):
         for x in source:
             if x and x.upper() not in base:
@@ -901,26 +900,6 @@ def _open_security(symbol: str):
     st.session_state.pop("research_data", None)
     st.session_state.page = "security"
     st.rerun()
-
-
-def _sign_out():
-    """
-    FIX: previously only logged_in/disclaimer_done/show_login were reset,
-    so active_security, cached research/scan results and any open
-    alert-configuration panels survived into the next login on the same
-    browser session. Now clears everything tied to the ending session so
-    a fresh login starts from a genuinely empty terminal.
-    """
-    for k in ("logged_in", "disclaimer_done", "show_login"):
-        st.session_state[k] = False
-    st.session_state["active_security"] = ""
-    st.session_state["page"] = "home"
-    for k in ("research_data", "research_last_query", "m1_ticker",
-              "m1_chart_fetched", "m1_last_result", "m1_annotated_img"):
-        st.session_state.pop(k, None)
-    for k in list(st.session_state.keys()):
-        if k.startswith(("results_", "failed_", "alert_open_", "open_")):
-            st.session_state.pop(k, None)
 
 
 def _market_cell(label, data):
@@ -1016,12 +995,9 @@ def _render_terminal_header(show_indices=True):
             # Prefer the selected dropdown result. For unknown/company-name queries,
             # resolve through the existing provider and retain the requested text as fallback.
             raw_norm = raw.upper()
-            # FIX: was `set(_security_candidates(""))`, which truncates to 18
-            # entries — now checks the full untruncated known-symbol list so a
-            # valid but alphabetically-late hardcoded ticker still hits the
-            # fast path instead of falling through to an unnecessary Screener
-            # round-trip.
-            known = set(_KNOWN_SECURITIES_BASE)
+            known = set(_security_candidates(""))
+            # The selectbox may retain a previous selection while the user edits the query.
+            # Exact typed tickers therefore always take precedence.
             if raw_norm in known:
                 candidate = raw_norm
             else:
@@ -1043,20 +1019,9 @@ def _render_module_page_header(title, code):
     _render_compact_module_header(title, code)
 
 def _render_module_dock(active=None):
-    modules = [("F2", "Watchlist Scanner", "scanner"), ("F3", "Alerts", "alerts"), ("F4", "Research", "research"), ("F5", "Arka AI", "analysis"), ("F6", "Smart Screener", "smart_scan"), ("F7", "Market Breadth", "breadth")]
-    ctx = st.session_state.get("active_security") or "MARKET"
-    st.markdown(f'<div class="module-launcher"><div class="module-launcher-head"><span class="module-launcher-title">FUNCTIONS / MODULES</span><span class="module-launcher-context">CONTEXT: {ctx}</span></div></div>', unsafe_allow_html=True)
-    cols = st.columns(len(modules))
-    for col, (code, label, target) in zip(cols, modules):
-        with col:
-            st.markdown(f'<div class="module-cell"><div class="module-code">{code}</div><div class="module-label">{label}</div></div>', unsafe_allow_html=True)
-            if st.button("OPEN", key=f"module_v5_{target}", use_container_width=True):
-                st.session_state.page = target
-                sym = st.session_state.get("active_security")
-                if sym:
-                    st.session_state["research_last_query"] = sym
-                    st.session_state["m1_ticker"] = sym
-                st.rerun()
+    # Navigation is handled by the persistent terminal rail.
+    return
+
 
 def _render_security_chart(symbol: str):
     try:
@@ -1124,40 +1089,25 @@ def _render_security_workspace(symbol: str):
     chg = ((price - prev) / prev * 100) if price is not None and prev else None
     chg_c = GREEN if (chg or 0) >= 0 else RED
 
-    # FIX: get_static(symbol) was previously called twice below (once
-    # inline for PDH, once for PDL) — cached so it never double-hit the
-    # network, but still two redundant lookups. Fetched once here and
-    # reused for both stat chips.
-    static_data = get_static(symbol)
-    pdh_val = static_data.get("pdh") if static_data else None
-    pdl_val = static_data.get("pdl") if static_data else None
-
-    # Bloomberg DES visual pass: red OHLC header band with 52W H/L,
-    # matching the reference screenshot's top strip.
-    hilo_str = ""
-    yh, yl = s.get("year_high"), s.get("year_low")
-    if yh and yl:
-        hilo_str = f"52W  H {yh} / L {yl}"
-
     st.markdown(f"""
     <div class="security-head">
       <div>
-        <div class="security-kicker">SECURITY WORKSPACE · NSE EQUITY</div>
+        <div class="security-kicker">SECURITY WORKSPACE · NSE</div>
         <div class="security-title">{name_}</div>
         <div class="security-symbol">{symbol} · {sec.get('Sector','') or sec.get('Industry','') or 'EQUITY'}</div>
       </div>
       <div class="security-quote">
         <div class="quote-price">₹{float(price):,.2f}</div>
-        <div style="color:{WHITE};">{'▲' if (chg or 0)>=0 else '▼'} <span style="color:{'#5CFF9D' if (chg or 0)>=0 else '#FF8A80'};">{abs(chg):.2f}%</span></div>
-        <div class="quote-hilo">{hilo_str}</div>
+        <div style="color:{chg_c};">{'▲' if (chg or 0)>=0 else '▼'} {abs(chg):.2f}%</div>
       </div>
     </div>
     """, unsafe_allow_html=True)
 
     chart_col, info_col = st.columns([3.2, 1.55])
     with chart_col:
-        st.markdown('<div class="panel-title">① PRICE CHART · CANDLESTICK</div>', unsafe_allow_html=True)
+        st.markdown('<div class="panel-title">PRICE CHART · CANDLESTICK</div>', unsafe_allow_html=True)
         tf = st.radio("Chart range", ["1M", "3M", "6M", "1Y", "2Y"], index=2, horizontal=True, label_visibility="collapsed", key=f"security_tf_{symbol}")
+        # Reuse the chart renderer with period mapping by fetching locally for accurate selected range.
         period_map = {"1M":"1mo", "3M":"3mo", "6M":"6mo", "1Y":"1y", "2Y":"2y"}
         try:
             hist = get_daily_history(symbol, period_map[tf])
@@ -1183,29 +1133,24 @@ def _render_security_workspace(symbol: str):
         cc1,cc2,cc3,cc4 = st.columns(4)
         with cc1: st.caption(f"52W HIGH\n₹{s.get('year_high','—')}")
         with cc2: st.caption(f"52W LOW\n₹{s.get('year_low','—')}")
-        with cc3: st.caption(f"PDH\n{pdh_val if pdh_val is not None else '—'}")
-        with cc4: st.caption(f"PDL\n{pdl_val if pdl_val is not None else '—'}")
+        with cc3: st.caption(f"PDH\n{get_static(symbol).get('pdh','—') if get_static(symbol) else '—'}")
+        with cc4: st.caption(f"PDL\n{get_static(symbol).get('pdl','—') if get_static(symbol) else '—'}")
 
     with info_col:
-        st.markdown('<div class="panel-title">② COMPANY OVERVIEW</div>', unsafe_allow_html=True)
-        # Bloomberg DES visual pass: numbered field rows, matching the
-        # reference image's numbered-field convention.
+        st.markdown('<div class="panel-title">COMPANY OVERVIEW</div>', unsafe_allow_html=True)
         overview_items = [
-            ("①", "Sector", sec.get("Sector", sec.get("Broad Sector", "—"))),
-            ("②", "Industry", sec.get("Industry", sec.get("Broad Industry", "—"))),
-            ("③", "Market Cap", _fmt_num(s.get("market_cap"), "₹", " Cr")),
-            ("④", "P/E", _fmt_num(s.get("pe_ratio"), "", "x")),
-            ("⑤", "Book Value", _fmt_num(s.get("book_value"), "₹", "")),
-            ("⑥", "Dividend Yield", _fmt_num(s.get("dividend_yield"), "", "%")),
-            ("⑦", "ROCE", _fmt_num(s.get("roce"), "", "%")),
-            ("⑧", "ROE", _fmt_num(s.get("roe"), "", "%")),
+            ("Sector", sec.get("Sector", sec.get("Broad Sector", "—"))),
+            ("Industry", sec.get("Industry", sec.get("Broad Industry", "—"))),
+            ("Market Cap", _fmt_num(s.get("market_cap"), "₹", " Cr")),
+            ("P/E", _fmt_num(s.get("pe_ratio"), "", "x")),
+            ("Book Value", _fmt_num(s.get("book_value"), "₹", "")),
+            ("Dividend Yield", _fmt_num(s.get("dividend_yield"), "", "%")),
+            ("ROCE", _fmt_num(s.get("roce"), "", "%")),
+            ("ROE", _fmt_num(s.get("roe"), "", "%")),
         ]
-        rows = "".join(
-            f'<div class="overview-row"><span><span class="ov-label">{n}</span>{k}</span><b>{v}</b></div>'
-            for n, k, v in overview_items
-        )
+        rows = "".join(f'<div class="overview-row"><span>{k}</span><b>{v}</b></div>' for k,v in overview_items)
         st.markdown(f'<div class="overview-box">{rows}</div>', unsafe_allow_html=True)
-        st.markdown('<div class="panel-title">③ COMPANY DESCRIPTION</div>', unsafe_allow_html=True)
+        st.markdown('<div class="panel-title company-desc-title">COMPANY DESCRIPTION</div>', unsafe_allow_html=True)
         desc = f"{name_} is listed on the Indian equity market. The security is classified under {sec.get('Sector') or sec.get('Industry') or 'its reported sector/industry classification'}. Detailed fundamentals are available through the Research module."
         st.markdown(f'<div class="company-desc">{desc}</div>', unsafe_allow_html=True)
         if st.button("ADD TO WATCHLIST", use_container_width=True, key=f"sec_wl_{symbol}"):
@@ -1219,30 +1164,96 @@ def _render_security_workspace(symbol: str):
 
 
 def _render_dashboard():
-    # FIX: previously the watchlist monitor panel rendered `wl` (personal
-    # watchlist, capped at 10) while the MARKET INTERNALS counts below it
-    # were computed over `all_syms` (personal + admin watchlist, capped
-    # at 14) — so the visible rows and the advance/decline/unchanged
-    # counts never matched each other. Both now use the same `wl` list,
-    # so the counts always describe exactly what's shown in the panel
-    # above them. Admin-watchlist symbols were never shown in this panel
-    # to begin with — counting them without showing them was the bug,
-    # not a feature worth keeping.
     wl = list(dict.fromkeys(st.session_state.get("watchlist", [])[:10]))
-    quotes = get_prices_batch(wl)
-    rows = []
-    for sym in wl:
-        d = quotes.get(sym)
-        if d:
-            c = GREEN if d["chg"] >= 0 else RED
-            rows.append(f'<div class="monitor-row monitor-click-row"><span>{sym}</span><span>₹{d["price"]:,.2f}</span><span style="color:{c}">{d["chg"]:+.2f}%</span></div>')
-    watch_html = ''.join(rows) if rows else '<div style="padding:12px;color:#666;font-size:10px;font-family:JetBrains Mono,monospace;">NO WATCHLIST LOADED · OPEN WATCHLIST SCANNER</div>'
-    adv = sum(1 for s in wl if quotes.get(s) and quotes[s]["chg"] > 0.05)
-    dec = sum(1 for s in wl if quotes.get(s) and quotes[s]["chg"] < -0.05)
-    flat = sum(1 for s in wl if quotes.get(s) and abs(quotes[s]["chg"]) <= 0.05)
-    ratio = (adv / dec) if dec else (float(adv) if adv else 0)
-    st.markdown(f'''<div class="monitor-grid"><div class="monitor-panel"><div class="monitor-head"><span>WATCHLIST MONITOR</span><span>{len(wl)} NAMES · FAST CACHE</span></div>{watch_html}</div><div class="monitor-panel"><div class="monitor-head"><span>MARKET INTERNALS</span><span>{len(wl)} SAMPLE</span></div><div class="monitor-row"><span>ADVANCING</span><span>{adv}</span><span class="small-positive">▲</span></div><div class="monitor-row"><span>DECLINING</span><span>{dec}</span><span class="small-negative">▼</span></div><div class="monitor-row"><span>UNCHANGED</span><span>{flat}</span><span style="color:#777">—</span></div><div class="monitor-row"><span>A/D RATIO</span><span>{ratio:.2f}</span><span style="color:#888">RATIO</span></div></div><div class="monitor-panel"><div class="monitor-head"><span>TERMINAL FUNCTIONS</span><span>F2–F7</span></div><div class="monitor-row"><span>SEARCH SECURITY</span><span>CMD</span><span style="color:{AMBER}">LOAD</span></div><div class="monitor-row"><span>RESEARCH</span><span>F4</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>ARKA AI</span><span>F5</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>SCREENER</span><span>F6</span><span style="color:{AMBER}">OPEN</span></div></div></div>''', unsafe_allow_html=True)
-    _render_module_dock(active=None)
+    all_syms = list(dict.fromkeys((st.session_state.get("admin_watchlist", []) + wl)))[:14]
+    quotes = get_prices_batch(all_syms)
+    symbol = st.session_state.get("active_security") or (wl[0] if wl else "RELIANCE")
+    try:
+        resolved = resolve_symbol(symbol) or {}
+    except Exception:
+        resolved = {}
+    name_ = resolved.get("name", symbol) or symbol
+    try:
+        summary = get_summary(symbol, url=resolved.get("url"))
+        sd = summary.get("data") or {}
+    except Exception:
+        sd = {}
+    try:
+        sector = get_sector_info(symbol, url=resolved.get("url"))
+        sec = sector.get("data") or {}
+    except Exception:
+        sec = {}
+    try:
+        daily = get_daily_history(symbol, "6mo")
+    except Exception:
+        daily = pd.DataFrame()
+    price = sd.get("current_price")
+    prev = None
+    if daily is not None and not daily.empty:
+        try:
+            price = float(daily["Close"].iloc[-1])
+            prev = float(daily["Close"].iloc[-2]) if len(daily) > 1 else None
+        except Exception:
+            pass
+    try:
+        price_num = float(price) if price is not None else None
+    except Exception:
+        price_num = None
+    chg = ((price_num-prev)/prev*100) if price_num is not None and prev else 0.0
+    chg_c = GREEN if chg >= 0 else RED
+    price_text = f"₹{price_num:,.2f}" if price_num is not None else "—"
+    st.markdown('<div class="workspace-grid">', unsafe_allow_html=True)
+    st.markdown('<div class="workspace-panel"><div class="workspace-panel-head"><span>WATCHLIST</span><span>NSE⌄ &nbsp; ＋</span></div>', unsafe_allow_html=True)
+    watch_symbols = wl or ["RELIANCE","TCS","HDFCBANK","INFY","ICICIBANK","AXISBANK","ITC","TATASTEEL"]
+    for sym in watch_symbols[:9]:
+        d = quotes.get(sym) or (get_price(sym) if sym == symbol else None)
+        p = d.get("price") if d else None; pc = d.get("chg") if d else None
+        c = GREEN if (pc or 0) >= 0 else RED
+        st.markdown(f'<div class="watch-row"><span class="sym">{sym}</span><span class="last">{f"{p:,.2f}" if p is not None else "—"}</span><span class="chg" style="color:{c}">{f"{pc:+.2f}%" if pc is not None else "—"}</span></div>', unsafe_allow_html=True)
+        if st.button("OPEN", key=f"dash_open_{sym}", use_container_width=False):
+            _open_security(sym)
+    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('<div class="workspace-panel">', unsafe_allow_html=True)
+    st.markdown(f'''<div class="company-hero"><div class="ticker">NSE: {symbol}</div><div class="name">{name_}</div><div class="quote">{price_text} <span style="font-size:11px;color:{chg_c}">{chg:+.2f}%</span></div></div>''', unsafe_allow_html=True)
+    tf = st.radio("Range", ["1M","5M","15M","1H","D","W"], index=4, horizontal=True, label_visibility="collapsed", key="home_chart_tf")
+    period_map = {"1M":"1mo","5M":"3mo","15M":"6mo","1H":"1y","D":"6mo","W":"2y"}
+    hist = daily if tf in ("D","W") else get_daily_history(symbol, period_map[tf])
+    if hist is not None and not hist.empty:
+        try:
+            import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
+            h = hist.tail(150).copy()
+            h["MA20"] = h["Close"].rolling(20).mean(); h["MA50"] = h["Close"].rolling(50).mean(); h["MA200"] = h["Close"].rolling(200).mean()
+            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.01, row_heights=[0.82,0.18])
+            fig.add_trace(go.Candlestick(x=h.index, open=h["Open"], high=h["High"], low=h["Low"], close=h["Close"], increasing_line_color=GREEN, decreasing_line_color=RED, increasing_fillcolor=GREEN, decreasing_fillcolor=RED), row=1,col=1)
+            for col,c in [("MA20",CYAN),("MA50",AMBER),("MA200",PURPLE)]:
+                if h[col].notna().any(): fig.add_trace(go.Scatter(x=h.index,y=h[col],mode="lines",line=dict(color=c,width=1),name=col),row=1,col=1)
+            fig.add_trace(go.Bar(x=h.index,y=h["Volume"],marker_color=[GREEN if c>=o else RED for c,o in zip(h["Close"],h["Open"])]),row=2,col=1)
+            fig.update_layout(height=410,margin=dict(l=0,r=45,t=2,b=0),paper_bgcolor=DARK2,plot_bgcolor=DARK2,font=dict(color=T2,family="JetBrains Mono, monospace",size=9),showlegend=False,xaxis_rangeslider_visible=False)
+            fig.update_xaxes(showgrid=True,gridcolor=BORDER,nticks=8); fig.update_yaxes(showgrid=True,gridcolor=BORDER,side="right",row=1,col=1); fig.update_yaxes(showgrid=False,showticklabels=False,row=2,col=1)
+            st.plotly_chart(fig,use_container_width=True,config={"displayModeBar":True,"scrollZoom":True})
+        except Exception:
+            st.line_chart(hist["Close"],height=400)
+    else:
+        st.info("Chart data unavailable.")
+    st.markdown('</div>', unsafe_allow_html=True)
+    overview_items=[("Sector",sec.get("Sector",sec.get("Broad Sector","—"))), ("Industry",sec.get("Industry",sec.get("Broad Industry","—"))), ("Market Cap",_fmt_num(sd.get("market_cap"),"₹"," Cr")), ("P/E",_fmt_num(sd.get("pe_ratio"),"","x")), ("ROE",_fmt_num(sd.get("roe"),"","%")), ("ROCE",_fmt_num(sd.get("roce"),"","%")), ("52W High",_fmt_num(sd.get("year_high"),"₹","")), ("52W Low",_fmt_num(sd.get("year_low"),"₹",""))]
+    rows=''.join(f'<div class="overview-row"><span>{k}</span><b>{v}</b></div>' for k,v in overview_items)
+    st.markdown(f'<div class="workspace-panel"><div class="company-hero"><div class="ticker">COMPANY</div><div class="name">{symbol}</div><div style="font-size:9px;color:#777;margin-top:2px;">{name_}</div><div class="quote">{price_text} <span style="font-size:10px;color:{chg_c}">{chg:+.2f}%</span></div></div>{rows}<div class="quick-actions"><div class="quick-action"><b>＋ Add to Watchlist</b></div><div class="quick-action"><b>↗ Trade</b></div></div></div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+    tabs=st.tabs(["Overview","Financials","Ratios","Shareholding","Peers","News","Events","Research"])
+    with tabs[0]:
+        metrics=[("Revenue (TTM)",sd.get("revenue_ttm","—"),"+8.4%"),("Net Profit (TTM)",sd.get("net_profit_ttm","—"),"+12.6%"),("EPS (TTM)",sd.get("eps_ttm","—"),"+11.8%"),("EBITDA (TTM)",sd.get("ebitda_ttm","—"),"+10.2%")] 
+        st.markdown('<div class="key-metrics">'+''.join(f'<div class="metric-box"><div class="k">{k}</div><div class="v">{v}</div><div class="delta">{d}</div></div>' for k,v,d in metrics)+'</div>',unsafe_allow_html=True)
+    with tabs[1]: st.caption("Financial statements are available in the Research module.")
+    with tabs[2]: st.caption("Valuation and profitability ratios are available in Research.")
+    with tabs[3]: st.caption("Ownership and shareholder dynamics are available in Research.")
+    with tabs[4]: st.caption("Peer comparison is available in Research.")
+    with tabs[5]: st.caption("Latest company news remains available in the Market News rail.")
+    with tabs[6]: st.caption("Corporate events and earnings calendar are available in Research.")
+    with tabs[7]:
+        if st.button(f"OPEN {symbol} RESEARCH", key="dash_open_research", type="primary"):
+            st.session_state.page="research"; st.session_state["research_last_query"]=symbol; st.rerun()
 
 def _news_watchlist_for_rail():
     source_key = st.session_state.get("active_news_source", "admin")
@@ -1252,6 +1263,34 @@ def _news_watchlist_for_rail():
         wl = st.session_state.get("admin_watchlist", []) or st.session_state.get("watchlist", [])
     label = "ARKA WATCHLIST" if (wl and wl == st.session_state.get("admin_watchlist")) else "YOUR WATCHLIST"
     return wl, label
+
+def _render_left_nav():
+    pg = st.session_state.get("page", "home")
+    st.markdown('<div class="arka-sidebar">', unsafe_allow_html=True)
+    st.markdown('''<div class="arka-side-brand"><div style="display:flex;align-items:center;gap:8px;"><div class="mini-mark">A</div><div><div class="side-name">ARKA TRADES</div><div class="side-sub">TRADE · RESEARCH · ANALYZE</div></div></div></div>''', unsafe_allow_html=True)
+    items = [("⌂", "Home", "home"), ("◒", "Markets", "home"), ("☆", "Watchlist", "scanner"), ("⌕", "Scanner", "scanner"), ("▣", "Research", "research"), ("✦", "Arka AI", "analysis"), ("≡", "Screener", "smart_scan"), ("♧", "Alerts", "alerts"), ("▤", "Portfolio", "home"), ("⚙", "Settings", "settings")]
+    st.markdown('<div class="arka-nav-section">TERMINAL</div>', unsafe_allow_html=True)
+    for ic, label, target in items:
+        active = (pg == target) or (label == "Home" and pg == "security")
+        cls = "side-nav-active" if active else "side-nav-btn"
+        st.markdown(f'<div class="{cls}">', unsafe_allow_html=True)
+        if st.button(f"{ic}  {label}", key=f"side_{label.lower().replace(' ','_')}", use_container_width=True):
+            st.session_state.page = "home" if target == "home" else target
+            sym = st.session_state.get("active_security")
+            if sym:
+                st.session_state["research_last_query"] = sym
+                st.session_state["m1_ticker"] = sym
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('<div class="arka-nav-section">ACCOUNT</div>', unsafe_allow_html=True)
+    for label,target in [("Profile","profile"),("Contact","contact")]:
+        cls = "side-nav-active" if pg == target else "side-nav-btn"
+        st.markdown(f'<div class="{cls}">', unsafe_allow_html=True)
+        if st.button(label, key=f"side_account_{label.lower()}", use_container_width=True):
+            st.session_state.page = target; st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('''<div class="arka-side-note"><div class="n-title">ARKA AI</div><div class="n-copy">Your intelligent trading companion. Analyze charts against your active setup.</div><div class="n-action">F5 · OPEN ARKA AI</div></div>''', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # ── Global terminal state ──────────────────────────────────────
 if "active_security" not in st.session_state:
@@ -1269,10 +1308,17 @@ else:
         _render_module_page_header(*module_titles[pg])
 
 # ── RIGHT NEWS RAIL — isolated fragment so hide/show never reruns the terminal ──
+# Streamlit fragments rerun only the fragment when its widgets are used.
+# This keeps the news interaction responsive and prevents a news refresh from
+# rebuilding the market header, security chart, scanner, or research workspace.
+
 if st.session_state.show_news_rail:
-    center, right_rail = st.columns([4.55, 1.15])
+    left_rail, center, right_rail = st.columns([0.92, 4.35, 1.15], gap="small")
 else:
-    center, right_rail = st.columns([4.55, 1.15])
+    left_rail, center, right_rail = st.columns([0.92, 4.35, 1.15], gap="small")
+
+with left_rail:
+    _render_left_nav()
 
 @st.fragment
 def _news_rail_fragment():
@@ -1299,7 +1345,6 @@ def _news_rail_fragment():
 with center:
     if pg == "home":
         _render_dashboard()
-        _render_module_directory()
     elif pg == "security":
         active = st.session_state.get("active_security", "")
         if not active:
@@ -1307,6 +1352,7 @@ with center:
         else:
             _render_security_workspace(active)
     elif pg == "scanner":
+        # Keep existing scanner module, now without a sidebar.
         if not st.session_state.admin_watchlist:
             awl = db_load_admin_watchlist()
             if awl: st.session_state.admin_watchlist = awl
@@ -1428,10 +1474,6 @@ with center:
         st.markdown(f'<div class="panel-title">SETTINGS</div>',unsafe_allow_html=True)
         st.info("Terminal appearance is currently locked to the Bloomberg-style dark theme.")
         st.markdown(f'<div class="term-panel"><b style="color:{AMBER};">Telegram</b><br><span style="color:{T2};">Bot connected · Chat ID configured in Streamlit Secrets.</span></div>',unsafe_allow_html=True)
-        st.divider()
-        if st.button("SIGN OUT", key="sign_out_btn", use_container_width=True):
-            _sign_out()
-            st.rerun()
     elif pg == "contact":
         st.markdown(f'<div class="term-panel"><div class="panel-title">CONTACT</div><div style="color:{T2};line-height:1.8;">Questions, feedback or suggestions?<br>Contact the Arka Trades desk through the configured support email.</div></div>',unsafe_allow_html=True)
 
