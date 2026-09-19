@@ -440,84 +440,10 @@ def _render_chart(symbol, T, period="6mo", key_suffix="main"):
     return h
 
 
-# ── v9.2: Bloomberg-style grouped function nav ──────────────────────
-# Bloomberg's own terminal groups functions into short codes (FA <GO>,
-# DES <GO>, ...) rather than one long flat list. The 24 research
-# functions are grouped the same way below: pick a group, then a
-# function within it. Group membership is fixed and covers all 24
-# items exactly once — nothing was dropped or duplicated.
-_GROUPS = [
-    ("OVERVIEW", "OV", ["01 Overview", "02 Company", "03 Business"]),
-    ("FINANCIALS", "FA", ["04 Financials", "05 Earnings", "20 Price + Fundamentals", "21 What Changed?"]),
-    ("VALUATION", "VAL", ["06 Valuation", "18 Factors"]),
-    ("OWNERSHIP", "OWN", ["07 Ownership", "08 Flows", "09 Segments", "10 Peers"]),
-    ("QUALITATIVE", "QL", ["11 Supply Chain", "12 Management", "13 Filings", "14 Events", "15 News"]),
-    ("TECHNICAL", "TECH", ["16 Technical", "17 Relative Strength", "19 Risk"]),
-    ("WORKSPACE", "WRK", ["22 Thesis", "23 Research Graph", "24 Data / Sources"]),
-]
-
-
-def _group_nav_css(T):
-    st.markdown(f'''<style>
-    div[class*="st-key-rgrp_"] > div > button, div[class*="st-key-rfn_"] > div > button {{
-        background:{T["panel"]} !important; color:{T["t2"]} !important;
-        border:1px solid {T["border"]} !important; border-radius:0 !important;
-        font-family:{T["mono"]} !important; font-size:10px !important; font-weight:700 !important;
-        letter-spacing:.6px !important; text-transform:uppercase !important; padding:6px 4px !important;
-    }}
-    div[class*="st-key-rgrp_"] > div > button:hover, div[class*="st-key-rfn_"] > div > button:hover {{
-        border-color:{T["amber"]} !important; color:{T["amber"]} !important;
-    }}
-    div[class*="st-key-rgrp_active"] > div > button {{
-        background:{T["amber"]}1c !important; color:{T["amber"]} !important; border-color:{T["amber"]} !important;
-    }}
-    div[class*="st-key-rfn_active"] > div > button {{
-        background:{T["panel2"]} !important; color:{T["ivory"]} !important;
-        border-color:{T["t3"]} !important; box-shadow:inset 0 -2px 0 {T["amber"]} !important;
-    }}
-    </style>''', unsafe_allow_html=True)
-
-
-def _research_nav(T):
-    """Renders the group row + function row and returns the selected
-    function's full label (e.g. "04 Financials") — same return shape
-    the old flat selectbox produced, so the dispatch dict below is
-    unchanged."""
-    _group_nav_css(T)
-    group_names = [g[0] for g in _GROUPS]
-    active_group = st.session_state.get("research_group_v92", group_names[0])
-    if active_group not in group_names:
-        active_group = group_names[0]
-
-    st.markdown(f'<div style="font:9px {T["mono"]};color:{T["t3"]};letter-spacing:1px;margin:2px 0 4px;">FUNCTION GROUP</div>', unsafe_allow_html=True)
-    gcols = st.columns(len(_GROUPS))
-    for col, (gname, gcode, _items) in zip(gcols, _GROUPS):
-        with col:
-            is_active = gname == active_group
-            key = f"rgrp_active_{gname}" if is_active else f"rgrp_{gname}"
-            if st.button(f"{gcode}", key=key, use_container_width=True, help=gname):
-                st.session_state["research_group_v92"] = gname
-                st.session_state.pop("research_func_v92", None)
-                st.rerun()
-
-    current_group = next(g for g in _GROUPS if g[0] == active_group)
-    items = current_group[2]
-    active_func = st.session_state.get("research_func_v92", items[0])
-    if active_func not in items:
-        active_func = items[0]
-
-    st.markdown(f'<div style="font:9px {T["mono"]};color:{T["amber"]};letter-spacing:1px;margin:10px 0 4px;">{active_group} FUNCTIONS</div>', unsafe_allow_html=True)
-    fcols = st.columns(len(items))
-    for col, item in zip(fcols, items):
-        with col:
-            is_active = item == active_func
-            short = item.split(" ", 1)[1] if item[:2].isdigit() else item
-            key = f"rfn_active_{item}" if is_active else f"rfn_{item}"
-            if st.button(short, key=key, use_container_width=True):
-                st.session_state["research_func_v92"] = item
-                st.rerun()
-
-    return active_func
+def _research_nav(tabs, active_index):
+    # Selectbox is intentionally used instead of building 24 interactive tabs;
+    # that keeps the Research shell lighter and easier to operate on desktop/mobile.
+    return st.selectbox("RESEARCH FUNCTION", tabs, index=active_index, key="research_function_v91")
 
 
 def _status_strip(T):
