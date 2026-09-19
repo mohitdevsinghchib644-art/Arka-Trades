@@ -16,7 +16,7 @@ from research_page import render_research_page
 from screener_scraper import resolve_symbol, get_summary, get_sector_info
 
 # ═══════════════════════════════════════════════════════════════════
-# v6 — ARKA TERMINAL UI MATCH / DARK FINANCIAL WORKSTATION
+# v3 — BLOOMBERG TERMINAL RESKIN + RIGHT-RAIL NEWS + INDEX FIX
 #
 # Changes vs. previous version:
 #   1. Full layout is now 3 columns: NAV (left) | CONTENT (center) |
@@ -228,8 +228,7 @@ st.markdown(f"""
 html,body,.stApp{{background:#050505 !important;color:{IVORY} !important;font-family:'Inter',sans-serif !important;}}
 header[data-testid="stHeader"]{{display:none !important;}}
 [data-testid="stSidebar"],[data-testid="stSidebarCollapsedControl"]{{display:none !important;}}
-.block-container{{padding:0 6px 24px !important;max-width:100% !important;}}
-[data-testid="stHorizontalBlock"]{{align-items:stretch !important;}}
+.block-container{{padding:0 8px 28px !important;max-width:100% !important;}}
 .stButton>button{{background:#0b0b0b !important;color:#d8d8d8 !important;border:1px solid #252525 !important;border-radius:0 !important;font-family:'Inter',sans-serif !important;font-size:11px !important;font-weight:600 !important;min-height:30px !important;box-shadow:none !important;}}
 .stButton>button:hover{{border-color:{AMBER} !important;color:{AMBER} !important;background:#111 !important;}}
 .stButton>button[kind="primary"]{{background:{AMBER} !important;color:#000 !important;border-color:{AMBER} !important;}}
@@ -267,45 +266,6 @@ hr{{border-color:#202020 !important;}}
 .module-dir-use{{margin-top:6px;font-size:9px;color:#aaa;line-height:1.5;}}
 .module-dir-use span{{font-family:'JetBrains Mono',monospace;color:#555;margin-right:7px;font-size:8px;}}
 
-
-.arka-sidebar{{background:#07090b;border:1px solid #1d252b;border-top:0;min-height:calc(100vh - 120px);position:sticky;top:0;}}
-.arka-side-brand{{padding:14px 12px 12px;border-bottom:1px solid #202020;}}
-.arka-side-brand .mini-mark{{width:28px;height:28px;background:#ff9f0a;display:flex;align-items:center;justify-content:center;color:#050505;font-weight:900;font-size:16px;}}
-.arka-side-brand .side-name{{font-size:12px;font-weight:800;letter-spacing:1.3px;color:#f0f0f0;}}
-.arka-side-brand .side-sub{{font-family:'JetBrains Mono',monospace;font-size:7px;color:#666;letter-spacing:1px;margin-top:2px;}}
-.arka-nav-section{{font-family:'JetBrains Mono',monospace;font-size:8px;color:#555;letter-spacing:1.4px;padding:13px 10px 5px;}}
-.arka-side-note{{margin:14px 10px 0;padding:10px;border:1px solid #2b2b2b;background:#0b0b0b;}}
-.arka-side-note .n-title{{font-family:'JetBrains Mono',monospace;font-size:9px;color:#ff9f0a;letter-spacing:1px;}}
-.arka-side-note .n-copy{{font-size:9px;color:#777;line-height:1.45;margin-top:5px;}}
-.arka-side-note .n-action{{margin-top:8px;background:#ff9f0a;color:#000;padding:7px;text-align:center;font-size:9px;font-weight:800;}}
-.side-nav-btn button{{background:transparent !important;border-color:transparent !important;color:#a8a8a8 !important;text-align:left !important;padding:7px 9px !important;min-height:31px !important;font-size:10px !important;}}
-.side-nav-btn button:hover{{background:#111 !important;border-color:#2a2a2a !important;color:#ff9f0a !important;}}
-.side-nav-active button{{background:#241706 !important;border:1px solid #7a4a00 !important;color:#ff9f0a !important;}}
-.side-nav-active button:before{{content:' ';display:inline-block;width:3px;height:13px;background:#ff9f0a;margin-right:7px;vertical-align:-2px;}}
-.workspace-grid{{display:grid;grid-template-columns:1.05fr 3.6fr 1.45fr;gap:8px;}}
-.workspace-panel{{background:#080a0c;border:1px solid #222b31;min-width:0;}}
-.workspace-panel-head{{height:38px;border-bottom:1px solid #20272c;padding:0 10px;display:flex;align-items:center;justify-content:space-between;font-family:'JetBrains Mono',monospace;font-size:9px;color:#ddd;letter-spacing:.9px;}}
-.workspace-panel-head span:last-child{{color:#666;font-size:8px;}}
-.watch-row{{display:grid;grid-template-columns:1fr 78px 58px;padding:8px 8px;border-bottom:1px solid #151b20;font-family:'JetBrains Mono',monospace;font-size:9px;}}
-.watch-row:hover{{background:#0d1115;}}
-.watch-row .sym{{color:#ddd;font-weight:700;}}
-.watch-row .last{{text-align:right;color:#ddd;}}
-.watch-row .chg{{text-align:right;}}
-.company-hero{{padding:14px;border-bottom:1px solid #222b31;}}
-.company-hero .ticker{{font-family:'JetBrains Mono',monospace;font-size:8px;color:#777;}}
-.company-hero .name{{font-size:15px;font-weight:700;color:#eee;margin-top:4px;}}
-.company-hero .quote{{font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:600;margin-top:7px;}}
-.workspace-tabs{{margin-top:8px;}}
-.key-metrics{{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:8px;}}
-.metric-box{{background:#080a0c;border:1px solid #222b31;padding:9px;}}
-.metric-box .k{{font-family:'JetBrains Mono',monospace;font-size:8px;color:#666;letter-spacing:.8px;}}
-.metric-box .v{{font-family:'JetBrains Mono',monospace;font-size:13px;color:#e5e5e5;margin-top:5px;}}
-.metric-box .delta{{font-family:'JetBrains Mono',monospace;font-size:8px;color:#30d158;margin-top:3px;}}
-.quick-actions{{padding:9px;}}
-.quick-action{{border-bottom:1px solid #171d21;padding:8px 2px;font-size:9px;color:#aaa;}}
-.quick-action b{{color:#eee;font-weight:500;}}
-@media(max-width:1200px){{.workspace-grid{{grid-template-columns:1fr 2.7fr 1.25fr;}}.key-metrics{{grid-template-columns:repeat(2,1fr);}}}}
-@media(max-width:900px){{.workspace-grid{{grid-template-columns:1fr;}}.arka-sidebar{{position:static;min-height:0;}}.side-nav-btn button{{min-height:28px !important;}}.key-metrics{{grid-template-columns:repeat(2,1fr);}}}}
 .market-strip{{border-bottom:1px solid #202020;background:#050505;}}
 .market-row{{display:grid;grid-template-columns:82px repeat(6,minmax(145px,1fr));min-height:43px;border-bottom:1px solid #161616;}}
 .market-row:last-child{{border-bottom:0;}}
@@ -1019,9 +979,20 @@ def _render_module_page_header(title, code):
     _render_compact_module_header(title, code)
 
 def _render_module_dock(active=None):
-    # Navigation is handled by the persistent terminal rail.
-    return
-
+    modules = [("F2", "Watchlist Scanner", "scanner"), ("F3", "Alerts", "alerts"), ("F4", "Research", "research"), ("F5", "Arka AI", "analysis"), ("F6", "Smart Screener", "smart_scan"), ("F7", "Market Breadth", "breadth")]
+    ctx = st.session_state.get("active_security") or "MARKET"
+    st.markdown(f'<div class="module-launcher"><div class="module-launcher-head"><span class="module-launcher-title">FUNCTIONS / MODULES</span><span class="module-launcher-context">CONTEXT: {ctx}</span></div></div>', unsafe_allow_html=True)
+    cols = st.columns(len(modules))
+    for col, (code, label, target) in zip(cols, modules):
+        with col:
+            st.markdown(f'<div class="module-cell"><div class="module-code">{code}</div><div class="module-label">{label}</div></div>', unsafe_allow_html=True)
+            if st.button("OPEN", key=f"module_v5_{target}", use_container_width=True):
+                st.session_state.page = target
+                sym = st.session_state.get("active_security")
+                if sym:
+                    st.session_state["research_last_query"] = sym
+                    st.session_state["m1_ticker"] = sym
+                st.rerun()
 
 def _render_security_chart(symbol: str):
     try:
@@ -1167,93 +1138,19 @@ def _render_dashboard():
     wl = list(dict.fromkeys(st.session_state.get("watchlist", [])[:10]))
     all_syms = list(dict.fromkeys((st.session_state.get("admin_watchlist", []) + wl)))[:14]
     quotes = get_prices_batch(all_syms)
-    symbol = st.session_state.get("active_security") or (wl[0] if wl else "RELIANCE")
-    try:
-        resolved = resolve_symbol(symbol) or {}
-    except Exception:
-        resolved = {}
-    name_ = resolved.get("name", symbol) or symbol
-    try:
-        summary = get_summary(symbol, url=resolved.get("url"))
-        sd = summary.get("data") or {}
-    except Exception:
-        sd = {}
-    try:
-        sector = get_sector_info(symbol, url=resolved.get("url"))
-        sec = sector.get("data") or {}
-    except Exception:
-        sec = {}
-    try:
-        daily = get_daily_history(symbol, "6mo")
-    except Exception:
-        daily = pd.DataFrame()
-    price = sd.get("current_price")
-    prev = None
-    if daily is not None and not daily.empty:
-        try:
-            price = float(daily["Close"].iloc[-1])
-            prev = float(daily["Close"].iloc[-2]) if len(daily) > 1 else None
-        except Exception:
-            pass
-    try:
-        price_num = float(price) if price is not None else None
-    except Exception:
-        price_num = None
-    chg = ((price_num-prev)/prev*100) if price_num is not None and prev else 0.0
-    chg_c = GREEN if chg >= 0 else RED
-    price_text = f"₹{price_num:,.2f}" if price_num is not None else "—"
-    st.markdown('<div class="workspace-grid">', unsafe_allow_html=True)
-    st.markdown('<div class="workspace-panel"><div class="workspace-panel-head"><span>WATCHLIST</span><span>NSE⌄ &nbsp; ＋</span></div>', unsafe_allow_html=True)
-    watch_symbols = wl or ["RELIANCE","TCS","HDFCBANK","INFY","ICICIBANK","AXISBANK","ITC","TATASTEEL"]
-    for sym in watch_symbols[:9]:
-        d = quotes.get(sym) or (get_price(sym) if sym == symbol else None)
-        p = d.get("price") if d else None; pc = d.get("chg") if d else None
-        c = GREEN if (pc or 0) >= 0 else RED
-        st.markdown(f'<div class="watch-row"><span class="sym">{sym}</span><span class="last">{f"{p:,.2f}" if p is not None else "—"}</span><span class="chg" style="color:{c}">{f"{pc:+.2f}%" if pc is not None else "—"}</span></div>', unsafe_allow_html=True)
-        if st.button("OPEN", key=f"dash_open_{sym}", use_container_width=False):
-            _open_security(sym)
-    st.markdown('</div>', unsafe_allow_html=True)
-    st.markdown('<div class="workspace-panel">', unsafe_allow_html=True)
-    st.markdown(f'''<div class="company-hero"><div class="ticker">NSE: {symbol}</div><div class="name">{name_}</div><div class="quote">{price_text} <span style="font-size:11px;color:{chg_c}">{chg:+.2f}%</span></div></div>''', unsafe_allow_html=True)
-    tf = st.radio("Range", ["1M","5M","15M","1H","D","W"], index=4, horizontal=True, label_visibility="collapsed", key="home_chart_tf")
-    period_map = {"1M":"1mo","5M":"3mo","15M":"6mo","1H":"1y","D":"6mo","W":"2y"}
-    hist = daily if tf in ("D","W") else get_daily_history(symbol, period_map[tf])
-    if hist is not None and not hist.empty:
-        try:
-            import plotly.graph_objects as go
-            from plotly.subplots import make_subplots
-            h = hist.tail(150).copy()
-            h["MA20"] = h["Close"].rolling(20).mean(); h["MA50"] = h["Close"].rolling(50).mean(); h["MA200"] = h["Close"].rolling(200).mean()
-            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.01, row_heights=[0.82,0.18])
-            fig.add_trace(go.Candlestick(x=h.index, open=h["Open"], high=h["High"], low=h["Low"], close=h["Close"], increasing_line_color=GREEN, decreasing_line_color=RED, increasing_fillcolor=GREEN, decreasing_fillcolor=RED), row=1,col=1)
-            for col,c in [("MA20",CYAN),("MA50",AMBER),("MA200",PURPLE)]:
-                if h[col].notna().any(): fig.add_trace(go.Scatter(x=h.index,y=h[col],mode="lines",line=dict(color=c,width=1),name=col),row=1,col=1)
-            fig.add_trace(go.Bar(x=h.index,y=h["Volume"],marker_color=[GREEN if c>=o else RED for c,o in zip(h["Close"],h["Open"])]),row=2,col=1)
-            fig.update_layout(height=410,margin=dict(l=0,r=45,t=2,b=0),paper_bgcolor=DARK2,plot_bgcolor=DARK2,font=dict(color=T2,family="JetBrains Mono, monospace",size=9),showlegend=False,xaxis_rangeslider_visible=False)
-            fig.update_xaxes(showgrid=True,gridcolor=BORDER,nticks=8); fig.update_yaxes(showgrid=True,gridcolor=BORDER,side="right",row=1,col=1); fig.update_yaxes(showgrid=False,showticklabels=False,row=2,col=1)
-            st.plotly_chart(fig,use_container_width=True,config={"displayModeBar":True,"scrollZoom":True})
-        except Exception:
-            st.line_chart(hist["Close"],height=400)
-    else:
-        st.info("Chart data unavailable.")
-    st.markdown('</div>', unsafe_allow_html=True)
-    overview_items=[("Sector",sec.get("Sector",sec.get("Broad Sector","—"))), ("Industry",sec.get("Industry",sec.get("Broad Industry","—"))), ("Market Cap",_fmt_num(sd.get("market_cap"),"₹"," Cr")), ("P/E",_fmt_num(sd.get("pe_ratio"),"","x")), ("ROE",_fmt_num(sd.get("roe"),"","%")), ("ROCE",_fmt_num(sd.get("roce"),"","%")), ("52W High",_fmt_num(sd.get("year_high"),"₹","")), ("52W Low",_fmt_num(sd.get("year_low"),"₹",""))]
-    rows=''.join(f'<div class="overview-row"><span>{k}</span><b>{v}</b></div>' for k,v in overview_items)
-    st.markdown(f'<div class="workspace-panel"><div class="company-hero"><div class="ticker">COMPANY</div><div class="name">{symbol}</div><div style="font-size:9px;color:#777;margin-top:2px;">{name_}</div><div class="quote">{price_text} <span style="font-size:10px;color:{chg_c}">{chg:+.2f}%</span></div></div>{rows}<div class="quick-actions"><div class="quick-action"><b>＋ Add to Watchlist</b></div><div class="quick-action"><b>↗ Trade</b></div></div></div>', unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
-    tabs=st.tabs(["Overview","Financials","Ratios","Shareholding","Peers","News","Events","Research"])
-    with tabs[0]:
-        metrics=[("Revenue (TTM)",sd.get("revenue_ttm","—"),"+8.4%"),("Net Profit (TTM)",sd.get("net_profit_ttm","—"),"+12.6%"),("EPS (TTM)",sd.get("eps_ttm","—"),"+11.8%"),("EBITDA (TTM)",sd.get("ebitda_ttm","—"),"+10.2%")] 
-        st.markdown('<div class="key-metrics">'+''.join(f'<div class="metric-box"><div class="k">{k}</div><div class="v">{v}</div><div class="delta">{d}</div></div>' for k,v,d in metrics)+'</div>',unsafe_allow_html=True)
-    with tabs[1]: st.caption("Financial statements are available in the Research module.")
-    with tabs[2]: st.caption("Valuation and profitability ratios are available in Research.")
-    with tabs[3]: st.caption("Ownership and shareholder dynamics are available in Research.")
-    with tabs[4]: st.caption("Peer comparison is available in Research.")
-    with tabs[5]: st.caption("Latest company news remains available in the Market News rail.")
-    with tabs[6]: st.caption("Corporate events and earnings calendar are available in Research.")
-    with tabs[7]:
-        if st.button(f"OPEN {symbol} RESEARCH", key="dash_open_research", type="primary"):
-            st.session_state.page="research"; st.session_state["research_last_query"]=symbol; st.rerun()
+    rows = []
+    for sym in wl:
+        d = quotes.get(sym)
+        if d:
+            c = GREEN if d["chg"] >= 0 else RED
+            rows.append(f'<div class="monitor-row monitor-click-row"><span>{sym}</span><span>₹{d["price"]:,.2f}</span><span style="color:{c}">{d["chg"]:+.2f}%</span></div>')
+    watch_html = ''.join(rows) if rows else '<div style="padding:12px;color:#666;font-size:10px;font-family:JetBrains Mono,monospace;">NO WATCHLIST LOADED · OPEN WATCHLIST SCANNER</div>'
+    adv = sum(1 for s in all_syms if quotes.get(s) and quotes[s]["chg"] > 0.05)
+    dec = sum(1 for s in all_syms if quotes.get(s) and quotes[s]["chg"] < -0.05)
+    flat = sum(1 for s in all_syms if quotes.get(s) and abs(quotes[s]["chg"]) <= 0.05)
+    ratio = (adv / dec) if dec else (float(adv) if adv else 0)
+    st.markdown(f'''<div class="monitor-grid"><div class="monitor-panel"><div class="monitor-head"><span>WATCHLIST MONITOR</span><span>{len(wl)} NAMES · FAST CACHE</span></div>{watch_html}</div><div class="monitor-panel"><div class="monitor-head"><span>MARKET INTERNALS</span><span>{len(all_syms)} SAMPLE</span></div><div class="monitor-row"><span>ADVANCING</span><span>{adv}</span><span class="small-positive">▲</span></div><div class="monitor-row"><span>DECLINING</span><span>{dec}</span><span class="small-negative">▼</span></div><div class="monitor-row"><span>UNCHANGED</span><span>{flat}</span><span style="color:#777">—</span></div><div class="monitor-row"><span>A/D RATIO</span><span>{ratio:.2f}</span><span style="color:#888">RATIO</span></div></div><div class="monitor-panel"><div class="monitor-head"><span>TERMINAL FUNCTIONS</span><span>F2–F7</span></div><div class="monitor-row"><span>SEARCH SECURITY</span><span>CMD</span><span style="color:{AMBER}">LOAD</span></div><div class="monitor-row"><span>RESEARCH</span><span>F4</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>ARKA AI</span><span>F5</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>SCREENER</span><span>F6</span><span style="color:{AMBER}">OPEN</span></div></div></div>''', unsafe_allow_html=True)
+    _render_module_dock(active=None)
 
 def _news_watchlist_for_rail():
     source_key = st.session_state.get("active_news_source", "admin")
@@ -1263,34 +1160,6 @@ def _news_watchlist_for_rail():
         wl = st.session_state.get("admin_watchlist", []) or st.session_state.get("watchlist", [])
     label = "ARKA WATCHLIST" if (wl and wl == st.session_state.get("admin_watchlist")) else "YOUR WATCHLIST"
     return wl, label
-
-def _render_left_nav():
-    pg = st.session_state.get("page", "home")
-    st.markdown('<div class="arka-sidebar">', unsafe_allow_html=True)
-    st.markdown('''<div class="arka-side-brand"><div style="display:flex;align-items:center;gap:8px;"><div class="mini-mark">A</div><div><div class="side-name">ARKA TRADES</div><div class="side-sub">TRADE · RESEARCH · ANALYZE</div></div></div></div>''', unsafe_allow_html=True)
-    items = [("⌂", "Home", "home"), ("◒", "Markets", "home"), ("☆", "Watchlist", "scanner"), ("⌕", "Scanner", "scanner"), ("▣", "Research", "research"), ("✦", "Arka AI", "analysis"), ("≡", "Screener", "smart_scan"), ("♧", "Alerts", "alerts"), ("▤", "Portfolio", "home"), ("⚙", "Settings", "settings")]
-    st.markdown('<div class="arka-nav-section">TERMINAL</div>', unsafe_allow_html=True)
-    for ic, label, target in items:
-        active = (pg == target) or (label == "Home" and pg == "security")
-        cls = "side-nav-active" if active else "side-nav-btn"
-        st.markdown(f'<div class="{cls}">', unsafe_allow_html=True)
-        if st.button(f"{ic}  {label}", key=f"side_{label.lower().replace(' ','_')}", use_container_width=True):
-            st.session_state.page = "home" if target == "home" else target
-            sym = st.session_state.get("active_security")
-            if sym:
-                st.session_state["research_last_query"] = sym
-                st.session_state["m1_ticker"] = sym
-            st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
-    st.markdown('<div class="arka-nav-section">ACCOUNT</div>', unsafe_allow_html=True)
-    for label,target in [("Profile","profile"),("Contact","contact")]:
-        cls = "side-nav-active" if pg == target else "side-nav-btn"
-        st.markdown(f'<div class="{cls}">', unsafe_allow_html=True)
-        if st.button(label, key=f"side_account_{label.lower()}", use_container_width=True):
-            st.session_state.page = target; st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
-    st.markdown('''<div class="arka-side-note"><div class="n-title">ARKA AI</div><div class="n-copy">Your intelligent trading companion. Analyze charts against your active setup.</div><div class="n-action">F5 · OPEN ARKA AI</div></div>''', unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
 
 # ── Global terminal state ──────────────────────────────────────
 if "active_security" not in st.session_state:
@@ -1313,12 +1182,9 @@ else:
 # rebuilding the market header, security chart, scanner, or research workspace.
 
 if st.session_state.show_news_rail:
-    left_rail, center, right_rail = st.columns([0.92, 4.35, 1.15], gap="small")
+    center, right_rail = st.columns([4.55, 1.15])
 else:
-    left_rail, center, right_rail = st.columns([0.92, 4.35, 1.15], gap="small")
-
-with left_rail:
-    _render_left_nav()
+    center, right_rail = st.columns([4.55, 1.15])
 
 @st.fragment
 def _news_rail_fragment():
@@ -1345,6 +1211,7 @@ def _news_rail_fragment():
 with center:
     if pg == "home":
         _render_dashboard()
+        _render_module_directory()
     elif pg == "security":
         active = st.session_state.get("active_security", "")
         if not active:
