@@ -1,16 +1,20 @@
-"""Arka Trades — Research Terminal v9.1.
+"""Arka Trades — Research Terminal v10 / ScanX data edition.
 
-Design goals:
-- Research shell opens quickly. No get_full_research() on page entry.
-- Each Research function loads only the data it needs (lazy loading).
-- Free sources are used where available: Screener + Yahoo/yfinance.
-- Missing datasets stay explicitly unavailable; no fabricated numbers.
-- Data calls are cached independently so moving between functions is fast.
+Design goals
+------------
+* Keep the existing Arka terminal shell; do not create a separate dashboard.
+* Use the public ScanX company page as the primary research-data source.
+* Keep yfinance/Screener as fallbacks for price history and datasets ScanX does
+  not expose in the public company page.
+* Lazy-load the ScanX page and only render the selected research function.
+* Never invent missing data: unavailable fields are clearly marked.
 """
 from __future__ import annotations
 
-import html
 from datetime import datetime, timezone, timedelta
+from io import StringIO
+import html
+import re
 from typing import Any
 
 import pandas as pd
@@ -18,28 +22,22 @@ import streamlit as st
 import yfinance as yf
 
 from news_feed import get_security_news
+from scanx_data import fetch_scanx_company
 
-from screener_scraper import (
-    resolve_symbol,
-    get_summary,
-    get_sector_info,
-    get_quarterly_results,
-    get_yearly_results,
-    get_shareholding,
-    get_balance_sheet,
-    get_cash_flow,
-    get_peer_comparison,
-    get_earnings_date,
-)
+try:
+    from screener_scraper import resolve_symbol, get_summary, get_sector_info
+except Exception:  # pragma: no cover - lets the module still import in isolation
+    resolve_symbol = None
+    get_summary = None
+    get_sector_info = None
 
 IST = timezone(timedelta(hours=5, minutes=30))
-_HOT_TICKERS = ["RELIANCE", "HDFCBANK", "TCS", "INFY", "ICICIBANK", "TATAMOTORS", "SBIN"]
 
 T0 = {
     "bg": "#000000", "panel": "#080808", "panel2": "#0E0E0E", "row_alt": "#0B0B0B",
     "border": "#242424", "amber": "#FF9F0A", "ivory": "#E8E8E8", "t2": "#9A9A9A",
     "t3": "#5E5E5E", "green": "#30D158", "red": "#FF453A", "cyan": "#5AC8FA",
-    "mono": "'JetBrains Mono','Consolas',monospace",
+    "blue": "#5AC8FA", "mono": "'JetBrains Mono','Consolas',monospace",
 }
 
 
@@ -54,39 +52,14 @@ def _esc(x: Any) -> str:
     return html.escape(str(x))
 
 
-def _num(v: Any) -> float | None:
-    if v is None:
-        return None
-    s = str(v).replace(",", "").replace("₹", "").replace("%", "").replace("Cr", "").replace("x", "").strip()
-    if s.lower() in {"", "—", "-", "nan", "none", "n/a"}:
-        return None
-    try:
-        return float(s)
-    except Exception:
-        return None
-
-
-def _age(seconds):
-    if seconds is None:
-        return ""
-    if seconds < 3600:
-        return f"{int(seconds // 60)}m ago"
-    if seconds < 172800:
-        return f"{int(seconds // 3600)}h ago"
-    return f"{int(seconds // 86400)}d ago"
-
-
-def _tag(status, T, age_seconds=None):
-    status = status or "unavailable"
+def _tag(status: str | None, T, text: str | None = None):
     if status == "live":
-        text, color = "● LIVE", T["green"]
+        label, color = text or "● SCANX LIVE", T["green"]
     elif status == "cached":
-        text, color = f"◐ CACHED · {_age(age_seconds)}", T["amber"]
-    elif status == "partial":
-        text, color = "◐ PARTIAL", T["amber"]
+        label, color = text or "◐ CACHED", T["amber"]
     else:
-        text, color = "✕ N/A", T["t3"]
-    return f'<span style="color:{color};font:700 9px {T["mono"]};letter-spacing:.8px">{text}</span>'
+        label, color = text or "✕ N/A", T["t3"]
+    return f'<span style="color:{color};font:700 9px {T["mono"]};letter-spacing:.8px">{_esc(label)}</span>'
 
 
 def _header(title, T, status=None, note=None):
@@ -110,13 +83,15 @@ def _panel(title, body, T, dashed=False):
 
 
 def _unavailable(title, requirement, T, detail=None):
-    detail = detail or "No verified free-source dataset is connected for this workspace yet."
-    body = (
+    detail = detail or "No verified connected dataset returned this field."
+    _panel(
+        title,
         f'<div style="font:10px {T["mono"]};color:{T["t2"]};line-height:1.75">'
         f'<b style="color:{T["t3"]}">STATUS:</b> DATA UNAVAILABLE<br>'
-        f'<b style="color:{T["t3"]}">REQUIRED:</b> {_esc(requirement)}<br>{_esc(detail)}</div>'
+        f'<b style="color:{T["t3"]}">REQUIRED:</b> {_esc(requirement)}<br>{_esc(detail)}</div>',
+        T,
+        dashed=True,
     )
-    _panel(title, body, T, dashed=True)
 
 
 def _kpis(items, T, cols=4):
@@ -132,693 +107,285 @@ def _kpis(items, T, cols=4):
             )
 
 
-def _table(periods, rows, T, highlights=()):
-    if not rows:
-        _panel("No data returned", '<div style="font:10px ' + T["mono"] + ';color:' + T["t3"] + '">The selected source returned no rows for this security.</div>', T, dashed=True)
-        return
-    heads = "".join(
-        f'<th style="text-align:right;padding:6px 8px;color:{T["t3"]};font:700 9px {T["mono"]};white-space:nowrap">{_esc(p)}</th>'
-        for p in periods
-    )
-    out = []
-    for i, r in enumerate(rows):
-        label = str(r.get("label", ""))
-        hl = any(x.lower() in label.lower() for x in highlights)
-        vals = r.get("values", [])
-        cells = "".join(
-            f'<td style="text-align:right;padding:6px 8px;color:{T["ivory"] if hl else T["t2"]};font:{"700" if hl else "500"} 10px {T["mono"]};white-space:nowrap">{_esc(v)}</td>'
-            for v in vals
-        )
-        out.append(
-            f'<tr style="background:{T["row_alt"] if i % 2 else "transparent"};border-bottom:1px solid {T["border"]}">'
-            f'<td style="padding:6px 8px;color:{T["amber"] if hl else T["t2"]};font:{"700" if hl else "500"} 10px {T["mono"]};white-space:nowrap">{_esc(label)}</td>{cells}</tr>'
-        )
-    st.markdown(
-        f'<div style="overflow-x:auto;border:1px solid {T["border"]};background:{T["panel"]}"><table style="width:100%;border-collapse:collapse">'
-        f'<thead><tr style="background:{T["panel2"]};border-bottom:1px solid {T["border"]}"><th style="text-align:left;padding:6px 8px;color:{T["t3"]};font:700 9px {T["mono"]}">METRIC</th>{heads}</tr></thead>'
-        f'<tbody>{"".join(out)}</tbody></table></div>', unsafe_allow_html=True
-    )
+def _fmt(v):
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return "—"
+    return str(v)
 
 
-def _df_to_rows(df: pd.DataFrame, max_rows=22, max_cols=8) -> tuple[list[str], list[dict]]:
+def _df_to_rows(df: pd.DataFrame | None, max_rows=30, max_cols=12):
     if df is None or df.empty:
         return [], []
     x = df.copy()
     if isinstance(x.index, pd.MultiIndex):
         x.index = [" · ".join(str(z) for z in idx) for idx in x.index]
-    periods = [str(c)[:16] for c in x.columns[:max_cols]]
-    rows = []
+    periods = [str(c)[:18] for c in x.columns[:max_cols]]
+    rows=[]
     for idx, row in x.head(max_rows).iterrows():
-        vals = []
+        vals=[]
         for v in row.iloc[:max_cols].tolist():
-            if pd.isna(v):
-                vals.append("—")
-            elif isinstance(v, (pd.Timestamp, datetime)):
-                vals.append(str(v)[:19])
-            elif isinstance(v, float):
-                vals.append(f"{v:,.2f}")
-            else:
-                vals.append(str(v))
-        rows.append({"label": str(idx), "values": vals})
+            if pd.isna(v): vals.append("—")
+            elif isinstance(v, (pd.Timestamp, datetime)): vals.append(str(v)[:19])
+            elif isinstance(v, float): vals.append(f"{v:,.2f}")
+            else: vals.append(str(v))
+        rows.append({"label":str(idx),"values":vals})
     return periods, rows
 
 
-def _row(section, names):
-    d = (section or {}).get("data") or {}
-    for r in d.get("rows", []):
-        label = str(r.get("label", "")).lower()
-        if any(n.lower() in label for n in names):
-            return r
-    return None
+def _table(periods, rows, T, highlights=(), links=False):
+    if not rows:
+        _unavailable("No rows returned", "Selected ScanX / provider dataset", T)
+        return
+    heads = "".join(f'<th style="text-align:right;padding:7px 8px;color:{T["t3"]};font:700 9px {T["mono"]};white-space:nowrap">{_esc(p)}</th>' for p in periods)
+    out=[]
+    for i,r in enumerate(rows):
+        label=str(r.get("label", "")); hl=any(x.lower() in label.lower() for x in highlights)
+        vals=r.get("values",[])
+        cells="".join(f'<td style="text-align:right;padding:7px 8px;color:{T["ivory"] if hl else T["t2"]};font:{"700" if hl else "500"} 10px {T["mono"]};white-space:nowrap">{_esc(v)}</td>' for v in vals)
+        out.append(f'<tr style="background:{T["row_alt"] if i%2 else "transparent"};border-bottom:1px solid {T["border"]}"><td style="padding:7px 8px;color:{T["amber"] if hl else T["t2"]};font:{"700" if hl else "500"} 10px {T["mono"]};white-space:nowrap">{_esc(label)}</td>{cells}</tr>')
+    st.markdown(
+        f'<div style="overflow-x:auto;border:1px solid {T["border"]};background:{T["panel"]};max-width:100%"><table style="width:100%;border-collapse:collapse">'
+        f'<thead><tr style="background:{T["panel2"]};border-bottom:1px solid {T["border"]}"><th style="text-align:left;padding:7px 8px;color:{T["t3"]};font:700 9px {T["mono"]}">METRIC</th>{heads}</tr></thead>'
+        f'<tbody>{"".join(out)}</tbody></table></div>', unsafe_allow_html=True)
 
 
-def _latest2(r):
-    if not r:
-        return None, None
-    vals = []
-    for v in r.get("values", []):
-        n = _num(v)
-        if n is not None:
-            vals.append(n)
-    if not vals:
-        return None, None
-    return vals[-1], vals[-2] if len(vals) > 1 else None
+def _rows_from_df(df, label_col=0, max_rows=80):
+    if df is None or df.empty:
+        return [], []
+    x=df.head(max_rows).copy()
+    cols=list(x.columns)
+    periods=[str(c) for c in cols[1:]]
+    rows=[]
+    for _,r in x.iterrows():
+        rows.append({"label":str(r.iloc[label_col]),"values":[_fmt(v) for v in r.iloc[1:].tolist()]})
+    return periods, rows
 
 
-def _pct_change(a, b):
-    if a is None or b in (None, 0):
-        return None
-    return (a / abs(b) - 1) * 100
+def _table_to_period_rows(df, max_rows=100, max_cols=12):
+    if df is None or df.empty:
+        return [], []
+    x=df.copy()
+    cols=list(x.columns)
+    if len(cols) < 2:
+        return [], []
+    periods=[str(c) for c in cols[1:max_cols+1]]
+    rows=[]
+    for _,r in x.head(max_rows).iterrows():
+        rows.append({"label":str(r.iloc[0]),"values":[_fmt(v) for v in r.iloc[1:max_cols+1].tolist()]})
+    return periods, rows
 
 
-# ----------------------- Cached data boundaries ------------------------
-@st.cache_data(ttl=300, show_spinner=False)
-def _yf_history(symbol: str, period: str = "6mo", interval: str = "1d") -> pd.DataFrame:
-    try:
-        return yf.Ticker(symbol.upper().strip() + ".NS").history(period=period, interval=interval, auto_adjust=False)
-    except Exception:
-        return pd.DataFrame()
+def _scanx_df(data, key):
+    return ((data.get("tables") or {}).get(key))
 
 
-@st.cache_data(ttl=600, show_spinner=False)
-def _yf_info(symbol: str) -> dict:
-    try:
-        return dict(yf.Ticker(symbol.upper().strip() + ".NS").info or {})
-    except Exception:
-        return {}
+def _scanx_header(data, T):
+    s=data.get("snapshot") or {}
+    name=data.get("name") or s.get("company_name") or data.get("symbol")
+    _header("ScanX security snapshot",T,"live" if data.get("status")=="live" else "unavailable",data.get("url"))
+    price=s.get("price","N/A")
+    change=s.get("change","N/A")
+    color=T["green"] if str(change).startswith("+") else T["red"] if str(change).startswith("-") else T["ivory"]
+    st.markdown(
+        f'<div style="border:1px solid {T["border"]};border-top:2px solid {T["amber"]};background:{T["panel"]};padding:12px 14px;margin:8px 0">'
+        f'<div style="display:flex;justify-content:space-between;align-items:end;gap:15px;flex-wrap:wrap">'
+        f'<div><span style="font:800 18px {T["mono"]};color:{T["ivory"]}">{_esc(name)}</span><span style="font:10px {T["mono"]};color:{T["t3"]};margin-left:10px">{_esc(data.get("symbol",""))} · NSE/BSE</span></div>'
+        f'<div style="text-align:right"><span style="font:800 22px {T["mono"]};color:{T["ivory"]}">₹{_esc(price)}</span><span style="font:700 11px {T["mono"]};color:{color};margin-left:10px">{_esc(change)}</span></div>'
+        f'</div></div>', unsafe_allow_html=True)
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def _yf_income(symbol: str, freq: str = "quarterly") -> pd.DataFrame:
-    try:
-        t = yf.Ticker(symbol.upper().strip() + ".NS")
-        return (t.quarterly_income_stmt if freq == "quarterly" else t.income_stmt).copy()
-    except Exception:
-        return pd.DataFrame()
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def _yf_balance(symbol: str, freq: str = "quarterly") -> pd.DataFrame:
-    try:
-        t = yf.Ticker(symbol.upper().strip() + ".NS")
-        return (t.quarterly_balance_sheet if freq == "quarterly" else t.balance_sheet).copy()
-    except Exception:
-        return pd.DataFrame()
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def _yf_cashflow(symbol: str, freq: str = "quarterly") -> pd.DataFrame:
-    try:
-        t = yf.Ticker(symbol.upper().strip() + ".NS")
-        return (t.quarterly_cashflow if freq == "quarterly" else t.cashflow).copy()
-    except Exception:
-        return pd.DataFrame()
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def _yf_valuation(symbol: str) -> pd.DataFrame:
-    try:
-        t = yf.Ticker(symbol.upper().strip() + ".NS")
-        return t.get_valuation_measures(freq="quarterly", periods=8).copy()
-    except Exception:
-        try:
-            return yf.Ticker(symbol.upper().strip() + ".NS").valuation.copy()
-        except Exception:
-            return pd.DataFrame()
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def _yf_earnings_history(symbol: str) -> pd.DataFrame:
-    try:
-        return yf.Ticker(symbol.upper().strip() + ".NS").earnings_history.copy()
-    except Exception:
-        return pd.DataFrame()
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def _yf_earnings_estimate(symbol: str) -> pd.DataFrame:
-    try:
-        return yf.Ticker(symbol.upper().strip() + ".NS").earnings_estimate.copy()
-    except Exception:
-        return pd.DataFrame()
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def _yf_revenue_estimate(symbol: str) -> pd.DataFrame:
-    try:
-        return yf.Ticker(symbol.upper().strip() + ".NS").revenue_estimate.copy()
-    except Exception:
-        return pd.DataFrame()
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def _yf_eps_revisions(symbol: str) -> pd.DataFrame:
-    try:
-        return yf.Ticker(symbol.upper().strip() + ".NS").eps_revisions.copy()
-    except Exception:
-        return pd.DataFrame()
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def _yf_eps_trend(symbol: str) -> pd.DataFrame:
-    try:
-        return yf.Ticker(symbol.upper().strip() + ".NS").eps_trend.copy()
-    except Exception:
-        return pd.DataFrame()
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def _yf_target(symbol: str) -> dict:
-    try:
-        return dict(yf.Ticker(symbol.upper().strip() + ".NS").analyst_price_targets or {})
-    except Exception:
-        return {}
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def _yf_recommendations(symbol: str) -> pd.DataFrame:
-    try:
-        return yf.Ticker(symbol.upper().strip() + ".NS").recommendations_summary.copy()
-    except Exception:
-        try:
-            return yf.Ticker(symbol.upper().strip() + ".NS").recommendations.copy()
-        except Exception:
-            return pd.DataFrame()
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def _yf_major_holders(symbol: str) -> pd.DataFrame:
-    try:
-        return yf.Ticker(symbol.upper().strip() + ".NS").major_holders.copy()
-    except Exception:
-        return pd.DataFrame()
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def _yf_institutional_holders(symbol: str) -> pd.DataFrame:
-    try:
-        return yf.Ticker(symbol.upper().strip() + ".NS").institutional_holders.copy()
-    except Exception:
-        return pd.DataFrame()
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def _yf_mutualfund_holders(symbol: str) -> pd.DataFrame:
-    try:
-        return yf.Ticker(symbol.upper().strip() + ".NS").mutualfund_holders.copy()
-    except Exception:
-        return pd.DataFrame()
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def _yf_insider_transactions(symbol: str) -> pd.DataFrame:
-    try:
-        return yf.Ticker(symbol.upper().strip() + ".NS").insider_transactions.copy()
-    except Exception:
-        return pd.DataFrame()
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def _yf_company_officers(symbol: str) -> list[dict]:
-    info = _yf_info(symbol)
-    officers = info.get("companyOfficers") or []
-    return officers if isinstance(officers, list) else []
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def _yf_calendar(symbol: str):
-    try:
-        return yf.Ticker(symbol.upper().strip() + ".NS").calendar
-    except Exception:
-        return {}
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def _yf_dividends(symbol: str) -> pd.Series:
-    try:
-        return yf.Ticker(symbol.upper().strip() + ".NS").dividends.tail(12).copy()
-    except Exception:
-        return pd.Series(dtype=float)
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def _yf_splits(symbol: str) -> pd.Series:
-    try:
-        return yf.Ticker(symbol.upper().strip() + ".NS").splits.tail(12).copy()
-    except Exception:
-        return pd.Series(dtype=float)
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def _yf_news(symbol: str) -> list[dict]:
-    try:
-        return yf.Ticker(symbol.upper().strip() + ".NS").news or []
-    except Exception:
-        return []
-
-
-def _safe_screener_core(symbol: str) -> dict:
-    try:
-        res = resolve_symbol(symbol)
-    except Exception:
-        res = None
-    if not res:
-        return {"resolved": False, "symbol": symbol.upper(), "reason": "Security could not be resolved on Screener."}
-    url = res["url"]
-    try:
-        summary = get_summary(symbol, url=url)
-    except Exception as e:
-        summary = {"status": "unavailable", "reason": str(e), "data": {}}
-    try:
-        sector = get_sector_info(symbol, url=url)
-    except Exception:
-        sector = {"status": "unavailable", "data": {}}
-    return {"resolved": True, "symbol": symbol.upper(), "name": res.get("name", symbol.upper()), "url": url, "summary": summary, "sector": sector}
-
-
-@st.cache_data(ttl=600, show_spinner=False)
-def _core_cached(symbol: str) -> dict:
-    return _safe_screener_core(symbol.upper().strip())
-
-
-def _render_chart(symbol, T, period="6mo", key_suffix="main"):
+def _chart(symbol, T, period="1y"):
     import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
-    h = _yf_history(symbol, period, "1d")
+    h=_yf_history(symbol,period)
     if h is None or h.empty:
-        _unavailable("Price / volume chart", "Yahoo Finance market history", T)
-        return h
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.015, row_heights=[0.82, 0.18])
-    fig.add_trace(go.Candlestick(x=h.index, open=h["Open"], high=h["High"], low=h["Low"], close=h["Close"], increasing_line_color=T["green"], decreasing_line_color=T["red"], increasing_fillcolor=T["green"], decreasing_fillcolor=T["red"], name="Price"), row=1, col=1)
-    vol_colors = [T["green"] if c >= o else T["red"] for c, o in zip(h["Close"], h["Open"])]
-    fig.add_trace(go.Bar(x=h.index, y=h["Volume"], marker_color=vol_colors, name="Volume"), row=2, col=1)
-    fig.update_layout(height=430, margin=dict(l=0, r=45, t=5, b=0), paper_bgcolor=T["bg"], plot_bgcolor=T["bg"], font=dict(color=T["t2"], size=10, family="JetBrains Mono, Consolas, monospace"), showlegend=False, xaxis_rangeslider_visible=False, hovermode="x unified")
-    fig.update_xaxes(showgrid=True, gridcolor="#181818", nticks=10)
-    fig.update_yaxes(showgrid=True, gridcolor="#181818", side="right", row=1, col=1)
-    fig.update_yaxes(showgrid=False, side="right", showticklabels=False, row=2, col=1)
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": True, "scrollZoom": True}, key=f"research_chart_{symbol}_{period}_{key_suffix}")
+        _unavailable("Price chart","Yahoo Finance OHLCV history",T)
+        return
+    close=h["Close"].dropna()
+    fig=go.Figure()
+    fig.add_trace(go.Scatter(x=close.index,y=close,name="Price",mode="lines",line=dict(color=T["red"],width=2)))
+    ma50=close.rolling(50).mean(); ma200=close.rolling(200).mean()
+    fig.add_trace(go.Scatter(x=ma50.index,y=ma50,name="50 DMA",mode="lines",line=dict(color=T["amber"],width=1.4)))
+    fig.add_trace(go.Scatter(x=ma200.index,y=ma200,name="200 DMA",mode="lines",line=dict(color=T["cyan"],width=1.4)))
+    fig.update_layout(height=390,margin=dict(l=0,r=45,t=10,b=0),paper_bgcolor=T["bg"],plot_bgcolor=T["bg"],font=dict(color=T["t2"],family="JetBrains Mono, Consolas, monospace",size=9),showlegend=True,legend=dict(orientation="h",y=1.04,x=0),hovermode="x unified")
+    fig.update_xaxes(showgrid=True,gridcolor="#181818",nticks=10)
+    fig.update_yaxes(showgrid=True,gridcolor="#181818",side="right")
+    st.plotly_chart(fig,use_container_width=True,config={"displayModeBar":True,"scrollZoom":True},key=f"scanx_chart_{symbol}_{period}")
     return h
 
 
-def _research_nav(tabs, active_index):
-    # Selectbox is intentionally used instead of building 24 interactive tabs;
-    # that keeps the Research shell lighter and easier to operate on desktop/mobile.
-    return st.selectbox("RESEARCH FUNCTION", tabs, index=active_index, key="research_function_v91")
-
-
-def _status_strip(T):
-    now = datetime.now(IST)
-    opened = now.weekday() < 5 and now.replace(hour=9, minute=15, second=0, microsecond=0) <= now <= now.replace(hour=15, minute=30, second=0, microsecond=0)
-    color = T["green"] if opened else T["red"]
-    label = "MARKET OPEN" if opened else "MARKET CLOSED"
-    st.markdown(
-        f'<div style="display:flex;justify-content:space-between;border:1px solid {T["border"]};border-bottom:2px solid {T["amber"]};background:{T["panel"]};padding:7px 12px;margin-bottom:10px;font:10px {T["mono"]}">'
-        f'<span style="color:{T["amber"]};font-weight:800;letter-spacing:1px">ARKA TERMINAL · RESEARCH V9.1</span>'
-        f'<span style="color:{color};font-weight:700">● {label}</span><span style="color:{T["t3"]}">{now.strftime("%d %b %Y · %H:%M:%S IST")}</span></div>', unsafe_allow_html=True)
-
-
-def _summary_header(data, T):
-    s = (data.get("summary") or {}).get("data") or {}
-    st.markdown(
-        f'<div style="border:1px solid {T["border"]};border-top:2px solid {T["amber"]};background:{T["panel"]};padding:10px 13px;margin:8px 0">'
-        f'<div style="display:flex;justify-content:space-between;align-items:center"><div><span style="font:800 15px {T["mono"]};color:{T["ivory"]}">{_esc(data.get("name",""))}</span>'
-        f'<span style="font:10px {T["mono"]};color:{T["t3"]};margin-left:8px">{_esc(data.get("symbol",""))} · NSE/BSE</span></div>'
-        f'<span>{_tag((data.get("summary") or {}).get("status"),T,(data.get("summary") or {}).get("age_seconds"))}</span></div></div>', unsafe_allow_html=True)
-    if s:
-        _kpis([
-            ("Price", s.get("current_price", "N/A"), "₹"),
-            ("Market Cap", s.get("market_cap", "N/A"), "₹ Cr"),
-            ("P/E", s.get("pe_ratio", "N/A"), "x"),
-            ("Book Value", s.get("book_value", "N/A"), "₹"),
-            ("ROE", s.get("roe", "N/A"), "%"),
-            ("ROCE", s.get("roce", "N/A"), "%"),
-            ("Dividend Yield", s.get("dividend_yield", "N/A"), "%"),
-            ("Face Value", s.get("face_value", "N/A"), "₹"),
-        ], T, 4)
-
-
-def _overview(data, T):
-    s = (data.get("summary") or {}).get("data") or {}
-    sec = (data.get("sector") or {}).get("data") or {}
-    info = _yf_info(data["symbol"])
-    _header("Company overview", T)
-    items = [
-        ("Company", data.get("name", "N/A"), "Screener"),
-        ("Symbol", data.get("symbol", "N/A"), "NSE"),
-        ("Sector", sec.get("Sector") or info.get("sector") or "N/A", "provider"),
-        ("Industry", sec.get("Industry") or info.get("industry") or "N/A", "provider"),
-        ("Market Cap", s.get("market_cap") or info.get("marketCap") or "N/A", "₹ / provider"),
-        ("Employees", info.get("fullTimeEmployees", "N/A"), "Yahoo"),
-        ("Country", info.get("country", "N/A"), "Yahoo"),
-        ("Website", info.get("website", "N/A"), "Yahoo"),
-    ]
-    _table(["VALUE","SOURCE"], [{"label":a,"values":[str(b),c]} for a,b,c in items], T)
-    desc = info.get("longBusinessSummary") or "No detailed business description was returned by the connected free provider."
-    _panel("Business description", f'<div style="font:10px {T["mono"]};color:{T["t2"]};line-height:1.8">{_esc(desc)}</div>', T)
-
-
-def _business(data, T):
-    info = _yf_info(data["symbol"])
-    sec = (data.get("sector") or {}).get("data") or {}
-    _header("Business model", T)
-    _kpis([
-        ("Sector", sec.get("Sector") or info.get("sector") or "N/A", "classification"),
-        ("Industry", sec.get("Industry") or info.get("industry") or "N/A", "classification"),
-        ("Employees", info.get("fullTimeEmployees", "N/A"), "latest provider value"),
-        ("Currency", info.get("currency", "N/A"), "reported"),
-    ], T, 4)
-    desc = info.get("longBusinessSummary")
-    if desc:
-        _panel("Business description", f'<div style="font:10px {T["mono"]};color:{T["t2"]};line-height:1.8">{_esc(desc)}</div>', T)
-    else:
-        _unavailable("Business description", "Verified company profile disclosure", T)
-    # Product/service and order-book data are genuinely company-specific and are not safely inferable.
-    for title, req in [("Products / services", "Company annual report / investor presentation"), ("Customer concentration", "Company filing with customer concentration disclosure"), ("Order book / capacity", "Company operating disclosure")]:
-        _unavailable(title, req, T)
-
-
-def _financials(data, T):
-    symbol = data["symbol"]
-    for title, df in [
-        ("Quarterly income statement · Yahoo", _yf_income(symbol, "quarterly")),
-        ("Annual income statement · Yahoo", _yf_income(symbol, "annual")),
-        ("Quarterly balance sheet · Yahoo", _yf_balance(symbol, "quarterly")),
-        ("Quarterly cash flow · Yahoo", _yf_cashflow(symbol, "quarterly")),
-    ]:
-        periods, rows = _df_to_rows(df, max_rows=30, max_cols=8)
-        _header(title, T, "live" if rows else "unavailable")
-        _table(periods, rows, T, ["Revenue", "Operating Income", "Net Income", "EBITDA", "Total Assets", "Stockholders Equity", "Operating Cash Flow", "Free Cash Flow"])
-    # Screener fallback is useful when Yahoo doesn't populate a table.
-    if data.get("url"):
-        try:
-            scr_q = get_quarterly_results(symbol, url=data["url"])
-            d = scr_q.get("data") or {}
-            if d.get("rows"):
-                _header("Quarterly income statement · Screener fallback", T, scr_q.get("status"))
-                _table(d.get("periods", []), d.get("rows", []), T, ["sales", "operating profit", "net profit", "eps"])
-        except Exception:
-            pass
-
-
-def _earnings(data, T):
-    symbol = data["symbol"]
-    hist = _yf_earnings_history(symbol)
-    est = _yf_earnings_estimate(symbol)
-    rev = _yf_revenue_estimate(symbol)
-    revs = _yf_eps_revisions(symbol)
-    trend = _yf_eps_trend(symbol)
-    targets = _yf_target(symbol)
-    _header("Earnings surprise history", T, "live" if not hist.empty else "unavailable")
-    p, r = _df_to_rows(hist, 16, 8)
-    _table(p, r, T, ["epsactual", "epsestimate", "surprise"])
-    _header("Consensus EPS estimates", T, "live" if not est.empty else "unavailable")
-    p, r = _df_to_rows(est, 14, 8)
-    _table(p, r, T)
-    _header("Revenue estimates", T, "live" if not rev.empty else "unavailable")
-    p, r = _df_to_rows(rev, 14, 8)
-    _table(p, r, T)
-    _header("EPS revisions", T, "live" if not revs.empty else "unavailable")
-    p, r = _df_to_rows(revs, 14, 8)
-    _table(p, r, T)
-    _header("EPS trend", T, "live" if not trend.empty else "unavailable")
-    p, r = _df_to_rows(trend, 14, 8)
-    _table(p, r, T)
-    if targets:
-        _header("Analyst price target dataset", T, "live")
-        _table(["VALUE"], [{"label":str(k).title(),"values":[f"{v}" ]} for k,v in targets.items()], T)
-    else:
-        _unavailable("Analyst price targets", "Provider analyst-target dataset", T)
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def _peer_cached(symbol: str) -> dict:
+@st.cache_data(ttl=900,show_spinner=False)
+def _yf_history(symbol: str, period: str="1y"):
     try:
-        return get_peer_comparison(symbol) or {}
+        return yf.Ticker(symbol.upper().strip()+".NS").history(period=period,interval="1d",auto_adjust=False)
     except Exception:
-        return {}
+        return pd.DataFrame()
 
 
-def _valuation(data, T):
-    symbol = data["symbol"]
-    df = _yf_valuation(symbol)
-    if not df.empty:
-        _header("Historical valuation measures", T, "live")
-        p, r = _df_to_rows(df, 18, 9)
-        _table(p, r, T, ["PERatio", "PBRatio", "EnterpriseValue", "EVToEBITDA", "PSTrailing12Months"])
-    else:
-        s = (data.get("summary") or {}).get("data") or {}
-        _kpis([
-            ("P/E", s.get("pe_ratio", "N/A"), "current"),
-            ("P/B", "N/A", "requires balance-sheet normalization"),
-            ("EV/EBITDA", "N/A", "provider unavailable"),
-            ("FCF yield", "N/A", "provider unavailable"),
-        ], T, 4)
-
-    peers = _peer_cached(symbol)
-    _header("Relative valuation · peer set", T, peers.get("status"))
-    if peers.get("rows"):
-        rows=[{"label":f'{x["name"]} ({x["symbol"]})',"values":[x.get("cmp","—"),x.get("pe","—"),x.get("market_cap","—"),x.get("div_yield","—"),x.get("roce","—")]} for x in peers["rows"]]
-        _table(["CMP ₹","P/E","M.CAP ₹Cr","DIV YIELD %","ROCE %"],rows,T)
-    else:
-        _unavailable("Peer valuation", "Comparable-company dataset", T)
-
-    # V9.1 includes an actual editable DCF when a usable free-cash-flow basis
-    # and share-count are available. For banks/insurers, FCF DCF is not used
-    # because their cash-flow statements are not comparable to industrial firms.
-    info=_yf_info(symbol)
-    sec=((data.get("sector") or {}).get("data") or {})
-    sector_name=str(sec.get("Sector") or info.get("sector") or "").lower()
-    financial_firm=any(x in sector_name for x in ["bank", "financial", "insurance"])
-    cf=_yf_cashflow(symbol,"annual")
-    base_fcf=None
-    if not financial_firm and cf is not None and not cf.empty:
-        try:
-            if "Free Cash Flow" in cf.index:
-                v=cf.loc["Free Cash Flow"].dropna()
-                if len(v): base_fcf=float(v.iloc[0])
-            if base_fcf is None and "Operating Cash Flow" in cf.index and "Capital Expenditure" in cf.index:
-                ocf=cf.loc["Operating Cash Flow"].dropna(); cap=cf.loc["Capital Expenditure"].dropna()
-                if len(ocf) and len(cap): base_fcf=float(ocf.iloc[0])+float(cap.iloc[0])
-        except Exception:
-            base_fcf=None
-    shares=info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
-    if shares is None:
-        try:
-            shares=float(info.get("marketCap"))/float(info.get("currentPrice")) if info.get("marketCap") and info.get("currentPrice") else None
-        except Exception:
-            shares=None
-    if financial_firm:
-        _panel("DCF", f'<div style="font:10px {T["mono"]};color:{T["t2"]};line-height:1.7">FUNDAMENTAL FIT CHECK: skipped for this security because a conventional industrial free-cash-flow DCF is not an appropriate cash-flow model for banks / insurers. Use relative valuation, book value and return metrics instead.</div>', T)
-    elif base_fcf is None or base_fcf<=0 or not shares:
-        _unavailable("DCF", "Usable positive free cash flow + share count", T, "The model is enabled only when the connected provider supplies the required inputs.")
-    else:
-        _header("DCF workspace",T,"live","Illustrative model using the latest provider free-cash-flow observation; edit assumptions below.")
-        a,b,c=st.columns(3)
-        growth=a.number_input("FCF growth %",min_value=-20.0,max_value=40.0,value=8.0,step=0.5,key="dcf_growth_v91")/100
-        wacc=b.number_input("WACC %",min_value=5.0,max_value=25.0,value=11.0,step=0.5,key="dcf_wacc_v91")/100
-        tg=c.number_input("Terminal growth %",min_value=0.0,max_value=8.0,value=3.0,step=0.25,key="dcf_terminal_v91")/100
-        years=st.slider("Forecast years",3,10,5,key="dcf_years_v91")
-        if tg>=wacc:
-            st.warning("Terminal growth must be below WACC.")
-        else:
-            fcf0=float(base_fcf)
-            pv=0.0; forecast=[]
-            for y in range(1,years+1):
-                fcf=fcf0*((1+growth)**y); disc=(1+wacc)**y; pv+=fcf/disc; forecast.append({"label":f"Year {y}","values":[f"₹{fcf:,.0f} Cr",f"₹{fcf/disc:,.0f} Cr"]})
-            terminal=forecast[-1]["values"] if forecast else None
-            last_fcf=fcf0*((1+growth)**years)
-            tv=last_fcf*(1+tg)/(wacc-tg)
-            equity_value=pv+tv/(1+wacc)**years
-            per_share=equity_value/shares if shares else None
-            _kpis([("Base FCF",f"₹{base_fcf:,.0f}","provider cash-flow basis"),("PV of forecast",f"₹{pv:,.0f}","Cr"),("Terminal value",f"₹{tv:,.0f}","Cr"),("DCF / share",f"₹{per_share:,.2f}" if per_share is not None else "N/A","model output")],T,4)
-            _table(["FCF","PV OF FCF"],forecast,T)
-            _panel("Model discipline",f'<div style="font:9px {T["mono"]};color:{T["t3"]};line-height:1.7">Inputs are editable and stored only for this session. This is a scenario model, not a forecast or investment recommendation. Base FCF: ₹{base_fcf:,.0f} Cr · Shares: {shares:,.0f} · WACC: {wacc*100:.1f}% · Terminal growth: {tg*100:.2f}%.</div>',T)
-
-            _header("DCF sensitivity",T,"live","Rows = WACC · Columns = terminal growth. Values are model output per share.")
-            wacc_grid=[max(0.06,wacc-0.02),max(0.06,wacc-0.01),wacc,min(0.25,wacc+0.01),min(0.25,wacc+0.02)]
-            tg_grid=[max(0.0,tg-0.01),max(0.0,tg-0.005),tg,min(wacc-0.005,tg+0.005),min(wacc-0.005,tg+0.01)]
-            sens=[]
-            for wa in wacc_grid:
-                vals=[]
-                for gt in tg_grid:
-                    if gt>=wa:
-                        vals.append("—"); continue
-                    pvx=sum(fcf0*((1+growth)**y)/(1+wa)**y for y in range(1,years+1))
-                    last=fcf0*((1+growth)**years)
-                    tvx=last*(1+gt)/(wa-gt)
-                    evx=pvx+tvx/(1+wa)**years
-                    vals.append(f"₹{evx/shares:,.0f}")
-                sens.append({"label":f"WACC {wa*100:.1f}%","values":vals})
-            _table([f"g {gt*100:.1f}%" for gt in tg_grid],sens,T)
+@st.cache_data(ttl=900,show_spinner=False)
+def _yf_info(symbol: str):
+    try: return dict(yf.Ticker(symbol.upper().strip()+".NS").info or {})
+    except Exception: return {}
 
 
-def _ownership(data, T):
-    symbol = data["symbol"]
-    sh = data.get("shareholding") or {}
-    sd = sh.get("data") or {}
-    if sd.get("rows"):
-        _header("Promoter / FII / DII / public ownership", T, sh.get("status"))
-        _table(sd.get("periods", []), sd.get("rows", []), T, ["promoter", "fii", "dii", "public"])
-    major = _yf_major_holders(symbol)
-    _header("Major holders", T, "live" if not major.empty else "unavailable")
-    p,r=_df_to_rows(major, 20, 6); _table(p,r,T)
-    inst = _yf_institutional_holders(symbol)
-    _header("Institutional holders", T, "live" if not inst.empty else "unavailable")
-    p,r=_df_to_rows(inst, 20, 8); _table(p,r,T)
-    mf = _yf_mutualfund_holders(symbol)
-    _header("Mutual-fund holders", T, "live" if not mf.empty else "unavailable")
-    p,r=_df_to_rows(mf, 20, 8); _table(p,r,T)
-    ins = _yf_insider_transactions(symbol)
-    _header("Insider transactions", T, "live" if not ins.empty else "unavailable")
-    p,r=_df_to_rows(ins, 25, 9); _table(p,r,T)
-    _panel("Important distinction", f'<div style="font:10px {T["mono"]};color:{T["t2"]};line-height:1.7">The holder tables above are provider observations. They are not a substitute for an exchange-linked FII/DII flow attribution dataset.</div>', T)
+@st.cache_data(ttl=900,show_spinner=False)
+def _yf_targets(symbol: str):
+    try: return dict(yf.Ticker(symbol.upper().strip()+".NS").analyst_price_targets or {})
+    except Exception: return {}
 
 
-def _flows(data,T):
-    symbol=data["symbol"]
-    sh=data.get("shareholding") or {}
-    sd=sh.get("data") or {}
-    _header("Ownership-change tape",T,sh.get("status","unavailable"))
-    flow_rows=[]
-    for needle,label in [("promoters","Promoters"),("fiis","FIIs"),("fiis","FII"),("diis","DIIs"),("diis","DII"),("public","Public")]:
-        if any(r.get("label","").lower()==needle or needle in r.get("label","").lower() for r in sd.get("rows",[])):
-            row=next(r for r in sd.get("rows",[]) if needle in r.get("label","").lower())
-            vals=[_num(v) for v in row.get("values",[])]; vals=[v for v in vals if v is not None]
-            if vals:
-                latest=vals[-1]; prev=vals[-2] if len(vals)>1 else None
-                change=(latest-prev) if prev is not None else None
-                flow_rows.append({"label":label,"values":[f"{latest:.2f}%",f"{prev:.2f}%" if prev is not None else "—",f"{change:+.2f} pp" if change is not None else "—"]})
-    if flow_rows:
-        _table(["LATEST","PREVIOUS","CHANGE"],flow_rows,T)
-    else:
-        _unavailable("Ownership-change tape","Quarterly shareholding observations",T)
-
-    ins=_yf_insider_transactions(symbol)
-    inst=_yf_institutional_holders(symbol)
-    if not ins.empty:
-        _header("Insider transaction observations",T,"live"); p,r=_df_to_rows(ins,20,9); _table(p,r,T)
-    if not inst.empty:
-        _header("Institutional-holder observations",T,"live"); p,r=_df_to_rows(inst,20,9); _table(p,r,T)
-    _unavailable("FII / DII security-level flow attribution", "Exchange-linked security-level flow dataset", T)
-    _unavailable("Block / bulk deals", "NSE/BSE bulk and block deal feed", T)
+def _core(symbol):
+    if not resolve_symbol:
+        return {"symbol":symbol,"name":symbol,"url":""}
+    try:
+        r=resolve_symbol(symbol)
+    except Exception:
+        r=None
+    if not r:
+        return {"symbol":symbol,"name":symbol,"url":""}
+    url=r.get("url","")
+    summary={}; sector={}
+    try: summary=get_summary(symbol,url=url) or {}
+    except Exception: pass
+    try: sector=get_sector_info(symbol,url=url) or {}
+    except Exception: pass
+    return {"symbol":symbol,"name":r.get("name",symbol),"url":url,"summary":summary,"sector":sector}
 
 
-def _segments(data,T):
+def _load_data(symbol):
+    core=_core(symbol)
+    company_name=core.get("name") or symbol
+    with st.spinner("Loading public ScanX research data…"):
+        scanx=fetch_scanx_company(symbol,company_name=company_name)
+    return core,scanx
+
+
+def _overview(data,T):
+    s=data.get("snapshot") or {}
     info=_yf_info(data["symbol"])
-    if info.get("sector") or info.get("industry"):
-        _kpis([("Sector",info.get("sector","N/A"),"Yahoo"),("Industry",info.get("industry","N/A"),"Yahoo"),("Revenue",info.get("totalRevenue","N/A"),"provider"),("Gross Margin",info.get("grossMargins","N/A"),"provider")],T,4)
-    for title, req in [("Segment revenue", "Company filing / annual-report segment tables"),("Segment EBITDA", "Segment-level operating-profit/EBITDA disclosures"),("Segment growth & mix", "Multi-period segment history"),("Geographic exposure", "Geographic revenue/profit disclosures")]:
-        _unavailable(title, req, T)
+    sec=((data.get("core") or {}).get("sector") or {}).get("data") or {}
+    items=[
+        ("Market Cap",s.get("Market Cap") or "N/A","ScanX"),
+        ("P/E",s.get("PE Ratio") or "N/A","ScanX"),
+        ("EPS",s.get("EPS") or "N/A","ScanX"),
+        ("P/B",s.get("PB Ratio") or "N/A","ScanX"),
+        ("Book Value",s.get("Book Value") or "N/A","ScanX"),
+        ("EBITDA",s.get("EBITDA") or "N/A","ScanX"),
+        ("ROE",s.get("Return on Equity") or "N/A","ScanX"),
+        ("Debt / Equity",s.get("Debt to Equity") or "N/A","ScanX"),
+    ]
+    _kpis(items,T,4)
+    a,b=st.columns([3.2,1.25])
+    with a:
+        _header("Price / 50 DMA / 200 DMA",T,"live")
+        _chart(data["symbol"],T,st.session_state.get("research_chart_period","1y"))
+    with b:
+        _header("Key fundamentals",T,"live")
+        rows=[]
+        for k in ["Market Cap","EPS","PE Ratio","PB Ratio","Book Value","EBITDA","Dividend Yield","Return on Equity","Debt to Equity"]:
+            rows.append({"label":k,"values":[s.get(k,"N/A")]})
+        _table(["VALUE"],rows,T,["Market Cap","PE Ratio","Return"])
+    _header("Growth / quality snapshot",T)
+    # ScanX automatic screener metrics are represented in the public page as text.
+    about=(data.get("about") or {}).get("description")
+    if about:
+        _panel("Business context",f'<div style="font:10px {T["mono"]};color:{T["t2"]};line-height:1.8">{_esc(about)}</div>',T)
+    else:
+        _unavailable("Business context","ScanX About section",T)
+    peers=_scanx_df(data,"peers")
+    if peers is not None and not peers.empty:
+        _header("Peer snapshot",T,"live")
+        p,r=_table_to_period_rows(peers,10,8); _table(p,r,T)
+
+
+def _financials(data,T):
+    df=_scanx_df(data,"financials")
+    _header("Quarterly financial results · ScanX",T,"live" if df is not None and not df.empty else "unavailable","Consolidated/standalone selector remains a source-side control; public page data is shown as returned.")
+    p,r=_table_to_period_rows(df,60,14); _table(p,r,T,["Revenue","EBITDA","Net Profit","EPS"])
+    if df is None or df.empty:
+        return
+    # A compact recent-period view prevents the terminal from becoming an unreadable wall.
+    recent=df.iloc[:,max(0,len(df.columns)-9):].copy()
+    _header("Recent periods",T,"live")
+    p,r=_table_to_period_rows(recent,30,9); _table(p,r,T,["Revenue","EBITDA","Net Profit","EPS"])
+
+
+def _balance(data,T):
+    df=_scanx_df(data,"balance_sheet")
+    _header("Balance sheet · ScanX",T,"live" if df is not None and not df.empty else "unavailable")
+    p,r=_table_to_period_rows(df,60,14); _table(p,r,T,["Total Assets","Total Equity","Current Assets","Current Liabilities"])
+
+
+def _cashflow(data,T):
+    df=_scanx_df(data,"cash_flow")
+    _header("Cash flow · ScanX",T,"live" if df is not None and not df.empty else "unavailable")
+    p,r=_table_to_period_rows(df,30,14); _table(p,r,T,["Operating Activities","Investing Activities","Financing Activities","Net Cash Flow"])
+
+
+def _shareholding(data,T):
+    df=_scanx_df(data,"shareholding")
+    _header("Shareholding history · ScanX",T,"live" if df is not None and not df.empty else "unavailable")
+    p,r=_table_to_period_rows(df,20,26); _table(p,r,T,["Promoter","FIIs","DIIs","Public"])
+    if df is None or df.empty: return
+    # Plot the ownership lines from the same ScanX rows.
+    import plotly.graph_objects as go
+    x=df.iloc[:,0].astype(str)
+    fig=go.Figure()
+    for name in ["Promoter","FIIs","DIIs","Government","Public / Retail","Others"]:
+        row=df[df.iloc[:,0].astype(str).str.lower().eq(name.lower())]
+        if row.empty: continue
+        vals=pd.to_numeric(row.iloc[0,1:].astype(str).str.replace("%","",regex=False).str.replace(",","",regex=False),errors="coerce")
+        fig.add_trace(go.Scatter(x=x.iloc[:len(vals)],y=vals,mode="lines",name=name))
+    fig.update_layout(height=360,margin=dict(l=0,r=20,t=10,b=0),paper_bgcolor=T["bg"],plot_bgcolor=T["bg"],font=dict(color=T["t2"],family="JetBrains Mono, Consolas, monospace",size=9),legend=dict(orientation="h",y=1.05,x=0))
+    fig.update_xaxes(showgrid=True,gridcolor="#181818")
+    fig.update_yaxes(showgrid=True,gridcolor="#181818",ticksuffix="%",side="right")
+    st.plotly_chart(fig,use_container_width=True,config={"displayModeBar":False},key=f"scanx_ownership_{data['symbol']}")
+
+
+def _mf(data,T):
+    df=_scanx_df(data,"mf_holdings")
+    _header("Mutual fund holdings",T,"live" if df is not None and not df.empty else "unavailable","Primary table from the public ScanX company page. Current holding, 1M/3M changes and six-month trend are retained where exposed.")
+    p,r=_table_to_period_rows(df,80,8); _table(p,r,T,["0.00%"])
+    if df is None or df.empty: return
+    st.caption("Use the ScanX fund name links for deeper scheme-level history. Arka does not fabricate a six-month sparkline when the source does not expose the series in HTML.")
 
 
 def _peers(data,T):
-    result=_peer_cached(data["symbol"])
-    _header("Peer table",T,result.get("status"))
-    if result.get("rows"):
-        rows=[{"label":f'{r["name"]} ({r["symbol"]})',"values":[r.get("cmp","—"),r.get("pe","—"),r.get("market_cap","—"),r.get("div_yield","—"),r.get("roce","—")]} for r in result["rows"]]
-        _table(["CMP ₹","P/E","M.CAP ₹Cr","DIV YIELD %","ROCE %"],rows,T)
-        _panel("Peer set",f'<div style="font:10px {T["mono"]};color:{T["t2"]}">The current free peer set is curated by sector in the data layer. Extend the map when you want more companies covered.</div>',T)
-    else:
-        _unavailable("Peer comparison", "Comparable-company universe", T)
-    _unavailable("Peer growth / quality", "Synchronized multi-period peer financial history", T)
+    df=_scanx_df(data,"peers")
+    _header("Peer comparison",T,"live" if df is not None and not df.empty else "unavailable")
+    p,r=_table_to_period_rows(df,40,10); _table(p,r,T,[data.get("name","")])
+    if df is None or df.empty:
+        _unavailable("Peer set","ScanX comparable-company table",T)
 
 
-def _supply_chain(data,T):
-    info=_yf_info(data["symbol"])
-    _panel("Supplier / customer workspace",f'<div style="font:10px {T["mono"]};color:{T["t2"]};line-height:1.7">Sector: {_esc(info.get("sector","N/A"))} · Industry: {_esc(info.get("industry","N/A"))}. The terminal does not invent supplier or customer relationships from sector labels.</div>',T)
-    for title, req in [("Supplier map", "Company filings, supplier disclosures and supply-chain relationship dataset"),("Customer map", "Customer concentration / relationship disclosures"),("Commodity exposure", "Segment-level commodity sensitivity and input-cost history"),("Supply-chain news", "Entity-linked news/event graph")]:
-        _unavailable(title,req,T)
+def _dividend(data,T):
+    df=_scanx_df(data,"dividend")
+    _header("Dividend history",T,"live" if df is not None and not df.empty else "unavailable")
+    p,r=_table_to_period_rows(df,20,12); _table(p,r,T,["Dividend Per Share","Dividend Yield"])
 
 
-def _management(data,T):
-    officers=_yf_company_officers(data["symbol"])
-    _header("Company officers",T,"live" if officers else "unavailable")
-    if officers:
-        rows=[]
-        for x in officers[:12]:
-            rows.append({"label":x.get("name","—"),"values":[x.get("title","—"),x.get("yearBorn","—") or "—"]})
-        _table(["ROLE","YEAR BORN"],rows,T)
-    else:
-        _unavailable("Company officers", "Provider company-officer dataset", T)
-    for title, req in [("Earnings-call transcripts", "Timestamped earnings-call transcript/audio source"),("Management guidance", "Transcript / investor-presentation extraction"),("Commentary changes", "Quarter-over-quarter management-language history"),("Filings & presentations", "Exchange/company filing document feed")]:
-        _unavailable(title,req,T)
+def _actions(data,T):
+    df=_scanx_df(data,"corporate_actions")
+    _header("Corporate actions",T,"live" if df is not None and not df.empty else "unavailable")
+    p,r=_table_to_period_rows(df,80,8); _table(p,r,T)
 
 
-def _filings(data,T):
-    info=_yf_info(data["symbol"])
-    website=info.get("website")
-    if website:
-        _panel("Investor relations entry point",f'<a href="{html.escape(str(website),quote=True)}" target="_blank" style="color:{T["amber"]};font:10px {T["mono"]}">{_esc(website)}</a>',T)
-    # yfinance SEC filings is useful when Yahoo exposes them; for NSE names it can be sparse.
-    try:
-        filings=yf.Ticker(data["symbol"]+".NS").sec_filings or {}
-    except Exception:
-        filings={}
-    if filings:
-        _header("Provider filings",T,"live")
-        items=[]
-        if isinstance(filings,dict):
-            for k,v in list(filings.items())[:20]: items.append({"label":str(k),"values":[str(v)]})
-        elif isinstance(filings,list):
-            for i,v in enumerate(filings[:20]): items.append({"label":str(i+1),"values":[str(v)]})
-        _table(["VALUE"],items,T)
-    else:
-        _unavailable("Exchange announcements", "NSE/BSE corporate announcement feed", T)
-        _unavailable("Financial results filings", "NSE/BSE results filing feed", T)
-        _unavailable("Annual reports", "Company/NSE/BSE document repository", T)
-        _unavailable("Investor presentations", "Company investor-relations document feed", T)
+def _announcements(data,T):
+    anns=data.get("announcements") or []
+    _header("Exchange announcements",T,"live" if anns else "unavailable","Links are carried from the public ScanX page to the originating exchange document where ScanX exposes it.")
+    if not anns:
+        _unavailable("Announcements","Public ScanX announcement section",T)
+        return
+    for a in anns[:60]:
+        title=_esc(a.get("title"))
+        url=html.escape(str(a.get("url","")),quote=True)
+        st.markdown(f'<div style="padding:8px 0;border-bottom:1px solid {T["border"]};font:10px {T["mono"]}"><a href="{url}" target="_blank" style="color:{T["ivory"]};text-decoration:none">{title}</a><div style="color:{T["t3"]};margin-top:3px">OPEN SOURCE DOCUMENT ↗</div></div>',unsafe_allow_html=True)
 
 
-def _events(data,T):
-    symbol=data["symbol"]
-    cal=_yf_calendar(symbol)
-    if isinstance(cal,dict) and cal:
-        _header("Event calendar",T,"live")
-        _table(["VALUE"],[{"label":str(k),"values":[str(v)]} for k,v in cal.items()],T)
-    elif isinstance(cal, pd.DataFrame) and not cal.empty:
-        _header("Event calendar",T,"live")
-        p,r=_df_to_rows(cal,20,8); _table(p,r,T)
-    else:
-        ed=get_earnings_date(symbol)
-        _panel("Next earnings",f'<div style="font:13px {T["mono"]};color:{T["ivory"]}">{_esc(ed.get("date") or "N/A")}</div>',T)
-    div=_yf_dividends(symbol); splits=_yf_splits(symbol)
-    _header("Dividend history",T,"live" if len(div) else "unavailable")
-    if len(div): _table(["DATE","DIVIDEND"],[{"label":str(k),"values":[f"{v:,.4f}"]} for k,v in div.items()],T)
-    else: _unavailable("Dividend history","Corporate-actions history",T)
-    _header("Split history",T,"live" if len(splits) else "unavailable")
-    if len(splits): _table(["DATE","RATIO"],[{"label":str(k),"values":[str(v)]} for k,v in splits.items()],T)
-    else: _unavailable("Split history","Corporate-actions history",T)
-
-
-def _news(data,T,news_fetch_fn):
+def _news(data,T,news_fetch_fn=None):
     symbol=data["symbol"]
     news=[]
-    # v9.1 Arka News engine is the primary source so Research > News and the
-    # right rail use one normalized article model.
-    try:
-        news=get_security_news(symbol,days=7) or []
-    except Exception:
-        news=[]
+    try: news=get_security_news(symbol,days=7) or []
+    except Exception: news=[]
     if not news and news_fetch_fn:
         try: news=news_fetch_fn(symbol,days=7) or []
         except TypeError:
@@ -826,275 +393,191 @@ def _news(data,T,news_fetch_fn):
             except Exception: news=[]
         except Exception: news=[]
     if not news:
-        raw=_yf_news(symbol)
-        for x in raw[:20]:
-            content=x.get("content",x) if isinstance(x,dict) else {}
-            title=content.get("title") or x.get("title") or "Untitled"
-            url=(content.get("canonicalUrl") or {}).get("url") if isinstance(content.get("canonicalUrl"),dict) else content.get("link")
-            provider=content.get("provider",{}).get("displayName") if isinstance(content.get("provider"),dict) else x.get("publisher")
-            news.append({"title":title,"source":provider or "Yahoo Finance","published":content.get("pubDate") or x.get("providerPublishTime"),"url":url})
-    if not news:
-        _unavailable("News timeline","Arka News Intelligence v9.1 / Yahoo fallback",T)
+        _unavailable("Security news","Arka News Intelligence / connected news provider",T)
         return
     _header("Security news timeline",T,"live")
     for item in news[:30]:
         title=item.get("title") or item.get("headline") or "Untitled"
         source=item.get("source") or item.get("publisher") or "Source"
         ts=item.get("time_str") or item.get("published") or item.get("published_at") or item.get("time") or ""
-        event=item.get("event") or "NEWS"
-        priority=item.get("priority")
         sentiment=item.get("sentiment_label") or item.get("sentiment") or "—"
         url=item.get("url") or item.get("link")
         link=f'<a href="{html.escape(str(url),quote=True)}" target="_blank" style="color:{T["ivory"]};text-decoration:none">{_esc(title)}</a>' if url else _esc(title)
-        meta=f'{_esc(source)} · {_esc(ts)} · {_esc(event)} · {_esc(sentiment)}'
-        if priority is not None: meta += f' · priority {_esc(priority)}'
-        st.markdown(f'<div style="padding:8px 0;border-bottom:1px solid {T["border"]};font:10px {T["mono"]}"><div>{link}</div><div style="color:{T["t3"]};margin-top:3px">{meta}</div></div>',unsafe_allow_html=True)
-
-
-def _rsi(close, period=14):
-    d=close.diff(); g=d.clip(lower=0).rolling(period).mean(); l=(-d.clip(upper=0)).rolling(period).mean(); rs=g/l.replace(0,float("nan")); return 100-100/(1+rs)
+        st.markdown(f'<div style="padding:8px 0;border-bottom:1px solid {T["border"]};font:10px {T["mono"]}"><div>{link}</div><div style="color:{T["t3"]};margin-top:3px">{_esc(source)} · {_esc(ts)} · {_esc(sentiment)}</div></div>',unsafe_allow_html=True)
 
 
 def _technical(data,T):
-    period=st.selectbox("Technical range",["1mo","3mo","6mo","1y","2y"],index=2,key="research_technical_range_v91")
-    h=_yf_history(data["symbol"],period,"1d")
-    if h.empty:
-        _unavailable("OHLCV history","Yahoo Finance market history",T); return
-    close=h["Close"].dropna(); vol=h["Volume"].fillna(0)
-    ma20=close.rolling(20).mean(); ma50=close.rolling(50).mean(); ma200=close.rolling(200).mean()
-    rsi=_rsi(close).iloc[-1] if len(close)>=15 else None
-    atr = None
-    if len(h) >= 15:
-        tr = pd.concat([h["High"]-h["Low"], (h["High"]-h["Close"].shift(1)).abs(), (h["Low"]-h["Close"].shift(1)).abs()], axis=1).max(axis=1)
-        atr = tr.rolling(14).mean().iloc[-1]
-    avg20=vol.rolling(20).mean().iloc[-1] if len(vol)>=20 else None
-    relvol=float(vol.iloc[-1]/avg20) if avg20 else None
-    def f(x): return f"{x:,.2f}" if x is not None and pd.notna(x) else "N/A"
-    _kpis([("Close",f(float(close.iloc[-1])),"₹"),("SMA20",f(float(ma20.iloc[-1])),"₹"),("SMA50",f(float(ma50.iloc[-1])),"₹"),("SMA200",f(float(ma200.iloc[-1])),"₹"),("RSI14",f(float(rsi)) if rsi is not None else "N/A",""),("ATR14",f(float(atr)) if atr is not None else "N/A","₹"),("Rel Volume",f(relvol) if relvol is not None else "N/A","x"),("20D Vol Avg",f(float(avg20)) if avg20 else "N/A","shares")],T,4)
-    _render_chart(data["symbol"],T,period,"technical")
-    pdh=float(h["High"].iloc[-2]) if len(h)>1 else None; pdl=float(h["Low"].iloc[-2]) if len(h)>1 else None
-    hi52 = float(h["High"].tail(252).max()) if len(h) else None
-    lo52 = float(h["Low"].tail(252).min()) if len(h) else None
-    rows=[{"label":"PDH","values":[f"₹{pdh:,.2f}" if pdh else "N/A"]},{"label":"PDL","values":[f"₹{pdl:,.2f}" if pdl else "N/A"]},{"label":"52W High","values":[f"₹{hi52:,.2f}" if hi52 else "N/A"]},{"label":"52W Low","values":[f"₹{lo52:,.2f}" if lo52 else "N/A"]}]
-    _table(["VALUE"],rows,T)
+    tech=data.get("technical") or []
+    _header("Technical indicators · ScanX",T,"live" if tech else "unavailable")
+    if tech:
+        rows=[{"label":x["indicator"],"values":[x.get("value","—"),x.get("state","—")]} for x in tech]
+        _table(["VALUE","STATE"],rows,T)
+    else:
+        _unavailable("Technical indicator set","ScanX public Technical Indicators section",T)
+    _header("Arka price/volume context",T,"live")
+    period=st.selectbox("Chart range",["1mo","3mo","6mo","1y","2y","5y"],index=3,key="research_scanx_technical_range")
+    h=_chart(data["symbol"],T,period)
+    if h is not None and not h.empty:
+        close=h["Close"].dropna(); vol=h["Volume"].fillna(0)
+        rsi=None
+        if len(close)>=15:
+            d=close.diff(); g=d.clip(lower=0).rolling(14).mean(); l=(-d.clip(upper=0)).rolling(14).mean(); rs=g/l.replace(0,float("nan")); rsi=float((100-100/(1+rs)).iloc[-1])
+        _kpis([("Close",f"₹{close.iloc[-1]:,.2f}","Yahoo fallback/market history"),("SMA20",f"₹{close.rolling(20).mean().iloc[-1]:,.2f}",""),("SMA50",f"₹{close.rolling(50).mean().iloc[-1]:,.2f}",""),("RSI14",f"{rsi:.2f}" if rsi is not None else "N/A","")],T,4)
 
 
-def _relative_strength(data,T):
-    period=st.selectbox("Relative-strength window",["1mo","3mo","6mo","1y","2y"],index=2,key="research_rs_range_v91")
-    stock=_yf_history(data["symbol"],period,"1d")["Close"].dropna()
-    if stock.empty:
-        _unavailable("Relative strength","Stock + benchmark market history",T); return
-    sret=(stock.iloc[-1]/stock.iloc[0]-1)*100 if len(stock)>1 else None
-    rows=[{"label":data["symbol"],"values":[f"{sret:+.2f}%" if sret is not None else "N/A","BASE"]}]
-    for name,ticker in [("NIFTY 50","^NSEI"),("NIFTY 500","^CRSLDX"),("S&P 500","^GSPC")]:
-        b=yf.Ticker(ticker).history(period=period,interval="1d")["Close"].dropna()
-        r=(b.iloc[-1]/b.iloc[0]-1)*100 if len(b)>1 else None
-        ex=sret-r if sret is not None and r is not None else None
-        rows.append({"label":name,"values":[f"{r:+.2f}%" if r is not None else "N/A",f"{ex:+.2f}%" if ex is not None else "N/A"]})
-    _header("Relative performance",T,"live"); _table(["RETURN","EXCESS VS STOCK"],rows,T)
+def _forecast(data,T):
+    df=_scanx_df(data,"analyst")
+    _header("Analyst rating / forecast",T,"live" if df is not None and not df.empty else "unavailable","ScanX public page exposes a provider rating block. Arka displays the source observations without turning them into a recommendation.")
+    if df is not None and not df.empty:
+        p,r=_table_to_period_rows(df,20,8); _table(p,r,T)
+    else:
+        targets=_yf_targets(data["symbol"])
+        if targets:
+            _table(["VALUE"],[{"label":str(k),"values":[str(v)]} for k,v in targets.items()],T)
+        else:
+            _unavailable("Forecast dataset","ScanX forecast block or provider analyst targets",T)
 
 
-def _factors(data,T):
-    symbol=data["symbol"]; h=_yf_history(symbol,"1y","1d")
-    if h.empty: _unavailable("Factor observations","Price history + company fundamentals",T); return
-    close=h["Close"].dropna(); ret=close.pct_change().dropna()
-    nifty=yf.Ticker("^NSEI").history(period="1y",interval="1d")["Close"].dropna()
-    merged=pd.concat([close.rename("s"),nifty.rename("n")],axis=1).dropna(); beta=None
-    if len(merged)>30: beta=merged["s"].pct_change().cov(merged["n"].pct_change())/merged["n"].pct_change().var()
-    info=_yf_info(symbol)
-    rows=[
-        {"label":"1Y Momentum","values":[f"{(close.iloc[-1]/close.iloc[0]-1)*100:+.2f}%"]},
-        {"label":"Annualized Volatility","values":[f"{ret.std()*(252**0.5)*100:.2f}%"]},
-        {"label":"Beta vs NIFTY","values":[f"{beta:.2f}" if beta is not None else "N/A"]},
-        {"label":"ROE","values":[str(info.get("returnOnEquity","N/A"))]},
-        {"label":"ROA","values":[str(info.get("returnOnAssets","N/A"))]},
-        {"label":"Operating Margin","values":[str(info.get("operatingMargins","N/A"))]},
-        {"label":"Profit Margin","values":[str(info.get("profitMargins","N/A"))]},
-    ]
-    _header("Current factor observations",T,"live"); _table(["LATEST"],rows,T)
-    _panel("Factor definitions",f'<div style="font:10px {T["mono"]};color:{T["t2"]};line-height:1.8">Momentum = trailing price return; volatility = annualized daily-return volatility; beta = covariance to NIFTY / NIFTY variance. Profitability rows come from provider fundamentals.</div>',T)
+def _valuation(data,T):
+    s=data.get("snapshot") or {}
+    _header("Valuation monitor",T,"live")
+    _kpis([("P/E",s.get("PE Ratio","N/A"),"ScanX"),("P/B",s.get("PB Ratio","N/A"),"ScanX"),("EPS",s.get("EPS","N/A"),"ScanX"),("Book Value",s.get("Book Value","N/A"),"ScanX")],T,4)
+    _panel("Relative valuation",'<div style="font:10px '+T["mono"]+';color:'+T["t2"]+';line-height:1.7">Peer valuation is available in the PEERS function. A conventional DCF is intentionally not presented as a sourced ScanX field; any DCF added later should be an explicit scenario model with editable assumptions.</div>',T)
 
 
 def _risk(data,T):
-    info=_yf_info(data["symbol"]); s=(data.get("summary") or {}).get("data") or {}
-    rows=[]
-    for label,key,basis in [("Beta","beta","Yahoo"),("Current Ratio","currentRatio","Yahoo"),("Quick Ratio","quickRatio","Yahoo"),("Debt / Equity","debtToEquity","Yahoo"),("Interest Coverage","interestCoverage","Yahoo"),("Operating Margin","operatingMargins","Yahoo"),("Profit Margin","profitMargins","Yahoo"),("Valuation P/E","pe_ratio","Screener")]:
-        val=info.get(key,s.get(key))
-        rows.append({"label":label,"values":[str(val if val not in (None,"") else "N/A"),basis]})
-    _header("Risk monitor",T,"live"); _table(["VALUE","BASIS"],rows,T)
-    for title,req in [("Business concentration","Business/segment concentration dataset"),("Regulatory risk","Regulatory event/entity feed"),("Commodity risk","Commodity sensitivity disclosures"),("Currency risk","FX exposure disclosures"),("Liquidity / impact risk","Free float, turnover and market-impact history"),("Governance risk","Related-party, pledge and governance event history")]: _unavailable(title,req,T)
-
-
-def _price_fundamentals(data,T):
-    symbol=data["symbol"]
-    period=st.selectbox("Price / fundamentals window",["3mo","6mo","1y","2y","5y"],index=1,key="research_pf_range_v91")
-    h=_render_chart(symbol,T,period,"pricefund")
-    hist=_yf_earnings_history(symbol)
-    if not hist.empty and h is not None and not h.empty:
-        rows=[]
-        # Keep this table point-in-time: only use reported actual EPS observations.
-        for idx,row in hist.tail(8).iterrows():
-            dt=str(idx)[:10]
-            actual=row.get("epsactual") if isinstance(row,pd.Series) else None
-            surprise=row.get("surprisePercent") if isinstance(row,pd.Series) else None
-            rows.append({"label":dt,"values":[str(actual if pd.notna(actual) else "—"),str(surprise if pd.notna(surprise) else "—")]})
-        _header("Earnings observations",T,"live"); _table(["EPS ACTUAL","SURPRISE %"],rows,T)
-    val=_yf_valuation(symbol)
-    if not val.empty:
-        _header("Valuation history",T,"live"); p,r=_df_to_rows(val,12,9); _table(p,r,T,["PERatio","PBRatio","EVToEBITDA"])
+    s=data.get("snapshot") or {}
+    rows=[
+        {"label":"Debt to Equity","values":[s.get("Debt to Equity","N/A"),"ScanX"]},
+        {"label":"Return on Equity","values":[s.get("Return on Equity","N/A"),"ScanX"]},
+        {"label":"P/E","values":[s.get("PE Ratio","N/A"),"ScanX"]},
+        {"label":"52W High-Low","values":[s.get("52W High-Low","N/A"),"ScanX"]},
+    ]
+    _header("Risk monitor",T,"live"); _table(["VALUE","SOURCE"],rows,T)
+    for title,req in [("Business concentration","Segment-level concentration disclosure"),("Regulatory risk","Exchange/regulatory event dataset"),("Commodity exposure","Company commodity-sensitivity disclosures"),("Liquidity / impact","Turnover/free-float impact dataset")]:
+        _unavailable(title,req,T)
 
 
 def _what_changed(data,T):
-    symbol=data["symbol"]
-    q=_yf_income(symbol,"quarterly")
+    df=_scanx_df(data,"financials")
+    if df is None or df.empty:
+        _unavailable("Change engine","At least two dated ScanX financial periods",T); return
+    # Find the two latest columns and calculate changes for numeric rows.
+    latest=df.columns[-1]; prev=df.columns[-2]
     rows=[]
-    for label in ["Total Revenue","Operating Income","Net Income","EBITDA","Diluted EPS","Basic EPS"]:
-        if label in q.index and q.shape[1]>=2:
-            a,b=q.loc[label].iloc[0],q.loc[label].iloc[1]
-            ch=(float(a)/abs(float(b))-1)*100 if pd.notna(a) and pd.notna(b) and float(b)!=0 else None
-            rows.append({"label":label,"values":[f"{float(a):,.2f}" if pd.notna(a) else "—",f"{float(b):,.2f}" if pd.notna(b) else "—",f"{ch:+.2f}%" if ch is not None else "—"]})
-    _header("Fundamental changes",T,"live" if rows else "unavailable"); _table(["LATEST","PREVIOUS","CHANGE"],rows,T)
-    val=_yf_valuation(symbol)
-    if not val.empty:
-        cols=[c for c in val.columns if c != "Current"]
-        metric=next((m for m in val.index if "PERatio" in str(m)),None)
-        if metric and len(cols)>=2:
-            a,b=val.loc[metric,cols[0]],val.loc[metric,cols[1]]
-            _kpis([("P/E latest",f"{a:.2f}" if pd.notna(a) else "N/A","valuation"),("P/E previous",f"{b:.2f}" if pd.notna(b) else "N/A","valuation"),("P/E change",f"{((a/b)-1)*100:+.2f}%" if pd.notna(a) and pd.notna(b) and b!=0 else "N/A","history")],T,3)
-    _panel("Change engine",f'<div style="font:10px {T["mono"]};color:{T["t2"]};line-height:1.7">V9.1 computes changes only from adjacent dated provider observations. Estimate revisions and security-level ownership flows remain gated until point-in-time datasets are connected.</div>',T)
+    for _,r in df.iterrows():
+        label=str(r.iloc[0])
+        a=pd.to_numeric(str(r.iloc[-1]).replace(",",""),errors="coerce")
+        b=pd.to_numeric(str(r.iloc[-2]).replace(",",""),errors="coerce")
+        if pd.notna(a) and pd.notna(b) and b!=0:
+            rows.append({"label":label,"values":[str(r.iloc[-1]),str(r.iloc[-2]),f"{(a/abs(b)-1)*100:+.2f}%"]})
+    _header("What changed?",T,"live",f"Adjacent ScanX observations: {latest} vs {prev}")
+    _table([str(latest),str(prev),"CHANGE"],rows,T,["Revenue","EBITDA","Net Profit","EPS"])
 
 
 def _thesis(data,T):
     symbol=data["symbol"]
-    st.markdown(f'<div style="font:10px {T["mono"]};color:{T["t2"]};margin:6px 0">RESEARCH NOTEBOOK · {html.escape(symbol)}</div>',unsafe_allow_html=True)
-    fields=[("Bull case","research_bull"),("Bear case","research_bear"),("Catalysts","research_catalysts"),("Risks","research_risks")]
-    for title,key in fields:
-        st.text_area(title,value=st.session_state.get(key,""),height=110,key=key)
-    if st.button("SAVE RESEARCH NOTES",key="research_notes_save_v91",type="primary"):
-        st.success("Research notes saved for this session.")
-    _panel("Source discipline",f'<div style="font:10px {T["mono"]};color:{T["t2"]};line-height:1.7">Use sourced facts, dates and links in each field. The notebook stores your notes; it does not turn them into a recommendation.</div>',T)
+    st.markdown(f'<div style="font:10px {T["mono"]};color:{T["t2"]};margin:6px 0">ARKA RESEARCH NOTEBOOK · {_esc(symbol)}</div>',unsafe_allow_html=True)
+    fields=[("Bull case","research_bull_scanx"),("Bear case","research_bear_scanx"),("Catalysts","research_catalysts_scanx"),("Risks","research_risks_scanx")]
+    for title,key in fields: st.text_area(title,value=st.session_state.get(key,""),height=105,key=key)
+    if st.button("SAVE RESEARCH NOTES",key="research_notes_save_scanx",type="primary"): st.success("Research notes saved for this session.")
+    _panel("Source discipline",'<div style="font:10px '+T["mono"]+';color:'+T["t2"]+';line-height:1.7">Use dated source observations in each note. The notebook is a workspace, not an investment recommendation engine.</div>',T)
 
 
-def _graph(data,T):
-    symbol=data["symbol"]
-    nodes=["FINANCIALS","EARNINGS","VALUATION","OWNERSHIP","FLOWS","SEGMENTS","PEERS","SUPPLY CHAIN","MANAGEMENT","EVENTS","NEWS","RISK"]
-    _header("Research graph",T,"live")
-    cols=st.columns(3)
-    for i,n in enumerate(nodes):
-        with cols[i%3]:
-            st.markdown(f'<div style="border:1px solid {T["border"]};background:{T["panel"]};padding:10px;margin:4px 0;font:700 10px {T["mono"]};color:{T["ivory"]}">{_esc(symbol)} <span style="color:{T["amber"]}">→ {_esc(n)}</span><div style="font:9px {T["mono"]};color:{T["t3"]};margin-top:4px">OPEN THIS FUNCTION TO DRILL DOWN</div></div>',unsafe_allow_html=True)
-
-
-def _data_sources(data,T):
-    s=data.get("summary") or {}; sec=data.get("sector") or {}
+def _about(data,T):
+    desc=(data.get("about") or {}).get("description")
+    _header("About company",T,"live" if desc else "unavailable")
+    if desc:
+        _panel("ScanX company description",f'<div style="font:10px {T["mono"]};color:{T["t2"]};line-height:1.8">{_esc(desc)}</div>',T)
+    else:
+        _unavailable("Company description","ScanX About section",T)
+    s=data.get("snapshot") or {}
     rows=[
-        {"label":"Core security resolution","values":["Screener",s.get("status","unavailable")]},
-        {"label":"Price / OHLCV","values":["Yahoo Finance / yfinance","cached 5m"]},
-        {"label":"Company profile","values":["Yahoo Finance + Screener","cached 10m"]},
-        {"label":"Income / balance / cash flow","values":["yfinance + Screener fallback","lazy"]},
-        {"label":"Earnings estimates / revisions","values":["yfinance","lazy"]},
-        {"label":"Holder datasets","values":["yfinance","lazy"]},
-        {"label":"Peer comparison","values":["Curated Screener peer map","lazy"]},
-        {"label":"News","values":["Arka News Intelligence v9.1 + Yahoo fallback","cached / lazy"]},
-        {"label":"FII/DII security attribution","values":["Dedicated exchange dataset required","not connected"]},
-        {"label":"Segment / supply chain","values":["Company filing / research dataset required","not connected"]},
-        {"label":"Point-in-time DCF","values":["Editable assumption engine required","not connected"]},
+        {"label":"Website","values":[s.get("website") or "See source page"]},
+        {"label":"ScanX source","values":[data.get("url","N/A")]},
+    ]
+    _table(["VALUE"],rows,T)
+
+
+def _sources(data,T):
+    rows=[
+        {"label":"ScanX public company page","values":[data.get("url","N/A"),data.get("status","unavailable")]},
+        {"label":"Price / OHLCV","values":["Yahoo Finance / yfinance","fallback"]},
+        {"label":"Arka News","values":["news_feed.py","security timeline"]},
+        {"label":"Screener","values":["security resolution / fallback","connected if available"]},
     ]
     _header("Data provenance",T)
-    _table(["SOURCE / ENGINE","STATUS"],rows,T)
-    _panel("V9.1 integrity rule",f'<div style="font:10px {T["mono"]};color:{T["t2"]};line-height:1.8">No unavailable dataset is fabricated. A section is marked live only when the selected connector actually returns data.</div>',T)
+    _table(["SOURCE","STATUS"],rows,T)
+    _panel("Integrity rule",'<div style="font:10px '+T["mono"]+';color:'+T["t2"]+';line-height:1.8">ScanX values are displayed only when the public page returns them. Arka does not manufacture missing MF, ownership, filings, analyst or segment data.</div>',T)
+    _panel("Source note",'<div style="font:10px '+T["mono"]+';color:'+T["t3"]+';line-height:1.8">This adapter reads the public company HTML. It does not log in or bypass private APIs. If ScanX changes its page structure or blocks automated requests, the connector will show DATA UNAVAILABLE rather than silently substituting invented values.</div>',T)
 
 
 def render_research_page(T=None, news_fetch_fn=None):
     T=_theme(T)
     st.markdown(f'''<style>
     [data-testid="stAppViewContainer"]{{background:{T["bg"]}}}
-    div[data-testid="stTextInput"] input, div[data-testid="stTextArea"] textarea{{font-family:{T["mono"]};background:{T["panel"]};color:{T["ivory"]};border:1px solid {T["border"]}}}
-    div[data-testid="stTextInput"] input:focus, div[data-testid="stTextArea"] textarea:focus{{border-color:{T["amber"]}}}
-    div[data-testid="stSelectbox"] div[data-baseweb="select"] > div{{background:{T["panel"]};border-color:{T["border"]};font-family:{T["mono"]};}}
-    </style>''', unsafe_allow_html=True)
-    _status_strip(T)
+    .arka-research-tabs div[role="radiogroup"]{{gap:2px;overflow-x:auto;flex-wrap:nowrap;padding-bottom:5px}}
+    .arka-research-tabs label{{background:{T["panel"]};border:1px solid {T["border"]};padding:7px 10px!important;font:700 9px {T["mono"]}!important;color:{T["t2"]}!important;white-space:nowrap}}
+    .arka-research-tabs label[data-checked="true"]{{border-color:{T["amber"]};color:{T["amber"]}!important;background:{T["panel2"]}}}
+    div[data-testid="stTextInput"] input{{font-family:{T["mono"]};background:{T["panel"]};color:{T["ivory"]};border:1px solid {T["border"]}}}
+    div[data-testid="stSelectbox"] div[data-baseweb="select"] > div{{background:{T["panel"]};border-color:{T["border"]};font-family:{T["mono"]}}}
+    </style>''',unsafe_allow_html=True)
+
+    now=datetime.now(IST)
+    opened=now.weekday()<5 and now.replace(hour=9,minute=15,second=0,microsecond=0)<=now<=now.replace(hour=15,minute=30,second=0,microsecond=0)
+    color=T["green"] if opened else T["red"]
+    label="MARKET OPEN" if opened else "MARKET CLOSED"
+    st.markdown(f'<div style="display:flex;justify-content:space-between;border:1px solid {T["border"]};border-bottom:2px solid {T["amber"]};background:{T["panel"]};padding:7px 12px;margin-bottom:10px;font:10px {T["mono"]}"><span style="color:{T["amber"]};font-weight:800;letter-spacing:1px">ARKA TERMINAL · RESEARCH · SCANX DATA</span><span style="color:{color};font-weight:700">● {label}</span><span style="color:{T["t3"]}">{now.strftime("%d %b %Y · %H:%M:%S IST")}</span></div>',unsafe_allow_html=True)
 
     active=st.session_state.get("active_security") or st.session_state.get("research_last_query") or ""
-    query=st.text_input("Research security",value=active,placeholder="RELIANCE / HDFCBANK / TCS",label_visibility="collapsed",key="research_query_v91")
+    query=st.text_input("Research security",value=active,placeholder="RELIANCE / HDFCBANK / TCS",label_visibility="collapsed",key="research_scanx_query")
     c1,c2=st.columns([5,1])
     with c1:
-        if query.strip() and query.strip().upper()!=active.upper():
-            # Do not fetch while the user is still typing; only commit from the button.
-            pass
-        st.caption("Research shell loads the core security only. Detailed datasets load when you choose a function.")
+        st.caption("ScanX is the primary research source. Detailed sections are rendered only after a security is loaded.")
     with c2:
-        if st.button("LOAD SECURITY",key="research_load_v91",use_container_width=True,type="primary"):
+        if st.button("LOAD SECURITY",key="research_scanx_load",use_container_width=True,type="primary"):
             q=query.strip().upper()
             if q:
-                try:
-                    res=resolve_symbol(q)
-                    if res:
-                        import re
-                        m=re.search(r"/company/([^/]+)",str(res.get("url","")),flags=re.I)
-                        canonical=m.group(1).upper() if m else q
-                    else:
-                        canonical=q
-                except Exception:
-                    canonical=q
-                st.session_state.active_security=canonical
-                st.session_state.research_last_query=canonical
-                st.session_state.pop("research_core",None)
+                st.session_state.active_security=q
+                st.session_state.research_last_query=q
+                st.session_state.pop("research_scanx_data",None)
                 st.rerun()
 
     symbol=st.session_state.get("active_security") or st.session_state.get("research_last_query") or ""
     if not symbol:
-        _panel("Research ready", f'<div style="font:11px {T["mono"]};color:{T["t3"]}">Load a security to initialize the Research workspace.</div>',T,dashed=True)
+        _panel("Research ready",'<div style="font:11px '+T["mono"]+';color:'+T["t3"]+'">Load a security to initialize the ScanX research workspace.</div>',T,dashed=True)
         return
 
-    core=st.session_state.get("research_core")
-    if not core or core.get("symbol")!=symbol:
-        with st.spinner("Loading security core…"):
-            core=_core_cached(symbol)
-        if not core.get("resolved"):
-            st.error(core.get("reason","Security resolution failed.")); return
-        st.session_state.research_core=core
-    data=core
-    _summary_header(data,T)
+    cached=st.session_state.get("research_scanx_data")
+    if not cached or cached.get("symbol")!=symbol:
+        core,scanx=_load_data(symbol)
+        if scanx.get("status")!="live":
+            # One retry with the core company name when the first slug failed.
+            scanx=fetch_scanx_company(symbol,company_name=core.get("name") or symbol)
+        cached={**scanx,"core":core,"symbol":symbol}
+        st.session_state.research_scanx_data=cached
+    data=cached
 
-    periods=["1mo","3mo","6mo","1y","2y","5y"]
-    chart_period=st.selectbox("Research chart range",periods,index=2,key="research_top_chart_v91")
-    _header("Price / volume chart",T,(data.get("summary") or {}).get("status"),"Core chart is loaded once and reused by research functions where possible")
-    _render_chart(symbol,T,chart_period,"top")
+    _scanx_header(data,T)
+    periods=["3mo","6mo","1y","2y","5y"]
+    if "research_chart_period" not in st.session_state: st.session_state.research_chart_period="1y"
+    st.selectbox("Chart period",periods,index=periods.index(st.session_state.research_chart_period),key="research_chart_period")
 
-    tabs=[
-        "01 Overview","02 Company","03 Business","04 Financials","05 Earnings","06 Valuation",
-        "07 Ownership","08 Flows","09 Segments","10 Peers","11 Supply Chain","12 Management",
-        "13 Filings","14 Events","15 News","16 Technical","17 Relative Strength","18 Factors",
-        "19 Risk","20 Price + Fundamentals","21 What Changed?","22 Thesis","23 Research Graph","24 Data / Sources"
+    functions=[
+        "OVERVIEW","FORECAST","NEWS","PEERS","FINANCIALS","BALANCE SHEET","CASH FLOWS",
+        "SHAREHOLDING","DIVIDEND","CORPORATE ACTIONS","ANNOUNCEMENTS","MF HOLDINGS","TECHNICALS",
+        "VALUATION","RISK","WHAT CHANGED","THESIS","ABOUT","DATA / SOURCES"
     ]
-    selected=_research_nav(tabs,0)
+    active_fn=st.radio("RESEARCH FUNCTION",functions,index=0,horizontal=True,label_visibility="collapsed",key="research_scanx_function")
+    st.markdown('<div class="arka-research-tabs">',unsafe_allow_html=True)
+    st.markdown('</div>',unsafe_allow_html=True)
 
     dispatch={
-        "01 Overview":lambda:_overview(data,T),"02 Company":lambda:_overview(data,T) if False else _company(data,T),"03 Business":lambda:_business(data,T),
-        "04 Financials":lambda:_financials(data,T),"05 Earnings":lambda:_earnings(data,T),"06 Valuation":lambda:_valuation(data,T),
-        "07 Ownership":lambda:_ownership(data,T),"08 Flows":lambda:_flows(data,T),"09 Segments":lambda:_segments(data,T),
-        "10 Peers":lambda:_peers(data,T),"11 Supply Chain":lambda:_supply_chain(data,T),"12 Management":lambda:_management(data,T),
-        "13 Filings":lambda:_filings(data,T),"14 Events":lambda:_events(data,T),"15 News":lambda:_news(data,T,news_fetch_fn),
-        "16 Technical":lambda:_technical(data,T),"17 Relative Strength":lambda:_relative_strength(data,T),"18 Factors":lambda:_factors(data,T),
-        "19 Risk":lambda:_risk(data,T),"20 Price + Fundamentals":lambda:_price_fundamentals(data,T),"21 What Changed?":lambda:_what_changed(data,T),
-        "22 Thesis":lambda:_thesis(data,T),"23 Research Graph":lambda:_graph(data,T),"24 Data / Sources":lambda:_data_sources(data,T),
+        "OVERVIEW":lambda:_overview(data,T),"FORECAST":lambda:_forecast(data,T),"NEWS":lambda:_news(data,T,news_fetch_fn),
+        "PEERS":lambda:_peers(data,T),"FINANCIALS":lambda:_financials(data,T),"BALANCE SHEET":lambda:_balance(data,T),
+        "CASH FLOWS":lambda:_cashflow(data,T),"SHAREHOLDING":lambda:_shareholding(data,T),"DIVIDEND":lambda:_dividend(data,T),
+        "CORPORATE ACTIONS":lambda:_actions(data,T),"ANNOUNCEMENTS":lambda:_announcements(data,T),"MF HOLDINGS":lambda:_mf(data,T),
+        "TECHNICALS":lambda:_technical(data,T),"VALUATION":lambda:_valuation(data,T),"RISK":lambda:_risk(data,T),
+        "WHAT CHANGED":lambda:_what_changed(data,T),"THESIS":lambda:_thesis(data,T),"ABOUT":lambda:_about(data,T),"DATA / SOURCES":lambda:_sources(data,T),
     }
-    dispatch[selected]()
-
-
-def _company(data,T):
-    # Keep Company separate from Overview so it can be drilled into without repeating the entire research dataset.
-    info=_yf_info(data["symbol"]); s=(data.get("summary") or {}).get("data") or {}; sec=(data.get("sector") or {}).get("data") or {}
-    _header("Company profile",T,"live")
-    rows=[
-        {"label":"Name","values":[data.get("name","N/A")]},
-        {"label":"Symbol","values":[data.get("symbol","N/A")]},
-        {"label":"Sector","values":[sec.get("Sector") or info.get("sector") or "N/A"]},
-        {"label":"Industry","values":[sec.get("Industry") or info.get("industry") or "N/A"]},
-        {"label":"Market Cap","values":[str(s.get("market_cap") or info.get("marketCap") or "N/A")]},
-        {"label":"Employees","values":[str(info.get("fullTimeEmployees") or "N/A")]},
-        {"label":"Website","values":[str(info.get("website") or "N/A")]},
-    ]
-    _table(["VALUE"],rows,T)
-    _panel("Business description",f'<div style="font:10px {T["mono"]};color:{T["t2"]};line-height:1.8">{_esc(info.get("longBusinessSummary") or "No verified business description returned.")}</div>',T)
+    dispatch[active_fn]()
