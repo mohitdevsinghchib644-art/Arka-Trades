@@ -253,7 +253,6 @@ hr{{border-color:#202020 !important;}}
 .brand-status{{font-family:'JetBrains Mono',monospace;font-size:8px;letter-spacing:1px;color:{GREEN};display:flex;align-items:center;gap:6px;}}
 .brand-status-wide{{justify-content:flex-end;height:34px;}}
 .module-top-title{{height:34px;display:flex;align-items:center;justify-content:center;gap:9px;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;letter-spacing:1.2px;color:#e8e8e8;border-bottom:1px solid #202020;}}
-.module-top-title span{{color:{AMBER};font-size:9px;}}
 .module-top-title small{{font-size:7px;color:#555;letter-spacing:1px;font-weight:500;}}
 .module-directory-spacer{{height:22px;border-bottom:1px solid #181818;margin-bottom:10px;}}
 .module-directory-title{{font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:1.4px;color:{AMBER};border-top:1px solid #292929;border-bottom:1px solid #202020;padding:10px 7px;margin-bottom:7px;}}
@@ -872,12 +871,12 @@ def _market_cell(label, data):
 
 
 MODULE_INFO = [
-    ("F2", "WATCHLIST SCANNER", "Scan your saved universe for PDH/PDL breaks, momentum, RSI and volume conditions.", "High", "Fast daily trade discovery from your own symbols."),
-    ("F3", "ALERTS", "Monitor price, PDH and PDL conditions and deliver configured Telegram notifications.", "High", "Prevents you from having to watch every level manually."),
-    ("F4", "RESEARCH", "Deep company workspace covering financials, earnings, valuation, ownership, peers, risk, news and technicals.", "Core", "Use before making a research decision; keeps company context in one place."),
-    ("F5", "ARKA AI", "AI-assisted chart and market analysis that works with the currently selected security context.", "Advanced", "Turns terminal data and your trading rules into an analysis workflow."),
-    ("F6", "SMART SCREENER", "Build rule-based screens using price, trend, RSI, volume and fundamental conditions.", "High", "Finds candidates across a universe instead of checking stocks one by one."),
-    ("F7", "MARKET BREADTH", "See advancing/declining participation, breadth ratios and market-level internals.", "Core", "Provides market context before interpreting an individual stock signal."),
+    ("WATCHLIST SCANNER", "Scan your saved universe for PDH/PDL breaks, momentum, RSI and volume conditions.", "High", "Fast daily trade discovery from your own symbols."),
+    ("ALERTS", "Monitor price, PDH and PDL conditions and deliver configured Telegram notifications.", "High", "Prevents you from having to watch every level manually."),
+    ("RESEARCH", "Deep company workspace covering financials, earnings, valuation, ownership, peers, risk, news and technicals.", "Core", "Use before making a research decision; keeps company context in one place."),
+    ("ARKA AI", "AI-assisted chart and market analysis that works with the currently selected security context.", "Advanced", "Turns terminal data and your trading rules into an analysis workflow."),
+    ("SMART SCREENER", "Build rule-based screens using price, trend, RSI, volume and fundamental conditions.", "High", "Finds candidates across a universe instead of checking stocks one by one."),
+    ("MARKET BREADTH", "See advancing/declining participation, breadth ratios and market-level internals.", "Core", "Provides market context before interpreting an individual stock signal."),
 ]
 
 
@@ -894,7 +893,7 @@ def _render_compact_module_header(title, code=""):
             _go_home()
     with c2:
         st.markdown(
-            f'<div class="module-top-title"><span>{code}</span>{title.upper()}<small>ARKA MARKET TERMINAL</small></div>',
+            f'<div class="module-top-title">{title.upper()}<small>ARKA MARKET TERMINAL</small></div>',
             unsafe_allow_html=True,
         )
     with c3:
@@ -905,17 +904,31 @@ def _render_compact_module_header(title, code=""):
 def _render_module_directory():
     st.markdown('<div class="module-directory-spacer"></div>', unsafe_allow_html=True)
     st.markdown('<div class="module-directory-title">TERMINAL MODULE DIRECTORY · PURPOSE / IMPORTANCE / USE</div>', unsafe_allow_html=True)
+    targets = {
+        "WATCHLIST SCANNER": "scanner",
+        "ALERTS": "alerts",
+        "RESEARCH": "research",
+        "ARKA AI": "analysis",
+        "SMART SCREENER": "smart_scan",
+        "MARKET BREADTH": "breadth",
+    }
     cols = st.columns(3)
-    for i, (code, label, purpose, importance, use) in enumerate(MODULE_INFO):
+    for i, (label, purpose, importance, use) in enumerate(MODULE_INFO):
+        target = targets[label]
         with cols[i % 3]:
+            if st.button(label, key=f"module_directory_{target}", use_container_width=True):
+                st.session_state.page = target
+                sym = st.session_state.get("active_security")
+                if sym:
+                    st.session_state["research_last_query"] = sym
+                    st.session_state["m1_ticker"] = sym
+                st.rerun()
             st.markdown(
-                f'''<div class="module-directory-card">
-                    <div class="module-dir-code">{code}</div>
-                    <div class="module-dir-label">{label}</div>
-                    <div class="module-dir-purpose">{purpose}</div>
-                    <div class="module-dir-meta"><span>IMPORTANCE</span><b>{importance}</b></div>
-                    <div class="module-dir-use"><span>USE FOR</span>{use}</div>
-                </div>''', unsafe_allow_html=True)
+                f"""<div class=\"module-directory-card module-directory-card-body\">
+                    <div class=\"module-dir-purpose\">{purpose}</div>
+                    <div class=\"module-dir-meta\"><span>IMPORTANCE</span><b>{importance}</b></div>
+                    <div class=\"module-dir-use\"><span>USE FOR</span>{use}</div>
+                </div>""", unsafe_allow_html=True)
 
 
 def _render_terminal_brandbar():
@@ -975,8 +988,10 @@ def _render_terminal_header(show_indices=True):
             _open_security(candidate)
 
 
-def _render_module_page_header(title, code):
-    _render_compact_module_header(title, code)
+def _render_module_page_header(title, code=""):
+    _render_compact_module_header(title)
+
+
 
 def _render_security_chart(symbol: str):
     try:
@@ -1132,7 +1147,7 @@ def _render_dashboard():
     dec = sum(1 for s in all_syms if quotes.get(s) and quotes[s]["chg"] < -0.05)
     flat = sum(1 for s in all_syms if quotes.get(s) and abs(quotes[s]["chg"]) <= 0.05)
     ratio = (adv / dec) if dec else (float(adv) if adv else 0)
-    st.markdown(f'''<div class="monitor-grid"><div class="monitor-panel"><div class="monitor-head"><span>WATCHLIST MONITOR</span><span>{len(wl)} NAMES · FAST CACHE</span></div>{watch_html}</div><div class="monitor-panel"><div class="monitor-head"><span>MARKET INTERNALS</span><span>{len(all_syms)} SAMPLE</span></div><div class="monitor-row"><span>ADVANCING</span><span>{adv}</span><span class="small-positive">▲</span></div><div class="monitor-row"><span>DECLINING</span><span>{dec}</span><span class="small-negative">▼</span></div><div class="monitor-row"><span>UNCHANGED</span><span>{flat}</span><span style="color:#777">—</span></div><div class="monitor-row"><span>A/D RATIO</span><span>{ratio:.2f}</span><span style="color:#888">RATIO</span></div></div><div class="monitor-panel"><div class="monitor-head"><span>TERMINAL FUNCTIONS</span><span>F2–F7</span></div><div class="monitor-row"><span>SEARCH SECURITY</span><span>CMD</span><span style="color:{AMBER}">LOAD</span></div><div class="monitor-row"><span>RESEARCH</span><span>F4</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>ARKA AI</span><span>F5</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>SCREENER</span><span>F6</span><span style="color:{AMBER}">OPEN</span></div></div></div>''', unsafe_allow_html=True)
+    st.markdown(f'''<div class="monitor-grid"><div class="monitor-panel"><div class="monitor-head"><span>WATCHLIST MONITOR</span><span>{len(wl)} NAMES · FAST CACHE</span></div>{watch_html}</div><div class="monitor-panel"><div class="monitor-head"><span>MARKET INTERNALS</span><span>{len(all_syms)} SAMPLE</span></div><div class="monitor-row"><span>ADVANCING</span><span>{adv}</span><span class="small-positive">▲</span></div><div class="monitor-row"><span>DECLINING</span><span>{dec}</span><span class="small-negative">▼</span></div><div class="monitor-row"><span>UNCHANGED</span><span>{flat}</span><span style="color:#777">—</span></div><div class="monitor-row"><span>A/D RATIO</span><span>{ratio:.2f}</span><span style="color:#888">RATIO</span></div></div><div class="monitor-panel"><div class="monitor-head"><span>TERMINAL FUNCTIONS</span><span>QUICK ACCESS</span></div><div class="monitor-row"><span>SEARCH SECURITY</span><span>CMD</span><span style="color:{AMBER}">LOAD</span></div><div class="monitor-row"><span>RESEARCH</span><span>MODULE</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>ARKA AI</span><span>MODULE</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>SCREENER</span><span>MODULE</span><span style="color:{AMBER}">OPEN</span></div></div></div>''', unsafe_allow_html=True)
 
 def _news_watchlist_for_rail():
     source_key = st.session_state.get("active_news_source", "admin")
@@ -1154,9 +1169,9 @@ pg = st.session_state.page
 if pg in {"home", "security"}:
     _render_terminal_header(show_indices=True)
 else:
-    module_titles = {"scanner":("WATCHLIST SCANNER","F2"),"alerts":("ALERTS","F3"),"research":("RESEARCH","F4"),"analysis":("ARKA AI","F5"),"smart_scan":("SMART SCREENER","F6"),"breadth":("MARKET BREADTH","F7")}
+    module_titles = {"scanner":"WATCHLIST SCANNER","alerts":"ALERTS","research":"RESEARCH","analysis":"ARKA AI","smart_scan":"SMART SCREENER","breadth":"MARKET BREADTH"}
     if pg in module_titles:
-        _render_module_page_header(*module_titles[pg])
+        _render_module_page_header(module_titles[pg])
 
 # ── RIGHT NEWS RAIL — isolated fragment so hide/show never reruns the terminal ──
 # Streamlit fragments rerun only the fragment when its widgets are used.
