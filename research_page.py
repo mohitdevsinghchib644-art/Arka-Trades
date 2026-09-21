@@ -14,6 +14,7 @@ from __future__ import annotations
 from datetime import datetime, timezone, timedelta
 from io import StringIO
 import html
+import json
 import re
 from typing import Any
 
@@ -356,10 +357,28 @@ def _shareholding(data,T):
 
 def _mf(data,T):
     df=_scanx_df(data,"mf_holdings")
-    _header("Mutual fund holdings",T,"live" if df is not None and not df.empty else "unavailable","Primary table from the public ScanX company page. Current holding, 1M/3M changes and six-month trend are retained where exposed.")
-    p,r=_table_to_period_rows(df,80,8); _table(p,r,T,["0.00%"])
-    if df is None or df.empty: return
-    st.caption("Use the ScanX fund name links for deeper scheme-level history. Arka does not fabricate a six-month sparkline when the source does not expose the series in HTML.")
+    api=data.get("mf_transactions") or {}
+    if df is not None and not df.empty:
+        _header("Mutual fund holdings",T,"live","ScanX company-page table")
+        p,r=_table_to_period_rows(df,80,8); _table(p,r,T,["0.00%"])
+    else:
+        _header("Mutual fund holdings / transactions",T,"live" if api.get("status")=="live" else "unavailable","ScanX web-service adapter")
+        rows=api.get("rows") or []
+        arrays=api.get("arrays") or []
+        if rows:
+            # Preserve named JSON fields exactly as returned by ScanX.
+            cols=list(dict.fromkeys(k for row in rows for k in row.keys()))
+            view=[]
+            for row in rows[:100]:
+                view.append({"label":str(row.get("fundName") or row.get("fund_name") or row.get("fundingHouse") or row.get("scheme") or "Fund"),
+                             "values":[str(row.get(c,"")) for c in cols if c not in {"fundName","fund_name","fundingHouse","scheme"}]})
+            _table(cols,view,T)
+        elif arrays:
+            st.code(json.dumps(arrays[:100],ensure_ascii=False,indent=2),language="json")
+        else:
+            _unavailable("MF transaction rows","ScanX mftransaction endpoint",T)
+    if api:
+        st.caption(f"ScanX mftransaction · {api.get('status','unknown')} · HTTP {api.get('http_status','—')} · {api.get('endpoint','')}")
 
 
 def _peers(data,T):
@@ -522,7 +541,7 @@ def _sources(data,T):
     _header("Data provenance",T)
     _table(["SOURCE","STATUS"],rows,T)
     _panel("Integrity rule",'<div style="font:10px '+T["mono"]+';color:'+T["t2"]+';line-height:1.8">ScanX values are displayed only when the public page returns them. Arka does not manufacture missing MF, ownership, filings, analyst or segment data.</div>',T)
-    _panel("Source note",'<div style="font:10px '+T["mono"]+';color:'+T["t3"]+';line-height:1.8">This adapter reads the public company HTML. It does not log in or bypass private APIs. If ScanX changes its page structure or blocks automated requests, the connector will show DATA UNAVAILABLE rather than silently substituting invented values.</div>',T)
+    _panel("Source note",'<div style="font:10px '+T["mono"]+';color:'+T["t3"]+';line-height:1.8">The adapter uses the public ScanX company page plus browser-observed public web-service calls (currently mftransaction and getDataH). It does not log in or bypass private access controls. If an endpoint is unavailable or changes, Arka shows DATA UNAVAILABLE rather than inventing values.</div>',T)
 
 
 def render_research_page(T=None, news_fetch_fn=None):
