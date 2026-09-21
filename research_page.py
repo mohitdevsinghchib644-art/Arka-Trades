@@ -251,9 +251,22 @@ def _core(symbol):
     return {"symbol":symbol,"name":r.get("name",symbol),"url":url,"summary":summary,"sector":sector}
 
 
+@st.cache_data(ttl=3600,show_spinner=False)
+def _yf_company_name(symbol: str):
+    try:
+        info = yf.Ticker(symbol.upper().strip()+".NS").info or {}
+        return info.get("longName") or info.get("shortName") or ""
+    except Exception:
+        return ""
+
+
 def _load_data(symbol):
     core=_core(symbol)
-    company_name=core.get("name") or symbol
+    company_name=core.get("name") or ""
+    # If the optional Screener resolver is unavailable, use Yahoo's public
+    # company name so ScanX can build its name-based company slug.
+    if not company_name or company_name.upper().strip() == symbol.upper().strip():
+        company_name=_yf_company_name(symbol) or company_name or symbol
     with st.spinner("Loading public ScanX research data…"):
         scanx=fetch_scanx_company(symbol,company_name=company_name)
     return core,scanx
