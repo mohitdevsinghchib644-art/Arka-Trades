@@ -1,9 +1,7 @@
 import streamlit as st
 import streamlit.components.v1 as components
-import yfinance as yf
 import pandas as pd
 from datetime import datetime, timezone, timedelta
-import time
 import requests
 import re
 import json
@@ -12,30 +10,33 @@ from pathlib import Path
 from supabase import create_client, Client
 from news_feed import render_news_rail, get_news_dot, _ensure_news_state, refresh_news, _fetch_news_for_stock
 from arka_ai import render_arka_ai
-from research_page import render_research_page
-from screener_scraper import resolve_symbol, get_summary, get_sector_info
+from research_page import render_research_page, render_research_panel
+from screener_scraper import resolve_symbol
+from data_engine import (get_indices, get_quotes, scan_batch, get_static, get_history,
+                         warm_security, to_float)
+from chart_engine import render_pro_chart
 
 # ═══════════════════════════════════════════════════════════════════
-# v3 — BLOOMBERG TERMINAL RESKIN + RIGHT-RAIL NEWS + INDEX FIX
+# v4 — SPEED + FULL RESEARCH + PRO CHART
 #
-# Changes vs. previous version:
-#   1. Full layout is now 3 columns: NAV (left) | CONTENT (center) |
-#      NEWS RAIL (right, fixed, always visible). The old bottom-left
-#      floating news dock is removed entirely — news now lives where
-#      you can actually watch it while trading.
-#   2. Visual language pushed further toward an actual Bloomberg/FactSet
-#      terminal: top ticker strip, function-key nav labels, tighter
-#      data-dense rows, hairline grid borders, no rounded corners
-#      anywhere, monospace for every number.
-#   3. MIDCAP 100 / SMALLCAP 250 fixed — old tickers
-#      (NIFTY_MIDCAP_100.NS / ^CRSMID) don't resolve on Yahoo and
-#      always fell through to "No data". Replaced with a verified
-#      fallback chain of real Yahoo aliases.
-#   4. Login/landing page, disclaimer, Supabase/Telegram wiring,
-#      scanner, alerts, research, AI, smart screener, breadth,
-#      profile/settings/contact logic are UNCHANGED — only presentation
-#      and the two fixes above changed. Anything that was working still
-#      works exactly the same.
+# What changed vs v3:
+#   1. SPEED: every market-data call now goes through data_engine.py —
+#      indices fetched in parallel, watchlist scans use ONE batched
+#      download instead of 2 calls per stock, Screener is parsed once
+#      per security, and failures are never cached.
+#   2. The index strip is a self-refreshing fragment (60s) so it never
+#      blocks other clicks.
+#   3. Security workspace: TradingView Lightweight Charts (candles, volume,
+#      MA 20/50/200, RSI 14 + 14-period MA of RSI, PDH/PDL lines, D/W,
+#      log scale). Range / interval / study toggles run in the browser —
+#      no rerun, no lag.
+#   4. The full research panel (financials, balance sheet, cash flow,
+#      ratios, shareholding, peers, technicals, analyst, dividends, news,
+#      notes…) now lives directly under the chart.
+#   5. Scanner cards: OPEN button now sits inside its card column.
+#   6. Logins can come from Streamlit secrets (ADMIN_USER / ADMIN_PASS /
+#      MEMBER_USER / MEMBER_PASS). Old values remain as a fallback so
+#      nothing breaks — see the note in the reply about removing them.
 # ═══════════════════════════════════════════════════════════════════
 
 # ── Supabase ─────────────────────────────────────────────────
@@ -127,6 +128,13 @@ st.set_page_config(page_title="Arka Trades", layout="wide", page_icon="📈", in
 
 BOT_TOKEN = st.secrets.get("BOT_TOKEN", "")
 CHAT_ID   = st.secrets.get("CHAT_ID", "")
+
+# Logins: set these in Streamlit Cloud -> Settings -> Secrets, then delete the
+# fallback strings below so no password lives in your GitHub repo.
+_ADMIN_USER  = st.secrets.get("ADMIN_USER",  "ADMIN4477MAX")
+_ADMIN_PASS  = st.secrets.get("ADMIN_PASS",  "MOHIT1")
+_MEMBER_USER = st.secrets.get("MEMBER_USER", "max trades")
+_MEMBER_PASS = st.secrets.get("MEMBER_PASS", "max")
 
 def send_telegram(msg):
     try:
@@ -243,6 +251,7 @@ header[data-testid="stHeader"]{{display:none !important;}}
 [data-testid="stMetricLabel"] p{{font-size:8px !important;color:#777 !important;letter-spacing:1px !important;text-transform:uppercase !important;}}
 [data-testid="stMetricValue"]{{font-family:'JetBrains Mono',monospace !important;font-size:16px !important;}}
 hr{{border-color:#202020 !important;}}
+iframe{{border:none;}}
 .pulse-dot{{width:5px;height:5px;border-radius:50%;background:{GREEN};display:inline-block;box-shadow:0 0 7px {GREEN};}}
 .terminal-shell{{background:#070707;border:1px solid #202020;border-top:2px solid {AMBER};}}
 .terminal-brandbar{{height:45px;display:flex;align-items:center;justify-content:space-between;padding:0 12px;border-bottom:1px solid #202020;background:#080808;}}
@@ -331,121 +340,20 @@ def parse_csv(file):
             syms.append(v)
     return list(dict.fromkeys(syms))
 
-def calc_rsi(close, period=14):
-    d = close.diff(); g = d.clip(lower=0).rolling(period).mean()
-    l = (-d.clip(upper=0)).rolling(period).mean()
-    rs = g / l.replace(0, float('nan'))
-    v = (100 - 100/(1+rs)).iloc[-1]
-    return int(v) if pd.notna(v) else 0
+# Market data functions (get_static, get_price batch, get_index, history) now
+# live in data_engine.py — parallel, batched and cached. Nothing to define here.
 
-@st.cache_data(ttl=14400, show_spinner=False)
-def get_static(sym):
-    try:
-        h = yf.Ticker(sym+".NS").history(period="30d", interval="1d")
-        if len(h) < 16: return None
-        prev = h.iloc[-2]
-        return {"pdh": float(prev["High"]), "pdl": float(prev["Low"]),
-                "prev_close": float(prev["Close"]), "rsi": calc_rsi(h["Close"]),
-                "spark": [float(x) for x in h["Close"].tail(12).tolist()]}
-    except: return None
-
-@st.cache_data(ttl=30, show_spinner=False)
-def get_daily_history(sym, period="6mo"):
-    try:
-        h = yf.Ticker(sym + ".NS").history(period=period, interval="1d", auto_adjust=False)
-        return h if h is not None and not h.empty else pd.DataFrame()
-    except Exception:
-        return pd.DataFrame()
-
-@st.cache_data(ttl=10, show_spinner=False)
-def get_price(sym):
-    try:
-        intra = yf.Ticker(sym+".NS").history(period="1d", interval="1m")
-        if intra.empty: return None
-        cur = float(intra["Close"].iloc[-1])
-        daily = yf.Ticker(sym+".NS").history(period="5d", interval="1d")
-        if len(daily) < 2: return None
-        prev_close = float(daily["Close"].iloc[-2])
-        return {"price": cur, "chg": ((cur-prev_close)/prev_close)*100, "prev_close": prev_close}
-    except: return None
-
-@st.cache_data(ttl=20, show_spinner=False)
-def get_prices_batch(symbols):
-    """Concurrent cached quote boundary for terminal monitor widgets."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    syms = list(dict.fromkeys([str(x).upper().strip() for x in (symbols or []) if x]))
-    out = {}
-    if not syms:
-        return out
-    with ThreadPoolExecutor(max_workers=min(8, len(syms))) as ex:
-        futures = {ex.submit(get_price, s): s for s in syms}
-        for future in as_completed(futures):
-            s = futures[future]
-            try:
-                out[s] = future.result()
-            except Exception:
-                out[s] = None
-    return out
-
-def _values_are_sane(cur, pc):
-    try:
-        if cur is None or pc is None:
-            return False
-        cur, pc = float(cur), float(pc)
-        if not (math.isfinite(cur) and math.isfinite(pc)):
-            return False
-        if cur <= 0 or pc <= 0:
-            return False
-        return True
-    except (TypeError, ValueError):
-        return False
-
-def _fetch_index_history(sym):
-    try:
-        h = yf.Ticker(sym).history(period="5d", interval="1d")
-        if h.empty or len(h) < 2:
-            return None
-        return h
-    except:
-        return None
-
-@st.cache_data(ttl=60, show_spinner=False)
-def get_index(sym, fallback_syms=None):
-    candidates = [sym] + (fallback_syms or [])
-    for candidate in candidates:
-        h = _fetch_index_history(candidate)
-        if h is None:
-            continue
-        try:
-            cur = float(h["Close"].iloc[-1])
-            pc = float(h["Close"].iloc[-2])
-        except Exception:
-            continue
-        if not _values_are_sane(cur, pc):
-            continue
-        spark_raw = [float(x) for x in h["Close"].tolist()]
-        spark = [x for x in spark_raw if math.isfinite(x)]
-        if len(spark) < 2:
-            continue
-        return {
-            "price": cur, "chg": ((cur - pc) / pc) * 100, "pts": cur - pc,
-            "spark": spark, "ticker_used": candidate,
-        }
-    return None
-
-# ── FIX: Midcap/Smallcap index tickers ──────────────────────────
-# The previous candidate lists (NIFTY_MIDCAP_100.NS, ^CRSMID,
-# ^NIFTYMIDCAP100 / ^CNXSC, ^CNXSMALLCAP, NIFTYSMLCAP100.NS) do not
-# resolve on Yahoo Finance — none of those symbols exist in Yahoo's
-# index namespace, so get_index() silently exhausted every candidate
-# and the cards always rendered "No data". Replaced with the actual
-# Yahoo aliases for these NSE indices, in order of reliability, with
-# older/alternate aliases kept as later fallbacks.
+# Index tickers. Each entry is (label, (primary, fallback, fallback...)).
 MIDCAP_CANDIDATES = ["NIFTYMDCP100.NS", "^NSEMDCP50", "NIFTY_MIDCAP_100.NS", "^CRSMID"]
 SMALLCAP_CANDIDATES = ["NIFTYSMLCAP250.NS", "NIFTYSMCP100.NS", "^CNXSC", "^CNXSMALLCAP"]
 SP500_CANDIDATES    = ["^GSPC"]
 DOWJONES_CANDIDATES = ["^DJI"]
 GOLD_CANDIDATES     = ["GC=F"]
+
+INDIA_ITEMS = (("NIFTY 50", ("^NSEI",)), ("BANK NIFTY", ("^NSEBANK",)), ("SENSEX", ("^BSESN",)),
+               ("NIFTY IT", ("^CNXIT",)), ("NIFTY AUTO", ("^CNXAUTO",)), ("MIDCAP 100", tuple(MIDCAP_CANDIDATES)))
+GLOBAL_ITEMS = (("S&P 500", ("^GSPC",)), ("NASDAQ", ("^IXIC",)), ("DOW", ("^DJI",)),
+                ("DAX", ("^GDAXI",)), ("FTSE", ("^FTSE",)), ("NIKKEI", ("^N225",)))
 
 def check_alerts(results):
     for s in results:
@@ -638,10 +546,10 @@ if not st.session_state.logged_in:
                 ok = st.form_submit_button("Sign In", use_container_width=True, type="primary")
                 ph = st.empty()
                 if ok:
-                    if u.strip()=="ADMIN4477MAX" and p.strip()=="MOHIT1":
+                    if u.strip()==_ADMIN_USER and p.strip()==_ADMIN_PASS:
                         ph.success("Welcome, Admin!")
                         st.session_state.logged_in = True; st.session_state.is_admin = True; st.rerun()
-                    elif u.strip().lower()=="max trades" and p.strip().lower()=="max":
+                    elif u.strip().lower()==str(_MEMBER_USER).lower() and p.strip().lower()==str(_MEMBER_PASS).lower():
                         ph.success("Login successful.")
                         st.session_state.logged_in = True; st.session_state.is_admin = False; st.rerun()
                     else:
@@ -813,10 +721,10 @@ else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=s;}
 # directly into the terminal. This avoids a session-reset disclaimer loop.
 
 # ════════════════ MAIN APP — ARKA TERMINAL v4 ════════════════
-# The authenticated workspace is now a single terminal rather than a
+# The authenticated workspace is a single terminal rather than a
 # permanent left-sidebar application. Search is the primary entry point;
 # the selected security becomes the context for chart/research/AI tools.
-# The existing right-side MARKET NEWS rail is deliberately preserved.
+# The right-side MARKET NEWS rail is preserved.
 
 
 def _fmt_num(value, prefix="", suffix=""):
@@ -828,7 +736,7 @@ def _fmt_num(value, prefix="", suffix=""):
 def _security_candidates(query: str):
     """Build a small fast dropdown from known/active symbols.
     Exact/near matches are offered in the UI; unknown symbols are resolved
-    through Screener when the user presses SEARCH.
+    through Screener when the user presses LOAD.
     """
     base = [
         "RELIANCE", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK",
@@ -939,15 +847,21 @@ def _render_terminal_brandbar():
     with c2:
         st.markdown('<div class="brand-status brand-status-wide"><span class="pulse-dot"></span> LIVE MARKET DATA · TERMINAL</div>', unsafe_allow_html=True)
 
+
+@st.fragment(run_every=60)
+def _index_strips():
+    """Self-refreshing every 60s. Runs on its own so it never blocks other clicks."""
+    data = get_indices(INDIA_ITEMS + GLOBAL_ITEMS)
+    for title, items in (("INDIA", INDIA_ITEMS), ("GLOBAL", GLOBAL_ITEMS)):
+        cells = ''.join(_market_cell(label, data.get(label)) for label, _ in items)
+        st.markdown(f'<div class="market-strip"><div class="market-row"><div class="market-row-label">{title}</div>{cells}</div></div>', unsafe_allow_html=True)
+
+
 def _render_terminal_header(show_indices=True):
-    india = [("NIFTY 50", "^NSEI", None), ("BANK NIFTY", "^NSEBANK", None), ("SENSEX", "^BSESN", None), ("NIFTY IT", "^CNXIT", None), ("NIFTY AUTO", "^CNXAUTO", None), ("MIDCAP 100", MIDCAP_CANDIDATES[0], MIDCAP_CANDIDATES[1:])]
-    global_ = [("S&P 500", "^GSPC", None), ("NASDAQ", "^IXIC", None), ("DOW", "^DJI", None), ("DAX", "^GDAXI", None), ("FTSE", "^FTSE", None), ("NIKKEI", "^N225", None)]
     st.markdown('<div class="terminal-shell">', unsafe_allow_html=True)
     _render_terminal_brandbar()
     if show_indices:
-        for title, items in (("INDIA", india), ("GLOBAL", global_)):
-            cells = ''.join(_market_cell(label, get_index(sym, fb)) for label, sym, fb in items)
-            st.markdown(f'<div class="market-strip"><div class="market-row"><div class="market-row-label">{title}</div>{cells}</div></div>', unsafe_allow_html=True)
+        _index_strips()
     st.markdown('<div class="command-wrap"><div class="command-label">SECURITY / INDEX / COMPANY SEARCH</div>', unsafe_allow_html=True)
     with st.form("security_command_v9", clear_on_submit=False):
         q = st.text_input("Security search", value=st.session_state.get("security_search_v9", ""), placeholder="Type ticker or company name · e.g. RELIANCE", label_visibility="collapsed")
@@ -965,12 +879,9 @@ def _render_terminal_header(show_indices=True):
         if not chosen:
             st.warning("Enter a ticker or company name first.")
         else:
-            # Prefer the selected dropdown result. For unknown/company-name queries,
-            # resolve through the existing provider and retain the requested text as fallback.
+            # Exact typed tickers always take precedence over a stale dropdown selection.
             raw_norm = raw.upper()
             known = set(_security_candidates(""))
-            # The selectbox may retain a previous selection while the user edits the query.
-            # Exact typed tickers therefore always take precedence.
             if raw_norm in known:
                 candidate = raw_norm
             else:
@@ -992,119 +903,60 @@ def _render_module_page_header(title, code=""):
     _render_compact_module_header(title)
 
 
-
-def _render_security_chart(symbol: str):
-    try:
-        hist = yf.Ticker(symbol + ".NS").history(period="6mo", interval="1d")
-    except Exception:
-        hist = None
-    if hist is None or hist.empty:
-        st.warning(f"Chart data unavailable for {symbol}.")
-        return
-    try:
-        import plotly.graph_objects as go
-        from plotly.subplots import make_subplots
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.02, row_heights=[0.82, 0.18])
-        fig.add_trace(go.Candlestick(
-            x=hist.index, open=hist["Open"], high=hist["High"], low=hist["Low"], close=hist["Close"],
-            increasing_line_color=GREEN, decreasing_line_color=RED,
-            increasing_fillcolor=GREEN, decreasing_fillcolor=RED, name="Price"), row=1, col=1)
-        vol_colors = [GREEN if c >= o else RED for c, o in zip(hist["Close"], hist["Open"])]
-        fig.add_trace(go.Bar(x=hist.index, y=hist["Volume"], marker_color=vol_colors, name="Volume"), row=2, col=1)
-        fig.update_layout(
-            height=490, margin=dict(l=4,r=46,t=8,b=4), paper_bgcolor=DARK2, plot_bgcolor=DARK2,
-            font=dict(color=T2, family="JetBrains Mono, Consolas, monospace", size=10), showlegend=False,
-            xaxis_rangeslider_visible=False, hovermode="x unified"
-        )
-        fig.update_xaxes(showgrid=True, gridcolor=BORDER, nticks=10)
-        fig.update_yaxes(showgrid=True, gridcolor=BORDER, side="right", row=1, col=1)
-        fig.update_yaxes(showgrid=False, showticklabels=False, side="right", row=2, col=1)
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": True, "scrollZoom": True})
-    except ImportError:
-        st.line_chart(hist["Close"], height=430)
-
-
 def _render_security_workspace(symbol: str):
     symbol = symbol.upper().strip()
-    try:
-        resolved = resolve_symbol(symbol)
-    except Exception:
-        resolved = None
-    if not resolved:
-        st.error(f"Could not resolve {symbol}.")
-        return
+    # Screener fundamentals + 5y price history load IN PARALLEL, then stay cached.
+    with st.spinner(f"Loading {symbol}…"):
+        B, hist = warm_security(symbol)
 
-    name_ = resolved.get("name", symbol)
-    url_ = resolved.get("url")
-    try:
-        summary = get_summary(symbol, url=url_)
-        s = summary.get("data") or {}
-    except Exception:
-        summary, s = {}, {}
-    try:
-        sector = get_sector_info(symbol, url=url_)
-        sec = sector.get("data") or {}
-    except Exception:
-        sec = {}
+    s = B.get("summary") or {}
+    sec = B.get("sector") or {}
+    name_ = B.get("name") or symbol
 
-    price = s.get("current_price")
-    prev = None
-    try:
-        daily = get_daily_history(symbol, "5d")
-        if len(daily) >= 2:
-            price = float(daily["Close"].iloc[-1])
-            prev = float(daily["Close"].iloc[-2])
-    except Exception:
-        pass
-    chg = ((price - prev) / prev * 100) if price is not None and prev else None
+    price = prev = None
+    if hist is not None and len(hist) >= 2:
+        price = float(hist["Close"].iloc[-1]); prev = float(hist["Close"].iloc[-2])
+    elif to_float(s.get("current_price")):
+        price = to_float(s.get("current_price"))
+    chg = ((price - prev) / prev * 100) if (price is not None and prev) else None
     chg_c = GREEN if (chg or 0) >= 0 else RED
+    price_txt = f"₹{price:,.2f}" if price is not None else "—"
+    chg_txt = (f"{'▲' if chg >= 0 else '▼'} {abs(chg):.2f}%") if chg is not None else ""
+    sector_txt = sec.get('Sector', '') or sec.get('Industry', '') or 'EQUITY'
 
     st.markdown(f"""
     <div class="security-head">
       <div>
         <div class="security-kicker">SECURITY WORKSPACE · NSE</div>
         <div class="security-title">{name_}</div>
-        <div class="security-symbol">{symbol} · {sec.get('Sector','') or sec.get('Industry','') or 'EQUITY'}</div>
+        <div class="security-symbol">{symbol} · {sector_txt}</div>
       </div>
       <div class="security-quote">
-        <div class="quote-price">₹{float(price):,.2f}</div>
-        <div style="color:{chg_c};">{'▲' if (chg or 0)>=0 else '▼'} {abs(chg):.2f}%</div>
+        <div class="quote-price">{price_txt}</div>
+        <div style="color:{chg_c};">{chg_txt}</div>
       </div>
     </div>
     """, unsafe_allow_html=True)
+    if not B.get("resolved"):
+        st.caption("Screener fundamentals could not be loaded right now — price chart and technicals still work. Reopen the security in a minute to retry.")
 
     chart_col, info_col = st.columns([3.2, 1.55])
     with chart_col:
-        st.markdown('<div class="panel-title">PRICE CHART · CANDLESTICK</div>', unsafe_allow_html=True)
-        tf = st.radio("Chart range", ["1M", "3M", "6M", "1Y", "2Y"], index=2, horizontal=True, label_visibility="collapsed", key=f"security_tf_{symbol}")
-        # Reuse the chart renderer with period mapping by fetching locally for accurate selected range.
-        period_map = {"1M":"1mo", "3M":"3mo", "6M":"6mo", "1Y":"1y", "2Y":"2y"}
-        try:
-            hist = get_daily_history(symbol, period_map[tf])
-        except Exception:
-            hist = None
-        if hist is not None and not hist.empty:
-            try:
-                import plotly.graph_objects as go
-                from plotly.subplots import make_subplots
-                fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.01, row_heights=[0.82,0.18])
-                fig.add_trace(go.Candlestick(x=hist.index, open=hist["Open"], high=hist["High"], low=hist["Low"], close=hist["Close"], increasing_line_color=GREEN, decreasing_line_color=RED, increasing_fillcolor=GREEN, decreasing_fillcolor=RED), row=1,col=1)
-                fig.add_trace(go.Bar(x=hist.index, y=hist["Volume"], marker_color=[GREEN if c>=o else RED for c,o in zip(hist["Close"],hist["Open"])]), row=2,col=1)
-                fig.update_layout(height=500, margin=dict(l=0,r=45,t=4,b=0), paper_bgcolor=DARK2, plot_bgcolor=DARK2, font=dict(color=T2,family="JetBrains Mono, Consolas, monospace",size=10), showlegend=False, xaxis_rangeslider_visible=False)
-                fig.update_xaxes(showgrid=True, gridcolor=BORDER, nticks=10)
-                fig.update_yaxes(showgrid=True, gridcolor=BORDER, side="right", row=1,col=1)
-                fig.update_yaxes(showgrid=False, showticklabels=False, side="right", row=2,col=1)
-                st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": True, "scrollZoom": True})
-            except ImportError:
-                st.line_chart(hist["Close"], height=450)
-        else:
-            st.warning("Chart data unavailable.")
+        st.markdown('<div class="panel-title">PRICE CHART · CANDLES · VOLUME · MA · RSI 14 (+MA 14)</div>', unsafe_allow_html=True)
+        render_pro_chart(symbol, height=660)
 
-        cc1,cc2,cc3,cc4 = st.columns(4)
-        with cc1: st.caption(f"52W HIGH\n₹{s.get('year_high','—')}")
-        with cc2: st.caption(f"52W LOW\n₹{s.get('year_low','—')}")
-        with cc3: st.caption(f"PDH\n{get_static(symbol).get('pdh','—') if get_static(symbol) else '—'}")
-        with cc4: st.caption(f"PDL\n{get_static(symbol).get('pdl','—') if get_static(symbol) else '—'}")
+        cc1, cc2, cc3, cc4 = st.columns(4)
+        if hist is not None and len(hist) >= 2:
+            h252 = hist.tail(252)
+            hi52, lo52 = float(h252["High"].max()), float(h252["Low"].min())
+            pdh, pdl = float(hist["High"].iloc[-2]), float(hist["Low"].iloc[-2])
+        else:
+            hi52 = to_float(s.get("year_high")); lo52 = to_float(s.get("year_low")); pdh = pdl = None
+        f = lambda v: f"₹{v:,.2f}" if v is not None else "—"
+        with cc1: st.caption(f"52W HIGH\n{f(hi52)}")
+        with cc2: st.caption(f"52W LOW\n{f(lo52)}")
+        with cc3: st.caption(f"PDH\n{f(pdh)}")
+        with cc4: st.caption(f"PDL\n{f(pdl)}")
 
     with info_col:
         st.markdown('<div class="panel-title">COMPANY OVERVIEW</div>', unsafe_allow_html=True)
@@ -1118,10 +970,13 @@ def _render_security_workspace(symbol: str):
             ("ROCE", _fmt_num(s.get("roce"), "", "%")),
             ("ROE", _fmt_num(s.get("roe"), "", "%")),
         ]
-        rows = "".join(f'<div class="overview-row"><span>{k}</span><b>{v}</b></div>' for k,v in overview_items)
+        rows = "".join(f'<div class="overview-row"><span>{k}</span><b>{v}</b></div>' for k, v in overview_items)
         st.markdown(f'<div class="overview-box">{rows}</div>', unsafe_allow_html=True)
         st.markdown('<div class="panel-title company-desc-title">COMPANY DESCRIPTION</div>', unsafe_allow_html=True)
-        desc = f"{name_} is listed on the Indian equity market. The security is classified under {sec.get('Sector') or sec.get('Industry') or 'its reported sector/industry classification'}. Detailed fundamentals are available through the Research module."
+        about = (B.get("about") or "").strip()
+        desc = about[:420] + ("…" if len(about) > 420 else "") if about else (
+            f"{name_} is listed on the Indian equity market, classified under {sector_txt}. "
+            "Full fundamentals are in the research panel below.")
         st.markdown(f'<div class="company-desc">{desc}</div>', unsafe_allow_html=True)
         if st.button("ADD TO WATCHLIST", use_container_width=True, key=f"sec_wl_{symbol}"):
             if symbol not in st.session_state.watchlist:
@@ -1129,13 +984,15 @@ def _render_security_workspace(symbol: str):
                 db_save_watchlist(st.session_state.watchlist)
                 st.success(f"{symbol} added to watchlist")
 
-    st.markdown('<div class="security-tabs-spacer"></div>', unsafe_allow_html=True)
+    # Full research panel (lazy, fragment-isolated: switching sections does not rerun the chart)
+    st.markdown('<div class="panel-title" style="margin-top:14px">RESEARCH WORKSPACE</div>', unsafe_allow_html=True)
+    render_research_panel(symbol, TERM_TOKENS, _fetch_news_for_stock, key="sec")
 
 
 def _render_dashboard():
     wl = list(dict.fromkeys(st.session_state.get("watchlist", [])[:10]))
     all_syms = list(dict.fromkeys((st.session_state.get("admin_watchlist", []) + wl)))[:14]
-    quotes = get_prices_batch(all_syms)
+    quotes = get_quotes(tuple(all_syms))
     rows = []
     for sym in wl:
         d = quotes.get(sym)
@@ -1174,14 +1031,7 @@ else:
         _render_module_page_header(module_titles[pg])
 
 # ── RIGHT NEWS RAIL — isolated fragment so hide/show never reruns the terminal ──
-# Streamlit fragments rerun only the fragment when its widgets are used.
-# This keeps the news interaction responsive and prevents a news refresh from
-# rebuilding the market header, security chart, scanner, or research workspace.
-
-if st.session_state.show_news_rail:
-    center, right_rail = st.columns([4.55, 1.15])
-else:
-    center, right_rail = st.columns([4.55, 1.15])
+center, right_rail = st.columns([4.55, 1.15])
 
 @st.fragment
 def _news_rail_fragment():
@@ -1216,7 +1066,6 @@ with center:
         else:
             _render_security_workspace(active)
     elif pg == "scanner":
-        # Keep existing scanner module, now without a sidebar.
         if not st.session_state.admin_watchlist:
             awl = db_load_admin_watchlist()
             if awl: st.session_state.admin_watchlist = awl
@@ -1226,24 +1075,24 @@ with center:
         def render_scan_results(syms, key_prefix=""):
             sc1,sc2,sc3,sc4=st.columns([1,1,1,2])
             filt=sc1.selectbox("Show",["All","Above PDH","Below PDL","In Range"],key=f"filt_v4_{key_prefix}")
-            refresh_after=sc2.checkbox("Refresh after scan",key=f"refresh_after_{key_prefix}")
-            sc3.caption("Cached")
+            fresh=sc2.checkbox("Force fresh data",key=f"fresh_{key_prefix}")
+            sc3.caption("Batched · cached 30s")
             scanbtn=sc4.button("Run Scan",use_container_width=True,type="primary",key=f"scan_v4_{key_prefix}")
             if scanbtn:
                 st.session_state["active_news_source"]=key_prefix
+                if fresh: scan_batch.clear()
+                with st.spinner(f"Scanning {len(syms)} stocks…"):
+                    data = scan_batch(tuple(syms))      # ONE batched download, not 2 calls per stock
                 results,failed=[],[]
-                bar=st.progress(0,text="Scanning...")
-                for i,sym in enumerate(syms):
-                    st_=get_static(sym); lv=get_price(sym)
-                    if st_ and lv:
-                        cur=lv["price"]; chg=lv["chg"]
-                        cls="g" if cur>st_["pdh"] else "r" if cur<st_["pdl"] else "n"
-                        results.append({"sym":sym,"cur":cur,"chg":chg,"pdh":st_["pdh"],"pdl":st_["pdl"],"rsi":st_["rsi"],"cls":cls,"spark":st_.get("spark",[])})
+                for sym in syms:
+                    d = data.get(str(sym).upper().strip())
+                    if d:
+                        cur=d["cur"]; chg=d["chg"]
+                        cls="g" if cur>d["pdh"] else "r" if cur<d["pdl"] else "n"
+                        results.append({"sym":sym,"cur":cur,"chg":chg,"pdh":d["pdh"],"pdl":d["pdl"],"rsi":d["rsi"],"cls":cls,"spark":d.get("spark",[])})
                     else: failed.append(sym)
-                    bar.progress((i+1)/len(syms),text=f"Fetching {sym}...")
-                bar.empty(); check_alerts(results)
+                check_alerts(results)
                 st.session_state[f"results_{key_prefix}"]=results; st.session_state[f"failed_{key_prefix}"]=failed
-                if refresh_after: st.toast("Scan completed; cached quotes remain available for fast navigation.")
             results=st.session_state.get(f"results_{key_prefix}",[]); failed=st.session_state.get(f"failed_{key_prefix}",[])
             if results:
                 filtered=results
@@ -1257,11 +1106,11 @@ with center:
                 for i,s in enumerate(filtered):
                     bd=f"{GREEN}66" if s["cls"]=="g" else f"{RED}66" if s["cls"]=="r" else BORDER
                     top=GREEN if s["cls"]=="g" else RED if s["cls"]=="r" else BORDER
-                    cc=GREEN if s["chg"]>=0 else RED; rc=GREEN if s["rsi"]<35 else RED if s["rsi"]>65 else T2
-                    st.markdown(f'<div style="background:{DARK2};border:1px solid {bd};border-top:2px solid {top};padding:10px;text-align:center;margin-bottom:6px;"><b style="color:{IVORY};">{s["sym"]}</b><br>{change_pill(s["chg"])}<div style="font-family:{MONO};color:{IVORY};margin:6px 0;">₹{s["cur"]:.2f}</div><div style="font-family:{MONO};font-size:10px;color:{rc};">RSI {s["rsi"]}</div></div>',unsafe_allow_html=True)
+                    rc=GREEN if s["rsi"]<35 else RED if s["rsi"]>65 else T2
                     with cols7[i%4]:
+                        st.markdown(f'<div style="background:{DARK2};border:1px solid {bd};border-top:2px solid {top};padding:10px;text-align:center;margin-bottom:4px;"><b style="color:{IVORY};">{s["sym"]}</b><br>{change_pill(s["chg"])}<div style="font-family:{MONO};color:{IVORY};margin:6px 0;">₹{s["cur"]:.2f}</div><div style="font-family:{MONO};font-size:10px;color:{rc};">RSI {s["rsi"]}</div></div>',unsafe_allow_html=True)
                         if st.button("OPEN",key=f"open_scan_{key_prefix}_{s['sym']}",use_container_width=True): _open_security(s["sym"])
-                if failed: st.caption(f"Skipped: {', '.join(failed)}")
+                if failed: st.caption(f"Skipped (no data returned): {', '.join(failed)}")
         tab1,tab2=st.tabs(["Arka Watchlist","Your Watchlist"])
         with tab1:
             if IS_ADMIN:
