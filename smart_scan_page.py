@@ -1,26 +1,27 @@
 # --------------------------------------------------------------
-# smart_scan_page.py  —  Arka Trades Smart Screener  (Sept 2026 rev)
+# smart_scan_page.py  —  Arka Trades Smart Screener  (Oct 2026 rev)
 #
-# STRICT SETUP MATCH REVISION — explicit rule enforcement + candlestick hover charts
+# v-Oct-2026 CHANGES
+#   1. RESULT ROWS: every shortlisted stock is now a row with
+#        SYMBOL (hover = compact candlestick + volume + SMA50 chart, chartink style)
+#        · key metrics · [ANALYSIS] [RESEARCH] [+]
+#      ANALYSIS -> opens Arka AI on that stock and starts the analysis
+#      RESEARCH -> opens the Research page on that stock
+#      +        -> saves the stock to your watchlist (Supabase) in one click
+#      The same three buttons sit under every AI-matched result card.
+#   2. The rows live in an st.fragment: paging and "+" never re-run the scan.
+#   3. FIX: price history is now fetched with period="6mo". The old "60d" is
+#      60 CALENDAR days (~41 candles) but the indicator code needs >= 55
+#      candles for SMA50, so every symbol was being dropped as "no data".
+#   4. RSI is now Wilder's RSI (same as TradingView) so the scanner's RSI and
+#      RSI-SMA14 rules agree with the RSI you see on the chart.
+#   5. Batch download parsing reuses data_engine._parse_download (works on every
+#      yfinance version, including single-ticker batches).
 #
-# The scanner now treats the saved setup as a real rule specification.
-# Numeric filters run BEFORE AI vision, and the following pattern rules are
-# evaluated directly from OHLCV data:
-#   1) 30-day momentum > configured minimum (default 20%).
-#   2) RSI > 50 AND RSI > its 14-period SMA.
-#   3) Volume dry-up during the pullback.
-#   4) Pullback lasts 2-4 candles (2-3 preferred, 4 accepted).
-#   5) Close is above the 50-day SMA.
+# Everything else (strict pattern rules, AI vision audit, setup manager,
+# Supabase persistence) is unchanged.
 #
-# Existing saved setups that pre-date this revision still work: when their
-# new rule_config field is absent, the scanner derives these rules from the
-# plain-English visual_rules description.
-#
-# The hover preview is a REAL candlestick + volume SVG chart; the old
-# close-only line chart is gone.
-#
-# NOTE ON THE SUPABASE `setups` TABLE: the 4 new filter columns need
-# to exist there before they'll persist. Run this once:
+# NOTE ON THE SUPABASE `setups` TABLE: the new filter columns must exist:
 #
 #   alter table setups
 #     add column if not exists atr_pct_min double precision default 0,
@@ -29,9 +30,7 @@
 #     add column if not exists move_pct_max double precision default 0,
 #     add column if not exists rule_config jsonb default '{}'::jsonb;
 #
-# _save_setup() below degrades gracefully if you haven't run that yet
-# — it retries without the new fields and tells you why, rather than
-# failing the whole save.
+# _save_setup() degrades gracefully if you haven't run that yet.
 # --------------------------------------------------------------
 
 import streamlit as st
@@ -41,6 +40,7 @@ import yfinance as yf
 import base64
 import io
 import json
+import math
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -48,6 +48,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+from data_engine import _parse_download, rsi_wilder
 
 try:
     from google import genai
@@ -73,12 +75,8 @@ GREEN   = "#30D158"
 RED     = "#FF453A"
 PURPLE  = "#BF5AF2"
 AMBER   = "#FF9F0A"
-INDIGO  = "#5AC8FA"   # secondary/informational accent (cyan) — "partial
-                       # match" and secondary headers, kept visually
-                       # distinct from the primary amber brand color
-BLUE    = AMBER        # primary brand accent, kept under the old name
-                        # so every existing "BLUE" reference in this
-                        # file picks up the terminal's amber
+INDIGO  = "#5AC8FA"
+BLUE    = AMBER
 FONT    = "'Plus Jakarta Sans','Inter',sans-serif"
 MONO    = "'JetBrains Mono',monospace"
 
@@ -86,6 +84,7 @@ GEMINI_TEXT_MODEL     = "gemini-2.5-flash"
 GEMINI_VISION_MODEL   = "gemini-2.5-flash"
 MIN_SIMILARITY_FLOOR  = 6
 BATCH_SIZE            = 150   # symbols per yf.download call
+HISTORY_PERIOD        = "6mo" # >= 55 candles are needed for SMA50 / pullback rules
 
 
 def _section(title, accent=None):
@@ -98,22 +97,28 @@ def _section(title, accent=None):
 
 _HOVER_CSS = f"""
 <style>
-.hc-table-wrap{{ overflow-x:auto; overflow-y:visible; border:1px solid {BORDER}; }}
-.hc-table{{ border-collapse:collapse; width:100%; font-family:{MONO}; font-size:12px; }}
-.hc-table th{{ text-align:right; padding:8px 10px; font-size:10px; color:{T2}; font-weight:700;
-    letter-spacing:0.5px; border-bottom:1px solid {BORDER}; background:{DARK3}; white-space:nowrap; }}
-.hc-table th:first-child, .hc-table td:first-child{{ text-align:left; }}
-.hc-table td{{ text-align:right; padding:7px 10px; color:{IVORY}; border-bottom:1px solid {BORDER}; white-space:nowrap; }}
-.hc-table tr:hover{{ background:{DARK2}; }}
-.hc-wrap{{ position:relative; display:inline-block; font-weight:800; color:{AMBER}; cursor:default; }}
+/* ── result rows ───────────────────────────────────────── */
+div[class*="st-key-slrows"]{{gap:0.2rem !important;}}
+div[data-testid="stHorizontalBlock"]:has(.hc-rowcell){{align-items:center;border-bottom:1px solid {BORDER};padding:2px 0;}}
+div[data-testid="stHorizontalBlock"]:has(.hc-rowcell):hover{{background:{DARK2};}}
+div[data-testid="stColumn"]:has(.hc-wrap:hover),
+div[data-testid="stElementContainer"]:has(.hc-wrap:hover),
+div[data-testid="stMarkdown"]:has(.hc-wrap:hover){{position:relative;z-index:99999;overflow:visible !important;}}
+.hc-rowcell{{font-family:{MONO};font-size:11px;color:{IVORY};min-height:34px;display:flex;align-items:center;}}
+.hc-metrics{{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px;width:100%;}}
+.hc-metrics span{{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}}
+.hc-head{{font-family:{MONO};font-size:9px;letter-spacing:.6px;color:{T2};font-weight:700;min-height:26px;display:flex;align-items:center;}}
+.hc-wrap{{position:relative;display:inline-block;font-weight:800;font-size:12px;color:{AMBER};cursor:default;
+    border-bottom:1px dotted {AMBER}88;}}
 .hc-pop{{
-    display:none; position:absolute; top:100%; left:0; margin-top:6px; width:240px;
-    background:{DARK2}; border:1px solid {BORDER}; border-top:2px solid {AMBER};
-    padding:10px; z-index:500; box-shadow:0 8px 24px rgba(0,0,0,.65);
+    display:none;position:absolute;top:100%;left:0;margin-top:6px;width:340px;
+    background:{DARK2};border:1px solid {BORDER};border-top:2px solid {AMBER};
+    padding:10px;z-index:99999;box-shadow:0 10px 30px rgba(0,0,0,.8);
 }}
-.hc-wrap:hover .hc-pop{{ display:block; }}
-.hc-pop-head{{ font-size:10px; font-weight:700; color:{T2}; letter-spacing:0.5px; margin-bottom:6px; }}
-.hc-pop-foot{{ display:flex; justify-content:space-between; font-size:11px; font-family:{MONO}; margin-top:6px; color:{IVORY}; }}
+.hc-wrap:hover .hc-pop{{display:block;}}
+.hc-pop-head{{display:flex;justify-content:space-between;font-size:10px;font-weight:700;color:{T2};letter-spacing:0.5px;margin-bottom:6px;}}
+.hc-pop-foot{{display:flex;justify-content:space-between;font-size:11px;font-family:{MONO};margin-top:6px;color:{IVORY};}}
+.hc-pop-sub{{font-size:10px;color:{T2};margin-top:5px;line-height:1.6;font-weight:400;}}
 </style>
 """
 
@@ -171,8 +176,7 @@ def get_full_nse_universe():
       1. Live NSE fetch (session + cookies, multiple mirror URLs)
       2. A locally bundled nse_universe.csv, if you add one to the repo
       3. The small hardcoded liquid list (last resort)
-    source_label always says exactly which tier was used, so the UI never
-    silently shows a shrunken list while implying it's the full universe.
+    source_label always says exactly which tier was used.
     """
     if HAS_REQUESTS:
         try:
@@ -230,15 +234,6 @@ def get_full_nse_universe():
 #     reference_image_b64 text,
 #     created_at timestamptz default now()
 #   );
-#
-# Already have the table from before this revision? Just run:
-#
-#   alter table setups
-#     add column if not exists atr_pct_min double precision default 0,
-#     add column if not exists atr_pct_max double precision default 0,
-#     add column if not exists move_pct_min double precision default 0,
-#     add column if not exists move_pct_max double precision default 0,
-#     add column if not exists rule_config jsonb default '{}'::jsonb;
 
 def _load_setups(supabase):
     try:
@@ -294,6 +289,56 @@ def _delete_setup(supabase, setup_id):
     except Exception as e:
         st.error(f"Could not delete setup: {e}")
         return False
+
+
+# ════════════════════════════════════════════════════════════
+# RESULT ACTIONS — Analysis / Research / + Watchlist
+# ════════════════════════════════════════════════════════════
+
+def _go_research(sym):
+    """Open the Research page on this stock."""
+    sym = str(sym).upper().strip()
+    st.session_state["active_security"] = sym
+    st.session_state["research_last_query"] = sym
+    st.session_state["m1_ticker"] = sym
+    st.session_state.pop("research_data", None)
+    st.session_state["page"] = "research"
+    st.rerun()
+
+
+def _go_analysis(sym):
+    """Open Arka AI (Mode 1) on this stock and ask it to start analysing straight away."""
+    sym = str(sym).upper().strip()
+    st.session_state["active_security"] = sym
+    st.session_state["research_last_query"] = sym
+    st.session_state["m1_ticker"] = sym
+    # Arka AI v8 widget/state keys
+    st.session_state["ai_mode_v8"] = "Mode 1 — Setup Analysis"
+    st.session_state["m1_ticker_v8"] = sym
+    st.session_state["m1_loaded_ticker_v8"] = sym
+    st.session_state["m1_chart_fetched_v8"] = False
+    st.session_state["arka_autorun_v8"] = sym
+    st.session_state.pop("m1_result_v8", None)
+    st.session_state.pop("m1_annotated_v8", None)
+    st.session_state["page"] = "analysis"
+    st.rerun()
+
+
+def _add_to_watchlist(supabase, sym):
+    """Insert ONE row into the Supabase watchlist (no delete-all/re-insert) and
+    update the session watchlist. Returns True on success / already present."""
+    sym = str(sym).upper().strip()
+    current = list(dict.fromkeys(st.session_state.get("watchlist", [])))
+    if sym in current:
+        return True
+    if supabase is not None:
+        try:
+            supabase.table("watchlist").insert({"symbol": sym}).execute()
+        except Exception as e:
+            st.error(f"Could not save {sym} to watchlist: {e}")
+            return False
+    st.session_state["watchlist"] = current + [sym]
+    return True
 
 
 # ════════════════════════════════════════════════════════════
@@ -491,11 +536,8 @@ def parse_rules_with_ai(description, gemini_key):
 # ════════════════════════════════════════════════════════════
 
 def _rsi(close, period=14):
-    d = close.diff()
-    gain = d.clip(lower=0).rolling(period).mean()
-    loss = (-d.clip(upper=0)).rolling(period).mean()
-    rs = gain / loss.replace(0, np.nan)
-    return 100 - 100 / (1 + rs)
+    """Wilder's RSI — identical to TradingView's RSI."""
+    return rsi_wilder(close, period)
 
 
 def _sma(series, period):
@@ -517,7 +559,7 @@ def _atr(df, period=14):
 # BULK FETCH — batched yf.download instead of one Ticker() per symbol
 # ════════════════════════════════════════════════════════════
 
-def _fetch_bulk(symbols, batch_size=BATCH_SIZE, period="60d", progress_cb=None):
+def _fetch_bulk(symbols, batch_size=BATCH_SIZE, period=HISTORY_PERIOD, progress_cb=None):
     """
     Fetches OHLCV for many symbols using yf.download with a ticker list per
     batch — one HTTP round-trip per ~150 symbols instead of one per symbol.
@@ -528,7 +570,7 @@ def _fetch_bulk(symbols, batch_size=BATCH_SIZE, period="60d", progress_cb=None):
     batches = [symbols[i:i + batch_size] for i in range(0, len(symbols), batch_size)]
 
     for bi, batch in enumerate(batches):
-        tickers = " ".join(f"{s}.NS" for s in batch)
+        tickers = [f"{s}.NS" for s in batch]
         try:
             data = yf.download(tickers, period=period, interval="1d",
                                 group_by="ticker", threads=True,
@@ -539,13 +581,10 @@ def _fetch_bulk(symbols, batch_size=BATCH_SIZE, period="60d", progress_cb=None):
                 progress_cb((bi + 1) / len(batches), f"Batch {bi + 1}/{len(batches)} failed")
             continue
 
+        parsed = _parse_download(data, tickers)
         for sym in batch:
-            key = f"{sym}.NS"
+            df = parsed.get(f"{sym}.NS")
             try:
-                if len(batch) == 1:
-                    df = data
-                else:
-                    df = data[key] if key in data.columns.get_level_values(0) else None
                 if df is None or df.empty or df["Close"].dropna().shape[0] < 20:
                     failed.append(sym)
                     continue
@@ -572,9 +611,11 @@ def _calculate_indicators(sym, df):
     if cur<=0: return None
     prev=df.iloc[-2]
     rsi_series=_rsi(close); rsi=float(rsi_series.iloc[-1]) if pd.notna(rsi_series.iloc[-1]) else 50.0
-    rsi_sma14=float(rsi_series.rolling(14).mean().iloc[-1]) if pd.notna(rsi_series.rolling(14).mean().iloc[-1]) else 50.0
+    rsi_sma=rsi_series.rolling(14).mean()
+    rsi_sma14=float(rsi_sma.iloc[-1]) if pd.notna(rsi_sma.iloc[-1]) else 50.0
     sma50=float(close.rolling(50).mean().iloc[-1])
-    atr=float(_atr(df).iloc[-1]) if pd.notna(_atr(df).iloc[-1]) else 0.0
+    atr_series=_atr(df)
+    atr=float(atr_series.iloc[-1]) if pd.notna(atr_series.iloc[-1]) else 0.0
     av20=float(vol.rolling(20).mean().iloc[-1])
     vr=float(vol.iloc[-1]/av20) if av20>0 else 0.0
     roc5=float((cur/close.iloc[-6]-1)*100) if len(close)>6 else 0.0
@@ -667,81 +708,173 @@ def _make_chart_image(sym, df, lookback=60):
 
 
 # ════════════════════════════════════════════════════════════
-# HOVER MINI-CHART — cheap pure-SVG line, no matplotlib. Built
-# straight from the OHLCV each candidate already carries in memory
-# (_calculate_indicators keeps "df"), so generating one of these for
-# every row in a results table costs no extra fetch and is fast even
-# for a couple hundred rows — unlike _make_chart_image above, which
-# is comparatively expensive and only worth paying for the handful
-# of AI-audited cards.
+# HOVER MINI-CHART — pure SVG candlesticks + volume + SMA50.
+# Built straight from the OHLCV each candidate already carries in memory,
+# so generating one per row costs no extra fetch.
 # ════════════════════════════════════════════════════════════
 
-def _svg_mini_chart(df, width=240, height=120):
-    """Real candlestick + volume SVG preview."""
+def _svg_mini_chart(df, width=320, height=170, n=50):
+    """Compact chartink-style preview: last `n` daily candles, volume bars, SMA50."""
     try:
-        d=df.tail(40).copy().dropna(subset=["Open","High","Low","Close","Volume"])
+        full = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"]).copy()
     except Exception:
-        d=pd.DataFrame()
-    if len(d)<2:
-        return f'<div style="font-size:10px;color:{T2};padding:38px 0;text-align:center;">No chart data</div>'
-    px=6; pw=width-2*px; ph=78; vt=88; vh=25; lo=float(d["Low"].min()); hi=float(d["High"].max()); rng=(hi-lo) or 1; vmax=float(d["Volume"].max()) or 1; n=len(d); step=pw/n; bw=max(2,min(5,step*.62))
-    out=[f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg">',f'<rect width="{width}" height="{height}" fill="{DARK2}"/>']
-    for i,(_,r) in enumerate(d.iterrows()):
-        x=px+(i+.5)*step; op=float(r["Open"]); cl=float(r["Close"]); wh=float(r["High"]); wl=float(r["Low"]);
-        yhi=4+(hi-wh)/rng*(ph-8); ylo=4+(hi-wl)/rng*(ph-8); yop=4+(hi-op)/rng*(ph-8); ycl=4+(hi-cl)/rng*(ph-8); c=GREEN if cl>=op else RED
-        by=min(yop,ycl); bh=max(1.2,abs(ycl-yop)); out.append(f'<line x1="{x:.1f}" y1="{yhi:.1f}" x2="{x:.1f}" y2="{ylo:.1f}" stroke="{T2}" stroke-width="0.8"/>'); out.append(f'<rect x="{x-bw/2:.1f}" y="{by:.1f}" width="{bw:.1f}" height="{bh:.1f}" fill="{c}"/>')
-        vv=float(r["Volume"])/vmax*vh; vy=vt+vh-vv; out.append(f'<rect x="{x-bw/2:.1f}" y="{vy:.1f}" width="{bw:.1f}" height="{max(1,vv):.1f}" fill="{c}" opacity="0.65"/>')
-    out.append(f'<line x1="0" y1="{vt-1}" x2="{width}" y2="{vt-1}" stroke="{BORDER}" stroke-width="1"/>'); out.append('</svg>'); return ''.join(out)
+        full = pd.DataFrame()
+    if len(full) < 5:
+        return f'<div style="font-size:10px;color:{T2};padding:50px 0;text-align:center;">No chart data</div>'
+
+    sma = full["Close"].astype(float).rolling(50).mean()
+    d = full.tail(n)
+    sma = sma.tail(n).to_numpy()
+    px = 6
+    pw = width - 2 * px
+    p_top, p_bot = 6, 118            # price pane
+    v_top, v_bot = 126, height - 4   # volume pane
+    lo = float(d["Low"].min())
+    hi = float(d["High"].max())
+    valid_sma = sma[~np.isnan(sma)]
+    if valid_sma.size:
+        lo = min(lo, float(valid_sma.min()))
+        hi = max(hi, float(valid_sma.max()))
+    rng = (hi - lo) or 1.0
+    vmax = float(d["Volume"].max()) or 1.0
+    cnt = len(d)
+    step = pw / cnt
+    bw = max(2.0, min(6.0, step * 0.62))
+
+    def y(price):
+        return p_top + (hi - float(price)) / rng * (p_bot - p_top)
+
+    out = [f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg">',
+           f'<rect width="{width}" height="{height}" fill="{DARK2}"/>']
+    # light horizontal grid
+    for k in range(1, 4):
+        gy = p_top + (p_bot - p_top) * k / 4
+        out.append(f'<line x1="0" y1="{gy:.1f}" x2="{width}" y2="{gy:.1f}" stroke="#161616" stroke-width="1"/>')
+    for i, (_, r) in enumerate(d.iterrows()):
+        x = px + (i + 0.5) * step
+        op, cl, wh, wl = float(r["Open"]), float(r["Close"]), float(r["High"]), float(r["Low"])
+        c = GREEN if cl >= op else RED
+        out.append(f'<line x1="{x:.1f}" y1="{y(wh):.1f}" x2="{x:.1f}" y2="{y(wl):.1f}" stroke="{c}" stroke-width="1"/>')
+        by = min(y(op), y(cl))
+        bh = max(1.2, abs(y(cl) - y(op)))
+        out.append(f'<rect x="{x - bw / 2:.1f}" y="{by:.1f}" width="{bw:.1f}" height="{bh:.1f}" fill="{c}"/>')
+        vv = float(r["Volume"]) / vmax * (v_bot - v_top)
+        out.append(f'<rect x="{x - bw / 2:.1f}" y="{v_bot - vv:.1f}" width="{bw:.1f}" height="{max(1.0, vv):.1f}" fill="{c}" opacity="0.55"/>')
+    pts = [f"{px + (i + 0.5) * step:.1f},{y(v):.1f}" for i, v in enumerate(sma) if not np.isnan(v)]
+    if len(pts) > 1:
+        out.append(f'<polyline points="{" ".join(pts)}" fill="none" stroke="{AMBER}" stroke-width="1.4"/>')
+    out.append(f'<line x1="0" y1="{v_top - 4}" x2="{width}" y2="{v_top - 4}" stroke="{BORDER}" stroke-width="1"/>')
+    out.append(f'<text x="{width - 4}" y="14" text-anchor="end" fill="{T2}" font-size="9" font-family="monospace">{hi:,.2f}</text>')
+    out.append(f'<text x="{width - 4}" y="{p_bot - 3}" text-anchor="end" fill="{T2}" font-size="9" font-family="monospace">{lo:,.2f}</text>')
+    out.append('</svg>')
+    return "".join(out)
 
 
-def _render_hover_shortlist(results, max_rows=80):
-    shown = results[:max_rows]
-    rows_html = []
-    for r in shown:
-        chg = r["chg_pct"]
-        cc = GREEN if chg >= 0 else RED
-        chart_svg = _svg_mini_chart(r.get("df"))
-        rows_html.append(f"""<tr>
-          <td>
-            <span class="hc-wrap">{r['symbol']}
-              <span class="hc-pop">
-                <div class="hc-pop-head">{r['symbol']} · 40D CANDLES</div>
-                {chart_svg}
-                <div class="hc-pop-foot">
-                  <span>Rs {r['close']:,.2f}</span>
-                  <span style="color:{cc};">{'▲' if chg >= 0 else '▼'} {abs(chg):.2f}%</span>
-                </div>
-                <div style="font-size:10px;color:{T2};margin-top:6px;">
-                  30D MOM {r.get('momentum_30_pct',0):.1f}% · RSI {r.get('rsi',0):.1f}/{r.get('rsi_sma14',0):.1f} · SMA50 {r.get('sma50',0):,.0f}
-                </div>
-              </span>
-            </span>
-          </td>
-          <td>Rs {r['close']:,.2f}</td>
-          <td style="color:{cc};">{'▲' if chg >= 0 else '▼'} {abs(chg):.2f}%</td>
-          <td>{r['rsi']:.1f}</td>
-          <td>{r.get('rsi_sma14',0):.1f}</td>
-          <td style="color:{GREEN if r.get('above_sma50') else RED};">Rs {r.get('sma50',0):,.0f}</td>
-          <td>{r.get('momentum_30_pct',0):.1f}%</td>
-          <td>{r.get('pullback_candles',0)}</td>
-          <td>{r.get('pullback_vol_ratio',0):.2f}x</td>
-          <td>{r['vol_ratio']:.2f}x</td>
-          <td>{r['atr_pct']:.2f}%</td>
-          <td>Rs {r['pdh']:,.2f}</td>
-          <td>Rs {r['pdl']:,.2f}</td>
-        </tr>""")
+# Column ratios shared by the header row and every result row
+_SL_COLS = [1.6, 6.4, 1.05, 1.05, 0.6]
 
-    header = ("<tr><th>SYMBOL</th><th>PRICE</th><th>CHG%</th><th>RSI</th>"
-              "<th>RSI SMA14</th><th>SMA50</th><th>30D MOM</th><th>PB CANDLES</th>"
-              "<th>PB VOL</th><th>VOL RATIO</th><th>ATR%</th><th>PDH</th><th>PDL</th></tr>")
-    st.markdown(
-        f'<div class="hc-table-wrap"><table class="hc-table"><thead>{header}</thead>'
-        f'<tbody>{"".join(rows_html)}</tbody></table></div>',
-        unsafe_allow_html=True,
-    )
-    if len(results) > max_rows:
-        st.caption(f"Showing top {max_rows} of {len(results)} by the sort above — "
-                    f"narrow your filters or export the full CSV to see the rest.")
+
+def _name_cell(r):
+    chg = r["chg_pct"]
+    cc = GREEN if chg >= 0 else RED
+    chart = _svg_mini_chart(r.get("df"))
+    return f"""<div class="hc-rowcell"><span class="hc-wrap">{r['symbol']}
+      <span class="hc-pop">
+        <div class="hc-pop-head"><span>{r['symbol']} · 50D CANDLES · <span style="color:{AMBER};">SMA50</span></span><span>NSE</span></div>
+        {chart}
+        <div class="hc-pop-foot">
+          <span>Rs {r['close']:,.2f}</span>
+          <span style="color:{cc};">{'▲' if chg >= 0 else '▼'} {abs(chg):.2f}%</span>
+        </div>
+        <div class="hc-pop-sub">
+          30D MOM {r.get('momentum_30_pct',0):.1f}% · RSI {r.get('rsi',0):.1f} / SMA14 {r.get('rsi_sma14',0):.1f}<br>
+          PDH Rs {r.get('pdh',0):,.2f} · PDL Rs {r.get('pdl',0):,.2f} · ATR {r.get('atr_pct',0):.2f}%
+        </div>
+      </span></span></div>"""
+
+
+def _metrics_cell(r):
+    chg = r["chg_pct"]
+    cc = GREEN if chg >= 0 else RED
+    sma_c = GREEN if r.get("above_sma50") else RED
+    return f"""<div class="hc-rowcell hc-metrics">
+      <span>Rs {r['close']:,.2f}</span>
+      <span style="color:{cc};">{'▲' if chg >= 0 else '▼'} {abs(chg):.2f}%</span>
+      <span title="RSI / RSI SMA14">{r['rsi']:.0f}/{r.get('rsi_sma14',0):.0f}</span>
+      <span style="color:{sma_c};" title="SMA50">{r.get('sma50',0):,.0f}</span>
+      <span title="30 day momentum">{r.get('momentum_30_pct',0):.1f}%</span>
+      <span title="Pullback candles / pullback volume vs prior 20D">{r.get('pullback_candles',0)}c·{r.get('pullback_vol_ratio',0):.2f}x</span>
+      <span title="Volume vs 20D average">{r['vol_ratio']:.2f}x</span>
+      <span title="ATR % of price">{r['atr_pct']:.2f}%</span>
+    </div>"""
+
+
+def _head_cells():
+    heads = ["PRICE", "CHG", "RSI/SMA14", "SMA50", "30D MOM", "PULLBACK", "VOL×", "ATR%"]
+    return ('<div class="hc-head hc-metrics" style="display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px;width:100%;">'
+            + "".join(f"<span>{h}</span>" for h in heads) + "</div>")
+
+
+@st.fragment
+def _shortlist_fragment(results, ns, supabase):
+    """Paged result rows. Lives in a fragment: paging and '+' never re-run the scan."""
+    total = len(results)
+    c1, c2, _sp = st.columns([1, 1, 4])
+    size = c1.selectbox("Rows per page", [15, 25, 40], index=1, key=f"sl_size_{ns}")
+    pages = max(1, math.ceil(total / size))
+    page_key = f"sl_page_{ns}"
+    st.session_state[page_key] = max(1, min(int(st.session_state.get(page_key, 1)), pages))
+    page = c2.number_input("Page", 1, pages, key=page_key) if pages > 1 else 1
+    chunk = results[(page - 1) * size: page * size]
+    c1.caption(f"{total} stocks · page {page}/{pages}")
+
+    h = st.columns(_SL_COLS)
+    h[0].markdown('<div class="hc-head">SYMBOL</div>', unsafe_allow_html=True)
+    h[1].markdown(_head_cells(), unsafe_allow_html=True)
+    h[2].markdown('<div class="hc-head">&nbsp;</div>', unsafe_allow_html=True)
+
+    watch = set(st.session_state.get("watchlist", []))
+    with st.container(key=f"slrows_{ns}"):
+        for r in chunk:
+            sym = r["symbol"]
+            cols = st.columns(_SL_COLS)
+            with cols[0]:
+                st.markdown(_name_cell(r), unsafe_allow_html=True)
+            with cols[1]:
+                st.markdown(_metrics_cell(r), unsafe_allow_html=True)
+            with cols[2]:
+                if st.button("ANALYSIS", key=f"sa_{ns}_{sym}", use_container_width=True,
+                             help=f"Open {sym} in Arka AI and start the analysis"):
+                    _go_analysis(sym)
+            with cols[3]:
+                if st.button("RESEARCH", key=f"sr_{ns}_{sym}", use_container_width=True,
+                             help=f"Open {sym} in the Research panel"):
+                    _go_research(sym)
+            with cols[4]:
+                in_wl = sym in watch
+                if st.button("✓" if in_wl else "＋", key=f"sw_{ns}_{sym}", use_container_width=True,
+                             disabled=in_wl, help="Already in your watchlist" if in_wl else f"Add {sym} to your watchlist"):
+                    if _add_to_watchlist(supabase, sym):
+                        st.toast(f"{sym} added to your watchlist")
+                        st.rerun(scope="fragment")
+
+
+def _action_buttons(sym, key, supabase):
+    """Analysis / Research / + buttons for the AI result cards."""
+    a, b, c = st.columns([1, 1, 1])
+    with a:
+        if st.button("ANALYSIS", key=f"ca_{key}_{sym}", use_container_width=True):
+            _go_analysis(sym)
+    with b:
+        if st.button("RESEARCH", key=f"cr_{key}_{sym}", use_container_width=True):
+            _go_research(sym)
+    with c:
+        in_wl = sym in set(st.session_state.get("watchlist", []))
+        if st.button("✓ IN WATCHLIST" if in_wl else "＋ WATCHLIST", key=f"cw_{key}_{sym}",
+                     use_container_width=True, disabled=in_wl):
+            if _add_to_watchlist(supabase, sym):
+                st.toast(f"{sym} added to your watchlist")
+                st.rerun()
 
 
 # ════════════════════════════════════════════════════════════
@@ -865,7 +998,7 @@ def run_ai_audit(candidates, setup, gemini_key, max_stocks=15,
 # RESULT CARD
 # ════════════════════════════════════════════════════════════
 
-def _render_result_card(res, setup):
+def _render_result_card(res, setup, supabase=None):
     score = res.get("score", 0)
     verdict = res.get("verdict", "NO MATCH")
     vc = GREEN if verdict == "STRONG MATCH" else INDIGO if verdict == "PARTIAL MATCH" else T2
@@ -899,6 +1032,7 @@ def _render_result_card(res, setup):
         for m in res.get("mismatches", []):
             st.markdown(f"<div style='font-size:12px;color:{RED};margin:2px 0;'>- {m}</div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
+        _action_buttons(res["symbol"], "ai", supabase)
 
 
 # ════════════════════════════════════════════════════════════
@@ -1306,7 +1440,7 @@ def _render_scan_page(supabase, gemini_key):
             st.info("No charts satisfied the current filters. Lower the similarity slider.")
         else:
             for res in ordered:
-                _render_result_card(res, selected_setup)
+                _render_result_card(res, selected_setup, supabase)
 
     _section(f"Rules Shortlist ({len(math_results)} stocks)")
     sort_col, dl_col = st.columns([3, 1])
@@ -1332,8 +1466,9 @@ def _render_scan_page(supabase, gemini_key):
         st.download_button("Export CSV", csv_bytes, file_name="arka_shortlist.csv",
                            mime="text/csv", use_container_width=True)
 
-    st.caption("Hover a symbol for a real 40-day candlestick + volume chart.")
-    _render_hover_shortlist(sorted_results)
+    st.caption("Hover a symbol for a 50-day candlestick + volume + SMA50 chart · ANALYSIS opens Arka AI · "
+               "RESEARCH opens the research panel · ＋ adds to your watchlist.")
+    _shortlist_fragment(sorted_results, f"main_{shortlist_sort}", supabase)
 
 
 # ════════════════════════════════════════════════════════════
