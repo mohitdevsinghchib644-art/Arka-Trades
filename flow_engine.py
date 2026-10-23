@@ -1,8 +1,8 @@
 """
-flow_engine.py — Arka Money Flow analytics (v1)
+flow_engine.py — Arka Money Flow analytics (v1.1)
 
-Takes the constituents of ONE index (symbols + optional free-float weights from
-NSE) and computes everything from ~1 year of daily prices (Yahoo, batched):
+Takes the constituents of ONE index (symbols + optional free-float weights) and
+computes everything from ~1 year of daily prices (Yahoo, batched):
 
   per stock   returns 1D/1W/1M/3M, relative strength vs a benchmark, position vs
               20/50/200 DMA, relative volume, traded-value ratio, close location,
@@ -12,6 +12,9 @@ NSE) and computes everything from ~1 year of daily prices (Yahoo, batched):
               weighted index proxy return, participation signal
               (BROAD / NARROW / HEAVYWEIGHTS DRAGGING / BROAD SELLING),
               breadth-deterioration flag
+
+v1.1: self-contained (no import from data_engine) and analyse_index() reports WHY
+it failed instead of returning a bare None.
 
 Honest labelling: "pressure" scores are price + volume + close-location evidence.
 They do NOT identify who bought. Traded value is not net buying.
@@ -23,14 +26,42 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 
-from data_engine import _parse_download
-
 BENCHMARKS = {"NIFTY 50": "^NSEI", "NIFTY 500": "^CRSLDX"}
 DEFAULT_BENCH = "NIFTY 50"
 CHUNK = 80
+_FIELDS = ("Open", "High", "Low", "Close", "Volume")
 
 
 # ───────────────────────── download ─────────────────────────
+def _split_download(df, tickers: list) -> dict:
+    """yfinance batch download -> {ticker: OHLCV DataFrame}. Handles single/multi ticker
+    and both column-level orders. Frames with < 20 usable rows are dropped."""
+    out: dict = {}
+    if df is None or getattr(df, "empty", True):
+        return out
+    if isinstance(df.columns, pd.MultiIndex):
+        if "Close" in set(df.columns.get_level_values(0)):      # (field, ticker) -> (ticker, field)
+            df = df.swaplevel(axis=1).sort_index(axis=1)
+        present = set(df.columns.get_level_values(0))
+        for t in tickers:
+            if t in present:
+                out[t] = df[t]
+    elif len(tickers) == 1:
+        out[tickers[0]] = df
+    clean = {}
+    for t, f in out.items():
+        f = f.copy()
+        if "Close" not in f:
+            continue
+        for col in _FIELDS:
+            if col not in f:
+                f[col] = f["Close"] if col != "Volume" else 0.0
+        f = f[list(_FIELDS)].astype(float).dropna(subset=["Close"])
+        if len(f) >= 20:
+            clean[t] = f
+    return clean
+
+
 def _download_frames(tickers: list, period="1y") -> dict:
     out = {}
     for i in range(0, len(tickers), CHUNK):
@@ -40,7 +71,7 @@ def _download_frames(tickers: list, period="1y") -> dict:
                              threads=True, progress=False, auto_adjust=False)
         except Exception:
             continue
-        out.update(_parse_download(df, chunk))
+        out.update(_split_download(df, chunk))
     return out
 
 
@@ -115,7 +146,7 @@ def analyse_frames(frames: dict, symbols: list, weights: dict | None, bench_tick
     """Pure function (no network) — all analytics from already-downloaded frames."""
     syms = [s for s in symbols if f"{s}.NS" in frames]
     if len(syms) < 3:
-        raise ValueError("not enough price history returned")
+        raise ValueError(f"only {len(syms)} of {len(symbols)} symbols returned usable price history")
 
     close = pd.DataFrame({s: frames[f"{s}.NS"]["Close"].astype(float) for s in syms}).sort_index()
     vol = pd.DataFrame({s: frames[f"{s}.NS"]["Volume"].astype(float) for s in syms}).reindex(close.index)
@@ -215,7 +246,9 @@ def analyse_frames(frames: dict, symbols: list, weights: dict | None, bench_tick
         "weight_basis": weight_basis, "bench_ret": b,
         "asof": str(close.index[-1])[:10],
     }
-    return {"table": table, "series": series.reset_index().rename(columns={"index": "date", "Date": "date"}), "summary": summary}
+    series = series.copy()
+    series.index.name = "date"
+    return {"table": table, "series": series.reset_index(), "summary": summary}
 
 
 @st.cache_data(ttl=600, show_spinner=False, max_entries=24)
@@ -231,9 +264,9 @@ def _analyse_cached(symbols: tuple, weights_items: tuple, bench_name: str) -> di
 
 
 def analyse_index(symbols, weights: dict | None = None, bench_name: str = DEFAULT_BENCH):
-    """Cached (10 min). Returns dict(table, series, summary) or None on failure."""
+    """Cached (10 min). Returns dict(table, series, summary) or {"error": "<reason>"}."""
     try:
         items = tuple(sorted((k, float(v)) for k, v in (weights or {}).items() if pd.notna(v)))
         return _analyse_cached(tuple(_clean_symbol(s) for s in symbols), items, bench_name)
-    except Exception:
-        return None
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
