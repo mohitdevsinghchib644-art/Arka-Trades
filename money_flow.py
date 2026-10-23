@@ -1,21 +1,36 @@
-"""Arka Money Flow: sector rotation, market breadth, index explorer, constituents and FII/DII.
+"""Arka Money Flow (v3): sector rotation, index breadth, Index Explorer, constituents, FII/DII.
 
-v2 additions
-------------
-* INDEX EXPLORER tab — pick any NSE index and Arka downloads its constituents'
-  price history (one batched call) and computes: % advancing, % above 20/50/200
-  DMA (today + 120-day history), weighted index move, contribution of each stock,
-  relative strength vs NIFTY 50 / NIFTY 500, relative volume, and transparent
-  buying / selling PRESSURE scores. Flags NARROW LEADERSHIP, HEAVYWEIGHTS
-  DRAGGING and BREADTH DETERIORATION. Click a stock to open it in Arka.
-* SECTOR ROTATION now labels each index LEADER / EMERGING / FADING / LAGGARD.
+What this module does
+---------------------
+* SECTOR ROTATION  - every sectoral/thematic/broad index ranked by relative strength vs NIFTY 50,
+                     LEADER / EMERGING / FADING / LAGGARD labels and a rotation quadrant map.
+* MARKET BREADTH   - advance/decline for EVERY NSE index (from NSE's own allIndices feed) plus
+                     stock-level breadth for one chosen index universe.
+* INDEX EXPLORER   - pick any index; constituents' price history is downloaded in one batch and
+                     breadth (% above 20/50/200 DMA), contribution, relative strength, relative
+                     volume and transparent buying/selling PRESSURE scores are computed.
+* MONEY FLOW       - disclosed FII/DII cash flows + a price-signed turnover proxy per index.
+* CONSTITUENTS     - stocks of any index; click a row to open it in Arka.
 
-Uses NSE public endpoints where available. Missing feed fields stay missing.
-The turnover / pressure signals are price+volume evidence, not institutional order flow.
+Data sources: NSE public endpoints (allIndices, equity-stockIndices, fiidiiTradeReact,
+historical index closes), NSE archive constituent CSVs (fallback), Yahoo Finance (prices).
+Missing data stays missing - nothing is invented. Pressure / turnover signals are price+volume
+evidence, NOT institutional order flow.
+
+v3 fixes
+--------
+* No dependency on data_engine (flow_engine is self-contained).
+* NSE's allIndices often omits week/month-ago levels -> 1W/1M returns can be loaded from NSE
+  history with a Yahoo fallback; scores are re-weighted over whatever periods exist.
+* Offline mode: if NSE's live API blocks the host (common on cloud IPs) the Index Explorer still
+  works using NSE archive constituent CSVs + Yahoo prices.
 """
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, timedelta
+from io import StringIO
 from pathlib import Path
 from urllib.parse import quote
 
@@ -23,10 +38,12 @@ import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
+import yfinance as yf
 
 import flow_engine as fe
 
 NSE = "https://www.nseindia.com"
+ARCHIVE_BASE = "https://nsearchives.nseindia.com/content/indices/"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
@@ -46,7 +63,40 @@ SIGNAL_COLOR = {"BROAD PARTICIPATION": "#32d296", "NARROW LEADERSHIP": "#f7b84b"
                 "HEAVYWEIGHTS DRAGGING": "#f7b84b", "BROAD SELLING": "#ff6969",
                 "MIXED": "#9ca3af", "UNAVAILABLE": "#9ca3af"}
 
+# NSE archive constituent CSVs (fallback when the live API is blocked). Best-effort slugs:
+# an index whose file 404s simply reports "constituents unavailable".
+ARCHIVE_SLUGS = {
+    "NIFTY 50": "ind_nifty50list", "NIFTY NEXT 50": "ind_niftynext50list", "NIFTY 100": "ind_nifty100list",
+    "NIFTY 200": "ind_nifty200list", "NIFTY 500": "ind_nifty500list",
+    "NIFTY MIDCAP 50": "ind_niftymidcap50list", "NIFTY MIDCAP 100": "ind_niftymidcap100list",
+    "NIFTY MIDCAP 150": "ind_niftymidcap150list", "NIFTY SMALLCAP 50": "ind_niftysmallcap50list",
+    "NIFTY SMALLCAP 100": "ind_niftysmallcap100list", "NIFTY SMALLCAP 250": "ind_niftysmallcap250list",
+    "NIFTY MIDSMALLCAP 400": "ind_niftymidsmallcap400list", "NIFTY LARGEMIDCAP 250": "ind_niftylargemidcap250list",
+    "NIFTY BANK": "ind_niftybanklist", "NIFTY AUTO": "ind_niftyautolist",
+    "NIFTY FINANCIAL SERVICES": "ind_niftyfinancelist", "NIFTY FMCG": "ind_niftyfmcglist",
+    "NIFTY IT": "ind_niftyitlist", "NIFTY MEDIA": "ind_niftymedialist", "NIFTY METAL": "ind_niftymetallist",
+    "NIFTY PHARMA": "ind_niftypharmalist", "NIFTY PSU BANK": "ind_niftypsubanklist",
+    "NIFTY PRIVATE BANK": "ind_nifty_privatebanklist", "NIFTY REALTY": "ind_niftyrealtylist",
+    "NIFTY HEALTHCARE INDEX": "ind_niftyhealthcarelist", "NIFTY CONSUMER DURABLES": "ind_niftyconsumerdurableslist",
+    "NIFTY OIL & GAS": "ind_niftyoilgaslist", "NIFTY ENERGY": "ind_niftyenergylist",
+    "NIFTY INFRASTRUCTURE": "ind_niftyinfralist", "NIFTY COMMODITIES": "ind_niftycommoditieslist",
+    "NIFTY CONSUMPTION": "ind_niftyconsumptionlist", "NIFTY MNC": "ind_niftymnclist",
+    "NIFTY PSE": "ind_niftypselist", "NIFTY SERVICES SECTOR": "ind_niftyservicelist",
+}
 
+# Yahoo tickers for index-level 1W/1M returns when NSE history is unavailable (coverage is partial).
+YF_INDEX = {
+    "NIFTY 50": "^NSEI", "NIFTY NEXT 50": "^NSMIDCP", "NIFTY 500": "^CRSLDX", "NIFTY BANK": "^NSEBANK",
+    "NIFTY IT": "^CNXIT", "NIFTY AUTO": "^CNXAUTO", "NIFTY FMCG": "^CNXFMCG", "NIFTY PHARMA": "^CNXPHARMA",
+    "NIFTY METAL": "^CNXMETAL", "NIFTY REALTY": "^CNXREALTY", "NIFTY ENERGY": "^CNXENERGY",
+    "NIFTY MEDIA": "^CNXMEDIA", "NIFTY PSU BANK": "^CNXPSUBANK", "NIFTY FINANCIAL SERVICES": "^CNXFIN",
+    "NIFTY INFRASTRUCTURE": "^CNXINFRA", "NIFTY PSE": "^CNXPSE", "NIFTY MNC": "^CNXMNC",
+    "NIFTY SERVICES SECTOR": "^CNXSERVICE", "NIFTY COMMODITIES": "^CNXCMDT", "NIFTY CONSUMPTION": "^CNXCONSUM",
+}
+_HISTORY_ALIASES = {"NIFTY FINANCIAL SERVICES": "NIFTY FIN SERVICE", "NIFTY HEALTHCARE INDEX": "NIFTY HEALTHCARE"}
+
+
+# ═════════════════════════ styling / network ═════════════════════════
 def _style():
     st.markdown("""<style>
     .arka-mf-kicker{font:700 10px monospace;letter-spacing:1.5px;color:#9ca3af;text-transform:uppercase}
@@ -55,9 +105,6 @@ def _style():
     .arka-mf-section{font:700 11px monospace;letter-spacing:1px;color:#d1d7e0;margin:17px 0 8px;padding-bottom:7px;border-bottom:1px solid #292e36}
     .arka-mf-note{font-size:11px;color:#929aa6;border-left:2px solid #5a6472;padding:7px 10px;background:rgba(255,255,255,.025);margin:7px 0 12px}
     .arka-mf-banner{font:700 12px monospace;letter-spacing:.8px;padding:10px 14px;border:1px solid;margin:8px 0 12px;background:rgba(255,255,255,.02)}
-    div[data-testid="stMetric"]{background:linear-gradient(135deg,rgba(255,255,255,.035),rgba(255,255,255,.012));border:1px solid #292e36;padding:10px 12px;border-radius:5px}
-    div[data-testid="stMetricLabel"]{font-size:10px!important;letter-spacing:.8px;text-transform:uppercase;color:#a4acb8!important}
-    div[data-testid="stMetricValue"]{font-size:22px!important;font-weight:800}
     </style>""", unsafe_allow_html=True)
 
 
@@ -102,9 +149,28 @@ def _numeric(df, columns):
         df[col] = pd.to_numeric(df[col].astype(str).str.replace(",", "", regex=False), errors="coerce")
 
 
+def _num(v, decimals=2):
+    try: return "—" if pd.isna(v) else f"{float(v):,.{decimals}f}"
+    except (ValueError, TypeError): return "—"
+
+
+def _pct(v):
+    try: return "—" if pd.isna(v) else f"{float(v):+.2f}%"
+    except (ValueError, TypeError): return "—"
+
+
+def _fmt_ret(df, cols):
+    """Display-only: signed % strings, '—' for missing (no literal None/NaN in tables)."""
+    for c in cols:
+        if c in df:
+            df[c] = df[c].map(lambda v: f"{float(v):+.2f}%" if pd.notna(v) else "—")
+    return df
+
+
+# ═════════════════════════ NSE data ═════════════════════════
 @st.cache_data(ttl=60, show_spinner=False, max_entries=4)
 def fetch_all_indices():
-    """Latest available NSE index snapshot and normalized return/breadth fields."""
+    """Latest NSE index snapshot incl. advances/declines/unchanged for EVERY index."""
     payload = _get("/api/allIndices")
     if not isinstance(payload, dict) or not isinstance(payload.get("data"), list) or not payload["data"]:
         return None
@@ -133,9 +199,112 @@ def fetch_all_indices():
     return df.replace([np.inf, -np.inf], np.nan).sort_values("index").reset_index(drop=True)
 
 
+def _equity_index_rows(indices):
+    """Broad-market, sectoral and thematic equity indices (drops VIX / inverse / G-Sec style rows)."""
+    key = indices["key"].fillna("").astype(str).str.upper()
+    keep = key.str.contains(r"BROAD MARKET|SECTORAL|THEMATIC", regex=True)
+    names = indices["index"].astype(str).str.upper()
+    keep &= ~names.str.contains(r"\bVIX\b|INVERSE|G-SEC|GSEC|TREASURY|TR 1X|PR 1X", regex=True)
+    return indices[keep].copy()
+
+
+def fetch_index_history_returns(index_name: str) -> dict:
+    """1W/1M price returns from real NSE daily index closes; raises on failure."""
+    requested = _HISTORY_ALIASES.get(str(index_name).strip().upper(), str(index_name).strip())
+    response = _session().get(
+        NSE + "/api/historicalOR/indicesHistory",
+        params={"indexType": requested, "from": (date.today() - timedelta(days=50)).strftime("%d-%m-%Y"),
+                "to": date.today().strftime("%d-%m-%Y")}, timeout=10)
+    if response.status_code != 200:
+        raise RuntimeError(f"NSE history HTTP {response.status_code}")
+    payload = response.json()
+    rows = payload.get("data", []) if isinstance(payload, dict) else payload
+    if isinstance(rows, dict):                                   # {"indexCloseOnlineRecords": [...]}
+        rows = rows.get("indexCloseOnlineRecords") or next((v for v in rows.values() if isinstance(v, list)), [])
+    if not isinstance(rows, list) or len(rows) < 2:
+        raise RuntimeError("insufficient history rows")
+    hist = pd.DataFrame(rows)
+    dcol = next((c for c in ("EOD_TIMESTAMP", "CH_TIMESTAMP", "HistoricalDate", "date", "Date") if c in hist), None)
+    ccol = next((c for c in ("EOD_CLOSE_INDEX_VAL", "EOD_CLOSE_INDEX_VALUE", "CLOSE_INDEX_VAL", "CLOSE", "close", "Close") if c in hist), None)
+    if dcol is None or ccol is None:
+        raise RuntimeError("unrecognised history columns")
+    hist["_d"] = pd.to_datetime(hist[dcol], errors="coerce", dayfirst=True)
+    hist["_c"] = pd.to_numeric(hist[ccol].astype(str).str.replace(",", "", regex=False), errors="coerce")
+    closes = hist.dropna(subset=["_d", "_c"]).sort_values("_d").drop_duplicates("_d")["_c"].astype(float).tolist()
+    if len(closes) < 6:
+        raise RuntimeError("too few closes")
+    last = closes[-1]
+    wk = closes[-6]
+    mo = closes[-22] if len(closes) >= 22 else closes[0]
+    if min(last, wk, mo) <= 0:
+        raise RuntimeError("invalid closes")
+    return {"r1w": (last / wk - 1) * 100, "r1m": (last / mo - 1) * 100}
+
+
+@st.cache_data(ttl=1800, show_spinner=False, max_entries=8)
+def yahoo_index_returns(names: tuple) -> dict:
+    """Fallback 1W/1M index returns from Yahoo (only for indices in YF_INDEX)."""
+    pairs = {n: YF_INDEX[n] for n in names if n in YF_INDEX}
+    if not pairs:
+        return {}
+    tickers = sorted(set(pairs.values()))
+    try:
+        raw = yf.download(tickers, period="3mo", interval="1d", group_by="ticker",
+                          progress=False, auto_adjust=False, threads=True)
+    except Exception:
+        return {}
+    frames = fe._split_download(raw, tickers)
+    out = {}
+    for n, t in pairs.items():
+        f = frames.get(t)
+        if f is None:
+            continue
+        c = f["Close"].dropna()
+        if len(c) >= 22:
+            out[n] = {"r1w": (c.iloc[-1] / c.iloc[-6] - 1) * 100, "r1m": (c.iloc[-1] / c.iloc[-22] - 1) * 100}
+    return out
+
+
+def _load_history_returns(names):
+    """NSE history first (3 workers); Yahoo fallback for whatever failed. Returns (loaded, attempted)."""
+    saved = dict(st.session_state.get("mf_history_returns", {}))
+    todo = [n for n in names if n not in saved]
+    if not todo:
+        return len(names), len(names)
+    progress = st.progress(0.0, text=f"Loading index history · 0 / {len(todo)}")
+    failed = []
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = {pool.submit(fetch_index_history_returns, n): n for n in todo}
+        for i, fut in enumerate(as_completed(futures), start=1):
+            n = futures[fut]
+            try:
+                saved[n] = fut.result()
+            except Exception:
+                failed.append(n)
+            progress.progress(i / len(todo), text=f"Loading index history · {i} / {len(todo)}")
+    progress.empty()
+    if failed:
+        for n, v in yahoo_index_returns(tuple(failed)).items():
+            saved[n] = v
+    st.session_state["mf_history_returns"] = saved
+    loaded = sum(1 for n in todo if n in saved)
+    return loaded, len(todo)
+
+
+def _apply_history_returns(indices):
+    out = indices.copy()
+    saved = st.session_state.get("mf_history_returns", {})
+    for i, row in out.iterrows():
+        item = saved.get(str(row.get("index", "")), {})
+        for field in ("r1w", "r1m"):
+            if pd.isna(row.get(field)) and item.get(field) is not None:
+                out.at[i, field] = item[field]
+    return out
+
+
 @st.cache_data(ttl=120, show_spinner=False, max_entries=96)
 def fetch_constituents(index_name):
-    """Latest constituent snapshot for one index; volume/value units are not converted."""
+    """Live constituents + prices for one index (NSE API). Value/volume units are not converted."""
     payload = _get(f"/api/equity-stockIndices?index={quote(str(index_name), safe='')}")
     if not isinstance(payload, dict) or not isinstance(payload.get("data"), list) or not payload["data"]:
         return None
@@ -160,8 +329,30 @@ def fetch_constituents(index_name):
     return df.reset_index(drop=True)
 
 
+@st.cache_data(ttl=3600, show_spinner=False, max_entries=96)
+def archive_constituents(index_name):
+    """Symbols (+industry) from NSE's archive CSV. Works when the live API is blocked."""
+    slug = ARCHIVE_SLUGS.get(str(index_name).strip().upper())
+    if not slug:
+        return None
+    try:
+        r = requests.get(f"{ARCHIVE_BASE}{slug}.csv", headers={"User-Agent": HEADERS["User-Agent"]}, timeout=12)
+        if r.status_code != 200:
+            return None
+        df = pd.read_csv(StringIO(r.text))
+        df.columns = [c.strip() for c in df.columns]
+        if "Symbol" not in df:
+            return None
+        out = pd.DataFrame({"symbol": df["Symbol"].astype(str).str.upper().str.strip()})
+        if "Industry" in df:
+            out["industry"] = df["Industry"].astype(str).str.strip()
+        return out.drop_duplicates("symbol").reset_index(drop=True)
+    except Exception:
+        return None
+
+
 def local_constituents(index_name):
-    """Optional fallback: put index_constituents.csv (columns: index,symbol[,weight]) in the repo root."""
+    """Optional: index_constituents.csv (columns: index,symbol[,weight]) in the repo root."""
     p = Path("index_constituents.csv")
     if not p.exists():
         return None
@@ -176,6 +367,20 @@ def local_constituents(index_name):
         return out.drop_duplicates("symbol").reset_index(drop=True)
     except Exception:
         return None
+
+
+def get_constituent_symbols(index_name):
+    """NSE live API -> NSE archive CSV -> local CSV. Returns (DataFrame|None, source label)."""
+    cons = fetch_constituents(index_name)
+    if cons is not None and not cons.empty:
+        return cons, "NSE live constituents"
+    cons = archive_constituents(index_name)
+    if cons is not None and not cons.empty:
+        return cons, "NSE archive CSV (equal-weight)"
+    cons = local_constituents(index_name)
+    if cons is not None and not cons.empty:
+        return cons, "local index_constituents.csv"
+    return None, ""
 
 
 @st.cache_data(ttl=300, show_spinner=False, max_entries=4)
@@ -195,8 +400,9 @@ def fetch_fii_dii():
     return df
 
 
+# ═════════════════════════ analytics ═════════════════════════
 def rank_sectors(indices, scope="SECTORAL"):
-    """Relative-strength rank, rotation quadrant and LEADER/EMERGING/FADING/LAGGARD label vs NIFTY 50."""
+    """RS rank vs NIFTY 50, LEADER/EMERGING/FADING/LAGGARD label, rotation quadrant."""
     if indices is None or indices.empty or "NIFTY 50" not in indices["index"].values:
         return pd.DataFrame()
     keys = SCOPES.get(scope, ("SECTORAL",))
@@ -211,26 +417,28 @@ def rank_sectors(indices, scope="SECTORAL"):
     base = indices.loc[indices["index"].eq("NIFTY 50")].iloc[0]
     for p in ("1d", "1w", "1m"):
         sector[f"rs_{p}"] = sector[f"r{p}"] - base[f"r{p}"]
-    sector["score"] = .2 * sector.rs_1d + .3 * sector.rs_1w + .5 * sector.rs_1m
+    # 20/30/50 weights re-normalised over the periods that actually have data
+    num = pd.Series(0.0, index=sector.index)
+    den = pd.Series(0.0, index=sector.index)
+    for col, wt in (("rs_1d", .2), ("rs_1w", .3), ("rs_1m", .5)):
+        ok = sector[col].notna()
+        num.loc[ok] += sector.loc[ok, col] * wt
+        den.loc[ok] += wt
+    sector["score"] = num / den.replace(0, np.nan)
     sector["rank"] = sector["score"].rank(ascending=False, method="min").astype("Int64")
-    for col, base_col in (("rot_x", "oneMonthAgo"), ("rot_y", "oneWeekAgo")):
-        sec_ref = sector[base_col].where(sector[base_col] > 0)
-        base_ref = base.get(base_col)
-        rel_now = sector["last"] / base.get("last") if pd.notna(base.get("last")) and base.get("last") else np.nan
-        rel_ref = sec_ref / base_ref if pd.notna(base_ref) and base_ref else np.nan
-        sector[col] = rel_now / rel_ref * 100
+    b1w, b1m = base.get("r1w"), base.get("r1m")
+    sector["rot_x"] = (1 + sector["r1m"] / 100) / (1 + b1m / 100) * 100 if pd.notna(b1m) else np.nan
+    sector["rot_y"] = (1 + sector["r1w"] / 100) / (1 + b1w / 100) * 100 if pd.notna(b1w) else np.nan
 
-    def quadrant(row):
-        x, y = row.rot_x, row.rot_y
-        if pd.isna(x) or pd.isna(y): return "UNAVAILABLE"
-        return ("LEADING" if y >= 100 else "WEAKENING") if x >= 100 else ("IMPROVING" if y >= 100 else "LAGGING")
+    def quadrant(r):
+        if pd.isna(r.rot_x) or pd.isna(r.rot_y): return "UNAVAILABLE"
+        return ("LEADING" if r.rot_y >= 100 else "WEAKENING") if r.rot_x >= 100 else ("IMPROVING" if r.rot_y >= 100 else "LAGGING")
 
-    def leadership(row):
-        w, m = row.rs_1w, row.rs_1m
-        if pd.isna(w) or pd.isna(m): return "—"
-        if w > 0 and m > 0: return "LEADER"
-        if w > 0 and m <= 0: return "EMERGING"
-        if w <= 0 and m > 0: return "FADING"
+    def leadership(r):
+        if pd.isna(r.rs_1w) or pd.isna(r.rs_1m): return "—"
+        if r.rs_1w > 0 and r.rs_1m > 0: return "LEADER"
+        if r.rs_1w > 0: return "EMERGING"
+        if r.rs_1m > 0: return "FADING"
         return "LAGGARD"
 
     sector["quadrant"] = sector.apply(quadrant, axis=1)
@@ -246,14 +454,13 @@ def flow_stats(cons):
     up = float(data.loc[data.pChange > 0, "totalTradedValue"].sum())
     down = float(data.loc[data.pChange < 0, "totalTradedValue"].sum())
     total = up + down
-    return {"up_value": up, "down_value": down, "net_value": up-down,
-            "net_pct": (up-down)/total*100 if total else np.nan,
+    return {"up_value": up, "down_value": down, "net_value": up - down,
+            "net_pct": (up - down) / total * 100 if total else np.nan,
             "up": int((data.pChange > 0).sum()), "down": int((data.pChange < 0).sum()),
             "flat": int((data.pChange == 0).sum()), "stocks": len(data)}
 
 
 def stock_breadth(cons):
-    """Count advancers/decliners within one selected index's returned constituents."""
     if cons is None or cons.empty or "pChange" not in cons:
         return None, pd.DataFrame()
     data = cons.copy()
@@ -266,25 +473,17 @@ def stock_breadth(cons):
         if c in data: data[c] = pd.to_numeric(data[c], errors="coerce")
     high = int(data.nearWKH.between(0, 1).sum()) if "nearWKH" in data else None
     low = int(data.nearWKL.between(0, 1).sum()) if "nearWKL" in data else None
-    stats = {"total": total, "up": up, "down": down, "flat": flat, "net": up-down,
-             "ratio": ratio, "up_pct": up/total*100 if total else np.nan,
+    stats = {"total": total, "up": up, "down": down, "flat": flat, "net": up - down, "ratio": ratio,
+             "up_pct": up / total * 100 if total else np.nan,
              "median": data.pChange.median() if total else np.nan, "near_high": high, "near_low": low}
     return stats, data
 
 
-def _num(v, decimals=2):
-    try: return "—" if pd.isna(v) else f"{float(v):,.{decimals}f}"
-    except (ValueError, TypeError): return "—"
-
-
-def _pct(v):
-    try: return "—" if pd.isna(v) else f"{float(v):+.2f}%"
-    except (ValueError, TypeError): return "—"
-
-
+# ═════════════════════════ charts / tables ═════════════════════════
 def _rotation_chart(data):
     data = data.dropna(subset=["rot_x", "rot_y"])
-    if data.empty: st.info("Rotation plot unavailable: reference levels are missing."); return
+    if data.empty:
+        st.info("Rotation plot unavailable: press LOAD 1W / 1M RETURNS above to fetch the reference returns."); return
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -293,13 +492,14 @@ def _rotation_chart(data):
         st.info("Install matplotlib for the rotation plot; the table remains available."); return
     fig, ax = plt.subplots(figsize=(9, 5))
     fig.patch.set_facecolor("#090b0f"); ax.set_facecolor("#090b0f")
-    dx = max(float((data.rot_x-100).abs().max())*1.2, .6)
-    dy = max(float((data.rot_y-100).abs().max())*1.2, .6)
-    ax.set(xlim=(100-dx, 100+dx), ylim=(100-dy, 100+dy))
+    dx = max(float((data.rot_x - 100).abs().max()) * 1.2, .6)
+    dy = max(float((data.rot_y - 100).abs().max()) * 1.2, .6)
+    ax.set(xlim=(100 - dx, 100 + dx), ylim=(100 - dy, 100 + dy))
     ax.axhline(100, color="#39404b", lw=1); ax.axvline(100, color="#39404b", lw=1)
     for _, r in data.iterrows():
         ax.scatter(r.rot_x, r.rot_y, s=32, color=QUAD.get(r.quadrant, "#9ca3af"))
-        ax.annotate(str(r["index"]).replace("NIFTY ", ""), (r.rot_x, r.rot_y), xytext=(4,3), textcoords="offset points", fontsize=6.5, color="#d7dce2")
+        ax.annotate(str(r["index"]).replace("NIFTY ", ""), (r.rot_x, r.rot_y), xytext=(4, 3),
+                    textcoords="offset points", fontsize=6.5, color="#d7dce2")
     ax.set_xlabel("Relative trend · 1 month (100 = in line)", color="#9ca3af")
     ax.set_ylabel("Relative momentum · 1 week (100 = in line)", color="#9ca3af")
     ax.tick_params(colors="#9ca3af", labelsize=8)
@@ -308,11 +508,15 @@ def _rotation_chart(data):
 
 
 def _index_table(df, key):
-    cols = [c for c in ["index", "key", "last", "r1d", "r1w", "r1m", "advances", "declines", "unchanged", "net_adv", "adv_pct", "ad_ratio", "pe", "pb", "dy"] if c in df]
-    view = df[cols].rename(columns={"index":"Index", "key":"Category", "last":"Last", "r1d":"1D %", "r1w":"1W %", "r1m":"1M %", "advances":"Adv", "declines":"Dec", "unchanged":"Flat", "net_adv":"Net Adv", "adv_pct":"Advancing %", "ad_ratio":"A/D", "pe":"P/E", "pb":"P/B", "dy":"Div Yield"})
-    config = {c: st.column_config.NumberColumn(c, format="%+.2f%%") for c in ["1D %", "1W %", "1M %"]}
-    config["Advancing %"] = st.column_config.ProgressColumn("Advancing %", min_value=0, max_value=100, format="%.0f%%")
-    st.dataframe(view, hide_index=True, use_container_width=True, column_config=config, key=key)
+    cols = [c for c in ["index", "key", "last", "r1d", "r1w", "r1m", "advances", "declines", "unchanged",
+                        "net_adv", "adv_pct", "ad_ratio", "pe", "pb", "dy"] if c in df]
+    view = df[cols].rename(columns={"index": "Index", "key": "Category", "last": "Last", "r1d": "1D %", "r1w": "1W %",
+                                    "r1m": "1M %", "advances": "Adv", "declines": "Dec", "unchanged": "Flat",
+                                    "net_adv": "Net Adv", "adv_pct": "Advancing %", "ad_ratio": "A/D",
+                                    "pe": "P/E", "pb": "P/B", "dy": "Div Yield"}).copy()
+    _fmt_ret(view, ["1D %", "1W %", "1M %"])
+    st.dataframe(view, hide_index=True, use_container_width=True, key=key, column_config={
+        "Advancing %": st.column_config.ProgressColumn("Advancing %", min_value=0, max_value=100, format="%.0f%%")})
 
 
 # ═════════════════════════ INDEX EXPLORER ═════════════════════════
@@ -324,7 +528,8 @@ _EX_RENAME = {"symbol": "Symbol", "price": "Price", "weight": "Weight %", "r1d":
 
 
 def _ex_cfg():
-    cfg = {c: st.column_config.NumberColumn(c, format="%+.2f") for c in ["1D %", "1W %", "1M %", "3M %", "RS 1W", "RS 1M", "RS 3M", "Contrib (pp)"]}
+    cfg = {c: st.column_config.NumberColumn(c, format="%+.2f") for c in
+           ["1D %", "1W %", "1M %", "3M %", "RS 1W", "RS 1M", "RS 3M", "Contrib (pp)"]}
     cfg["Weight %"] = st.column_config.NumberColumn("Weight %", format="%.2f")
     cfg["Rel Vol ×"] = st.column_config.NumberColumn("Rel Vol ×", format="%.2f")
     cfg["Value ×"] = st.column_config.NumberColumn("Value ×", format="%.2f")
@@ -335,8 +540,7 @@ def _ex_cfg():
 
 
 def _ex_view(df, cols, n=None):
-    keep = [c for c in cols if c in df]
-    out = df[keep]
+    out = df[[c for c in cols if c in df]]
     if n:
         out = out.head(n)
     return out.rename(columns=_EX_RENAME).reset_index(drop=True)
@@ -365,20 +569,18 @@ def _render_explorer(indices, on_open=None):
         st.caption(f"Showing results for {target[0]} vs {target[1]} — press ANALYSE INDEX to update.")
     name, bench_name = target
 
-    cons = fetch_constituents(name)
-    source = "NSE constituents"
-    if cons is None or cons.empty:
-        cons = local_constituents(name)
-        source = "local index_constituents.csv"
-    if cons is None or cons.empty:
-        st.warning(f"No constituent list available for {name}. NSE returned nothing and no index_constituents.csv fallback was found.")
+    cons, source = get_constituent_symbols(name)
+    if cons is None:
+        st.warning(f"No constituent list available for {name}: NSE live API and the NSE archive CSV both returned nothing. "
+                   "Add an index_constituents.csv (columns: index,symbol[,weight]) to the repo root as a manual fallback.")
         return
     symbols = cons["symbol"].tolist()
     weights = dict(zip(cons["symbol"], cons["ffmc"])) if "ffmc" in cons else {}
     with st.spinner(f"Analysing {len(symbols)} constituents of {name}…"):
         res = fe.analyse_index(symbols, weights, bench_name)
-    if res is None:
-        st.error("Could not download enough price history for this index right now (Yahoo may be rate-limiting). Try again in a minute.")
+    if res is None or "error" in res:
+        st.error("Could not analyse this index: " + (res or {}).get("error", "unknown error") +
+                 ". Yahoo may be rate-limiting; try again in a minute.")
         return
     t, s, series = res["table"], res["summary"], res["series"]
 
@@ -390,7 +592,7 @@ def _render_explorer(indices, on_open=None):
                    "50-DMA has fallen 10+ points over the last 10 sessions. Fewer stocks are supporting the move.")
 
     m = st.columns(6)
-    m[0].metric("Stocks analysed", s["stocks"], help=f"Source: {source}. Missing: {', '.join(s['missing'][:8]) or 'none'}")
+    m[0].metric("Stocks analysed", s["stocks"], help=f"Constituents: {source}. Missing: {', '.join(s['missing'][:8]) or 'none'}")
     m[1].metric("Advancing today", f'{_num(s["adv_pct"], 0)}%')
     m[2].metric("Above 20 DMA", f'{_num(s["above20"], 0)}%')
     m[3].metric("Above 50 DMA", f'{_num(s["above50"], 0)}%')
@@ -458,8 +660,8 @@ def _render_explorer(indices, on_open=None):
     cols = ["symbol", "price", "weight", "r1d", "r1w", "r1m", "r3m", "rs_1m", "relvol", "close_loc", "buy_score", "sell_score", "pressure"]
     view = _ex_view(full, cols)
     event = st.dataframe(view, hide_index=True, use_container_width=True, column_config=_ex_cfg(),
-                         on_select="rerun" if on_open else "ignore", selection_mode="single-row" if on_open else "multi-row",
-                         key="mf_ex_table")
+                         on_select="rerun" if on_open else "ignore",
+                         selection_mode="single-row" if on_open else "multi-row", key="mf_ex_table")
     selected = getattr(getattr(event, "selection", None), "rows", []) if event is not None else []
     if selected and on_open:
         on_open(str(view.iloc[int(selected[0])]["Symbol"]))
@@ -467,69 +669,114 @@ def _render_explorer(indices, on_open=None):
 
 # ═════════════════════════ MAIN ═════════════════════════
 def render_money_flow(on_open=None):
-    """Unified Arka Money Flow workspace. Includes Market Breadth; no breadth_page dependency."""
+    """Arka Money Flow workspace."""
     _style()
-    st.markdown('<div class="arka-mf-kicker">ARKA MARKET TERMINAL · MARKET INTERNALS</div><div class="arka-mf-title">MONEY FLOW</div><div class="arka-mf-sub">Sector rotation, index and stock breadth, constituents, turnover pressure and disclosed FII/DII activity in one workspace.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="arka-mf-kicker">ARKA MARKET TERMINAL · MARKET INTERNALS</div><div class="arka-mf-title">MONEY FLOW</div>'
+                '<div class="arka-mf-sub">Sector rotation, index and stock breadth, constituents, turnover pressure and disclosed FII/DII activity in one workspace.</div>',
+                unsafe_allow_html=True)
     with st.spinner("Loading NSE index snapshot…"):
         indices = fetch_all_indices()
+
+    # ---------- offline mode: NSE live API blocked / down ----------
     if indices is None or indices.empty:
-        st.error("NSE index data is unavailable. No placeholder values are shown.")
+        st.warning("NSE's live index feed is unreachable from this server (NSE often blocks cloud IPs). Sector ranking, A/D and FII/DII "
+                   "need that feed and are hidden rather than faked. INDEX EXPLORER still works below: constituent lists come from NSE "
+                   "archive CSVs and prices from Yahoo Finance.")
         if st.button("RETRY LIVE FEED", key="mf_retry_live"):
             fetch_all_indices.clear(); fetch_constituents.clear(); fetch_fii_dii.clear(); _session.clear(); st.rerun()
-        st.caption("NSE public endpoint access can vary by network or response format.")
+        _render_explorer(pd.DataFrame({"index": list(ARCHIVE_SLUGS)}), on_open)
         return
 
-    changes = indices.r1d.dropna()
-    up, down, flat = int((changes > 0).sum()), int((changes < 0).sum()), int((changes == 0).sum())
-    breadth_idx = indices.dropna(subset=["advances", "declines"])
+    # ---------- 1W / 1M returns (allIndices often omits the reference levels) ----------
+    equity = _equity_index_rows(indices)
+    hcol, hdesc = st.columns([1.6, 5.0])
+    with hcol:
+        load_history = st.button("LOAD 1W / 1M RETURNS", key="mf_load_history", use_container_width=True)
+    with hdesc:
+        st.markdown('<div class="arka-mf-note">If the live snapshot lacks weekly/monthly reference levels, load them once from NSE index history '
+                    '(Yahoo fallback for major indices). Anything still unavailable stays "—".</div>', unsafe_allow_html=True)
+    if load_history:
+        names = equity["index"].astype(str).drop_duplicates().tolist()
+        with st.spinner(f"Requesting history for {len(names)} indexes…"):
+            loaded, attempted = _load_history_returns(names)
+        st.info(f"History loaded for {loaded} of {attempted} indexes. Missing rows stay —.")
+    indices = _apply_history_returns(indices)
+    equity = _equity_index_rows(indices)
+
+    changes = equity.r1d.dropna()
+    up, down = int((changes > 0).sum()), int((changes < 0).sum())
+    breadth_idx = equity.dropna(subset=["advances", "declines"])
     stamp = pd.Timestamp.now(tz="Asia/Kolkata").strftime("%d %b %Y · %H:%M IST")
     cards = st.columns(5)
-    cards[0].metric("Index records", len(indices))
+    cards[0].metric("Equity indexes", len(equity))
     cards[1].metric("Indexes up", up)
     cards[2].metric("Indexes down", down)
-    cards[3].metric("Index A/D", f"{up/down:.2f}" if down else (str(up) if up else "—"))
-    cards[4].metric("Index records with A/D", len(breadth_idx))
-    st.caption(f"Latest returned snapshot · {stamp} · index cache up to 60 seconds. Index rows overlap and do not represent unique stocks.")
+    cards[3].metric("Index A/D", f"{up / down:.2f}" if down else (str(up) if up else "—"))
+    cards[4].metric("Indexes with A/D", len(breadth_idx))
+    st.caption(f"Latest returned snapshot · {stamp} · {len(indices)} NSE index records in total (all listed in MARKET BREADTH). "
+               "Index rows overlap and do not represent unique stocks.")
 
     overview, rotation, breadth, explorer, flows, stocks = st.tabs(
         ["OVERVIEW", "SECTOR ROTATION", "MARKET BREADTH", "INDEX EXPLORER", "MONEY FLOW / FII-DII", "INDEX CONSTITUENTS"])
 
+    # ---------------- OVERVIEW ----------------
     with overview:
         a, b = st.columns(2)
-        movers = indices.dropna(subset=["r1d"]).sort_values("r1d", ascending=False)
+        movers = equity.dropna(subset=["r1d"]).sort_values("r1d", ascending=False)
+        pcols = ["index", "key", "r1d", "r1w", "r1m"]
+        ren = {"index": "Index", "key": "Category", "r1d": "1D %", "r1w": "1W %", "r1m": "1M %"}
         with a:
-            st.markdown('<div class="arka-mf-section">TOP INDEX PERFORMERS · 1D</div>', unsafe_allow_html=True)
-            st.dataframe(movers[["index", "key", "r1d", "r1w", "r1m"]].head(10).rename(columns={"index":"Index", "key":"Category", "r1d":"1D %", "r1w":"1W %", "r1m":"1M %"}), hide_index=True, use_container_width=True)
+            st.markdown('<div class="arka-mf-section">TOP EQUITY INDEX PERFORMERS · 1D</div>', unsafe_allow_html=True)
+            top = _fmt_ret(movers[pcols].head(10).copy(), ["r1d", "r1w", "r1m"]).rename(columns=ren)
+            st.dataframe(top, hide_index=True, use_container_width=True)
         with b:
-            st.markdown('<div class="arka-mf-section">WEAKEST INDEX PERFORMERS · 1D</div>', unsafe_allow_html=True)
-            st.dataframe(movers.sort_values("r1d")[["index", "key", "r1d", "r1w", "r1m"]].head(10).rename(columns={"index":"Index", "key":"Category", "r1d":"1D %", "r1w":"1W %", "r1m":"1M %"}), hide_index=True, use_container_width=True)
+            st.markdown('<div class="arka-mf-section">WEAKEST EQUITY INDEX PERFORMERS · 1D</div>', unsafe_allow_html=True)
+            weak = _fmt_ret(movers.sort_values("r1d")[pcols].head(10).copy(), ["r1d", "r1w", "r1m"]).rename(columns=ren)
+            st.dataframe(weak, hide_index=True, use_container_width=True)
         st.markdown('<div class="arka-mf-section">INDEX PARTICIPATION BY CATEGORY</div>', unsafe_allow_html=True)
-        cats = indices.groupby("key", dropna=False).agg(Indexes=("index","count"), Up=("r1d",lambda s:int((s>0).sum())), Down=("r1d",lambda s:int((s<0).sum())), Flat=("r1d",lambda s:int((s==0).sum())), Median_1D=("r1d","median"), Median_1W=("r1w","median"), Median_1M=("r1m","median")).reset_index().rename(columns={"key":"Category","Median_1D":"Median 1D %","Median_1W":"Median 1W %","Median_1M":"Median 1M %"})
+        cats = equity.groupby("key", dropna=False).agg(
+            Indexes=("index", "count"), Up=("r1d", lambda s: int((s > 0).sum())), Down=("r1d", lambda s: int((s < 0).sum())),
+            Flat=("r1d", lambda s: int((s == 0).sum())), m1d=("r1d", "median"), m1w=("r1w", "median"),
+            m1m=("r1m", "median")).reset_index().rename(columns={"key": "Category"})
+        _fmt_ret(cats, ["m1d", "m1w", "m1m"])
+        cats = cats.rename(columns={"m1d": "Median 1D %", "m1w": "Median 1W %", "m1m": "Median 1M %"})
         st.dataframe(cats, hide_index=True, use_container_width=True)
 
+    # ---------------- SECTOR ROTATION ----------------
     with rotation:
         scope = st.radio("Universe", list(SCOPES), horizontal=True, key="mf_scope")
         sector = rank_sectors(indices, scope)
         if sector.empty:
             st.info("No matching index records or NIFTY 50 reference levels are available.")
         else:
-            st.caption("Relative-strength score = 20% 1D + 30% 1W + 50% 1M performance versus NIFTY 50. This ranking is descriptive, not predictive. "
+            st.caption("Relative-strength score = 20% 1D + 30% 1W + 50% 1M versus NIFTY 50, re-weighted over the periods that have data "
+                       "(press LOAD 1W / 1M RETURNS if 1W/1M show —). Descriptive, not predictive. "
                        "LEADER = ahead of NIFTY 50 on both 1W and 1M · EMERGING = ahead on 1W only · FADING = ahead on 1M only · LAGGARD = behind on both.")
             cols = ["rank", "index", "key", "last", "r1d", "r1w", "r1m", "rs_1w", "rs_1m", "score", "advances", "declines", "leadership", "quadrant"]
-            view = sector[cols].rename(columns={"rank":"Rank", "index":"Index", "key":"Category", "last":"Last", "r1d":"1D %", "r1w":"1W %", "r1m":"1M %", "rs_1w":"RS 1W", "rs_1m":"RS 1M", "score":"RS Score", "advances":"Adv", "declines":"Dec", "leadership":"Leadership", "quadrant":"Rotation"})
+            view = sector[cols].rename(columns={"rank": "Rank", "index": "Index", "key": "Category", "last": "Last", "r1d": "1D %",
+                                                "r1w": "1W %", "r1m": "1M %", "rs_1w": "RS 1W", "rs_1m": "RS 1M", "score": "RS Score",
+                                                "advances": "Adv", "declines": "Dec", "leadership": "Leadership", "quadrant": "Rotation"}).copy()
+            _fmt_ret(view, ["1D %", "1W %", "1M %"])
+            for col in ("Last", "RS 1W", "RS 1M", "RS Score"):
+                view[col] = view[col].map(lambda v: f"{float(v):,.2f}" if pd.notna(v) else "—")
+            for col in ("Adv", "Dec"):
+                view[col] = view[col].map(lambda v: f"{int(v)}" if pd.notna(v) else "—")
+            view["Rank"] = view["Rank"].map(lambda v: f"{int(v)}" if pd.notna(v) else "—")
             st.dataframe(view, hide_index=True, use_container_width=True)
             emerging = sector[sector.leadership.eq("EMERGING")]["index"].tolist()
             fading = sector[sector.leadership.eq("FADING")]["index"].tolist()
             if emerging or fading:
-                st.markdown(f'<div class="arka-mf-note"><b>Leadership change to investigate</b> — Emerging: {", ".join(emerging[:8]) or "none"} · Fading: {", ".join(fading[:8]) or "none"}. Open INDEX EXPLORER to see which stocks are driving it.</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="arka-mf-note"><b>Leadership change to investigate</b> — Emerging: {", ".join(emerging[:8]) or "none"} · '
+                            f'Fading: {", ".join(fading[:8]) or "none"}. Open INDEX EXPLORER to see which stocks are driving it.</div>', unsafe_allow_html=True)
             st.markdown("**RELATIVE STRENGTH SCORE**")
             chart = sector.set_index("index").score.dropna().sort_values()
             if not chart.empty: st.bar_chart(chart, horizontal=True)
             st.markdown("**ROTATION QUADRANT · SIMPLIFIED RRG-STYLE MAP**")
             _rotation_chart(sector)
 
+    # ---------------- MARKET BREADTH ----------------
     with breadth:
-        st.markdown('<div class="arka-mf-section">INDEX-LEVEL ADVANCE / DECLINE</div>', unsafe_allow_html=True)
+        st.markdown('<div class="arka-mf-section">INDEX-LEVEL ADVANCE / DECLINE · ALL NSE INDICES</div>', unsafe_allow_html=True)
         categories = ["ALL CATEGORIES"] + sorted(indices.key.dropna().astype(str).unique().tolist())
         cat = st.selectbox("Index category", categories, key="mf_breadth_category")
         idxdata = indices if cat == "ALL CATEGORIES" else indices[indices.key.astype(str).eq(cat)]
@@ -539,7 +786,8 @@ def render_money_flow(on_open=None):
             vals[0].metric("Indexes with A/D", len(usable))
             vals[1].metric("Advancing majority", int((usable.advances > usable.declines).sum()))
             vals[2].metric("Declining majority", int((usable.advances < usable.declines).sum()))
-            vals[3].metric("Median advancing %", _num(usable.adv_pct.median(), 1) + "%" if pd.notna(usable.adv_pct.median()) else "—")
+            med = usable.adv_pct.median()
+            vals[3].metric("Median advancing %", f"{med:.1f}%" if pd.notna(med) else "—")
             plot = idxdata.dropna(subset=["adv_pct"]).sort_values("adv_pct")
             if not plot.empty: st.bar_chart(plot.set_index("index").adv_pct, horizontal=True)
         _index_table(idxdata.sort_values("adv_pct", ascending=False, na_position="last"), "mf_index_breadth_table")
@@ -551,7 +799,8 @@ def render_money_flow(on_open=None):
         with csel: universe = st.selectbox("Constituent universe", names, index=preferred, key="mf_breadth_universe")
         with cref:
             st.write(""); st.write("")
-            if st.button("REFRESH BREADTH", key="mf_breadth_refresh", use_container_width=True): fetch_constituents.clear(); st.rerun()
+            if st.button("REFRESH BREADTH", key="mf_breadth_refresh", use_container_width=True):
+                fetch_constituents.clear(); st.rerun()
         cons = fetch_constituents(universe)
         stats, detail = stock_breadth(cons)
         if stats is None:
@@ -568,11 +817,11 @@ def render_money_flow(on_open=None):
             z[1].metric("Median stock move", _pct(stats["median"]))
             z[2].metric("Within 1% of 52W high", "—" if stats["near_high"] is None else stats["near_high"])
             z[3].metric("Within 1% of 52W low", "—" if stats["near_low"] is None else stats["near_low"])
-            counts = pd.DataFrame({"Stocks": [stats["up"], stats["down"], stats["flat"]]}, index=["Advancing", "Declining", "Unchanged"])
-            st.bar_chart(counts)
+            st.bar_chart(pd.DataFrame({"Stocks": [stats["up"], stats["down"], stats["flat"]]}, index=["Advancing", "Declining", "Unchanged"]))
             l, r = st.columns(2)
             fields = [c for c in ["symbol", "lastPrice", "pChange", "totalTradedVolume", "nearWKH", "nearWKL"] if c in detail]
-            rename = {"symbol":"Symbol", "lastPrice":"Price", "pChange":"1D %", "totalTradedVolume":"Volume", "nearWKH":"% from 52W High", "nearWKL":"% from 52W Low"}
+            rename = {"symbol": "Symbol", "lastPrice": "Price", "pChange": "1D %", "totalTradedVolume": "Volume",
+                      "nearWKH": "% from 52W High", "nearWKL": "% from 52W Low"}
             with l:
                 st.markdown("**TOP ADVANCERS**")
                 st.dataframe(detail.sort_values("pChange", ascending=False)[fields].head(10).rename(columns=rename), hide_index=True, use_container_width=True)
@@ -588,16 +837,22 @@ def render_money_flow(on_open=None):
             elif move == "Decliners": filtered = filtered[filtered.pChange < 0]
             elif move == "Unchanged": filtered = filtered[filtered.pChange == 0]
             fields = [c for c in ["symbol", "lastPrice", "pChange", "totalTradedVolume", "value_raw", "yearHigh", "yearLow", "nearWKH", "nearWKL"] if c in filtered]
-            rename = {"symbol":"Symbol", "lastPrice":"Price", "pChange":"1D %", "totalTradedVolume":"Volume", "value_raw":"Traded Value (NSE units)", "yearHigh":"52W High", "yearLow":"52W Low", "nearWKH":"% from 52W High", "nearWKL":"% from 52W Low"}
-            st.caption(f"Showing {len(filtered)} of {len(detail)} returned constituents. This is a live snapshot, not a historical breadth time series — use INDEX EXPLORER for the 120-day history.")
-            event = st.dataframe(filtered[fields].rename(columns=rename).reset_index(drop=True), hide_index=True, use_container_width=True,
-                                 on_select="rerun" if on_open else "ignore", selection_mode="single-row" if on_open else "multi-row", key="mf_breadth_stock_table")
+            rename = {"symbol": "Symbol", "lastPrice": "Price", "pChange": "1D %", "totalTradedVolume": "Volume",
+                      "value_raw": "Traded Value (NSE units)", "yearHigh": "52W High", "yearLow": "52W Low",
+                      "nearWKH": "% from 52W High", "nearWKL": "% from 52W Low"}
+            st.caption(f"Showing {len(filtered)} of {len(detail)} returned constituents. Live snapshot, not a time series — use INDEX EXPLORER for 120-day history.")
+            table = filtered[fields].rename(columns=rename).reset_index(drop=True)
+            event = st.dataframe(table, hide_index=True, use_container_width=True,
+                                 on_select="rerun" if on_open else "ignore",
+                                 selection_mode="single-row" if on_open else "multi-row", key="mf_breadth_stock_table")
             selected = getattr(getattr(event, "selection", None), "rows", []) if event is not None else []
-            if selected and on_open: on_open(str(filtered.reset_index(drop=True).iloc[int(selected[0])]["symbol"]))
+            if selected and on_open: on_open(str(table.iloc[int(selected[0])]["Symbol"]))
 
+    # ---------------- INDEX EXPLORER ----------------
     with explorer:
         _render_explorer(indices, on_open)
 
+    # ---------------- MONEY FLOW / FII-DII ----------------
     with flows:
         st.markdown('<div class="arka-mf-section">DISCLOSED MARKET-WIDE FII / DII CASH ACTIVITY</div>', unsafe_allow_html=True)
         fii = fetch_fii_dii()
@@ -607,35 +862,39 @@ def render_money_flow(on_open=None):
             metrics = st.columns(min(max(len(fii), 1), 4))
             for col, (_, row) in zip(metrics, fii.head(4).iterrows()):
                 category = str(row.get("category", "Investor")).strip() or "Investor"
-                date = str(row.get("date", "")).strip()
-                col.metric(f"{category} · {date}" if date else category, _num(row.get("netValue")),
+                dt = str(row.get("date", "")).strip()
+                col.metric(f"{category} · {dt}" if dt else category, _num(row.get("netValue")),
                            help=f"Buy: {_num(row.get('buyValue'))} · Sell: {_num(row.get('sellValue'))}")
             st.dataframe(fii, hide_index=True, use_container_width=True)
         st.markdown('<div class="arka-mf-section">SECTOR TURNOVER PRESSURE PROXY</div>', unsafe_allow_html=True)
-        st.markdown('<div class="arka-mf-note">Proxy = traded value of stocks closing up minus value of stocks closing down. It is not actual institutional flow, not net order flow and not proof of accumulation. Turnover units are shown as returned by NSE.</div>', unsafe_allow_html=True)
-        scope = st.radio("Flow universe", list(SCOPES), horizontal=True, key="mf_flow_scope")
-        sectors = rank_sectors(indices, scope)
+        st.markdown('<div class="arka-mf-note">Proxy = traded value of stocks closing up minus value of stocks closing down. It is not actual institutional flow, '
+                    'not net order flow and not proof of accumulation. Turnover units are shown as returned by NSE.</div>', unsafe_allow_html=True)
+        fscope = st.radio("Flow universe", list(SCOPES), horizontal=True, key="mf_flow_scope")
+        sectors = rank_sectors(indices, fscope)
         if sectors.empty:
             st.info("No matching index rows are available for this scope.")
         else:
             available = sectors["index"].astype(str).tolist()
-            default = available[:min(8, len(available))]
-            chosen = st.multiselect("Indexes to calculate (select a small group to limit requests)", available, default=default, key="mf_flow_indexes")
+            chosen = st.multiselect("Indexes to calculate (select a small group to limit requests)", available,
+                                    default=available[:min(8, len(available))], key="mf_flow_indexes")
             if st.button("COMPUTE / REFRESH FLOW PROXY", type="primary", key="mf_flow_compute", disabled=not chosen):
                 result = {}
                 progress = st.progress(0, text="Fetching constituent snapshots…")
-                for i, name in enumerate(chosen):
-                    result[name] = flow_stats(fetch_constituents(name))
-                    progress.progress((i+1)/len(chosen), text=f"Processed {i+1} of {len(chosen)} indexes")
+                for i, nm in enumerate(chosen):
+                    result[nm] = flow_stats(fetch_constituents(nm))
+                    progress.progress((i + 1) / len(chosen), text=f"Processed {i + 1} of {len(chosen)} indexes")
                 progress.empty(); st.session_state["mf_flow_result"] = result
             result = st.session_state.get("mf_flow_result", {})
-            rows = [{"Index": name, "Up Value": x["up_value"], "Down Value": x["down_value"], "Net Value": x["net_value"], "Net %": x["net_pct"], "Adv": x["up"], "Dec": x["down"], "Stocks": x["stocks"]} for name, x in result.items() if x]
+            rows = [{"Index": nm, "Up Value": x["up_value"], "Down Value": x["down_value"], "Net Value": x["net_value"],
+                     "Net %": x["net_pct"], "Adv": x["up"], "Dec": x["down"], "Stocks": x["stocks"]} for nm, x in result.items() if x]
             if rows:
                 out = pd.DataFrame(rows).sort_values("Net %", ascending=False)
                 st.dataframe(out, hide_index=True, use_container_width=True)
                 st.bar_chart(out.set_index("Index")["Net %"], horizontal=True)
-            elif result: st.warning("No flow proxy values returned for the selected indexes. Refresh the snapshot or try fewer indexes.")
+            elif result:
+                st.warning("No flow proxy values returned for the selected indexes. Refresh the snapshot or try fewer indexes.")
 
+    # ---------------- INDEX CONSTITUENTS ----------------
     with stocks:
         index_names = indices["index"].dropna().astype(str).tolist()
         preferred = next((i for i, n in enumerate(index_names) if n.upper() == "NIFTY 50"), 0)
@@ -645,7 +904,12 @@ def render_money_flow(on_open=None):
         with c: sort = st.selectbox("Sort", ["1D change", "Traded value", "Symbol"], key="mf_const_sort")
         cons = fetch_constituents(index_name)
         if cons is None or cons.empty:
-            st.warning("NSE returned no constituents for this index.")
+            arch = archive_constituents(index_name)
+            if arch is None:
+                st.warning("NSE returned no constituents for this index.")
+            else:
+                st.info("NSE live prices unavailable; showing the constituent list from NSE archive (no prices).")
+                st.dataframe(arch.rename(columns={"symbol": "Symbol", "industry": "Industry"}), hide_index=True, use_container_width=True)
         else:
             view = cons.copy()
             if query: view = view[view.symbol.str.contains(query, na=False)]
@@ -653,22 +917,31 @@ def render_money_flow(on_open=None):
             elif sort == "Traded value": view = view.sort_values("totalTradedValue", ascending=False, na_position="last")
             else: view = view.sort_values("symbol")
             fields = [c for c in ["symbol", "lastPrice", "pChange", "totalTradedVolume", "value_raw", "ffmc", "yearHigh", "yearLow", "nearWKH", "nearWKL"] if c in view]
-            table = view[fields].rename(columns={"symbol":"Symbol", "lastPrice":"Price", "pChange":"1D %", "totalTradedVolume":"Volume", "value_raw":"Traded Value (NSE units)", "ffmc":"FF Mcap", "yearHigh":"52W High", "yearLow":"52W Low", "nearWKH":"% from 52W High", "nearWKL":"% from 52W Low"}).reset_index(drop=True)
+            table = view[fields].rename(columns={"symbol": "Symbol", "lastPrice": "Price", "pChange": "1D %", "totalTradedVolume": "Volume",
+                                                 "value_raw": "Traded Value (NSE units)", "ffmc": "FF Mcap", "yearHigh": "52W High",
+                                                 "yearLow": "52W Low", "nearWKH": "% from 52W High", "nearWKL": "% from 52W Low"}).reset_index(drop=True)
             st.caption(f"{len(table)} rows returned for {index_name}; select a row to open Arka stock research.")
-            event = st.dataframe(table, hide_index=True, use_container_width=True, on_select="rerun" if on_open else "ignore", selection_mode="single-row" if on_open else "multi-row", key="mf_constituents_table")
+            event = st.dataframe(table, hide_index=True, use_container_width=True,
+                                 on_select="rerun" if on_open else "ignore",
+                                 selection_mode="single-row" if on_open else "multi-row", key="mf_constituents_table")
             selected = getattr(getattr(event, "selection", None), "rows", []) if event is not None else []
             if selected and on_open: on_open(str(table.iloc[int(selected[0])]["Symbol"]))
 
-    st.caption("Data: NSE India public index, constituent and FII/DII endpoints, where accessible; constituent price history from Yahoo Finance. All metrics reflect the latest returned snapshot; this is not a licensed real-time feed.")
+    st.caption("Data: NSE India public index, constituent and FII/DII endpoints where accessible; NSE archive CSVs; Yahoo Finance for constituent price history. "
+               "Snapshot data, not a licensed real-time feed.")
     with st.expander("DATA SOURCES & METRIC DEFINITIONS"):
         st.markdown("""
-        **Live index snapshot and index-level breadth:** [NSE Live Market Indices](https://www.nseindia.com/market-data/live-market-indices) — public `/api/allIndices` response.
+        **Index snapshot, index-level advance/decline (all indices):** NSE `/api/allIndices` ([Live Market Indices](https://www.nseindia.com/market-data/live-market-indices)).
 
-        **Constituent lists, free-float weights, prices and turnover:** public `/api/equity-stockIndices?index=...` response. Reported turnover units are preserved as returned.
+        **Constituents, prices, free-float weights, turnover:** NSE `/api/equity-stockIndices?index=...`; fallback constituent lists from NSE archive CSVs (`nsearchives.nseindia.com/content/indices/`).
 
-        **Constituent history (INDEX EXPLORER):** one batched Yahoo Finance daily download per index (≈1 year), cached 10 minutes. % above DMA, relative strength, relative volume and pressure scores are computed from it.
+        **1W / 1M index returns:** NSE index history endpoint, Yahoo Finance fallback for major indices.
 
-        **Disclosed market-wide investor activity:** [NSE FII/FPI & DII reports](https://www.nseindia.com/reports/fii-dii). These figures are market-wide, not sector-specific.
+        **Constituent history (INDEX EXPLORER):** one batched Yahoo Finance daily download per index (≈1 year), cached 10 minutes.
 
-        **Interpretation:** relative-strength ranking compares returns with NIFTY 50 (or NIFTY 500 in the explorer). Rotation quadrants are simplified approximations, not a licensed JdK RRG. The explorer's index proxy is weighted by free-float market cap and is an approximation of the official index. Pressure scores are price/volume evidence and do not reveal buyer identity or prove accumulation. Index families overlap.
+        **FII / DII:** [NSE FII/FPI & DII reports](https://www.nseindia.com/reports/fii-dii) — market-wide, not by sector.
+
+        **Interpretation:** relative strength compares returns with NIFTY 50 (or NIFTY 500 in the explorer). Rotation quadrants are simplified, not a licensed JdK RRG.
+        The explorer's index proxy is weighted by free-float market cap (equal-weight when weights are unavailable) and approximates the official index.
+        Pressure scores are price/volume evidence and do not reveal buyer identity. Index families overlap.
         """)
