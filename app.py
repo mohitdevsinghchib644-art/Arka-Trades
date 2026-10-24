@@ -15,7 +15,6 @@ from screener_scraper import resolve_symbol
 from data_engine import (get_indices, get_quotes, scan_batch, get_static, get_history,
                          warm_security, to_float)
 from chart_engine import render_pro_chart
-from money_flow import render_money_flow          # NEW — Money Flow module
 
 # ═══════════════════════════════════════════════════════════════════
 # v4 — SPEED + FULL RESEARCH + PRO CHART
@@ -786,8 +785,6 @@ MODULE_INFO = [
     ("ARKA AI", "AI-assisted chart and market analysis that works with the currently selected security context.", "Advanced", "Turns terminal data and your trading rules into an analysis workflow."),
     ("SMART SCREENER", "Build rule-based screens using price, trend, RSI, volume and fundamental conditions.", "High", "Finds candidates across a universe instead of checking stocks one by one."),
     ("MARKET BREADTH", "See advancing/declining participation, breadth ratios and market-level internals.", "Core", "Provides market context before interpreting an individual stock signal."),
-    # NEW
-    ("MONEY FLOW", "Sector ranking, rotation quadrant, index advance/decline and FII/DII flows across NSE indices.", "Core", "See where money is moving before picking stocks."),
 ]
 
 
@@ -822,7 +819,6 @@ def _render_module_directory():
         "ARKA AI": "analysis",
         "SMART SCREENER": "smart_scan",
         "MARKET BREADTH": "breadth",
-        "MONEY FLOW": "flow",          # NEW
     }
     cols = st.columns(3)
     for i, (label, purpose, importance, use) in enumerate(MODULE_INFO):
@@ -1030,8 +1026,7 @@ pg = st.session_state.page
 if pg in {"home", "security"}:
     _render_terminal_header(show_indices=True)
 else:
-    module_titles = {"scanner":"WATCHLIST SCANNER","alerts":"ALERTS","research":"RESEARCH","analysis":"ARKA AI","smart_scan":"SMART SCREENER","breadth":"MARKET BREADTH",
-                     "flow":"MONEY FLOW"}      # NEW
+    module_titles = {"scanner":"WATCHLIST SCANNER","alerts":"ALERTS","research":"RESEARCH","analysis":"ARKA AI","smart_scan":"SMART SCREENER","breadth":"MARKET BREADTH"}
     if pg in module_titles:
         _render_module_page_header(module_titles[pg])
 
@@ -1175,10 +1170,6 @@ with center:
             from breadth_page import render_market_breadth
             render_market_breadth()
         except Exception as e: st.error(f"Market Breadth module failed to load: {e}")
-    elif pg == "flow":                                  # NEW
-        try:
-            render_money_flow(on_open=_open_security)
-        except Exception as e: st.error(f"Money Flow module failed to load: {e}")
     elif pg == "profile":
         p1,p2=st.columns([1,2])
         with p1:
