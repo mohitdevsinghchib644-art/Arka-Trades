@@ -41,6 +41,8 @@ import streamlit as st
 import yfinance as yf
 
 import flow_engine as fe
+import index_engine as ix
+import sector_engine as se
 
 NSE = "https://www.nseindia.com"
 ARCHIVE_BASE = "https://nsearchives.nseindia.com/content/indices/"
@@ -82,6 +84,7 @@ ARCHIVE_SLUGS = {
     "NIFTY INFRASTRUCTURE": "ind_niftyinfralist", "NIFTY COMMODITIES": "ind_niftycommoditieslist",
     "NIFTY CONSUMPTION": "ind_niftyconsumptionlist", "NIFTY MNC": "ind_niftymnclist",
     "NIFTY PSE": "ind_niftypselist", "NIFTY SERVICES SECTOR": "ind_niftyservicelist",
+    "NIFTY TOTAL MARKET": "ind_niftytotalmarket_list", "NIFTY MICROCAP 250": "ind_niftymicrocap250_list",
 }
 
 # Yahoo tickers for index-level 1W/1M returns when NSE history is unavailable (coverage is partial).
@@ -208,48 +211,86 @@ def _equity_index_rows(indices):
     return indices[keep].copy()
 
 
-def fetch_index_history_returns(index_name: str) -> dict:
-    """1W/1M price returns from real NSE daily index closes; raises on failure."""
-    requested = _HISTORY_ALIASES.get(str(index_name).strip().upper(), str(index_name).strip())
-    response = _session().get(
-        NSE + "/api/historicalOR/indicesHistory",
-        params={"indexType": requested, "from": (date.today() - timedelta(days=50)).strftime("%d-%m-%Y"),
-                "to": date.today().strftime("%d-%m-%Y")}, timeout=10)
-    if response.status_code != 200:
-        raise RuntimeError(f"NSE history HTTP {response.status_code}")
-    payload = response.json()
-    rows = payload.get("data", []) if isinstance(payload, dict) else payload
+@st.cache_resource(ttl=3600, show_spinner=False)
+def _hist_store() -> dict:
+    """Shared in-memory store {index name: (timestamp, OHLC DataFrame)}; safe to fill from worker threads."""
+    return {}
+
+
+def _parse_nse_history(rows) -> pd.DataFrame:
+    """NSE index-history rows -> OHLC DataFrame (daily). Raises on unrecognised shapes."""
     if isinstance(rows, dict):                                   # {"indexCloseOnlineRecords": [...]}
         rows = rows.get("indexCloseOnlineRecords") or next((v for v in rows.values() if isinstance(v, list)), [])
     if not isinstance(rows, list) or len(rows) < 2:
         raise RuntimeError("insufficient history rows")
-    hist = pd.DataFrame(rows)
-    dcol = next((c for c in ("EOD_TIMESTAMP", "CH_TIMESTAMP", "HistoricalDate", "date", "Date") if c in hist), None)
-    ccol = next((c for c in ("EOD_CLOSE_INDEX_VAL", "EOD_CLOSE_INDEX_VALUE", "CLOSE_INDEX_VAL", "CLOSE", "close", "Close") if c in hist), None)
+    h = pd.DataFrame(rows)
+    pick = lambda opts: next((c for c in opts if c in h), None)
+    dcol = pick(("EOD_TIMESTAMP", "CH_TIMESTAMP", "HistoricalDate", "date", "Date"))
+    ccol = pick(("EOD_CLOSE_INDEX_VAL", "EOD_CLOSE_INDEX_VALUE", "CLOSE_INDEX_VAL", "CLOSE", "close", "Close"))
     if dcol is None or ccol is None:
         raise RuntimeError("unrecognised history columns")
-    hist["_d"] = pd.to_datetime(hist[dcol], errors="coerce", dayfirst=True)
-    hist["_c"] = pd.to_numeric(hist[ccol].astype(str).str.replace(",", "", regex=False), errors="coerce")
-    closes = hist.dropna(subset=["_d", "_c"]).sort_values("_d").drop_duplicates("_d")["_c"].astype(float).tolist()
-    if len(closes) < 6:
-        raise RuntimeError("too few closes")
-    last = closes[-1]
-    wk = closes[-6]
-    mo = closes[-22] if len(closes) >= 22 else closes[0]
-    if min(last, wk, mo) <= 0:
-        raise RuntimeError("invalid closes")
-    return {"r1w": (last / wk - 1) * 100, "r1m": (last / mo - 1) * 100}
+    num = lambda c: (pd.to_numeric(h[c].astype(str).str.replace(",", "", regex=False), errors="coerce")
+                     if c else pd.Series(np.nan, index=h.index))
+    out = pd.DataFrame({"Open": num(pick(("EOD_OPEN_INDEX_VAL", "OPEN_INDEX_VAL", "OPEN", "open", "Open"))),
+                        "High": num(pick(("EOD_HIGH_INDEX_VAL", "HIGH_INDEX_VAL", "HIGH", "high", "High"))),
+                        "Low": num(pick(("EOD_LOW_INDEX_VAL", "LOW_INDEX_VAL", "LOW", "low", "Low"))),
+                        "Close": num(ccol)})
+    out.index = pd.to_datetime(h[dcol], errors="coerce", dayfirst=True)
+    out = out[out.index.notna()]
+    if getattr(out.index, "tz", None) is not None:
+        out.index = out.index.tz_localize(None)
+    out.index = out.index.normalize()
+    out = out.dropna(subset=["Close"])
+    out = out[out["Close"] > 0]
+    for c in ("Open", "High", "Low"):
+        out[c] = out[c].fillna(out["Close"])
+    out = out[~out.index.duplicated(keep="last")].sort_index()
+    if len(out) < 2:
+        raise RuntimeError("no usable closes")
+    return out[["Open", "High", "Low", "Close"]]
+
+
+def _fetch_nse_ohlc(index_name: str, days: int = 400) -> pd.DataFrame:
+    """~400 days of daily OHLC from NSE (two requests of ~200 days). Tries NSE's short name first."""
+    key = str(index_name).strip()
+    cands = []
+    for c in (_HISTORY_ALIASES.get(key.upper()), key):
+        if c and c not in cands:
+            cands.append(c)
+    end = date.today()
+    mid = end - timedelta(days=days // 2)
+    spans = [(end - timedelta(days=days), mid - timedelta(days=1)), (mid, end)]
+    last_err = None
+    for req in cands:
+        try:
+            parts = []
+            for a, b in spans:
+                r = _session().get(NSE + "/api/historicalOR/indicesHistory",
+                                   params={"indexType": req, "from": a.strftime("%d-%m-%Y"),
+                                           "to": b.strftime("%d-%m-%Y")}, timeout=12)
+                if r.status_code != 200:
+                    raise RuntimeError(f"HTTP {r.status_code}")
+                payload = r.json()
+                parts.append(_parse_nse_history(payload.get("data", []) if isinstance(payload, dict) else payload))
+            df = pd.concat(parts)
+            df = df[~df.index.duplicated(keep="last")].sort_index()
+            if len(df) >= 30:
+                return df
+            raise RuntimeError("too few rows")
+        except Exception as exc:
+            last_err = exc
+    raise RuntimeError(str(last_err))
 
 
 @st.cache_data(ttl=1800, show_spinner=False, max_entries=8)
-def yahoo_index_returns(names: tuple) -> dict:
-    """Fallback 1W/1M index returns from Yahoo (only for indices in YF_INDEX)."""
+def yahoo_index_ohlc(names: tuple) -> dict:
+    """Fallback OHLC from Yahoo for the major indices listed in YF_INDEX (coverage is partial)."""
     pairs = {n: YF_INDEX[n] for n in names if n in YF_INDEX}
     if not pairs:
         return {}
     tickers = sorted(set(pairs.values()))
     try:
-        raw = yf.download(tickers, period="3mo", interval="1d", group_by="ticker",
+        raw = yf.download(tickers, period="2y", interval="1d", group_by="ticker",
                           progress=False, auto_adjust=False, threads=True)
     except Exception:
         return {}
@@ -257,48 +298,58 @@ def yahoo_index_returns(names: tuple) -> dict:
     out = {}
     for n, t in pairs.items():
         f = frames.get(t)
-        if f is None:
-            continue
-        c = f["Close"].dropna()
-        if len(c) >= 22:
-            out[n] = {"r1w": (c.iloc[-1] / c.iloc[-6] - 1) * 100, "r1m": (c.iloc[-1] / c.iloc[-22] - 1) * 100}
+        if f is not None and len(f) >= 30:
+            g = f[["Open", "High", "Low", "Close"]].copy()
+            idx = pd.to_datetime(g.index)
+            if getattr(idx, "tz", None) is not None:
+                idx = idx.tz_localize(None)
+            g.index = idx.normalize()
+            out[n] = g
     return out
 
 
-def _load_history_returns(names):
-    """NSE history first (3 workers); Yahoo fallback for whatever failed. Returns (loaded, attempted)."""
-    saved = dict(st.session_state.get("mf_history_returns", {}))
-    todo = [n for n in names if n not in saved]
+def load_index_histories(names, progress=None) -> tuple[int, int]:
+    """Fill the shared store: NSE history first (3 workers), Yahoo fallback. Returns (loaded, attempted)."""
+    store, now = _hist_store(), time.time()
+    names = list(dict.fromkeys(names))
+    todo = [n for n in names if n not in store or now - store[n][0] > 3600]
     if not todo:
         return len(names), len(names)
-    progress = st.progress(0.0, text=f"Loading index history · 0 / {len(todo)}")
     failed = []
     with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = {pool.submit(fetch_index_history_returns, n): n for n in todo}
+        futures = {pool.submit(_fetch_nse_ohlc, n): n for n in todo}
         for i, fut in enumerate(as_completed(futures), start=1):
             n = futures[fut]
             try:
-                saved[n] = fut.result()
+                store[n] = (time.time(), fut.result())
             except Exception:
                 failed.append(n)
-            progress.progress(i / len(todo), text=f"Loading index history · {i} / {len(todo)}")
-    progress.empty()
+            if progress:
+                progress(i / len(todo), f"Loading index history · {i} / {len(todo)}")
     if failed:
-        for n, v in yahoo_index_returns(tuple(failed)).items():
-            saved[n] = v
-    st.session_state["mf_history_returns"] = saved
-    loaded = sum(1 for n in todo if n in saved)
-    return loaded, len(todo)
+        for n, df in yahoo_index_ohlc(tuple(failed)).items():
+            store[n] = (time.time(), df)
+    return sum(1 for n in names if n in store), len(names)
+
+
+def index_histories(names) -> dict:
+    store = _hist_store()
+    return {n: store[n][1] for n in names if n in store}
 
 
 def _apply_history_returns(indices):
+    """Fill 1W / 1M returns from stored EOD closes wherever the live snapshot lacks them."""
     out = indices.copy()
-    saved = st.session_state.get("mf_history_returns", {})
+    store = _hist_store()
     for i, row in out.iterrows():
-        item = saved.get(str(row.get("index", "")), {})
-        for field in ("r1w", "r1m"):
-            if pd.isna(row.get(field)) and item.get(field) is not None:
-                out.at[i, field] = item[field]
+        ent = store.get(str(row.get("index", "")))
+        if not ent:
+            continue
+        c = ent[1]["Close"].dropna()
+        if len(c) >= 6 and pd.isna(row.get("r1w")):
+            out.at[i, "r1w"] = (c.iloc[-1] / c.iloc[-6] - 1) * 100
+        if len(c) >= 22 and pd.isna(row.get("r1m")):
+            out.at[i, "r1m"] = (c.iloc[-1] / c.iloc[-22] - 1) * 100
     return out
 
 
@@ -329,26 +380,57 @@ def fetch_constituents(index_name):
     return df.reset_index(drop=True)
 
 
-@st.cache_data(ttl=3600, show_spinner=False, max_entries=96)
-def archive_constituents(index_name):
-    """Symbols (+industry) from NSE's archive CSV. Works when the live API is blocked."""
-    slug = ARCHIVE_SLUGS.get(str(index_name).strip().upper())
-    if not slug:
-        return None
+@st.cache_data(ttl=3600, show_spinner=False, max_entries=24)
+def _read_archive(slug: str):
+    """Raw NSE archive constituent CSV (Company Name, Industry, Symbol, ...) or None."""
     try:
         r = requests.get(f"{ARCHIVE_BASE}{slug}.csv", headers={"User-Agent": HEADERS["User-Agent"]}, timeout=12)
         if r.status_code != 200:
             return None
         df = pd.read_csv(StringIO(r.text))
         df.columns = [c.strip() for c in df.columns]
-        if "Symbol" not in df:
-            return None
-        out = pd.DataFrame({"symbol": df["Symbol"].astype(str).str.upper().str.strip()})
-        if "Industry" in df:
-            out["industry"] = df["Industry"].astype(str).str.strip()
-        return out.drop_duplicates("symbol").reset_index(drop=True)
+        return df if "Symbol" in df else None
     except Exception:
         return None
+
+
+def archive_constituents(index_name):
+    """Symbols (+industry) from NSE's archive CSV. Works when the live API is blocked."""
+    slug = ARCHIVE_SLUGS.get(str(index_name).strip().upper())
+    df = _read_archive(slug) if slug else None
+    if df is None:
+        return None
+    out = pd.DataFrame({"symbol": df["Symbol"].astype(str).str.upper().str.strip()})
+    if "Industry" in df:
+        out["industry"] = df["Industry"].astype(str).str.strip()
+    return out.drop_duplicates("symbol").reset_index(drop=True)
+
+
+@st.cache_data(ttl=86400, show_spinner=False, max_entries=2)
+def universe_meta():
+    """Stock universe + NSE industry classification (Nifty Total Market, else Nifty 500 + Microcap 250)."""
+    df = None
+    for slugs in (["ind_niftytotalmarket_list"], ["ind_nifty500list", "ind_niftymicrocap250_list"], ["ind_nifty500list"]):
+        parts = [p for p in (_read_archive(s) for s in slugs) if p is not None]
+        if parts and sum(len(p) for p in parts) >= 300:
+            df = pd.concat(parts, ignore_index=True)
+            break
+    if df is None:
+        return None
+    out = pd.DataFrame({
+        "symbol": df["Symbol"].astype(str).str.upper().str.strip(),
+        "industry": df["Industry"].astype(str).str.strip() if "Industry" in df else "Unclassified",
+        "company": df["Company Name"].astype(str).str.strip() if "Company Name" in df else ""})
+    return out.drop_duplicates("symbol").reset_index(drop=True)
+
+
+@st.cache_data(ttl=900, show_spinner=False, max_entries=2)
+def load_universe_frames(symbols: tuple) -> dict:
+    """~6 months of daily OHLCV for the whole stock universe + NIFTY 50 (batched Yahoo download)."""
+    frames = fe._download_frames([f"{s}.NS" for s in symbols] + ["^NSEI"], "6mo")
+    if len(frames) < 30:
+        raise ValueError(f"Yahoo returned history for only {len(frames)} tickers")
+    return frames
 
 
 def local_constituents(index_name):
@@ -483,7 +565,7 @@ def stock_breadth(cons):
 def _rotation_chart(data):
     data = data.dropna(subset=["rot_x", "rot_y"])
     if data.empty:
-        st.info("Rotation plot unavailable: press LOAD 1W / 1M RETURNS above to fetch the reference returns."); return
+        st.info("Rotation plot unavailable: press LOAD INDEX HISTORY above to fetch the reference returns."); return
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -667,6 +749,190 @@ def _render_explorer(indices, on_open=None):
         on_open(str(view.iloc[int(selected[0])]["Symbol"]))
 
 
+# ═════════════════════════ NIFTY INDICES (44 sectoral / thematic) ═════════════════════════
+def _scope_rows(indices, scope):
+    keys = SCOPES.get(scope, ())
+    cats = indices["key"].astype(str).str.upper().str.replace("_", " ", regex=False)
+    sub = indices[cats.apply(lambda x: any(k in x for k in keys))] if keys else indices
+    return _equity_index_rows(sub)
+
+
+def _render_nifty_indices(indices):
+    st.markdown('<div class="arka-mf-section">NIFTY INDICES · PRICE, WEEKLY RSI, EMAs, PIVOTS AND RS RANK HISTORY</div>', unsafe_allow_html=True)
+    scope = st.radio("Universe", ["SECTORAL + THEMATIC", "SECTORAL", "THEMATIC", "BROAD MARKET"], horizontal=True, key="mf_ni_scope")
+    mode = st.radio("Change columns", ["Daily", "Weekly", "Both"], horizontal=True, key="mf_ni_mode", index=2)
+    sub = _scope_rows(indices, scope)
+    names = sub["index"].astype(str).tolist()
+    st.caption(f"{len(names)} NSE {scope.lower()} indices in the live feed. History-based columns need LOAD INDEX HISTORY (top of page).")
+    hists = index_histories(names + ["NIFTY 50"])
+    have = [n for n in names if n in hists]
+    live = sub.set_index("index")
+
+    if "NIFTY 50" not in hists or not have:
+        st.info("History not loaded yet — showing the live snapshot only. Press LOAD INDEX HISTORY above to add weekly RSI, EMAs, pivots and RS rank history.")
+        v = sub[["index", "last", "r1d", "advances", "declines"]].rename(
+            columns={"index": "Index", "last": "Price", "r1d": "1D %", "advances": "Adv", "declines": "Dec"})
+        st.dataframe(v.sort_values("1D %", ascending=False), hide_index=True, use_container_width=True)
+        return
+    try:
+        res = ix.analyse_histories({n: hists[n] for n in have + ["NIFTY 50"]}, "NIFTY 50")
+    except Exception as exc:
+        st.error(f"Could not analyse index history: {exc}")
+        return
+    res = res[res["index"].isin(names)].copy()
+    res["price"] = res["index"].map(live["last"]).fillna(res["price"])
+    res["r1d"] = res["index"].map(live["percentChange"]).fillna(res["r1d"])
+    res = res.sort_values("r1d", ascending=False).reset_index(drop=True)
+    res.insert(0, "#", range(1, len(res) + 1))
+    cols = {"Daily": ["#", "index", "price", "r1d"], "Weekly": ["#", "index", "price", "r1w"],
+            "Both": ["#", "index", "price", "r1d", "r1w"]}[mode]
+    cols += ["w_rsi", "ema_chips", "pct_w20", "d_pivot", "w_pivot", "rs_t30", "rs_t15", "rs_t5", "rs_t0"]
+    ren = {"index": "Index", "price": "Price", "r1d": "1D %", "r1w": "1W %", "w_rsi": "W-RSI", "ema_chips": "W-EMA 10 · 20 · 50 · D200",
+           "pct_w20": "% from W-20EMA", "d_pivot": "D-Pivot", "w_pivot": "W-Pivot",
+           "rs_t30": "RS T-30", "rs_t15": "RS T-15", "rs_t5": "RS T-5", "rs_t0": "RS T0"}
+    view = res[cols].rename(columns=ren)
+    cfg = {"1D %": st.column_config.NumberColumn("1D %", format="%+.2f%%"),
+           "1W %": st.column_config.NumberColumn("1W %", format="%+.2f%%"),
+           "Price": st.column_config.NumberColumn("Price", format="%.2f"),
+           "W-RSI": st.column_config.NumberColumn("W-RSI", format="%.1f"),
+           "% from W-20EMA": st.column_config.NumberColumn("% from W-20EMA", format="%+.1f%%")}
+    for c in ("RS T-30", "RS T-15", "RS T-5", "RS T0"):
+        cfg[c] = st.column_config.ProgressColumn(c, min_value=0, max_value=99, format="%d")
+    st.dataframe(view, hide_index=True, use_container_width=True, column_config=cfg, key="mf_ni_table")
+    miss = [n for n in names if n not in hists]
+    asof = res["asof"].max() if "asof" in res else ""
+    st.markdown(f'<div class="arka-mf-note">History as of {asof} close · {len(have)} of {len(names)} indices have history'
+                f'{(" (missing: " + ", ".join(miss[:6]) + ("…" if len(miss) > 6 else "") + ")") if miss else ""}. '
+                'RS T-n = percentile (0-99) of the index\'s 20-session performance vs NIFTY 50 among the indices shown, n sessions ago. '
+                'EMA dots: 🟢 price above / 🔴 below the weekly 10/20/50 EMA and the 200-DAY EMA (weekly 200 needs ~4 years of data). '
+                'Pivots: classic levels from the previous completed day / week; the label says where the latest close sits.</div>', unsafe_allow_html=True)
+
+
+# ═════════════════════════ SECTOR RANKING (stock universe) ═════════════════════════
+def _sector_cfg():
+    c = {"Stocks": st.column_config.NumberColumn("Stocks", format="%d"),
+         "Turnover (Cr)": st.column_config.NumberColumn("Turnover (Cr)", format="₹%.0f"),
+         "Share %": st.column_config.NumberColumn("Share %", format="%.2f"),
+         "A/D Net": st.column_config.NumberColumn("A/D Net", format="%+.2f"),
+         "Avg RSI": st.column_config.NumberColumn("Avg RSI", format="%.0f"),
+         "% >20EMA": st.column_config.NumberColumn("% >20EMA", format="%.0f%%"),
+         "% BO 10d": st.column_config.NumberColumn("% BO 10d", format="%.0f%%")}
+    for k in ("% Chg", "Δ Share (pt)", "CMF 20", "CMF 5d ago", "Δ CMF"):
+        c[k] = st.column_config.NumberColumn(k, format="%+.2f")
+    for k in ("RS T-30", "RS T-15", "RS T-5", "RS T0"):
+        c[k] = st.column_config.ProgressColumn(k, min_value=0, max_value=99, format="%d")
+    return c
+
+
+def _render_sector_ranking(on_open=None):
+    st.markdown('<div class="arka-mf-section">SECTOR RANKING · WHERE TURNOVER, STRENGTH AND MONEY FLOW SIT ACROSS THE STOCK UNIVERSE</div>', unsafe_allow_html=True)
+    meta = universe_meta()
+    if meta is None:
+        st.warning("Could not load the stock universe (NSE archive constituent files were unreachable). Sector Ranking needs the "
+                   "Nifty Total Market / Nifty 500 constituent CSVs with their Industry column.")
+        return
+    c1, c2 = st.columns([1.7, 5])
+    with c1:
+        if st.button("LOAD / REFRESH SECTOR DATA", type="primary", use_container_width=True, key="mf_sr_run"):
+            st.session_state["mf_sr_ready"] = True
+    with c2:
+        st.markdown(f'<div class="arka-mf-note">Downloads ~6 months of daily prices for {len(meta)} stocks (Yahoo, batched; first load can take 1-2 minutes, '
+                    'then cached 15 minutes). Sector = NSE industry classification. Turnover = close × volume.</div>', unsafe_allow_html=True)
+    if not st.session_state.get("mf_sr_ready"):
+        st.info("Press LOAD / REFRESH SECTOR DATA to build the sector tables.")
+        return
+    with st.spinner(f"Loading price history for {len(meta)} stocks…"):
+        try:
+            frames = load_universe_frames(tuple(meta["symbol"]))
+        except Exception as exc:
+            st.error(f"Price history unavailable right now: {exc}. Yahoo may be rate-limiting; try again in a minute.")
+            return
+    try:
+        res = se.analyse_universe(frames, meta, "^NSEI")
+    except Exception as exc:
+        st.error(f"Could not analyse the universe: {exc}")
+        return
+    sec, stk = res["sectors"], res["stocks"]
+    st.caption(f"As of {res['asof']} close · {res['n_stocks']} stocks in {len(sec)} sectors · "
+               f"{len(res['unmapped'])} symbols had no Yahoo data · {len(res['stale'])} stale tickers skipped.")
+
+    view = st.radio("View", ["Sector ranking", "Turnover A/D", "Sector turnover", "Chaikin money flow", "Relative strength"],
+                    horizontal=True, key="mf_sr_view")
+    per = st.radio("Period", ["Daily", "Weekly"], horizontal=True, key="mf_sr_period") if view in ("Sector ranking", "Sector turnover") else "Daily"
+    chg, dsh = ("r1d", "dshare_d") if per == "Daily" else ("r1w", "dshare_w")
+    cfg = _sector_cfg()
+
+    if view == "Sector ranking":
+        t = sec[["sector", "stocks", "turnover_cr", chg, "share", dsh, "ad_net", "avg_rsi", "pct_above20", "pct_bo10", "leaders"]].rename(columns={
+            "sector": "Sector", "stocks": "Stocks", "turnover_cr": "Turnover (Cr)", chg: "% Chg", "share": "Share %", dsh: "Δ Share (pt)",
+            "ad_net": "A/D Net", "avg_rsi": "Avg RSI", "pct_above20": "% >20EMA", "pct_bo10": "% BO 10d", "leaders": "Leaders (1W, liquid names)"})
+        st.dataframe(t, hide_index=True, use_container_width=True, column_config=cfg)
+        st.markdown('<div class="arka-mf-note">% Chg = average of the sector\'s stocks. Share % = sector turnover ÷ universe turnover; Δ Share = change in percentage points '
+                    '(vs yesterday / 5 sessions ago). A/D Net = (advancers − decliners) ÷ stocks. % BO 10d = share of stocks that closed above their prior 20-day high in the last 10 sessions.</div>', unsafe_allow_html=True)
+    elif view == "Turnover A/D":
+        t = sec[["sector", "stocks", "adv", "dec", "up_turn_cr", "dn_turn_cr", "turn_ad", "pct_turn_adv"]].rename(columns={
+            "sector": "Sector", "stocks": "Stocks", "adv": "Adv", "dec": "Dec", "up_turn_cr": "Up Turnover (Cr)", "dn_turn_cr": "Down Turnover (Cr)",
+            "turn_ad": "Turnover A/D", "pct_turn_adv": "% Turnover in Advancers"}).sort_values("% Turnover in Advancers", ascending=False)
+        st.dataframe(t, hide_index=True, use_container_width=True, column_config={
+            "Up Turnover (Cr)": st.column_config.NumberColumn(format="₹%.0f"), "Down Turnover (Cr)": st.column_config.NumberColumn(format="₹%.0f"),
+            "Turnover A/D": st.column_config.NumberColumn(format="%.2f"),
+            "% Turnover in Advancers": st.column_config.ProgressColumn("% Turnover in Advancers", min_value=0, max_value=100, format="%.0f%%")})
+        st.bar_chart(t.set_index("Sector")["% Turnover in Advancers"], horizontal=True)
+        st.markdown('<div class="arka-mf-note">Turnover A/D = turnover of stocks closing up ÷ turnover of stocks closing down. Above 1 means more money changed hands in rising stocks. '
+                    'Every trade has two sides, so this shows where activity is concentrated, not who is buying.</div>', unsafe_allow_html=True)
+    elif view == "Sector turnover":
+        t = sec[["sector", "turnover_cr", "turn_avg20_cr", "turn_vs20", "share", dsh]].rename(columns={
+            "sector": "Sector", "turnover_cr": "Turnover (Cr)", "turn_avg20_cr": "20d Avg (Cr)", "turn_vs20": "Today ÷ 20d Avg",
+            "share": "Share %", dsh: "Δ Share (pt)"}).sort_values("Turnover (Cr)", ascending=False)
+        st.dataframe(t, hide_index=True, use_container_width=True, column_config={
+            "20d Avg (Cr)": st.column_config.NumberColumn(format="₹%.0f"), "Today ÷ 20d Avg": st.column_config.NumberColumn(format="%.2f×"), **cfg})
+        top = t["Sector"].head(6).tolist()
+        ss = res["share_series"][top].rename_axis("date")
+        st.markdown("**TURNOVER SHARE % · LAST 60 SESSIONS · TOP 6 SECTORS**")
+        st.line_chart(ss)
+    elif view == "Chaikin money flow":
+        sec = sec.copy()
+        sec["d_cmf"] = sec["cmf"] - sec["cmf_5d"]
+        sec["signal"] = np.where(sec["cmf"] > .05, "ACCUMULATION", np.where(sec["cmf"] < -.05, "DISTRIBUTION", "NEUTRAL"))
+        t = sec[["sector", "stocks", "cmf", "cmf_5d", "d_cmf", "signal"]].rename(columns={
+            "sector": "Sector", "stocks": "Stocks", "cmf": "CMF 20", "cmf_5d": "CMF 5d ago", "d_cmf": "Δ CMF", "signal": "Signal"}).sort_values("CMF 20", ascending=False)
+        st.dataframe(t, hide_index=True, use_container_width=True, column_config=cfg)
+        st.bar_chart(t.set_index("Sector")["CMF 20"], horizontal=True)
+        pick = st.multiselect("Plot CMF history", t["Sector"].tolist(), default=t["Sector"].head(4).tolist(), key="mf_sr_cmf_pick")
+        if pick:
+            st.line_chart(res["cmf_series"][pick].rename_axis("date"))
+        st.markdown('<div class="arka-mf-note">Chaikin Money Flow (20) = Σ money-flow-volume ÷ Σ volume over 20 sessions, aggregated across the sector\'s stocks. '
+                    'Positive = closes tend to land in the upper part of the day\'s range on volume (accumulation-like); negative = lower part (distribution-like). '
+                    'Signal band ±0.05 is a convention, not a forecast.</div>', unsafe_allow_html=True)
+    else:
+        sec = sec.copy()
+        sec["trend"] = sec["rs_t0"] - sec["rs_t15"]
+        t = sec[["sector", "stocks", "rs_1w", "rs_1m", "rs_t30", "rs_t15", "rs_t5", "rs_t0", "trend"]].rename(columns={
+            "sector": "Sector", "stocks": "Stocks", "rs_1w": "RS 1W (pp)", "rs_1m": "RS 1M (pp)", "rs_t30": "RS T-30", "rs_t15": "RS T-15",
+            "rs_t5": "RS T-5", "rs_t0": "RS T0", "trend": "Δ Rank (T0 − T-15)"}).sort_values("RS T0", ascending=False)
+        st.dataframe(t, hide_index=True, use_container_width=True, column_config={
+            **cfg, "RS 1W (pp)": st.column_config.NumberColumn(format="%+.2f"), "RS 1M (pp)": st.column_config.NumberColumn(format="%+.2f"),
+            "Δ Rank (T0 − T-15)": st.column_config.NumberColumn(format="%+d")})
+        st.markdown('<div class="arka-mf-note">RS = the sector\'s 20-session performance (equal-weight index of its stocks) relative to NIFTY 50; the rank is the percentile (0-99) among sectors '
+                    'at T-30, T-15, T-5 sessions ago and today. RS 1W / 1M = excess return vs NIFTY 50 in percentage points.</div>', unsafe_allow_html=True)
+
+    # ---- drill-down: stocks of one sector ----
+    st.markdown('<div class="arka-mf-section">STOCKS IN A SECTOR · SELECT A ROW TO OPEN THE STOCK</div>', unsafe_allow_html=True)
+    pick = st.selectbox("Sector", sec["sector"].tolist(), key="mf_sr_drill")
+    st_t = stk[stk["sector"] == pick].sort_values("turnover_cr", ascending=False)
+    tv = st_t[["symbol", "price", "turnover_cr", "r1d", "r1w", "rsi", "above20", "bo10", "cmf"]].rename(columns={
+        "symbol": "Symbol", "price": "Price", "turnover_cr": "Turnover (Cr)", "r1d": "1D %", "r1w": "1W %", "rsi": "RSI 14",
+        "above20": ">20EMA", "bo10": "Breakout 10d", "cmf": "CMF 20"}).reset_index(drop=True)
+    ev = st.dataframe(tv, hide_index=True, use_container_width=True, key="mf_sr_stocks",
+                      on_select="rerun" if on_open else "ignore", selection_mode="single-row" if on_open else "multi-row",
+                      column_config={"Price": st.column_config.NumberColumn(format="%.2f"), "Turnover (Cr)": st.column_config.NumberColumn(format="₹%.1f"),
+                                     "1D %": st.column_config.NumberColumn(format="%+.2f%%"), "1W %": st.column_config.NumberColumn(format="%+.2f%%"),
+                                     "RSI 14": st.column_config.NumberColumn(format="%.0f"), "CMF 20": st.column_config.NumberColumn(format="%+.2f")})
+    rows = getattr(getattr(ev, "selection", None), "rows", []) if ev is not None else []
+    if rows and on_open:
+        on_open(str(tv.iloc[int(rows[0])]["Symbol"]))
+
+
 # ═════════════════════════ MAIN ═════════════════════════
 def render_money_flow(on_open=None):
     """Arka Money Flow workspace."""
@@ -687,19 +953,21 @@ def render_money_flow(on_open=None):
         _render_explorer(pd.DataFrame({"index": list(ARCHIVE_SLUGS)}), on_open)
         return
 
-    # ---------- 1W / 1M returns (allIndices often omits the reference levels) ----------
+    # ---------- index history (1W/1M returns, RS, RSI, EMAs, pivots) ----------
     equity = _equity_index_rows(indices)
     hcol, hdesc = st.columns([1.6, 5.0])
     with hcol:
-        load_history = st.button("LOAD 1W / 1M RETURNS", key="mf_load_history", use_container_width=True)
+        load_history = st.button("LOAD INDEX HISTORY", key="mf_load_history", use_container_width=True, type="primary")
     with hdesc:
-        st.markdown('<div class="arka-mf-note">If the live snapshot lacks weekly/monthly reference levels, load them once from NSE index history '
-                    '(Yahoo fallback for major indices). Anything still unavailable stays "—".</div>', unsafe_allow_html=True)
+        st.markdown('<div class="arka-mf-note">Loads ~1 year of daily index history from NSE (Yahoo fallback for major indices), cached for an hour. '
+                    'It fills 1W/1M returns, RS vs NIFTY 50, weekly RSI/EMAs, pivots and RS rank history. First load can take a minute.</div>', unsafe_allow_html=True)
     if load_history:
-        names = equity["index"].astype(str).drop_duplicates().tolist()
-        with st.spinner(f"Requesting history for {len(names)} indexes…"):
-            loaded, attempted = _load_history_returns(names)
-        st.info(f"History loaded for {loaded} of {attempted} indexes. Missing rows stay —.")
+        # NIFTY 50 is the RS benchmark and is NOT in the sectoral/thematic categories: always include it (and NIFTY 500).
+        names = list(dict.fromkeys(equity["index"].astype(str).tolist() + ["NIFTY 50", "NIFTY 500"]))
+        bar = st.progress(0.0, text=f"Loading index history · 0 / {len(names)}")
+        loaded, attempted = load_index_histories(names, progress=lambda f, t: bar.progress(min(f, 1.0), text=t))
+        bar.empty()
+        st.info(f"History loaded for {loaded} of {attempted} indices. Missing ones stay —.")
     indices = _apply_history_returns(indices)
     equity = _equity_index_rows(indices)
 
@@ -716,8 +984,13 @@ def render_money_flow(on_open=None):
     st.caption(f"Latest returned snapshot · {stamp} · {len(indices)} NSE index records in total (all listed in MARKET BREADTH). "
                "Index rows overlap and do not represent unique stocks.")
 
-    overview, rotation, breadth, explorer, flows, stocks = st.tabs(
-        ["OVERVIEW", "SECTOR ROTATION", "MARKET BREADTH", "INDEX EXPLORER", "MONEY FLOW / FII-DII", "INDEX CONSTITUENTS"])
+    overview, nifty_ix, sector_rk, rotation, breadth, explorer, flows, stocks = st.tabs(
+        ["OVERVIEW", "NIFTY INDICES", "SECTOR RANKING", "SECTOR ROTATION", "MARKET BREADTH", "INDEX EXPLORER", "MONEY FLOW / FII-DII", "INDEX CONSTITUENTS"])
+
+    with nifty_ix:
+        _render_nifty_indices(indices)
+    with sector_rk:
+        _render_sector_ranking(on_open)
 
     # ---------------- OVERVIEW ----------------
     with overview:
@@ -750,7 +1023,7 @@ def render_money_flow(on_open=None):
             st.info("No matching index records or NIFTY 50 reference levels are available.")
         else:
             st.caption("Relative-strength score = 20% 1D + 30% 1W + 50% 1M versus NIFTY 50, re-weighted over the periods that have data "
-                       "(press LOAD 1W / 1M RETURNS if 1W/1M show —). Descriptive, not predictive. "
+                       "(press LOAD INDEX HISTORY if 1W/1M show —). Descriptive, not predictive. "
                        "LEADER = ahead of NIFTY 50 on both 1W and 1M · EMERGING = ahead on 1W only · FADING = ahead on 1M only · LAGGARD = behind on both.")
             cols = ["rank", "index", "key", "last", "r1d", "r1w", "r1m", "rs_1w", "rs_1m", "score", "advances", "declines", "leadership", "quadrant"]
             view = sector[cols].rename(columns={"rank": "Rank", "index": "Index", "key": "Category", "last": "Last", "r1d": "1D %",
