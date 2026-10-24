@@ -8,6 +8,7 @@ import json
 import math
 from pathlib import Path
 from supabase import create_client, Client
+import user_data as ud                              # NEW — shared watchlist/portfolio storage helpers
 from news_feed import render_news_rail, get_news_dot, _ensure_news_state, refresh_news, _fetch_news_for_stock
 from arka_ai import render_arka_ai
 from research_page import render_research_page, render_research_panel
@@ -15,36 +16,48 @@ from screener_scraper import resolve_symbol
 from data_engine import (get_indices, get_quotes, scan_batch, get_static, get_history,
                          warm_security, to_float)
 from chart_engine import render_pro_chart
-from money_flow import render_money_flow          # NEW — Money Flow module
+from money_flow import render_money_flow
+# watchlist_page / portfolio_page are imported lazily inside their page branches
+# (see the router near the bottom) so a problem in either file can never stop
+# the rest of the terminal from loading.
 
 # ═══════════════════════════════════════════════════════════════════
-# v4 — SPEED + FULL RESEARCH + PRO CHART
+# v5 — WATCHLIST + PORTFOLIO MODULES WIRED IN
 #
-# What changed vs v3:
-#   1. SPEED: every market-data call now goes through data_engine.py —
-#      indices fetched in parallel, watchlist scans use ONE batched
-#      download instead of 2 calls per stock, Screener is parsed once
-#      per security, and failures are never cached.
-#   2. The index strip is a self-refreshing fragment (60s) so it never
-#      blocks other clicks.
-#   3. Security workspace: TradingView Lightweight Charts (candles, volume,
-#      MA 20/50/200, RSI 14 + 14-period MA of RSI, PDH/PDL lines, D/W,
-#      log scale). Range / interval / study toggles run in the browser —
-#      no rerun, no lag.
-#   4. The full research panel (financials, balance sheet, cash flow,
-#      ratios, shareholding, peers, technicals, analyst, dividends, news,
-#      notes…) now lives directly under the chart.
-#   5. Scanner cards: OPEN button now sits inside its card column.
-#   6. Logins can come from Streamlit secrets (ADMIN_USER / ADMIN_PASS /
-#      MEMBER_USER / MEMBER_PASS). Old values remain as a fallback so
-#      nothing breaks — see the note in the reply about removing them.
+# What changed vs v4:
+#   1. NEW modules: WATCHLIST (watchlist_page.py) and PORTFOLIO
+#      (portfolio_page.py). Both appear in the Module Directory, have a
+#      compact header with a back button, and are routed at the bottom.
+#   2. Both modules share user_data.py, so the watchlist you edit there is the
+#      same list the Scanner, Alerts, dashboard and news rail already use.
+#   3. "ADD TO WATCHLIST" on a security page now INSERTS one symbol instead of
+#      deleting and re-inserting the whole table (the old way could wipe the
+#      list if the insert failed halfway).
+#   4. News rail: while you are on the Portfolio page it follows your holdings.
+#   5. FIX: scanning the Arka list used to set the news source to "admin_v4",
+#      which the news rail never matched, so it silently showed the wrong list.
+#   6. FIX: st.set_page_config now runs first, and st.secrets is read through a
+#      safe helper (no crash when secrets.toml is missing locally).
+#   7. Bare `except:` blocks replaced with `except Exception:` so Streamlit's
+#      own rerun/stop signals are never swallowed.
 # ═══════════════════════════════════════════════════════════════════
+
+st.set_page_config(page_title="Arka Trades", layout="wide", page_icon="📈", initial_sidebar_state="collapsed")
+
+
+def _secret(name: str, default=""):
+    """st.secrets.get() that never raises when no secrets file exists."""
+    try:
+        return st.secrets.get(name, default)
+    except Exception:
+        return default
+
 
 # ── Supabase ─────────────────────────────────────────────────
-SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
-SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
+SUPABASE_URL = _secret("SUPABASE_URL", "")
+SUPABASE_KEY = _secret("SUPABASE_KEY", "")
 
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def get_supabase() -> Client | None:
     if not SUPABASE_URL or not SUPABASE_KEY:
         return None
@@ -75,7 +88,7 @@ def db_load_watchlist() -> list:
         # the UI, since sym-keyed widgets downstream (alerts page) will
         # crash with StreamlitDuplicateElementKey on a repeated symbol.
         return list(dict.fromkeys(r["symbol"] for r in res.data)) if res.data else []
-    except: return []
+    except Exception: return []
 
 def db_save_alert(symbol: str, alert_type: str, price: float):
     if supabase is None:
@@ -93,7 +106,7 @@ def db_delete_alert(symbol: str):
         return True
     try:
         supabase.table("alerts").delete().eq("symbol", symbol).execute(); return True
-    except: return False
+    except Exception: return False
 
 def db_load_alerts() -> dict:
     if supabase is None:
@@ -102,7 +115,7 @@ def db_load_alerts() -> dict:
         res = supabase.table("alerts").select("*").eq("active", True).execute()
         return {r["symbol"]: {"type": r["alert_type"], "price": float(r["price"]), "active": True}
                 for r in res.data} if res.data else {}
-    except: return {}
+    except Exception: return {}
 
 def db_save_admin_watchlist(symbols: list):
     if supabase is None:
@@ -123,25 +136,23 @@ def db_load_admin_watchlist() -> list:
     try:
         res = supabase.table("admin_watchlist").select("symbol").execute()
         return list(dict.fromkeys(r["symbol"] for r in res.data)) if res.data else []
-    except: return []
+    except Exception: return []
 
-st.set_page_config(page_title="Arka Trades", layout="wide", page_icon="📈", initial_sidebar_state="collapsed")
-
-BOT_TOKEN = st.secrets.get("BOT_TOKEN", "")
-CHAT_ID   = st.secrets.get("CHAT_ID", "")
+BOT_TOKEN = _secret("BOT_TOKEN", "")
+CHAT_ID   = _secret("CHAT_ID", "")
 
 # Logins: set these in Streamlit Cloud -> Settings -> Secrets, then delete the
 # fallback strings below so no password lives in your GitHub repo.
-_ADMIN_USER  = st.secrets.get("ADMIN_USER",  "ADMIN4477MAX")
-_ADMIN_PASS  = st.secrets.get("ADMIN_PASS",  "MOHIT1")
-_MEMBER_USER = st.secrets.get("MEMBER_USER", "max trades")
-_MEMBER_PASS = st.secrets.get("MEMBER_PASS", "max")
+_ADMIN_USER  = _secret("ADMIN_USER",  "ADMIN4477MAX")
+_ADMIN_PASS  = _secret("ADMIN_PASS",  "MOHIT1")
+_MEMBER_USER = _secret("MEMBER_USER", "max trades")
+_MEMBER_PASS = _secret("MEMBER_PASS", "max")
 
 def send_telegram(msg):
     try:
         requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
             data={"chat_id":CHAT_ID,"text":msg,"parse_mode":"HTML"}, timeout=5)
-    except: pass
+    except Exception: pass
 
 # ════════════════ DESIGN SYSTEM — TERMINAL v3 ════════════════════
 DARK   = "#000000"
@@ -326,7 +337,7 @@ def parse_csv(file):
     TradingView-style exports don't get double-suffixed downstream.
     """
     try: df = pd.read_csv(file, header=None)
-    except: return []
+    except Exception: return []
     syms = []
     for v in df.iloc[:,0].astype(str):
         v = v.strip()
@@ -721,7 +732,7 @@ else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=s;}
 # Terms are presented on the public landing page; authenticated users go
 # directly into the terminal. This avoids a session-reset disclaimer loop.
 
-# ════════════════ MAIN APP — ARKA TERMINAL v4 ════════════════
+# ════════════════ MAIN APP — ARKA TERMINAL v5 ════════════════
 # The authenticated workspace is a single terminal rather than a
 # permanent left-sidebar application. Search is the primary entry point;
 # the selected security becomes the context for chart/research/AI tools.
@@ -746,7 +757,10 @@ def _security_candidates(query: str):
         "ADANIPORTS", "TATASTEEL", "JSWSTEEL", "NTPC", "POWERGRID", "ONGC",
         "COALINDIA", "BEL", "HAL", "RVNL", "IRFC", "TRENT", "PERSISTENT",
     ]
-    for source in (st.session_state.get("watchlist", []), st.session_state.get("admin_watchlist", [])):
+    # Watchlists and portfolio holdings are also searchable.
+    for source in (st.session_state.get("watchlist", []),
+                   st.session_state.get("admin_watchlist", []),
+                   ud.holding_symbols()):
         for x in source:
             if x and x.upper() not in base:
                 base.append(x.upper())
@@ -780,13 +794,15 @@ def _market_cell(label, data):
 
 
 MODULE_INFO = [
+    # NEW — personal modules first
+    ("WATCHLIST", "Add NSE stocks by symbol or company name. Saved automatically, with live price, RSI and PDH/PDL status for each name.", "High", "Your permanent list of stocks to track — open, analyse or remove in one click."),
+    ("PORTFOLIO", "Record buy lots, track live P&L, day P&L and allocation, with a yellow news light on holdings that have fresh headlines.", "Core", "Know where you stand and when one of your holdings is in the news."),
     ("WATCHLIST SCANNER", "Scan your saved universe for PDH/PDL breaks, momentum, RSI and volume conditions.", "High", "Fast daily trade discovery from your own symbols."),
     ("ALERTS", "Monitor price, PDH and PDL conditions and deliver configured Telegram notifications.", "High", "Prevents you from having to watch every level manually."),
     ("RESEARCH", "Deep company workspace covering financials, earnings, valuation, ownership, peers, risk, news and technicals.", "Core", "Use before making a research decision; keeps company context in one place."),
     ("ARKA AI", "AI-assisted chart and market analysis that works with the currently selected security context.", "Advanced", "Turns terminal data and your trading rules into an analysis workflow."),
     ("SMART SCREENER", "Build rule-based screens using price, trend, RSI, volume and fundamental conditions.", "High", "Finds candidates across a universe instead of checking stocks one by one."),
     ("MARKET BREADTH", "See advancing/declining participation, breadth ratios and market-level internals.", "Core", "Provides market context before interpreting an individual stock signal."),
-    # NEW
     ("MONEY FLOW", "Sector ranking, rotation quadrant, index advance/decline and FII/DII flows across NSE indices.", "Core", "See where money is moving before picking stocks."),
 ]
 
@@ -816,13 +832,15 @@ def _render_module_directory():
     st.markdown('<div class="module-directory-spacer"></div>', unsafe_allow_html=True)
     st.markdown('<div class="module-directory-title">TERMINAL MODULE DIRECTORY · PURPOSE / IMPORTANCE / USE</div>', unsafe_allow_html=True)
     targets = {
+        "WATCHLIST": "watchlist",              # NEW
+        "PORTFOLIO": "portfolio",              # NEW
         "WATCHLIST SCANNER": "scanner",
         "ALERTS": "alerts",
         "RESEARCH": "research",
         "ARKA AI": "analysis",
         "SMART SCREENER": "smart_scan",
         "MARKET BREADTH": "breadth",
-        "MONEY FLOW": "flow",          # NEW
+        "MONEY FLOW": "flow",
     }
     cols = st.columns(3)
     for i, (label, purpose, importance, use) in enumerate(MODULE_INFO):
@@ -983,10 +1001,14 @@ def _render_security_workspace(symbol: str):
             "Full fundamentals are in the research panel below.")
         st.markdown(f'<div class="company-desc">{desc}</div>', unsafe_allow_html=True)
         if st.button("ADD TO WATCHLIST", use_container_width=True, key=f"sec_wl_{symbol}"):
-            if symbol not in st.session_state.watchlist:
-                st.session_state.watchlist.append(symbol)
-                db_save_watchlist(st.session_state.watchlist)
+            # Inserts just this symbol (no delete-everything-then-reinsert).
+            added, err = ud.add_symbols(supabase, [symbol], ud.W_TABLE)
+            if added:
                 st.success(f"{symbol} added to watchlist")
+            elif not err:
+                st.info(f"{symbol} is already in your watchlist")
+            if err:
+                (st.warning if added else st.error)(err)
 
     # Full research panel (lazy, fragment-isolated: switching sections does not rerun the chart)
     st.markdown('<div class="panel-title" style="margin-top:14px">RESEARCH WORKSPACE</div>', unsafe_allow_html=True)
@@ -1003,14 +1025,19 @@ def _render_dashboard():
         if d:
             c = GREEN if d["chg"] >= 0 else RED
             rows.append(f'<div class="monitor-row monitor-click-row"><span>{sym}</span><span>₹{d["price"]:,.2f}</span><span style="color:{c}">{d["chg"]:+.2f}%</span></div>')
-    watch_html = ''.join(rows) if rows else '<div style="padding:12px;color:#666;font-size:10px;font-family:JetBrains Mono,monospace;">NO WATCHLIST LOADED · OPEN WATCHLIST SCANNER</div>'
+    watch_html = ''.join(rows) if rows else '<div style="padding:12px;color:#666;font-size:10px;font-family:JetBrains Mono,monospace;">NO WATCHLIST YET · OPEN THE WATCHLIST MODULE TO ADD STOCKS</div>'
     adv = sum(1 for s in all_syms if quotes.get(s) and quotes[s]["chg"] > 0.05)
     dec = sum(1 for s in all_syms if quotes.get(s) and quotes[s]["chg"] < -0.05)
     flat = sum(1 for s in all_syms if quotes.get(s) and abs(quotes[s]["chg"]) <= 0.05)
     ratio = (adv / dec) if dec else (float(adv) if adv else 0)
-    st.markdown(f'''<div class="monitor-grid"><div class="monitor-panel"><div class="monitor-head"><span>WATCHLIST MONITOR</span><span>{len(wl)} NAMES · FAST CACHE</span></div>{watch_html}</div><div class="monitor-panel"><div class="monitor-head"><span>MARKET INTERNALS</span><span>{len(all_syms)} SAMPLE</span></div><div class="monitor-row"><span>ADVANCING</span><span>{adv}</span><span class="small-positive">▲</span></div><div class="monitor-row"><span>DECLINING</span><span>{dec}</span><span class="small-negative">▼</span></div><div class="monitor-row"><span>UNCHANGED</span><span>{flat}</span><span style="color:#777">—</span></div><div class="monitor-row"><span>A/D RATIO</span><span>{ratio:.2f}</span><span style="color:#888">RATIO</span></div></div><div class="monitor-panel"><div class="monitor-head"><span>TERMINAL FUNCTIONS</span><span>QUICK ACCESS</span></div><div class="monitor-row"><span>SEARCH SECURITY</span><span>CMD</span><span style="color:{AMBER}">LOAD</span></div><div class="monitor-row"><span>RESEARCH</span><span>MODULE</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>ARKA AI</span><span>MODULE</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>SCREENER</span><span>MODULE</span><span style="color:{AMBER}">OPEN</span></div></div></div>''', unsafe_allow_html=True)
+    st.markdown(f'''<div class="monitor-grid"><div class="monitor-panel"><div class="monitor-head"><span>WATCHLIST MONITOR</span><span>{len(wl)} NAMES · FAST CACHE</span></div>{watch_html}</div><div class="monitor-panel"><div class="monitor-head"><span>MARKET INTERNALS</span><span>{len(all_syms)} SAMPLE</span></div><div class="monitor-row"><span>ADVANCING</span><span>{adv}</span><span class="small-positive">▲</span></div><div class="monitor-row"><span>DECLINING</span><span>{dec}</span><span class="small-negative">▼</span></div><div class="monitor-row"><span>UNCHANGED</span><span>{flat}</span><span style="color:#777">—</span></div><div class="monitor-row"><span>A/D RATIO</span><span>{ratio:.2f}</span><span style="color:#888">RATIO</span></div></div><div class="monitor-panel"><div class="monitor-head"><span>TERMINAL FUNCTIONS</span><span>QUICK ACCESS</span></div><div class="monitor-row"><span>SEARCH SECURITY</span><span>CMD</span><span style="color:{AMBER}">LOAD</span></div><div class="monitor-row"><span>WATCHLIST</span><span>MODULE</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>PORTFOLIO</span><span>MODULE</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>RESEARCH</span><span>MODULE</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>ARKA AI</span><span>MODULE</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>SCREENER</span><span>MODULE</span><span style="color:{AMBER}">OPEN</span></div></div></div>''', unsafe_allow_html=True)
 
 def _news_watchlist_for_rail():
+    # NEW: on the Portfolio page the rail follows your holdings.
+    if st.session_state.get("page") == "portfolio":
+        held = ud.holding_symbols()
+        if held:
+            return held, "YOUR PORTFOLIO"
     source_key = st.session_state.get("active_news_source", "admin")
     primary_key = "admin_watchlist" if source_key == "admin" else "watchlist"
     wl = st.session_state.get(primary_key, [])
@@ -1031,7 +1058,8 @@ if pg in {"home", "security"}:
     _render_terminal_header(show_indices=True)
 else:
     module_titles = {"scanner":"WATCHLIST SCANNER","alerts":"ALERTS","research":"RESEARCH","analysis":"ARKA AI","smart_scan":"SMART SCREENER","breadth":"MARKET BREADTH",
-                     "flow":"MONEY FLOW"}      # NEW
+                     "flow":"MONEY FLOW",
+                     "watchlist":"WATCHLIST","portfolio":"PORTFOLIO"}      # NEW
     if pg in module_titles:
         _render_module_page_header(module_titles[pg])
 
@@ -1055,7 +1083,7 @@ def _news_rail_fragment():
         </div>""", unsafe_allow_html=True)
     watchlist_for_news, rail_label = _news_watchlist_for_rail()
     if not watchlist_for_news:
-        st.markdown(f'<div style="font-size:11px;color:{T2};padding:8px 4px;">Macro/global news updates below. Add a watchlist in Scanner for stock-specific news.</div>',unsafe_allow_html=True)
+        st.markdown(f'<div style="font-size:11px;color:{T2};padding:8px 4px;">Macro/global news updates below. Add stocks in the Watchlist module for stock-specific news.</div>',unsafe_allow_html=True)
     render_news_rail(watchlist_for_news, label=rail_label)
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1070,6 +1098,31 @@ with center:
             _render_dashboard()
         else:
             _render_security_workspace(active)
+
+    # ───────────── NEW: WATCHLIST ─────────────
+    elif pg == "watchlist":
+        try:
+            from watchlist_page import render_watchlist
+        except Exception as e:
+            st.error(f"Watchlist module failed to load: {e}")
+        else:
+            try:
+                render_watchlist(supabase, on_open=_open_security, is_admin=IS_ADMIN)
+            except Exception as e:
+                st.error(f"Watchlist module error: {e}")
+
+    # ───────────── NEW: PORTFOLIO ─────────────
+    elif pg == "portfolio":
+        try:
+            from portfolio_page import render_portfolio
+        except Exception as e:
+            st.error(f"Portfolio module failed to load: {e}")
+        else:
+            try:
+                render_portfolio(supabase, on_open=_open_security)
+            except Exception as e:
+                st.error(f"Portfolio module error: {e}")
+
     elif pg == "scanner":
         if not st.session_state.admin_watchlist:
             awl = db_load_admin_watchlist()
@@ -1084,7 +1137,9 @@ with center:
             sc3.caption("Batched · cached 30s")
             scanbtn=sc4.button("Run Scan",use_container_width=True,type="primary",key=f"scan_v4_{key_prefix}")
             if scanbtn:
-                st.session_state["active_news_source"]=key_prefix
+                # FIX: the news rail only understands "admin" / "yours". The raw key_prefix
+                # ("admin_v4" / "yours_v4") never matched, so the rail showed the wrong list.
+                st.session_state["active_news_source"]="admin" if key_prefix.startswith("admin") else "yours"
                 if fresh: scan_batch.clear()
                 with st.spinner(f"Scanning {len(syms)} stocks…"):
                     data = scan_batch(tuple(syms))      # ONE batched download, not 2 calls per stock
@@ -1119,21 +1174,23 @@ with center:
         tab1,tab2=st.tabs(["Arka Watchlist","Your Watchlist"])
         with tab1:
             if IS_ADMIN:
-                uploaded_admin=st.file_uploader("Upload Arka Watchlist",type=["csv","txt"],key="admin_upload_v4")
+                uploaded_admin=st.file_uploader("Upload Arka Watchlist (replaces the current Arka list)",type=["csv","txt"],key="admin_upload_v4")
                 if uploaded_admin:
                     syms=parse_csv(uploaded_admin)
                     if syms and db_save_admin_watchlist(syms): st.success(f"Arka Watchlist updated — {len(syms)} stocks.")
+                st.caption("To add or remove single stocks, use the WATCHLIST module → ARKA DESK LIST tab.")
             syms=st.session_state.admin_watchlist
             if syms: render_scan_results(syms,"admin_v4")
             else: st.info("Arka Watchlist not available yet.")
         with tab2:
-            uploaded_yours=st.file_uploader("Upload Your Watchlist (CSV or TXT)",type=["csv","txt"],key="your_upload_v4")
+            uploaded_yours=st.file_uploader("Upload Your Watchlist (CSV or TXT) — replaces your current saved list",type=["csv","txt"],key="your_upload_v4")
             if uploaded_yours:
                 syms=parse_csv(uploaded_yours)
                 if syms and db_save_watchlist(syms): st.success(f"{len(syms)} stocks loaded and saved.")
+            st.caption("To add or remove single stocks, use the WATCHLIST module.")
             syms=st.session_state.watchlist
             if syms: render_scan_results(syms,"yours_v4")
-            else: st.info("Upload your TradingView watchlist above to start scanning.")
+            else: st.info("Add stocks in the WATCHLIST module (or upload a TradingView file above) to start scanning.")
     elif pg == "alerts":
         active_alerts={s:a for s,a in st.session_state.alerts.items() if a.get("active")}
         a1,a2,a3=st.columns(3); a1.metric("Active Alerts",len(active_alerts)); a2.metric("Triggered Today",len(st.session_state.alert_fired)); a3.metric("Delivery","Telegram")
@@ -1175,7 +1232,7 @@ with center:
             from breadth_page import render_market_breadth
             render_market_breadth()
         except Exception as e: st.error(f"Market Breadth module failed to load: {e}")
-    elif pg == "flow":                                  # NEW
+    elif pg == "flow":
         try:
             render_money_flow(on_open=_open_security)
         except Exception as e: st.error(f"Money Flow module failed to load: {e}")
