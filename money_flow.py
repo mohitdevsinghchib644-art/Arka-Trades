@@ -23,7 +23,9 @@ v4
 * RS percentile ratings removed everywhere; RSI(14) + EMA 10/20/50/200 position (green = price above, red = below)
   and % distance from the 10 / 20 EMA added.
 * New rotation radar: RRG-style relative rotation vs NIFTY 50 / MIDCAP 100 / SMALLCAP 100, a transparent 0-100
-  rotation score and stage labels (ROTATING IN / LEADING / EXTENDED / IMPROVING / WEAKENING / LAGGING).
+  rotation score and stage labels (ROTATING IN / LEADING / EXTENDED / IMPROVING / FADING / WEAK).
+* v4.1: plain-English rotation board (four lanes), 'what changed' list, money-leaning chart and a readable map
+  (arrows instead of spaghetti trails); MARKET AVG benchmark added and made the default.
 * Professional table + chart styling (mf_ui.py). The sector ranking now also works when NSE's live API is blocked.
 """
 from __future__ import annotations
@@ -62,7 +64,7 @@ SCOPES = {
     "SECTORAL + THEMATIC": ("SECTORAL", "THEMATIC"),
     "BROAD MARKET": ("BROAD MARKET", "BROADMARKET"), "ALL INDICES": (),
 }
-QUAD = {"LEADING": "#32d296", "WEAKENING": "#f7b84b", "LAGGING": "#ff6969", "IMPROVING": "#57b8ff"}
+QUAD = {"LEADING": "#32d296", "FADING": "#f7b84b", "WEAK": "#ff6969", "IMPROVING": "#57b8ff"}
 SIGNAL_COLOR = {"BROAD PARTICIPATION": "#32d296", "NARROW LEADERSHIP": "#f7b84b",
                 "HEAVYWEIGHTS DRAGGING": "#f7b84b", "BROAD SELLING": "#ff6969",
                 "MIXED": "#9ca3af", "UNAVAILABLE": "#9ca3af"}
@@ -612,7 +614,7 @@ def rank_sectors(indices, scope="SECTORAL"):
 
     def quadrant(r):
         if pd.isna(r.rot_x) or pd.isna(r.rot_y): return "UNAVAILABLE"
-        return ("LEADING" if r.rot_y >= 100 else "WEAKENING") if r.rot_x >= 100 else ("IMPROVING" if r.rot_y >= 100 else "LAGGING")
+        return ("LEADING" if r.rot_y >= 100 else "FADING") if r.rot_x >= 100 else ("IMPROVING" if r.rot_y >= 100 else "WEAK")
 
     def leadership(r):
         if pd.isna(r.rs_1w) or pd.isna(r.rs_1m): return "—"
@@ -916,7 +918,7 @@ def _render_nifty_indices(indices):
 
 
 # ═════════════════════════ SECTOR RANKING (stock universe) ═════════════════════════
-_SHORT = {"NIFTY 50": "NIFTY 50", "MIDCAP 100": "MIDCAP 100", "SMALLCAP 100": "SMALLCAP 100"}
+_BSHORT = {"MARKET AVG": "MKT", "NIFTY 50": "N50", "MIDCAP 100": "MID100", "SMALLCAP 100": "SML100"}
 _VIEWS = ["ROTATION RADAR", "SECTOR RANKING", "TREND · RSI & EMA", "VS BENCHMARKS", "TURNOVER A/D", "SECTOR TURNOVER", "CHAIKIN MONEY FLOW"]
 
 
@@ -938,37 +940,134 @@ def _plot(fig, key, fallback_df=None):
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=key)
 
 
+def _plain_summary(rot, bench) -> str:
+    pick = lambda stg, n=4: rot.loc[rot.stage == stg, "sector"].head(n).tolist()
+    rin, imp, lead, ext, fade = pick("ROTATING IN"), pick("IMPROVING"), pick("LEADING"), pick("EXTENDED"), pick("FADING")
+    n_rin = int((rot.stage == "ROTATING IN").sum())
+    parts = []
+    if rin:
+        parts.append(f'<b style="color:{ui.GREEN}">{n_rin} sector{"s" if n_rin != 1 else ""} rotating in</b>: {ui.esc(", ".join(rin))}.')
+    else:
+        parts.append("<b>No sector is confirmed as rotating in today.</b>")
+    if imp:
+        parts.append(f'Catching up (watch list): <b style="color:{ui.CYAN}">{ui.esc(", ".join(imp))}</b>.')
+    if lead:
+        parts.append(f'Already leading: <b style="color:#8AD66B">{ui.esc(", ".join(lead))}</b>.')
+    if ext:
+        parts.append(f'Stretched, often pause first: <b style="color:{ui.YELLOW}">{ui.esc(", ".join(ext))}</b>.')
+    if fade:
+        parts.append(f'Losing steam: <b style="color:{ui.AMBER}">{ui.esc(", ".join(fade))}</b>.')
+    return f'<div class="mf-sum">{" ".join(parts)} <span style="color:#6f6f6f">(measured against {ui.esc(bench)})</span></div>'
+
+
+def _events(rot) -> list:
+    """Sectors that changed lane in the last 5 / 10 sessions, improvements first."""
+    out = []
+    for r in rot.to_dict("records"):
+        src = r.get("moved_from")
+        if not src or r.get("quadrant") not in ui.LANE_VALUE:
+            continue
+        to = r["quadrant"]
+        r = dict(r)
+        r["move_html"] = f'{ui.stage_pill(src)} <span style="color:#777">→</span> {ui.stage_pill(to)}'
+        r["when_txt"] = f'last {int(r["moved_when"])} sessions'
+        r["_up"] = bool(r.get("moved_up"))
+        out.append(r)
+    out.sort(key=lambda r: (not r["_up"], -(r.get("score") or 0)))
+    return out
+
+
+def _key_labels(df, extra=(), n_top=7, n_bottom=3):
+    names = df.sort_values("score", ascending=False, na_position="last")["sector"].tolist()
+    return list(dict.fromkeys(names[:n_top] + names[-n_bottom:] + list(extra)))
+
+
+def _map_controls(prefix, df, default_hl, extra_labels=()):
+    """Names / trails pickers so the map stays readable. Returns (highlight list, label list or None)."""
+    mode = st.radio("Names on the map", ["Key sectors", "All sectors", "None"], horizontal=True, key=f"{prefix}_lbl")
+    options = df["sector"].tolist()
+    k = f"{prefix}_hl"
+    st.session_state[k] = [v for v in st.session_state.get(k, default_hl) if v in options]
+    hl = st.multiselect("Show the full 30-session trail for", options, key=k)
+    labels = None if mode == "All sectors" else [] if mode == "None" else _key_labels(df, extra_labels)
+    return hl, labels
+
+
 def _view_radar(rot, trails, res, bench):
+    st.markdown(ui.how_to_read(bench), unsafe_allow_html=True)
+    st.markdown(_plain_summary(rot, bench), unsafe_allow_html=True)
     stages = rot["stage"].value_counts()
     names = lambda s: ", ".join(rot.loc[rot.stage == s, "sector"].head(3)) or "none right now"
-    kp = [("Rotating in", int(stages.get("ROTATING IN", 0)), names("ROTATING IN"), ui.GREEN),
+    kp = [("★ Rotating in", int(stages.get("ROTATING IN", 0)), names("ROTATING IN"), ui.GREEN),
           ("Leading", int(stages.get("LEADING", 0)), names("LEADING"), "#8AD66B"),
           ("Improving", int(stages.get("IMPROVING", 0)), names("IMPROVING"), ui.CYAN),
-          ("Extended", int(stages.get("EXTENDED", 0)), names("EXTENDED"), ui.YELLOW),
-          ("Weakening", int(stages.get("WEAKENING", 0)), names("WEAKENING"), ui.AMBER),
-          ("Lagging", int(stages.get("LAGGING", 0)), names("LAGGING"), ui.RED)]
+          ("Stretched", int(stages.get("EXTENDED", 0)), names("EXTENDED"), ui.YELLOW),
+          ("Fading", int(stages.get("FADING", 0)), names("FADING"), ui.AMBER),
+          ("Weak", int(stages.get("WEAK", 0)), names("WEAK"), ui.RED)]
     st.markdown(ui.kpi_strip(kp), unsafe_allow_html=True)
 
-    st.markdown(f'<div class="arka-mf-section">SECTORS TURNING UP · CONFIRMED BY TREND, MOMENTUM, RELATIVE STRENGTH vs {bench}, BREADTH AND FLOW</div>', unsafe_allow_html=True)
+    # 1 ── candidates
+    st.markdown('<div class="arka-mf-section">1 · SECTORS TURNING UP · CONFIRMED BY TREND, MOMENTUM, STRENGTH vs THE BENCHMARK, BREADTH AND FLOW</div>', unsafe_allow_html=True)
     top = rot[rot.stage == "ROTATING IN"].head(3)
     if len(top) < 3:
         extra = rot[rot.stage.isin(["IMPROVING", "LEADING"]) & ~rot.sector.isin(top.sector)].head(3 - len(top))
         if top.empty:
-            st.info("No sector shows a confirmed fresh turn today (ROTATING IN needs a new 20-EMA reclaim / RSI-50 cross / 10-20 EMA cross / RS turn, "
-                    "price above the 20-EMA, RSI 50+, not stretched, score 55+). Showing the strongest improving / leading sectors instead.")
+            st.info("No sector shows a confirmed fresh turn today. ROTATING IN needs a new 20-EMA reclaim / RSI-50 cross / 10-20 EMA cross / relative-strength turn, "
+                    "price above the 20-EMA, RSI 50+, not stretched, and a score of 55+. Showing the strongest improving / leading sectors instead.")
         top = pd.concat([top, extra])
     if not top.empty:
         st.markdown('<div class="mf-picks">' + "".join(ui.pick_card(r, bench) for r in top.to_dict("records")) + "</div>", unsafe_allow_html=True)
 
-    st.markdown('<div class="arka-mf-section">ROTATION RADAR · ALL SECTORS</div>', unsafe_allow_html=True)
+    # 2 ── board
+    st.markdown(f'<div class="arka-mf-section">2 · ROTATION BOARD · EVERY SECTOR IN ITS LANE vs {bench}</div>', unsafe_allow_html=True)
+    st.markdown(ui.rotation_board(rot.to_dict("records")), unsafe_allow_html=True)
+
+    # 3 ── what changed
+    st.markdown('<div class="arka-mf-section">3 · WHAT CHANGED · SECTORS THAT SWITCHED LANE RECENTLY</div>', unsafe_allow_html=True)
+    ev = _events(rot)
+    if ev:
+        ui.show_table([ui.C("Sector", "sector", "sector"), ui.C("Move", "move_html", "html", al=""), ui.C("Happened within", "when_txt", "text"),
+                       ui.C("Score", "score", "score"), ui.C("1W", "r1w", "pct", scale=4.0), ui.C("RSI", "rsi_d", "rsi")], ev, max_height=360)
+    else:
+        st.markdown('<div class="arka-mf-note">No sector has changed lane in the last 10 sessions: the rotation picture is stable.</div>', unsafe_allow_html=True)
+
+    # 4 ── money moving
+    st.markdown(f'<div class="arka-mf-section">4 · WHERE MONEY IS LEANING · EXTRA RETURN vs {bench} (PERCENTAGE POINTS)</div>', unsafe_allow_html=True)
+    win = st.radio("Window", ["1 week", "2 weeks", "1 month"], index=1, horizontal=True, key="mf_sr_money_win")
+    col = {"1 week": "ex1w", "2 weeks": "ex2w", "1 month": "ex1m"}[win]
+    d = rot.dropna(subset=[col]).sort_values(col, ascending=False)
+    if not d.empty:
+        vals = d[col].astype(float).tolist()
+        fig = ui.fig_hbar(d["sector"].tolist(), vals, [ui.GREEN if v >= 0 else ui.RED for v in vals])
+        if fig is None:
+            st.bar_chart(d.set_index("sector")[col], horizontal=True)
+        else:
+            _plot(fig, "mf_sr_money")
+    st.markdown('<div class="arka-mf-note">Green = the sector beat the benchmark over this window, red = it trailed. Sectors that move from red to green are where buying interest '
+                'is arriving; this is price evidence, not a record of who bought.</div>', unsafe_allow_html=True)
+
+    # 5 ── map
+    st.markdown(f'<div class="arka-mf-section">5 · ROTATION MAP vs {bench} · DOTS = TODAY, ARROWS = LAST 10 SESSIONS, BIGGER DOT = HIGHER SCORE</div>', unsafe_allow_html=True)
+    default_hl = rot[rot.stage.isin(["ROTATING IN", "IMPROVING"])]["sector"].head(3).tolist()
+    hl, labels = _map_controls("mf_sr_map", rot, default_hl, rot[rot.stage == "ROTATING IN"]["sector"].tolist())
+    fig = ui.fig_rrg(rot, trails, hl, labels)
+    if fig is None:
+        _rotation_chart(rot.rename(columns={"sector": "index", "rrg_x": "rot_x", "rrg_y": "rot_y"}))
+    else:
+        _plot(fig, "mf_sr_rrg")
+    st.markdown('<div class="arka-mf-note">Hover any dot for details. Colour = stage (green rotating in / leading, cyan improving, yellow stretched, amber fading, red weak). '
+                'An arrow pointing up and to the right means the sector is gaining on the benchmark.</div>', unsafe_allow_html=True)
+
+    # 6 ── details
+    st.markdown('<div class="arka-mf-section">6 · DETAILS · ALL SECTORS WITH THE NUMBERS BEHIND THE STAGES</div>', unsafe_allow_html=True)
     opts = {"Rotation score": ("score", False), "1D %": ("r1d", False), "1W %": ("r1w", False), "1M %": ("r1m", False),
-            "RSI (daily)": ("rsi_d", False), "Distance from 20-EMA": ("dist20", False), "RS-Momentum": ("rrg_y", False),
+            "RSI (daily)": ("rsi_d", False), "Distance from 20-EMA": ("dist20", False), "Momentum": ("rrg_y", False),
             "Turnover share Δ (1W)": ("dshare_w", False)}
     rows = _sorted_records(rot, "radar", opts, "Rotation score")
     cols = [ui.C("#", t="rank"), ui.C("Sector", "sector", "sector", sub="stocks", sub_fmt="{} stocks"),
             ui.C("Stage", "stage", "stage"), ui.C("Score", "score", "score", tip="0-100 rotation score (see methodology)"),
-            ui.C("RS-Ratio", "rrg_x", "num", d=1, tip=f"Relative trend vs {bench}: above 100 = outperforming its own 50-session trend"),
-            ui.C("RS-Mom", "rrg_y", "num", d=1, tip="Is the relative trend accelerating? above 100 = yes"),
+            ui.C("Trend", "rrg_x", "num", d=1, tip=f"Relative trend vs {bench}: above 100 = beating its own 50-session average"),
+            ui.C("Momentum", "rrg_y", "num", d=1, tip="Is the relative trend speeding up? above 100 = yes"),
             ui.C("1D", "r1d", "pct", scale=2.0), ui.C("1W", "r1w", "pct", scale=4.0), ui.C("RSI", "rsi_d", "rsi"),
             ui.C("EMA 10·20·50·200", t="ema"), ui.C("vs 10", "dist10", "dist", scale=5.0), ui.C("vs 20", "dist20", "dist"),
             ui.C("Fresh signals", "signals", "tags"),
@@ -976,32 +1075,26 @@ def _view_radar(rot, trails, res, bench):
             ui.C("CMF", "cmf", "num", d=2, tip="Chaikin money flow (20)"), ui.C("Leaders (1W)", "leaders", "muted")]
     ui.show_table(cols, rows, max_height=760)
 
-    st.markdown(f'<div class="arka-mf-section">ROTATION MAP vs {bench} · TRAILS = LAST {se.TRAIL_LEN * se.TRAIL_STEP} SESSIONS (5-SESSION STEPS)</div>', unsafe_allow_html=True)
-    fig = ui.fig_rrg(rot, trails)
-    if fig is None:
-        _rotation_chart(rot.rename(columns={"sector": "index", "rrg_x": "rot_x", "rrg_y": "rot_y"}))
-    else:
-        _plot(fig, "mf_sr_rrg")
-    st.markdown('<div class="arka-mf-note">Sectors usually travel clockwise: IMPROVING (top-left) → LEADING (top-right) → WEAKENING (bottom-right) → LAGGING (bottom-left). '
-                'The early-rotation zone is a sector moving from LAGGING into IMPROVING and then crossing into LEADING, with its trail pointing up and right.</div>', unsafe_allow_html=True)
-
     with st.expander("HOW THE ROTATION SCORE AND STAGES WORK"):
         st.markdown(
             "**Sector index.** Equal-weight, daily-rebalanced average of the sector's stocks, so every sector is read like a chart.\n\n"
+            "**Which benchmark?** MARKET AVG (the average stock in the universe) is the fair yardstick for sector rotation. NIFTY 50 is weighted towards "
+            "a few large caps, so equal-weight sectors often look weak against it even in a healthy market; MIDCAP 100 and SMALLCAP 100 show the rotation "
+            "within those segments.\n\n"
             "**Score (0-100).** Trend 30 (above 20-EMA 10, above 50-EMA 10, 10-EMA over 20-EMA 5, 20-EMA over 50-EMA 5) · "
             "Momentum 20 (RSI above 50: 10, RSI rising over 5 sessions: 5, RSI not above 75: 5) · "
-            "Relative strength 25 (RS-Ratio at or above 100: 10, RS-Momentum at or above 100: 10, RS line above its 20-EMA: 5) · "
+            "Relative strength 25 (Trend at or above 100: 10, Momentum at or above 100: 10, relative line above its 20-EMA: 5) · "
             "Breadth 15 (half or more of the stocks above their 20-EMA: 8, that share rising over 5 sessions: 7) · "
             "Flow 10 (Chaikin money flow above zero: 5, turnover share up over the week: 5).\n\n"
-            "**Stages.** ROTATING IN = leading or improving quadrant + a fresh turn in the last 5-10 sessions (20-EMA reclaim, RSI back above 50, "
-            "10/20-EMA cross or the RS line crossing up) + price above the 20-EMA + RSI 50 or more + not stretched + score 55 or more. "
-            "LEADING = trend intact. EXTENDED = leading but more than 6% above the 20-EMA or RSI above 72 (moves like this often pause first). "
-            "IMPROVING = relative momentum is turning up but price has not confirmed. WEAKENING / LAGGING = outperformance fading / underperforming.\n\n"
-            "**RS-Ratio / RS-Momentum.** RRG-style and simplified (not the licensed JdK RRG): RS line = sector index ÷ benchmark; "
-            "RS-Ratio = 100 × RS ÷ its 50-session average; RS-Momentum = RS-Ratio ÷ its value 10 sessions ago × 100.\n\n"
-            "**Use it as a shortlist.** These are signals from price, breadth and volume, not forecasts or advice: "
-            "check the leader stocks on a chart, consider position size and where you would be wrong, and remember equal-weight sector "
-            "indices differ from NSE's official sector indices.")
+            "**Lanes.** LEADING = beating the benchmark and speeding up · IMPROVING = behind but catching up · FADING = still ahead but losing steam · "
+            "WEAK = behind and falling further behind.\n\n"
+            "**Stages.** ★ ROTATING IN = LEADING or IMPROVING lane + a fresh turn in the last 5-10 sessions (20-EMA reclaim, RSI back above 50, "
+            "10/20-EMA cross or the relative line crossing up) + price above the 20-EMA + RSI 50 or more + not stretched + score 55 or more. "
+            "LEADING = trend intact. STRETCHED (EXTENDED) = leading but more than 6% above the 20-EMA or RSI above 72, which often pauses first.\n\n"
+            "**Trend / Momentum.** RRG-style and simplified (not the licensed JdK RRG): relative line = sector index ÷ benchmark; "
+            "Trend = 100 × relative line ÷ its 50-session average; Momentum = Trend ÷ its value 10 sessions ago × 100.\n\n"
+            "**Use it as a shortlist.** These are signals from price, breadth and volume, not forecasts or advice: check the leader stocks on a chart, "
+            "think about position size and where you would be wrong, and remember equal-weight sector indices differ from NSE's official sector indices.")
 
 
 def _view_ranking(rot, bench):
@@ -1012,7 +1105,7 @@ def _view_ranking(rot, bench):
     cols = [ui.C("#", t="rank"), ui.C("Sector", "sector", "sector", sub="stocks", sub_fmt="{} stocks"),
             ui.C("30D", "spark", "spark"),
             ui.C("1D", "r1d", "pct", scale=2.0), ui.C("1W", "r1w", "pct", scale=4.0), ui.C("1M", "r1m", "pct", scale=8.0),
-            ui.C("3M", "r3m", "pct", scale=15.0), ui.C(f"vs {bench[:9]} 1M", "ex1m", "pct", scale=6.0, tip="Excess return vs the benchmark, percentage points"),
+            ui.C("3M", "r3m", "pct", scale=15.0), ui.C(f"vs {_BSHORT.get(bench, bench)} 1M", "ex1m", "pct", scale=6.0, tip="Excess return vs the benchmark, percentage points"),
             ui.C("RSI", "rsi_d", "rsi"), ui.C("EMA 10·20·50·200", t="ema"),
             ui.C("vs 10", "dist10", "dist", scale=5.0), ui.C("vs 20", "dist20", "dist"),
             ui.C("Turnover ₹Cr", "turnover_cr", "num", d=0), ui.C("Share %", "share", "num", d=2),
@@ -1055,7 +1148,7 @@ def _view_trend(rot):
 def _view_benchmarks(res, rot):
     rv, bret = se.returns_vs_benchmarks(res)
     srcs = res.get("bench_sources", {})
-    benches = list(res["bench_index"].columns)
+    benches = [b for b in se.COMPARE if b in res["bench_index"].columns]
     kp = [(b, f'{bret["1m"][b]:+.1f}%' if pd.notna(bret["1m"][b]) else "—",
            f'1M · 3M {bret["3m"][b]:+.1f}% · 1W {bret["1w"][b]:+.1f}%<br>{ui.esc(srcs.get(b, ""))}' if pd.notna(bret["3m"][b]) else ui.esc(srcs.get(b, "")),
            ui.BENCH_COLORS.get(b, ui.T2)) for b in benches]
@@ -1211,7 +1304,11 @@ def _render_sector_ranking(on_open=None):
     st.caption(f"As of {res['asof']} close · {res['n_stocks']} stocks in {len(res['sectors'])} sectors · "
                f"{len(res['unmapped'])} symbols had no Yahoo data · {len(res['stale'])} stale tickers skipped.")
 
-    bench = st.radio("Benchmark for relative strength", benches, horizontal=True, key="mf_sr_bench")
+    bench = st.radio("Compare sectors against", benches, horizontal=True, key="mf_sr_bench2")
+    st.caption({"MARKET AVG": "MARKET AVG = the average stock in the universe: the fair test of whether a sector is beating the market.",
+                "NIFTY 50": "NIFTY 50 is weighted towards a few large caps, so equal-weight sectors can look weak against it even in a healthy market.",
+                "MIDCAP 100": "Rotation measured against the mid-cap segment.",
+                "SMALLCAP 100": "Rotation measured against the small-cap segment."}.get(bench, ""))
     view = st.radio("View", _VIEWS, horizontal=True, key="mf_sr_view")
     try:
         rot, trails = se.rotation_table(res, bench)
@@ -1239,6 +1336,77 @@ def _render_sector_ranking(on_open=None):
         _view_cmf(rot, res)
     _drilldown(res, rot, on_open)
     st.caption("Evidence from price, breadth and volume for research and shortlisting, not investment advice.")
+
+
+def _render_index_rotation(sector, scope):
+    """SECTOR ROTATION tab (NSE sectoral / thematic indices): lanes first, numbers second."""
+    miss = int(sector[["r1w", "r1m"]].isna().any(axis=1).sum())
+    if miss:
+        st.warning(f"1-week and 1-month returns are missing for {miss} of {len(sector)} indices: NSE's live snapshot does not include them. "
+                   "Load them once (about a minute) and the lanes, map and table fill in.")
+        if st.button("LOAD 1W / 1M DATA FOR THESE INDICES", type="primary", key="mf_rot_load"):
+            names = list(dict.fromkeys(sector["index"].astype(str).tolist() + ["NIFTY 50"]))
+            bar = st.progress(0.0, text=f"Loading index history · 0 / {len(names)}")
+            loaded, attempted = load_index_histories(names, progress=lambda f, t: bar.progress(min(f, 1.0), text=t))
+            bar.empty()
+            st.rerun()
+    ready = sector.dropna(subset=["rot_x", "rot_y"]).copy()
+    st.markdown(ui.how_to_read("NIFTY 50").replace(" The arrow shows where the sector moved in the last 10 sessions.", ""), unsafe_allow_html=True)
+    if ready.empty:
+        st.info("The lanes and map appear as soon as 1W and 1M returns are loaded (button above). Until then only today's move is available.")
+    else:
+        ready["sector"] = ready["index"]
+        ready["stage"] = ready["quadrant"]
+        ready["score_plain"] = ready["score"]
+        ready["score"] = np.nan                                    # outperformance score is not a 0-100 score
+        ready["meta_extra"] = ready["rs_1w"].map(lambda v: f"vs N50 {v:+.1f}%" if pd.notna(v) else "")
+        pick = lambda lead, n=5: ready.loc[ready.leadership == lead, "sector"].head(n).tolist()
+        em, ld, fd = pick("EMERGING"), pick("LEADER"), pick("FADING")
+        parts = []
+        if em:
+            parts.append(f'<b style="color:{ui.CYAN}">Early rotation candidates</b> (ahead of NIFTY 50 this week, still behind this month): {ui.esc(", ".join(em))}.')
+        else:
+            parts.append("<b>No index is newly turning up against NIFTY 50.</b>")
+        if ld:
+            parts.append(f'Leading on both 1W and 1M: <b style="color:{ui.GREEN}">{ui.esc(", ".join(ld))}</b>.')
+        if fd:
+            parts.append(f'Ahead this month but slipping this week: <b style="color:{ui.AMBER}">{ui.esc(", ".join(fd))}</b>.')
+        st.markdown(f'<div class="mf-sum">{" ".join(parts)}</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="arka-mf-section">ROTATION BOARD · EVERY INDEX IN ITS LANE vs NIFTY 50</div>', unsafe_allow_html=True)
+        st.markdown(ui.rotation_board(ready.to_dict("records"), show_score=False), unsafe_allow_html=True)
+
+        st.markdown('<div class="arka-mf-section">ROTATION MAP · DOTS = TODAY (1M TREND, 1W MOMENTUM)</div>', unsafe_allow_html=True)
+        order = ready.sort_values("score_plain", ascending=False)["sector"].tolist()
+        mode = st.radio("Names on the map", ["Key indices", "All indices", "None"], horizontal=True, key="mf_ir_lbl")
+        labels = None if mode == "All indices" else [] if mode == "None" else list(dict.fromkeys(order[:6] + order[-3:] + em))
+        trails = {r["sector"]: [(float(r["rot_x"]), float(r["rot_y"]))] for r in ready.to_dict("records")}
+        fig = ui.fig_rrg(ready, trails, [], labels)
+        if fig is None:
+            _rotation_chart(sector)
+        else:
+            _plot(fig, "mf_ir_rrg")
+
+    st.markdown('<div class="arka-mf-section">DETAILS · OUTPERFORMANCE vs NIFTY 50</div>', unsafe_allow_html=True)
+    rows = sector.to_dict("records")
+    for r in rows:
+        r["lead_html"] = ('<span class="mf-stage" style="--sc:' +
+                          {"LEADER": "#30D158", "EMERGING": "#5AC8FA", "FADING": "#FF9F0A", "LAGGARD": "#FF453A"}.get(r["leadership"], "#5A5A5A") +
+                          f'">{ui.esc(r["leadership"])}</span>')
+        r["rot_html"] = _quad_pill(r["quadrant"])
+    cols = [ui.C("#", "rank", "num", d=0), ui.C("Index", "index", "sector"), ui.C("Last", "last", "num"),
+            ui.C("1D", "r1d", "pct", scale=2.0), ui.C("1W", "r1w", "pct", scale=4.0), ui.C("1M", "r1m", "pct", scale=8.0),
+            ui.C("vs N50 1W", "rs_1w", "pct", scale=3.0), ui.C("vs N50 1M", "rs_1m", "pct", scale=6.0),
+            ui.C("Outperf. score", "score", "num", d=2), ui.C("Adv", "advances", "int"), ui.C("Dec", "declines", "int"),
+            ui.C("Leadership", "lead_html", "html"), ui.C("Lane", "rot_html", "html")]
+    ui.show_table(cols, rows, max_height=700)
+    st.markdown('<div class="arka-mf-note">Outperformance score = 20% 1D + 30% 1W + 50% 1M return versus NIFTY 50 (re-weighted over the periods that have data). '
+                'LEADER = ahead on both 1W and 1M · EMERGING = ahead on 1W only · FADING = ahead on 1M only · LAGGARD = behind on both. '
+                'Descriptive, not predictive. For the full stock-based radar with RSI, EMAs and stages, open SECTOR RANKING.</div>', unsafe_allow_html=True)
+    chart = sector.set_index("index").score.dropna().sort_values()
+    if not chart.empty:
+        st.markdown("**OUTPERFORMANCE SCORE**")
+        st.bar_chart(chart, horizontal=True)
 
 
 # ═════════════════════════ MAIN ═════════════════════════
@@ -1334,30 +1502,7 @@ def render_money_flow(on_open=None):
         if sector.empty:
             st.info("No matching index records or NIFTY 50 reference levels are available.")
         else:
-            st.caption("Outperformance score = 20% 1D + 30% 1W + 50% 1M return versus NIFTY 50, re-weighted over the periods that have data "
-                       "(press LOAD INDEX HISTORY if 1W/1M show —). Descriptive, not predictive. "
-                       "LEADER = ahead of NIFTY 50 on both 1W and 1M · EMERGING = ahead on 1W only · FADING = ahead on 1M only · LAGGARD = behind on both. "
-                       "For the full stock-based rotation radar with RSI, EMAs and stages, open SECTOR RANKING.")
-            rows = sector.to_dict("records")
-            for r in rows:
-                r["lead_html"] = f'<span class="mf-stage" style="--sc:{ {"LEADER": "#30D158", "EMERGING": "#5AC8FA", "FADING": "#FF9F0A", "LAGGARD": "#FF453A"}.get(r["leadership"], "#5A5A5A") }">{ui.esc(r["leadership"])}</span>'
-                r["rot_html"] = _quad_pill(r["quadrant"])
-            cols = [ui.C("#", "rank", "num", d=0), ui.C("Index", "index", "sector"), ui.C("Last", "last", "num"),
-                    ui.C("1D", "r1d", "pct", scale=2.0), ui.C("1W", "r1w", "pct", scale=4.0), ui.C("1M", "r1m", "pct", scale=8.0),
-                    ui.C("vs N50 1W", "rs_1w", "pct", scale=3.0), ui.C("vs N50 1M", "rs_1m", "pct", scale=6.0),
-                    ui.C("Score", "score", "num", d=2), ui.C("Adv", "advances", "int"), ui.C("Dec", "declines", "int"),
-                    ui.C("Leadership", "lead_html", "html"), ui.C("Rotation", "rot_html", "html")]
-            ui.show_table(cols, rows, max_height=700)
-            emerging = sector[sector.leadership.eq("EMERGING")]["index"].tolist()
-            fading = sector[sector.leadership.eq("FADING")]["index"].tolist()
-            if emerging or fading:
-                st.markdown(f'<div class="arka-mf-note"><b>Leadership change to investigate</b> — Emerging: {", ".join(emerging[:8]) or "none"} · '
-                            f'Fading: {", ".join(fading[:8]) or "none"}. Open INDEX EXPLORER to see which stocks are driving it.</div>', unsafe_allow_html=True)
-            st.markdown("**OUTPERFORMANCE SCORE**")
-            chart = sector.set_index("index").score.dropna().sort_values()
-            if not chart.empty: st.bar_chart(chart, horizontal=True)
-            st.markdown("**ROTATION QUADRANT · SIMPLIFIED RRG-STYLE MAP**")
-            _rotation_chart(sector)
+            _render_index_rotation(sector, scope)
 
     # ---------------- MARKET BREADTH ----------------
     with breadth:
