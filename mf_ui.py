@@ -29,8 +29,8 @@ GREEN, RED, AMBER, CYAN, PURPLE, YELLOW = "#30D158", "#FF453A", "#FF9F0A", "#5AC
 IVORY, T2, T3, BORDER = "#E8E8E8", "#8A8A8A", "#5A5A5A", "#262626"
 BENCH_COLORS = {"NIFTY 50": "#D0D0D0", "MIDCAP 100": CYAN, "SMALLCAP 100": PURPLE}
 STAGE_COLORS = {"ROTATING IN": GREEN, "LEADING": "#8AD66B", "EXTENDED": YELLOW, "IMPROVING": CYAN,
-                "WEAKENING": AMBER, "LAGGING": RED, "—": T3}
-QUAD_COLORS = {"LEADING": "48,209,88", "WEAKENING": "255,159,10", "LAGGING": "255,69,58", "IMPROVING": "90,200,250"}
+                "FADING": AMBER, "WEAK": RED, "—": T3}
+QUAD_COLORS = {"LEADING": "48,209,88", "FADING": "255,159,10", "WEAK": "255,69,58", "IMPROVING": "90,200,250"}
 EXTENDED_PCT = 6.0
 
 CSS = """
@@ -75,6 +75,25 @@ CSS = """
 .mf-pick .e{margin-top:9px;padding:7px 9px;border-left:2px solid #3a3a3a;background:rgba(255,255,255,.02);font-size:10px;color:#8f8f8f;line-height:1.6;}
 .mf-pick .l{margin-top:8px;font:10px 'JetBrains Mono',monospace;color:#6f6f6f;}
 .mf-pick .l b{color:#FF9F0A;}
+
+.mf-board{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:8px 0 14px;}
+@media(max-width:900px){.mf-board{grid-template-columns:1fr;}}
+.mf-lane{border:1px solid #1f1f1f;border-top:2px solid var(--c);background:#080808;padding:11px 13px;min-height:112px;}
+.mf-lh{display:flex;align-items:baseline;gap:10px;margin-bottom:10px;}
+.mf-lh b{font:800 11px 'JetBrains Mono',monospace;letter-spacing:1px;color:var(--c);}
+.mf-lh span{font:10px 'Inter',sans-serif;color:#7d7d7d;flex:1;}
+.mf-lh i{font:700 11px 'JetBrains Mono',monospace;font-style:normal;color:#aaa;background:rgba(255,255,255,.06);padding:1px 9px;border-radius:10px;}
+.mf-lb{display:flex;flex-wrap:wrap;gap:7px;}
+.mf-sp{border:1px solid #242424;border-left:3px solid var(--pc);background:rgba(255,255,255,.02);padding:7px 10px;border-radius:5px;min-width:138px;}
+.mf-sp .n{display:block;font:700 12px 'Inter',sans-serif;color:#eee;}
+.mf-sp .m{display:block;font:10px 'JetBrains Mono',monospace;color:#8a8a8a;margin-top:3px;}
+.mf-sp .t{display:inline-block;margin:5px 4px 0 0;font:800 8px 'JetBrains Mono',monospace;letter-spacing:.6px;padding:2px 6px;border-radius:3px;}
+.mf-sp.glow{background:rgba(48,209,88,.07);box-shadow:0 0 14px -4px var(--pc);}
+.mf-how{border:1px solid #222;border-left:3px solid #FF9F0A;background:#090909;padding:11px 15px;margin:6px 0 10px;}
+.mf-how .h{font:800 9px 'JetBrains Mono',monospace;letter-spacing:1.2px;color:#FF9F0A;margin-bottom:6px;}
+.mf-how ol{margin:0 0 0 18px;padding:0;color:#b8b8b8;font-size:12px;line-height:1.75;}
+.mf-how b{color:#eaeaea;}
+.mf-sum{border:1px solid #222;background:#0b0b0b;padding:11px 15px;margin:8px 0 10px;font-size:13px;color:#cfcfcf;line-height:1.75;}
 </style>
 """
 
@@ -297,39 +316,74 @@ def _dark(fig, h=340, legend=True, margin=(8, 8, 30, 8)):
     return fig
 
 
-def fig_rrg(rot: pd.DataFrame, trails: dict):
-    """Rotation map with trails: x = RS-Ratio, y = RS-Momentum (both centred on 100)."""
+def fig_rrg(rot, trails, highlight=(), label_sectors=None):
+    """Rotation map. x = trend vs benchmark, y = momentum (both centred on 100).
+    Dot = where a sector is today (bigger = higher score), arrow = where it moved over the last ~10 sessions,
+    full trail only for `highlight`, names only for `label_sectors` (None = every sector)."""
     if go is None:
         return None
-    xs = [x for t in trails.values() for x, _ in t]
-    ys = [y for t in trails.values() for _, y in t]
-    if not xs:
+    recs = {r["sector"]: r for r in rot.to_dict("records")}
+    now = {s: t[-1] for s, t in trails.items() if t and s in recs}
+    if not now:
         return None
-    dx = max(2.0, max(abs(v - 100) for v in xs) * 1.18)
-    dy = max(1.5, max(abs(v - 100) for v in ys) * 1.18)
+    hl = {s for s in (highlight or []) if s in now}
+    labelled = (set(now) if label_sectors is None else set(label_sectors)) | hl
+    devx = [abs(p[0] - 100) for p in now.values()]
+    devy = [abs(p[1] - 100) for p in now.values()]
+    for s in hl:
+        devx += [abs(p[0] - 100) for p in trails[s]]
+        devy += [abs(p[1] - 100) for p in trails[s]]
+    dx = max(1.5, max(devx) * 1.18)
+    dy = max(1.2, max(devy) * 1.18)
+
     fig = go.Figure()
-    for name, x0, x1, y0, y1 in (("LEADING", 100, 100 + dx, 100, 100 + dy), ("WEAKENING", 100, 100 + dx, 100 - dy, 100),
-                                 ("LAGGING", 100 - dx, 100, 100 - dy, 100), ("IMPROVING", 100 - dx, 100, 100, 100 + dy)):
-        fig.add_shape(type="rect", x0=x0, x1=x1, y0=y0, y1=y1, fillcolor=f"rgba({QUAD_COLORS[name]},0.055)", line_width=0, layer="below")
-        fig.add_annotation(x=x1 if x0 == 100 else x0, y=y1 if y0 == 100 else y0, text=name, showarrow=False,
-                           xanchor="right" if x0 == 100 else "left", yanchor="top" if y0 == 100 else "bottom",
-                           font=dict(size=10, color=f"rgb({QUAD_COLORS[name]})", family="JetBrains Mono, monospace"))
-    for r in rot.to_dict("records"):
-        t = trails.get(r["sector"])
-        if not t:
-            continue
-        col = STAGE_COLORS.get(r["stage"], T2)
-        fig.add_trace(go.Scatter(x=[p[0] for p in t], y=[p[1] for p in t], mode="lines+markers", showlegend=False, hoverinfo="skip",
-                                 line=dict(color=col, width=1.3), opacity=0.75,
-                                 marker=dict(size=[4] * (len(t) - 1) + [4], color=col)))
-        hover = (f'<b>{esc(r["sector"])}</b><br>{esc(r["stage"])} · score {int(r["score"])}<br>'
-                 f'RS-Ratio {t[-1][0]:.1f} · RS-Momentum {t[-1][1]:.1f}<extra></extra>')
-        fig.add_trace(go.Scatter(x=[t[-1][0]], y=[t[-1][1]], mode="markers+text", text=[_short(r["sector"])], textposition="top center",
-                                 textfont=dict(size=9, color=col), showlegend=False, hovertemplate=hover,
-                                 marker=dict(size=11, color=col, line=dict(color="#000", width=1))))
-    _dark(fig, 560, legend=False, margin=(8, 8, 8, 8))
-    fig.update_xaxes(range=[100 - dx, 100 + dx], title="RS-Ratio · relative trend vs benchmark (100 = in line)", gridcolor="#161616", zeroline=False)
-    fig.update_yaxes(range=[100 - dy, 100 + dy], title="RS-Momentum · is it accelerating?", gridcolor="#161616", zeroline=False)
+    for name, x0, x1, y0, y1, xa, ya in (("IMPROVING", 100 - dx, 100, 100, 100 + dy, "left", "top"),
+                                         ("LEADING", 100, 100 + dx, 100, 100 + dy, "right", "top"),
+                                         ("WEAK", 100 - dx, 100, 100 - dy, 100, "left", "bottom"),
+                                         ("FADING", 100, 100 + dx, 100 - dy, 100, "right", "bottom")):
+        rgb = QUAD_COLORS[name]
+        fig.add_shape(type="rect", x0=x0, x1=x1, y0=y0, y1=y1, fillcolor=f"rgba({rgb},0.06)", line_width=0, layer="below")
+        fig.add_annotation(x=x0 if xa == "left" else x1, y=y1 if ya == "top" else y0, xanchor=xa, yanchor=ya,
+                           showarrow=False, align=xa, opacity=0.9, font=dict(size=12, color=f"rgb({rgb})"),
+                           text=f"<b>{name}</b><br><span style='font-size:10px'>{LANE_INFO[name][0]}</span>")
+
+    for s, p in now.items():                                  # arrows: direction of travel over ~10 sessions
+        t = trails[s]
+        if len(t) >= 2:
+            prev = t[-3] if len(t) >= 3 else t[0]
+            fig.add_annotation(x=p[0], y=p[1], ax=prev[0], ay=prev[1], xref="x", yref="y", axref="x", ayref="y",
+                               showarrow=True, arrowhead=2, arrowsize=1.1, arrowwidth=1.3, standoff=7, text="",
+                               arrowcolor=STAGE_COLORS.get(recs[s].get("stage"), T2), opacity=0.55)
+    for s in hl:                                              # full trail only for the sectors you pick
+        t = trails[s]
+        if len(t) >= 2:
+            col = STAGE_COLORS.get(recs[s].get("stage"), T2)
+            fig.add_trace(go.Scatter(x=[q[0] for q in t], y=[q[1] for q in t], mode="lines+markers", showlegend=False,
+                                     hoverinfo="skip", line=dict(color=col, width=2),
+                                     marker=dict(size=[5] * (len(t) - 1) + [2], color=col)))
+
+    order = sorted(now, key=lambda s: now[s][0])
+    cycle = ["top center", "bottom center", "middle right", "middle left"]
+    xs, ys, texts, tpos, cols, sizes, hovers = [], [], [], [], [], [], []
+    for i, s in enumerate(order):
+        r, p = recs[s], now[s]
+        sc = r.get("score")
+        has_sc = not _na(sc) and 0 <= float(sc) <= 100
+        xs.append(p[0]); ys.append(p[1])
+        texts.append(_short(s, 18) if s in labelled else "")
+        tpos.append(cycle[i % 4])
+        cols.append(STAGE_COLORS.get(r.get("stage"), T2))
+        sizes.append(9 + (float(sc) / 100 * 11 if has_sc else 3))
+        hovers.append(f"<b>{esc(s)}</b><br>{esc(r.get('stage'))}" + (f" · score {int(float(sc))}" if has_sc else "")
+                      + f"<br>Trend {p[0]:.1f} · Momentum {p[1]:.1f}")
+    fig.add_trace(go.Scatter(x=xs, y=ys, mode="markers+text", text=texts, textposition=tpos, showlegend=False,
+                             textfont=dict(size=10, color=cols), hovertext=hovers, hoverinfo="text",
+                             marker=dict(size=sizes, color=cols, line=dict(color="#000", width=1))))
+    _dark(fig, 620, legend=False, margin=(8, 8, 8, 8))
+    fig.update_xaxes(range=[100 - dx, 100 + dx], gridcolor="#151515", zeroline=False,
+                     title="◀ weaker than the benchmark          TREND          stronger than the benchmark ▶")
+    fig.update_yaxes(range=[100 - dy, 100 + dy], gridcolor="#151515", zeroline=False,
+                     title="◀ slowing down       MOMENTUM       speeding up ▶")
     fig.add_vline(x=100, line_color="#3a3a3a", line_width=1)
     fig.add_hline(y=100, line_color="#3a3a3a", line_width=1)
     return fig
@@ -391,3 +445,67 @@ def fig_hbar(labels, values, colors, h=None):
     fig.update_yaxes(autorange="reversed", showgrid=False, tickfont=dict(size=10, color=IVORY))
     fig.update_xaxes(gridcolor="#161616", zeroline=True, zerolinecolor="#444")
     return fig
+
+
+# ───────────────────────── rotation board (plain-English lanes) ─────────────────────────
+LANE_INFO = {"IMPROVING": ("Behind, but starting to catch up", CYAN),
+             "LEADING": ("Beating the market and speeding up", GREEN),
+             "WEAK": ("Behind and falling further behind", RED),
+             "FADING": ("Still ahead, but losing steam", AMBER)}
+LANE_ORDER = ("IMPROVING", "LEADING", "WEAK", "FADING")          # same layout as the map: top row, then bottom row
+LANE_VALUE = {"LEADING": 3, "IMPROVING": 2, "FADING": 1, "WEAK": 0}
+
+
+def _lane_pill(r: dict, name_key: str, quad_key: str, show_score: bool) -> str:
+    stage = r.get("stage") or r.get(quad_key)
+    c = STAGE_COLORS.get(stage, LANE_INFO.get(r.get(quad_key), ("", T2))[1])
+    bits = []
+    w = r.get("r1w")
+    if not _na(w):
+        w = float(w)
+        bits.append(f'<span style="color:{GREEN if w >= 0 else RED}">{"▲" if w >= 0 else "▼"} {abs(w):.1f}% 1W</span>')
+    rsi = r.get("rsi_d")
+    if not _na(rsi):
+        bits.append(f'<span style="color:{rsi_color(float(rsi))}">RSI {float(rsi):.0f}</span>')
+    if r.get("meta_extra"):
+        bits.append(esc(r["meta_extra"]))
+    tags_html = ""
+    if stage == "ROTATING IN":
+        tags_html += f'<span class="t" style="background:rgba(48,209,88,.18);color:{GREEN}">★ ROTATING IN</span>'
+    elif stage == "EXTENDED":
+        tags_html += f'<span class="t" style="background:rgba(255,214,10,.14);color:{YELLOW}">STRETCHED</span>'
+    src = r.get("moved_from")
+    if src:
+        up = bool(r.get("moved_up"))
+        tags_html += (f'<span class="t" style="background:rgba(255,255,255,.06);color:{GREEN if up else RED}">'
+                      f'{"↑" if up else "↓"} from {esc(src)}</span>')
+    tip = esc(f'{r.get(name_key)} · {stage}' + (f' · score {int(float(r["score"]))}' if show_score and not _na(r.get("score")) else ""))
+    glow = " glow" if stage == "ROTATING IN" else ""
+    return (f'<div class="mf-sp{glow}" style="--pc:{c}" title="{tip}"><span class="n">{esc(r.get(name_key))}</span>'
+            f'<span class="m">{" · ".join(bits)}</span>{tags_html}</div>')
+
+
+def rotation_board(rows: list, name_key="sector", quad_key="quadrant", show_score=True) -> str:
+    """Four lanes laid out like the rotation map: IMPROVING | LEADING on top, WEAK | FADING below."""
+    lanes = {k: [] for k in LANE_ORDER}
+    for r in rows:
+        if r.get(quad_key) in lanes:
+            lanes[r[quad_key]].append(r)
+    for k in lanes:
+        lanes[k].sort(key=lambda r: -(float(r["score"]) if show_score and not _na(r.get("score")) else (float(r["r1w"]) if not _na(r.get("r1w")) else -1e9)))
+    cells = ""
+    for k in LANE_ORDER:
+        desc, c = LANE_INFO[k]
+        items = "".join(_lane_pill(r, name_key, quad_key, show_score) for r in lanes[k]) or '<span class="mf-na">none</span>'
+        cells += (f'<div class="mf-lane" style="--c:{c}"><div class="mf-lh"><b>{k}</b><span>{esc(desc)}</span>'
+                  f'<i>{len(lanes[k])}</i></div><div class="mf-lb">{items}</div></div>')
+    return f'<div class="mf-board">{cells}</div>'
+
+
+def how_to_read(bench: str) -> str:
+    return ('<div class="mf-how"><div class="h">HOW TO READ THIS IN 10 SECONDS</div><ol>'
+            f'<li>Every sector is compared with <b>{esc(bench)}</b>. <b>Right = beating it</b>, left = trailing it.</li>'
+            '<li><b>Up = getting stronger</b>, down = slowing down. The arrow shows where the sector moved in the last 10 sessions.</li>'
+            '<li>Sectors usually travel <b>IMPROVING → LEADING → FADING → WEAK → IMPROVING</b>. '
+            'The best window is early: a sector climbing out of WEAK into IMPROVING, then turning LEADING (marked <b>★ ROTATING IN</b>). '
+            'LEADING sectors that are stretched far above their averages often pause first.</li></ol></div>')
