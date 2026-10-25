@@ -326,6 +326,13 @@ iframe{{border:none;}}
 .monitor-row span:last-child{{text-align:right;}}
 .small-positive{{color:{GREEN};}} .small-negative{{color:{RED};}}
 .news-rail{{background:#080808;border-left:1px solid #262626;min-height:100%;}}
+.home-monitor-grid{{grid-template-columns:1fr 1fr 0.85fr;align-items:stretch;}}
+.monitor-panel{{min-width:0;overflow:hidden;}}
+.monitor-row{{grid-template-columns:minmax(0,1fr) minmax(70px,88px) minmax(62px,70px);}}
+.stButton>button{{transition:border-color .12s ease,color .12s ease,background .12s ease;}}
+.stButton>button:focus-visible{{outline:1px solid {AMBER} !important;outline-offset:1px;}}
+@media(max-width:1300px){{.home-monitor-grid{{grid-template-columns:1fr 1fr;}}.home-monitor-grid .monitor-panel:last-child{{grid-column:1/-1;}}}}
+@media(max-width:800px){{.home-monitor-grid{{grid-template-columns:1fr;}}.home-monitor-grid .monitor-panel:last-child{{grid-column:auto;}}}}
 @media(max-width:1100px){{.market-row{{grid-template-columns:70px repeat(6,minmax(120px,1fr));overflow-x:auto;}}.monitor-grid{{grid-template-columns:1fr;}}}}
 </style>
 """, unsafe_allow_html=True)
@@ -809,23 +816,39 @@ MODULE_INFO = [
 
 def _go_home():
     st.session_state.page = "home"
-    st.session_state["show_news_rail"] = True
     st.rerun()
 
 
 def _render_compact_module_header(title, code=""):
-    c1, c2, c3 = st.columns([2.4, 5.5, 1.5])
-    with c1:
-        if st.button("▲  ARKA TRADES", key=f"brand_home_{code}_{title}", use_container_width=True):
-            _go_home()
-    with c2:
-        st.markdown(
-            f'<div class="module-top-title">{title.upper()}<small>ARKA MARKET TERMINAL</small></div>',
-            unsafe_allow_html=True,
-        )
-    with c3:
-        if st.button("← BACK TO TERMINAL", key=f"back_terminal_{code}_{title}", use_container_width=True):
-            _go_home()
+    """Persistent terminal navigation: jump directly between workspaces."""
+    st.markdown(
+        f'<div class="module-top-title" style="justify-content:space-between;padding:0 10px;">'
+        f'<span>{title.upper()} <small>ARKA MARKET TERMINAL</small></span>'
+        f'<span style="color:{GREEN};font-size:8px;">● WORKSPACE</span></div>',
+        unsafe_allow_html=True,
+    )
+    nav_items = [
+        ("HOME", "home"), ("WATCHLIST", "watchlist"), ("PORTFOLIO", "portfolio"),
+        ("SCANNER", "scanner"), ("ALERTS", "alerts"), ("RESEARCH", "research"),
+        ("ARKA AI", "analysis"), ("SCREENER", "smart_scan"),
+        ("BREADTH", "breadth"), ("MONEY FLOW", "flow"),
+    ]
+    nav_cols = st.columns(len(nav_items))
+    for col, (label, target) in zip(nav_cols, nav_items):
+        with col:
+            active = st.session_state.get("page") == target
+            if st.button(label, key=f"global_nav_{target}_{title}",
+                         use_container_width=True, type="primary" if active else "secondary"):
+                if target == "home":
+                    _go_home()
+                else:
+                    st.session_state.page = target
+                    st.session_state["show_news_rail"] = False
+                    sym = st.session_state.get("active_security")
+                    if sym:
+                        st.session_state["research_last_query"] = sym
+                        st.session_state["m1_ticker"] = sym
+                    st.rerun()
 
 
 def _render_module_directory():
@@ -867,7 +890,29 @@ def _render_terminal_brandbar():
         if st.button("▲  ARKA TRADES", key="brand_home_terminal", use_container_width=True):
             _go_home()
     with c2:
-        st.markdown('<div class="brand-status brand-status-wide"><span class="pulse-dot"></span> LIVE MARKET DATA · TERMINAL</div>', unsafe_allow_html=True)
+        st.markdown('<div class="brand-status brand-status-wide"><span class="pulse-dot"></span> MARKET TERMINAL · WORKSPACE NAVIGATION</div>', unsafe_allow_html=True)
+    nav_items = [
+        ("HOME", "home"), ("WATCHLIST", "watchlist"), ("PORTFOLIO", "portfolio"),
+        ("SCANNER", "scanner"), ("ALERTS", "alerts"), ("RESEARCH", "research"),
+        ("ARKA AI", "analysis"), ("SCREENER", "smart_scan"),
+        ("BREADTH", "breadth"), ("MONEY FLOW", "flow"),
+    ]
+    nav_cols = st.columns(len(nav_items))
+    for col, (label, target) in zip(nav_cols, nav_items):
+        with col:
+            active = st.session_state.get("page") == target
+            if st.button(label, key=f"top_nav_{target}", use_container_width=True,
+                         type="primary" if active else "secondary"):
+                if target == "home":
+                    _go_home()
+                else:
+                    st.session_state.page = target
+                    st.session_state["show_news_rail"] = False
+                    sym = st.session_state.get("active_security")
+                    if sym:
+                        st.session_state["research_last_query"] = sym
+                        st.session_state["m1_ticker"] = sym
+                    st.rerun()
 
 
 @st.fragment(run_every=60)
@@ -1016,21 +1061,73 @@ def _render_security_workspace(symbol: str):
 
 
 def _render_dashboard():
-    wl = list(dict.fromkeys(st.session_state.get("watchlist", [])[:10]))
-    all_syms = list(dict.fromkeys((st.session_state.get("admin_watchlist", []) + wl)))[:14]
-    quotes = get_quotes(tuple(all_syms))
-    rows = []
-    for sym in wl:
-        d = quotes.get(sym)
-        if d:
+    """Home monitor: personal watchlist and portfolio holdings at a glance."""
+    wl = list(dict.fromkeys(st.session_state.get("watchlist", [])[:12]))
+    holdings = list(dict.fromkeys(ud.holding_symbols() or []))[:12]
+    all_syms = list(dict.fromkeys(st.session_state.get("admin_watchlist", []) + wl + holdings))[:30]
+    quotes = get_quotes(tuple(all_syms)) if all_syms else {}
+
+    def _rows(symbols, empty_message):
+        result = []
+        for sym in symbols:
+            d = quotes.get(sym)
+            if not d:
+                result.append(
+                    f'<div class="monitor-row"><span>{sym}</span><span>—</span>'
+                    f'<span style="color:#666">NO DATA</span></div>'
+                )
+                continue
             c = GREEN if d["chg"] >= 0 else RED
-            rows.append(f'<div class="monitor-row monitor-click-row"><span>{sym}</span><span>₹{d["price"]:,.2f}</span><span style="color:{c}">{d["chg"]:+.2f}%</span></div>')
-    watch_html = ''.join(rows) if rows else '<div style="padding:12px;color:#666;font-size:10px;font-family:JetBrains Mono,monospace;">NO WATCHLIST YET · OPEN THE WATCHLIST MODULE TO ADD STOCKS</div>'
+            result.append(
+                f'<div class="monitor-row"><span>{sym}</span>'
+                f'<span>₹{d["price"]:,.2f}</span>'
+                f'<span style="color:{c}">{d["chg"]:+.2f}%</span></div>'
+            )
+        return "".join(result) or (
+            f'<div style="padding:14px 11px;color:#777;font-size:10px;'
+            f'font-family:JetBrains Mono,monospace;line-height:1.7;">{empty_message}</div>'
+        )
+
+    wl_html = _rows(wl, "NO PERSONAL WATCHLIST YET · OPEN WATCHLIST TO ADD SYMBOLS")
+    holdings_html = _rows(holdings, "NO HOLDINGS YET · ADD A POSITION IN PORTFOLIO")
     adv = sum(1 for s in all_syms if quotes.get(s) and quotes[s]["chg"] > 0.05)
     dec = sum(1 for s in all_syms if quotes.get(s) and quotes[s]["chg"] < -0.05)
     flat = sum(1 for s in all_syms if quotes.get(s) and abs(quotes[s]["chg"]) <= 0.05)
     ratio = (adv / dec) if dec else (float(adv) if adv else 0)
-    st.markdown(f'''<div class="monitor-grid"><div class="monitor-panel"><div class="monitor-head"><span>WATCHLIST MONITOR</span><span>{len(wl)} NAMES · FAST CACHE</span></div>{watch_html}</div><div class="monitor-panel"><div class="monitor-head"><span>MARKET INTERNALS</span><span>{len(all_syms)} SAMPLE</span></div><div class="monitor-row"><span>ADVANCING</span><span>{adv}</span><span class="small-positive">▲</span></div><div class="monitor-row"><span>DECLINING</span><span>{dec}</span><span class="small-negative">▼</span></div><div class="monitor-row"><span>UNCHANGED</span><span>{flat}</span><span style="color:#777">—</span></div><div class="monitor-row"><span>A/D RATIO</span><span>{ratio:.2f}</span><span style="color:#888">RATIO</span></div></div><div class="monitor-panel"><div class="monitor-head"><span>TERMINAL FUNCTIONS</span><span>QUICK ACCESS</span></div><div class="monitor-row"><span>SEARCH SECURITY</span><span>CMD</span><span style="color:{AMBER}">LOAD</span></div><div class="monitor-row"><span>WATCHLIST</span><span>MODULE</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>PORTFOLIO</span><span>MODULE</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>RESEARCH</span><span>MODULE</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>ARKA AI</span><span>MODULE</span><span style="color:{AMBER}">OPEN</span></div><div class="monitor-row"><span>SCREENER</span><span>MODULE</span><span style="color:{AMBER}">OPEN</span></div></div></div>''', unsafe_allow_html=True)
+
+    html = (
+        '<div class="monitor-grid home-monitor-grid">'
+        '<div class="monitor-panel"><div class="monitor-head"><span>YOUR WATCHLIST</span>'
+        f'<span>{len(wl)} SYMBOLS</span></div>{wl_html}</div>'
+        '<div class="monitor-panel"><div class="monitor-head"><span>PORTFOLIO HOLDINGS</span>'
+        f'<span>{len(holdings)} POSITIONS</span></div>{holdings_html}</div>'
+        '<div class="monitor-panel"><div class="monitor-head"><span>MARKET INTERNALS</span>'
+        f'<span>{len(all_syms)} SYMBOL SAMPLE</span></div>'
+        f'<div class="monitor-row"><span>ADVANCING</span><span>{adv}</span><span class="small-positive">▲</span></div>'
+        f'<div class="monitor-row"><span>DECLINING</span><span>{dec}</span><span class="small-negative">▼</span></div>'
+        f'<div class="monitor-row"><span>UNCHANGED</span><span>{flat}</span><span style="color:#777">—</span></div>'
+        f'<div class="monitor-row"><span>A/D RATIO</span><span>{ratio:.2f}</span><span style="color:#888">RATIO</span></div>'
+        '</div></div>'
+    )
+    st.markdown(html, unsafe_allow_html=True)
+
+    st.markdown('<div class="panel-title" style="margin-top:14px;">QUICK WORKSPACE ACCESS</div>', unsafe_allow_html=True)
+    quick = [
+        ("WATCHLIST", "watchlist"), ("PORTFOLIO", "portfolio"), ("SCANNER", "scanner"),
+        ("ALERTS", "alerts"), ("RESEARCH", "research"), ("ARKA AI", "analysis"),
+        ("SMART SCREENER", "smart_scan"), ("MARKET BREADTH", "breadth"), ("MONEY FLOW", "flow"),
+    ]
+    qcols = st.columns(5)
+    for i, (label, target) in enumerate(quick):
+        with qcols[i % len(qcols)]:
+            if st.button(label, key=f"home_quick_{target}", use_container_width=True):
+                st.session_state.page = target
+                st.session_state["show_news_rail"] = False
+                sym = st.session_state.get("active_security")
+                if sym:
+                    st.session_state["research_last_query"] = sym
+                    st.session_state["m1_ticker"] = sym
+                st.rerun()
 
 def _news_watchlist_for_rail():
     # NEW: on the Portfolio page the rail follows your holdings.
@@ -1063,8 +1160,14 @@ else:
     if pg in module_titles:
         _render_module_page_header(module_titles[pg])
 
-# ── RIGHT NEWS RAIL — isolated fragment so hide/show never reruns the terminal ──
-center, right_rail = st.columns([4.55, 1.15])
+# ── Workspace layout ────────────────────────────────────────────────
+# Home/security retain the contextual news rail. Dedicated modules use the full
+# viewport so tables and controls are not squeezed into a narrow center column.
+if pg in {"home", "security"}:
+    center, right_rail = st.columns([4.55, 1.15], gap="small")
+else:
+    center = st.container()
+    right_rail = None
 
 @st.fragment
 def _news_rail_fragment():
@@ -1256,5 +1359,6 @@ with center:
     elif pg == "contact":
         st.markdown(f'<div class="term-panel"><div class="panel-title">CONTACT</div><div style="color:{T2};line-height:1.8;">Questions, feedback or suggestions?<br>Contact the Arka Trades desk through the configured support email.</div></div>',unsafe_allow_html=True)
 
-with right_rail:
-    _news_rail_fragment()
+if right_rail is not None:
+    with right_rail:
+        _news_rail_fragment()
