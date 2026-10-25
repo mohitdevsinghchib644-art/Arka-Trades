@@ -148,16 +148,20 @@ def get_static(sym: str):
 # Batched quotes (watchlist monitor) and scanner
 # ════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=20, show_spinner=False, max_entries=32)
-def get_quotes(symbols: tuple) -> dict:
-    """{SYM: {price, chg, prev_close} | None} — ONE download call per 60 symbols."""
+def _get_quotes_cached(symbols: tuple) -> dict:
+    """Cached quote snapshot. Raises on total provider failure so failures aren't cached."""
     syms = list(dict.fromkeys(str(x).upper().strip() for x in (symbols or ()) if x))
     out = {s: None for s in syms}
+    attempted = 0
+    provider_errors = 0
     for chunk in _chunks(syms, 60):
         tick = [s + ".NS" for s in chunk]
+        attempted += 1
         try:
             df = yf.download(tick, period="5d", interval="1d", group_by="ticker",
                              progress=False, threads=True, auto_adjust=False)
         except Exception:
+            provider_errors += 1
             continue
         parsed = _parse_download(df, tick)
         for s in chunk:
@@ -170,7 +174,18 @@ def get_quotes(symbols: tuple) -> dict:
             cur, pc = float(c.iloc[-1]), float(c.iloc[-2])
             if cur > 0 and pc > 0:
                 out[s] = {"price": cur, "chg": (cur - pc) / pc * 100, "prev_close": pc}
+    if syms and attempted and provider_errors == attempted:
+        raise RuntimeError("All quote-provider requests failed")
     return out
+
+
+def get_quotes(symbols: tuple) -> dict:
+    """Safe public quote API; provider failures return placeholders but aren't cached."""
+    syms = list(dict.fromkeys(str(x).upper().strip() for x in (symbols or ()) if x))
+    try:
+        return _get_quotes_cached(tuple(syms))
+    except Exception:
+        return {s: None for s in syms}
 
 
 get_prices_batch = get_quotes   # backwards-compatible name
@@ -244,8 +259,8 @@ def _index_chain(chain):
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def get_indices(items: tuple) -> dict:
-    """items = ((label, (primary, fallback, ...)), ...)  ->  {label: dict | None}"""
+def _get_indices_cached(items: tuple) -> dict:
+    """Cached index snapshot; raise if every index lookup fails to avoid caching outages."""
     out = {}
     if not items:
         return out
@@ -256,7 +271,17 @@ def get_indices(items: tuple) -> dict:
                 out[futs[f]] = f.result()
             except Exception:
                 out[futs[f]] = None
+    if out and not any(value for value in out.values()):
+        raise RuntimeError("All index-provider lookups failed")
     return out
+
+
+def get_indices(items: tuple) -> dict:
+    """Safe API: preserve labels with None values during outages; retry on next rerun."""
+    try:
+        return _get_indices_cached(tuple(items or ()))
+    except Exception:
+        return {label: None for label, _chain in (items or ())}
 
 
 # ════════════════════════════════════════════════════════════════
