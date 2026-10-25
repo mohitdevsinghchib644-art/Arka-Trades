@@ -1,26 +1,22 @@
 """
-index_engine.py — Arka "Nifty Indices" analytics (pure functions, no network).
+index_engine.py — Arka "Nifty Indices" analytics v2 (pure functions, no network).
 
 Input : {index name -> OHLC DataFrame (Open, High, Low, Close; daily; ~1 year+)}
 Output: one row per index with
-    price, 1D %, 1W %, weekly RSI(14), price vs weekly EMA 10/20/50 and daily EMA 200,
-    % from weekly 20-EMA, price vs DAILY and WEEKLY classic pivots (previous completed bar),
-    RS rank history (percentile among the loaded indices vs the benchmark at T-30/-15/-5/T0).
+    price, 1D / 1W / 1M %, daily RSI(14), weekly RSI(14),
+    price vs DAILY EMA 10 / 20 / 50 / 200  (flag ab10.. = price above, dist10.. = % distance),
+    price vs DAILY and WEEKLY classic pivots (previous completed bar).
 
-RS definition: 20-session relative performance of the index vs the benchmark
-    RS(t) = [close(t)/close(t-20)] / [bench(t)/bench(t-20)]
-and the rank is the percentile (0-99) of that RS among all loaded indices on that day.
-
-Honest limits: weekly EMA-200 needs ~4 years of weekly bars, so the 200 marker here is the
-200-DAY EMA. Everything is computed from the supplied closes; nothing is estimated.
+v2: the RS-rank history (percentile ratings) was removed in favour of RSI + EMA position.
+Honest limits: EMA-200 needs 200 daily bars (flag is NaN without them). Everything is computed from the
+supplied closes; nothing is estimated.
 """
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
-RS_OFFSETS = (30, 15, 5, 0)
-RS_LOOKBACK = 20
+EMA_SPANS = (10, 20, 50, 200)
 
 
 def _clean(df: pd.DataFrame) -> pd.DataFrame:
@@ -66,12 +62,8 @@ def pivot_label(price, high, low, close) -> str:
     return "<S2"
 
 
-def _chip(flag) -> str:
-    return "—" if flag is None or (isinstance(flag, float) and np.isnan(flag)) else ("🟢" if flag else "🔴")
-
-
 def analyse_histories(hists: dict, base: str = "NIFTY 50") -> pd.DataFrame:
-    """One row per index that has enough history. Raises ValueError if the benchmark is missing."""
+    """One row per index that has enough history (30+ daily bars). `base` is kept for compatibility."""
     clean = {}
     for name, df in (hists or {}).items():
         try:
@@ -80,49 +72,34 @@ def analyse_histories(hists: dict, base: str = "NIFTY 50") -> pd.DataFrame:
             continue
         if len(d) >= 30:
             clean[name] = d
-    if base not in clean:
-        raise ValueError(f"benchmark {base} has no usable history")
-
-    # ---- RS rank history (percentile of 20-session relative performance) ----
-    closes = pd.DataFrame({n: d["Close"] for n, d in clean.items()}).sort_index().ffill()
-    bench = closes[base]
-    rel = closes.div(closes.shift(RS_LOOKBACK)).div(bench.div(bench.shift(RS_LOOKBACK)), axis=0)
-    rel = rel.drop(columns=[base])
-    ranks = {}
-    for off in RS_OFFSETS:
-        pos = len(rel) - 1 - off
-        if pos < 0:
-            ranks[off] = pd.Series(np.nan, index=rel.columns)
-            continue
-        row = rel.iloc[pos]
-        ranks[off] = (row.rank(pct=True) * 99).round()
+    if not clean:
+        raise ValueError("no index has usable history")
 
     rows = []
     for name, d in clean.items():
         c = d["Close"]
+        n = len(c)
         w = weekly(d)
         wc = w["Close"]
         last = float(c.iloc[-1])
-        r1d = (last / float(c.iloc[-2]) - 1) * 100 if len(c) >= 2 else np.nan
-        r1w = (last / float(c.iloc[-6]) - 1) * 100 if len(c) >= 6 else np.nan
-        r1m = (last / float(c.iloc[-22]) - 1) * 100 if len(c) >= 22 else np.nan
-        w_rsi = float(rsi(wc).iloc[-1]) if len(wc) > 14 else np.nan
-        ema = {n: wc.ewm(span=n, adjust=False).mean().iloc[-1] for n in (10, 20, 50)} if len(wc) >= 10 else {}
-        d200 = c.ewm(span=200, adjust=False).mean().iloc[-1] if len(c) >= 200 else np.nan
-        flags = {
-            "w10": (last > ema[10]) if 10 in ema and len(wc) >= 10 else None,
-            "w20": (last > ema[20]) if 20 in ema and len(wc) >= 20 else None,
-            "w50": (last > ema[50]) if 50 in ema and len(wc) >= 50 else None,
-            "d200": (last > d200) if pd.notna(d200) else None,
+        row = {
+            "index": name, "price": last,
+            "r1d": (last / float(c.iloc[-2]) - 1) * 100 if n >= 2 else np.nan,
+            "r1w": (last / float(c.iloc[-6]) - 1) * 100 if n >= 6 else np.nan,
+            "r1m": (last / float(c.iloc[-22]) - 1) * 100 if n >= 22 else np.nan,
+            "d_rsi": float(rsi(c).iloc[-1]) if n > 15 else np.nan,
+            "w_rsi": float(rsi(wc).iloc[-1]) if len(wc) > 15 else np.nan,
+            "d_pivot": pivot_label(last, *(d.iloc[-2][["High", "Low", "Close"]].tolist())) if n >= 2 else "—",
+            "w_pivot": pivot_label(last, *(w.iloc[-2][["High", "Low", "Close"]].tolist())) if len(w) >= 2 else "—",
+            "asof": str(c.index[-1])[:10],
         }
-        pct_w20 = (last / ema[20] - 1) * 100 if 20 in ema and len(wc) >= 20 else np.nan
-        dpiv = pivot_label(last, *(d.iloc[-2][["High", "Low", "Close"]].tolist())) if len(d) >= 2 else "—"
-        wpiv = pivot_label(last, *(w.iloc[-2][["High", "Low", "Close"]].tolist())) if len(w) >= 2 else "—"
-        row = {"index": name, "price": last, "r1d": r1d, "r1w": r1w, "r1m": r1m, "w_rsi": w_rsi,
-               "pct_w20": pct_w20, "d_pivot": dpiv, "w_pivot": wpiv,
-               "ema_chips": f"10{_chip(flags['w10'])} 20{_chip(flags['w20'])} 50{_chip(flags['w50'])} D200{_chip(flags['d200'])}",
-               "asof": str(c.index[-1])[:10]}
-        for off in RS_OFFSETS:
-            row[f"rs_t{off}"] = float(ranks[off].get(name, np.nan)) if name != base else np.nan
+        for s in EMA_SPANS:
+            if n >= s:
+                e = float(c.ewm(span=s, adjust=False).mean().iloc[-1])
+                row[f"ab{s}"] = last > e
+                row[f"dist{s}"] = (last / e - 1) * 100
+            else:
+                row[f"ab{s}"] = np.nan
+                row[f"dist{s}"] = np.nan
         rows.append(row)
     return pd.DataFrame(rows)
