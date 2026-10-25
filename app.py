@@ -155,30 +155,30 @@ def send_telegram(msg):
     except Exception: pass
 
 # ════════════════ DESIGN SYSTEM — TERMINAL v3 ════════════════════
-DARK   = "#000000"
-DARK2  = "#0A0A0A"
-DARK3  = "#111111"
-BORDER = "#262626"
-BORDER2 = "#1A1A1A"
-IVORY  = "#E8E8E8"
-T2     = "#8A8A8A"
-T3     = "#5A5A5A"
-NAVY   = "#0A0A0A"
+DARK   = "#0B0F14"
+DARK2  = "#10161D"
+DARK3  = "#151D26"
+BORDER = "#293442"
+BORDER2 = "#202A35"
+IVORY  = "#E6EBF1"
+T2     = "#9AA7B5"
+T3     = "#667484"
+NAVY   = "#0B1118"
 
-AMBER  = "#FF9F0A"
-CYAN   = "#5AC8FA"
-GREEN  = "#30D158"
-RED    = "#FF453A"
-INDIGO = "#5E8CFF"
-PURPLE = "#BF5AF2"
-PINK   = "#FF6482"
+AMBER  = "#D9A85B"
+CYAN   = "#68A7C8"
+GREEN  = "#38B889"
+RED    = "#E16B70"
+INDIGO = "#7E9BCB"
+PURPLE = "#A78AC7"
+PINK   = "#D98B9A"
 
 BLUE   = AMBER
 GOLD   = AMBER
 
-GRAD_BRAND = f"linear-gradient(135deg,{AMBER},{CYAN})"
-GRAD_AI    = f"linear-gradient(135deg,{PURPLE},{AMBER})"
-GRAD_TEXT  = f"linear-gradient(90deg,{CYAN},{AMBER},{PURPLE})"
+GRAD_BRAND = f"linear-gradient(135deg,{AMBER},{AMBER})"
+GRAD_AI    = f"linear-gradient(135deg,{PURPLE},{CYAN})"
+GRAD_TEXT  = f"linear-gradient(90deg,{IVORY},{AMBER})"
 
 FONT = "'Plus Jakarta Sans','Inter',sans-serif"
 MONO = "'JetBrains Mono',monospace"
@@ -245,39 +245,50 @@ st.markdown(f"""
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
 :root{{color-scheme:dark;}}
 *,*::before,*::after{{box-sizing:border-box;}}
-html,body,.stApp{{background:#050505 !important;color:{IVORY} !important;font-family:'Inter',sans-serif !important;}}
+html,body,.stApp{{background:#0B0F14 !important;color:{IVORY} !important;font-family:'Inter',sans-serif !important;}}
+.stApp{{background-image:linear-gradient(180deg,rgba(104,167,200,.025),transparent 240px) !important;}}
+[data-testid="stVerticalBlock"]{{gap:.55rem;}}
+[data-testid="stHorizontalBlock"]{{gap:.55rem;}}
+[data-testid="stMainBlockContainer"]{{padding-top:.35rem !important;}}
+::selection{{background:{AMBER}55;color:#fff;}}
 header[data-testid="stHeader"]{{display:none !important;}}
 [data-testid="stSidebar"],[data-testid="stSidebarCollapsedControl"]{{display:none !important;}}
-.block-container{{padding:0 8px 28px !important;max-width:100% !important;}}
-.stButton>button{{background:#0b0b0b !important;color:#d8d8d8 !important;border:1px solid #252525 !important;border-radius:0 !important;font-family:'Inter',sans-serif !important;font-size:11px !important;font-weight:600 !important;min-height:30px !important;box-shadow:none !important;}}
-.stButton>button:hover{{border-color:{AMBER} !important;color:{AMBER} !important;background:#111 !important;}}
-.stButton>button[kind="primary"]{{background:{AMBER} !important;color:#000 !important;border-color:{AMBER} !important;}}
-.stTextInput input{{background:#0a0a0a !important;color:#eee !important;border:1px solid #303030 !important;border-radius:0 !important;font-family:'Inter',sans-serif !important;font-size:13px !important;height:40px !important;}}
+ .block-container{{padding:0 14px 28px !important;max-width:1920px !important;margin:0 auto !important;}}
+@media(max-width:800px){{.block-container{{padding:0 7px 20px !important;}}}}
+.stButton>button{{background:#111821 !important;color:#C7D0DA !important;border:1px solid #2B3745 !important;border-radius:4px !important;font-family:'Inter',sans-serif !important;font-size:10px !important;font-weight:650 !important;min-height:32px !important;box-shadow:none !important;letter-spacing:.2px !important;}}
+.stButton>button[kind="secondary"]{{background:#10161D !important;}}
+.stButton>button:disabled{{opacity:.42 !important;}}
+.stButton>button:hover{{border-color:{AMBER} !important;color:#F0C982 !important;background:#18202A !important;}}
+.stButton>button[kind="primary"]{{background:{AMBER} !important;color:#10151B !important;border-color:{AMBER} !important;font-weight:750 !important;}}
+.stTextInput input{{background:#10161D !important;color:#E6EBF1 !important;border:1px solid #344151 !important;border-radius:4px !important;font-family:'Inter',sans-serif !important;font-size:13px !important;height:38px !important;}}
 .stTextInput input:focus{{border-color:{AMBER} !important;box-shadow:0 0 0 1px {AMBER} !important;}}
 .stTextInput label,.stSelectbox label,.stRadio label{{font-size:9px !important;color:#777 !important;text-transform:uppercase !important;letter-spacing:1px !important;}}
-[data-testid="stSelectbox"]>div>div{{background:#0a0a0a !important;border:1px solid #303030 !important;border-radius:0 !important;color:#ddd !important;}}
-.stTabs [data-baseweb="tab-list"]{{background:#0a0a0a !important;border:1px solid #252525 !important;border-radius:0 !important;gap:0 !important;}}
-.stTabs [data-baseweb="tab"]{{font-family:'JetBrains Mono',monospace !important;font-size:10px !important;color:#777 !important;text-transform:uppercase !important;border-radius:0 !important;}}
+[data-testid="stSelectbox"]>div>div{{background:#10161D !important;border:1px solid #344151 !important;border-radius:4px !important;color:#ddd !important;}}
+.stTabs [data-baseweb="tab-list"]{{background:#0E141B !important;border:1px solid #293442 !important;border-radius:4px !important;gap:2px !important;padding:3px !important;}}
+.stTabs [data-baseweb="tab"]{{font-family:'JetBrains Mono',monospace !important;font-size:10px !important;color:#8D9AA8 !important;text-transform:uppercase !important;border-radius:3px !important;}}
 .stTabs [aria-selected="true"]{{color:{AMBER} !important;background:#101010 !important;box-shadow:inset 0 -2px 0 {AMBER};}}
-[data-testid="stMetric"]{{background:#090909 !important;border:1px solid #202020 !important;border-radius:0 !important;padding:9px !important;}}
+[data-testid="stMetric"]{{background:linear-gradient(145deg,#121922,#0E141B) !important;border:1px solid #293442 !important;border-radius:5px !important;padding:10px 12px !important;}}
 [data-testid="stMetricLabel"] p{{font-size:8px !important;color:#777 !important;letter-spacing:1px !important;text-transform:uppercase !important;}}
 [data-testid="stMetricValue"]{{font-family:'JetBrains Mono',monospace !important;font-size:16px !important;}}
-hr{{border-color:#202020 !important;}}
+hr{{border-color:#293442 !important;}}
+[data-testid="stDataFrame"]{{border:1px solid #293442;border-radius:4px;overflow:hidden;}}
+[data-testid="stAlert"]{{border-radius:4px !important;}}
+[data-testid="stExpander"]{{border:1px solid #293442 !important;border-radius:4px !important;background:#0F151C !important;}}
 iframe{{border:none;}}
 .pulse-dot{{width:5px;height:5px;border-radius:50%;background:{GREEN};display:inline-block;box-shadow:0 0 7px {GREEN};}}
-.terminal-shell{{background:#070707;border:1px solid #202020;border-top:2px solid {AMBER};}}
-.terminal-brandbar{{height:45px;display:flex;align-items:center;justify-content:space-between;padding:0 12px;border-bottom:1px solid #202020;background:#080808;}}
+.terminal-shell{{background:#0D131A;border:1px solid #293442;border-top:2px solid {AMBER};border-radius:5px 5px 0 0;overflow:hidden;}}
+.terminal-brandbar{{height:45px;display:flex;align-items:center;justify-content:space-between;padding:0 12px;border-bottom:1px solid #293442;background:#0D131A;}}
 .brand-left{{display:flex;align-items:center;gap:9px;}}
-.brand-mark{{width:24px;height:24px;background:{AMBER};display:flex;align-items:center;justify-content:center;}}
+.brand-mark{{width:25px;height:25px;background:{AMBER};display:flex;align-items:center;justify-content:center;border-radius:3px;}}
 .brand-name{{font-size:12px;font-weight:700;letter-spacing:1.3px;color:#eee;}}
 .brand-sub{{font-family:'JetBrains Mono',monospace;font-size:7px;letter-spacing:1.5px;color:#666;margin-top:2px;}}
 .brand-status{{font-family:'JetBrains Mono',monospace;font-size:8px;letter-spacing:1px;color:{GREEN};display:flex;align-items:center;gap:6px;}}
 .brand-status-wide{{justify-content:flex-end;height:34px;}}
-.module-top-title{{height:34px;display:flex;align-items:center;justify-content:center;gap:9px;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;letter-spacing:1.2px;color:#e8e8e8;border-bottom:1px solid #202020;}}
+.module-top-title{{height:38px;display:flex;align-items:center;justify-content:center;gap:9px;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;letter-spacing:1.2px;color:#E6EBF1;border-bottom:1px solid #293442;background:#0D131A;}}
 .module-top-title small{{font-size:7px;color:#555;letter-spacing:1px;font-weight:500;}}
 .module-directory-spacer{{height:22px;border-bottom:1px solid #181818;margin-bottom:10px;}}
 .module-directory-title{{font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:1.4px;color:{AMBER};border-top:1px solid #292929;border-bottom:1px solid #202020;padding:10px 7px;margin-bottom:7px;}}
-.module-directory-card{{background:#090909;border:1px solid #242424;border-top:2px solid #252525;padding:11px 12px;min-height:158px;margin-bottom:8px;}}
+.module-directory-card{{background:#111821;border:1px solid #293442;border-top:2px solid #354252;padding:11px 12px;min-height:158px;margin-bottom:8px;border-radius:4px;}}
 .module-dir-code{{font-family:'JetBrains Mono',monospace;color:{AMBER};font-size:9px;font-weight:700;}}
 .module-dir-label{{font-family:'JetBrains Mono',monospace;color:#eee;font-size:11px;font-weight:700;letter-spacing:.5px;margin:4px 0 7px;}}
 .module-dir-purpose{{font-size:10px;color:#888;line-height:1.55;min-height:48px;}}
@@ -318,15 +329,22 @@ iframe{{border:none;}}
 .module-code{{font-family:'JetBrains Mono',monospace;color:{AMBER};font-size:8px;font-weight:700;}}
 .module-label{{font-size:9px;color:#cfcfcf;margin-top:3px;}}
 .monitor-grid{{display:grid;grid-template-columns:1.15fr 1fr 1fr;gap:8px;margin-top:8px;}}
-.monitor-panel{{background:#090909;border:1px solid #242424;min-height:205px;}}
-.monitor-head{{height:38px;border-bottom:1px solid #202020;padding:0 9px;display:flex;align-items:center;justify-content:space-between;font-family:'JetBrains Mono',monospace;font-size:8px;color:{AMBER};letter-spacing:1px;}}
-.monitor-row{{display:grid;grid-template-columns:1fr 88px 70px;gap:7px;padding:9px 11px;border-bottom:1px solid #161616;font-family:'JetBrains Mono',monospace;font-size:10px;}}
+.monitor-panel{{background:#10161D;border:1px solid #293442;min-height:0;border-radius:4px;}}
+.monitor-head{{height:38px;border-bottom:1px solid #293442;padding:0 10px;display:flex;align-items:center;justify-content:space-between;font-family:'JetBrains Mono',monospace;font-size:9px;color:{AMBER};letter-spacing:.8px;background:#141C25;}}
+.monitor-row{{display:grid;grid-template-columns:minmax(0,1fr) 88px 70px;gap:7px;padding:8px 10px;border-bottom:1px solid #202A35;font-family:'JetBrains Mono',monospace;font-size:10px;min-height:33px;}}
 .monitor-row span:first-child{{color:#aaa;}}
 .monitor-row span:nth-child(2){{text-align:right;color:#ddd;}}
 .monitor-row span:last-child{{text-align:right;}}
 .small-positive{{color:{GREEN};}} .small-negative{{color:{RED};}}
-.news-rail{{background:#080808;border-left:1px solid #262626;min-height:100%;}}
-.home-monitor-grid{{grid-template-columns:1fr 1fr 0.85fr;align-items:stretch;}}
+.news-rail{{background:#0F151C;border-left:1px solid #293442;min-height:100%;padding-left:8px;}}
+.home-monitor-grid{{grid-template-columns:minmax(0,1.1fr) minmax(0,1.1fr) minmax(210px,.8fr);align-items:stretch;}}
+.monitor-list{{max-height:410px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:#394554 #10161D;}}
+.monitor-list::-webkit-scrollbar{{width:6px;}}.monitor-list::-webkit-scrollbar-thumb{{background:#394554;border-radius:5px;}}
+.monitor-list .monitor-row:last-child{{border-bottom:0;}}
+.module-nav-wrap{{padding:5px 6px 7px;background:#0A1016;border-bottom:1px solid #293442;}}
+.module-nav-wrap [data-testid="stHorizontalBlock"]{{gap:4px !important;}}
+.module-nav-wrap .stButton>button{{min-height:30px !important;font-size:9px !important;letter-spacing:.3px !important;}}
+.page-kicker{{font:9px 'JetBrains Mono',monospace;color:#8D9AA8;letter-spacing:1.2px;text-transform:uppercase;}}
 .monitor-panel{{min-width:0;overflow:hidden;}}
 .monitor-row{{grid-template-columns:minmax(0,1fr) minmax(70px,88px) minmax(62px,70px);}}
 .stButton>button{{transition:border-color .12s ease,color .12s ease,background .12s ease;}}
@@ -833,22 +851,25 @@ def _render_compact_module_header(title, code=""):
         ("ARKA AI", "analysis"), ("SCREENER", "smart_scan"),
         ("BREADTH", "breadth"), ("MONEY FLOW", "flow"),
     ]
-    nav_cols = st.columns(len(nav_items))
-    for col, (label, target) in zip(nav_cols, nav_items):
-        with col:
-            active = st.session_state.get("page") == target
-            if st.button(label, key=f"global_nav_{target}_{title}",
-                         use_container_width=True, type="primary" if active else "secondary"):
-                if target == "home":
-                    _go_home()
-                else:
-                    st.session_state.page = target
-                    st.session_state["show_news_rail"] = False
-                    sym = st.session_state.get("active_security")
-                    if sym:
-                        st.session_state["research_last_query"] = sym
-                        st.session_state["m1_ticker"] = sym
-                    st.rerun()
+    st.markdown('<div class="module-nav-wrap">', unsafe_allow_html=True)
+    for start in range(0, len(nav_items), 5):
+        nav_cols = st.columns(5)
+        for col, (label, target) in zip(nav_cols, nav_items[start:start + 5]):
+            with col:
+                active = st.session_state.get("page") == target
+                if st.button(label, key=f"global_nav_{target}_{title}",
+                             use_container_width=True, type="primary" if active else "secondary"):
+                    if target == "home":
+                        _go_home()
+                    else:
+                        st.session_state.page = target
+                        st.session_state["show_news_rail"] = False
+                        sym = st.session_state.get("active_security")
+                        if sym:
+                            st.session_state["research_last_query"] = sym
+                            st.session_state["m1_ticker"] = sym
+                        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 def _render_module_directory():
@@ -897,22 +918,25 @@ def _render_terminal_brandbar():
         ("ARKA AI", "analysis"), ("SCREENER", "smart_scan"),
         ("BREADTH", "breadth"), ("MONEY FLOW", "flow"),
     ]
-    nav_cols = st.columns(len(nav_items))
-    for col, (label, target) in zip(nav_cols, nav_items):
-        with col:
-            active = st.session_state.get("page") == target
-            if st.button(label, key=f"top_nav_{target}", use_container_width=True,
-                         type="primary" if active else "secondary"):
-                if target == "home":
-                    _go_home()
-                else:
-                    st.session_state.page = target
-                    st.session_state["show_news_rail"] = False
-                    sym = st.session_state.get("active_security")
-                    if sym:
-                        st.session_state["research_last_query"] = sym
-                        st.session_state["m1_ticker"] = sym
-                    st.rerun()
+    st.markdown('<div class="module-nav-wrap">', unsafe_allow_html=True)
+    for start in range(0, len(nav_items), 5):
+        nav_cols = st.columns(5)
+        for col, (label, target) in zip(nav_cols, nav_items[start:start + 5]):
+            with col:
+                active = st.session_state.get("page") == target
+                if st.button(label, key=f"top_nav_{target}", use_container_width=True,
+                             type="primary" if active else "secondary"):
+                    if target == "home":
+                        _go_home()
+                    else:
+                        st.session_state.page = target
+                        st.session_state["show_news_rail"] = False
+                        sym = st.session_state.get("active_security")
+                        if sym:
+                            st.session_state["research_last_query"] = sym
+                            st.session_state["m1_ticker"] = sym
+                        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 @st.fragment(run_every=60)
@@ -1062,9 +1086,16 @@ def _render_security_workspace(symbol: str):
 
 def _render_dashboard():
     """Home monitor: personal watchlist and portfolio holdings at a glance."""
-    wl = list(dict.fromkeys(st.session_state.get("watchlist", [])[:12]))
-    holdings = list(dict.fromkeys(ud.holding_symbols() or []))[:12]
-    all_syms = list(dict.fromkeys(st.session_state.get("admin_watchlist", []) + wl + holdings))[:30]
+    wl = list(dict.fromkeys(st.session_state.get("watchlist", []) or []))
+    try:
+        holdings = list(dict.fromkeys(ud.holding_symbols() or []))
+        holdings_error = ""
+    except Exception as exc:
+        holdings = []
+        holdings_error = str(exc)
+    admin_wl = list(st.session_state.get("admin_watchlist", []) or [])
+    all_syms = list(dict.fromkeys(admin_wl + wl + holdings))
+    # Quote retrieval is batched/cached by data_engine; keep the full lists visible.
     quotes = get_quotes(tuple(all_syms)) if all_syms else {}
 
     def _rows(symbols, empty_message):
@@ -1088,8 +1119,14 @@ def _render_dashboard():
             f'font-family:JetBrains Mono,monospace;line-height:1.7;">{empty_message}</div>'
         )
 
-    wl_html = _rows(wl, "NO PERSONAL WATCHLIST YET · OPEN WATCHLIST TO ADD SYMBOLS")
-    holdings_html = _rows(holdings, "NO HOLDINGS YET · ADD A POSITION IN PORTFOLIO")
+    wl_html = '<div class="monitor-list">' + (_rows(wl, "NO PERSONAL WATCHLIST YET · OPEN WATCHLIST TO ADD SYMBOLS")) + '</div>'
+    if holdings_error:
+        holdings_empty = "PORTFOLIO STORAGE COULD NOT BE READ · OPEN PORTFOLIO TO CHECK CONNECTION"
+    elif not holdings:
+        holdings_empty = "NO POSITIONS RETURNED BY PORTFOLIO STORAGE · ADD OR IMPORT A POSITION IN PORTFOLIO"
+    else:
+        holdings_empty = "NO HOLDINGS YET · ADD A POSITION IN PORTFOLIO"
+    holdings_html = '<div class="monitor-list">' + _rows(holdings, holdings_empty) + '</div>'
     adv = sum(1 for s in all_syms if quotes.get(s) and quotes[s]["chg"] > 0.05)
     dec = sum(1 for s in all_syms if quotes.get(s) and quotes[s]["chg"] < -0.05)
     flat = sum(1 for s in all_syms if quotes.get(s) and abs(quotes[s]["chg"]) <= 0.05)
