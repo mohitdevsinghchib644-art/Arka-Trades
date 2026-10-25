@@ -21,7 +21,7 @@ Rotation detection (RRG-style, simplified - not the licensed JdK RRG)
   RS line        sector index / benchmark index
   RS-Ratio  (x)  100 x RS / SMA(RS, 50)        > 100 = outperforming its own 50-session trend
   RS-Momentum(y) 100 x RS-Ratio / RS-Ratio[10 sessions ago]   > 100 = relative trend accelerating
-  Quadrants      LEADING (x>=100,y>=100) · WEAKENING (x>=100,y<100) · LAGGING (x<100,y<100) · IMPROVING (x<100,y>=100)
+  Lanes          LEADING (x>=100,y>=100) · FADING (x>=100,y<100) · WEAK (x<100,y<100) · IMPROVING (x<100,y>=100)
 
   Rotation score (0-100, transparent)
      Trend 30      above 20-EMA 10 · above 50-EMA 10 · 10-EMA over 20-EMA 5 · 20-EMA over 50-EMA 5
@@ -35,7 +35,7 @@ Rotation detection (RRG-style, simplified - not the licensed JdK RRG)
                    line crossing up within 5-10 sessions) + above 20-EMA + RSI >= 50 + not extended + score >= 55
      LEADING       leading quadrant, trend intact          EXTENDED   leading but > 6% above 20-EMA or RSI > 72
      IMPROVING     relative momentum turning up, not yet confirmed by price
-     WEAKENING     outperforming trend but momentum fading   LAGGING   underperforming and fading
+     FADING        ahead of the benchmark but losing steam    WEAK      behind and falling further behind
 
 Honest limits: "sector" is the NSE industry classification from the index constituent files; turnover is not
 exchange-reported value; scores and stages are evidence from price, breadth and volume - not forecasts.
@@ -51,9 +51,12 @@ RS_TREND, RS_MOM = 50, 10
 TRAIL_STEP, TRAIL_LEN = 5, 6
 EXTENDED_PCT = 6.0
 EXTENDED_RSI = 72.0
-BENCH_ORDER = ("NIFTY 50", "MIDCAP 100", "SMALLCAP 100")
-BK = {"NIFTY 50": "n50", "MIDCAP 100": "m100", "SMALLCAP 100": "s100"}
-STAGES = ("ROTATING IN", "LEADING", "EXTENDED", "IMPROVING", "WEAKENING", "LAGGING")
+MARKET = "MARKET AVG"        # equal-weight average of every stock in the universe: the fair yardstick for sector rotation
+BENCH_ORDER = (MARKET, "NIFTY 50", "MIDCAP 100", "SMALLCAP 100")
+COMPARE = ("NIFTY 50", "MIDCAP 100", "SMALLCAP 100")      # benchmarks shown in the comparison charts / tables
+BK = {MARKET: "mkt", "NIFTY 50": "n50", "MIDCAP 100": "m100", "SMALLCAP 100": "s100"}
+STAGES = ("ROTATING IN", "LEADING", "EXTENDED", "IMPROVING", "FADING", "WEAK")
+LANE_VALUE = {"LEADING": 3, "IMPROVING": 2, "FADING": 1, "WEAK": 0}
 
 
 # ───────────────────────── small helpers ─────────────────────────
@@ -224,6 +227,7 @@ def analyse_universe(frames: dict, meta: pd.DataFrame, bench: str = "^NSEI", ben
                 bser[k] = s
     elif frames.get(bench) is not None:
         bser["NIFTY 50"] = norm_series(frames[bench]["Close"])
+    bser[MARKET] = (1 + (ret1.mean(axis=1) / 100).fillna(0)).cumprod() * 100       # average stock in the universe
     bench_idx = pd.DataFrame({k: bser[k].reindex(idx.union(bser[k].index)).ffill().reindex(idx)
                               for k in BENCH_ORDER if k in bser}, index=idx)
 
@@ -284,10 +288,16 @@ def analyse_universe(frames: dict, meta: pd.DataFrame, bench: str = "^NSEI", ben
 
 
 # ───────────────────────── benchmark comparison ─────────────────────────
+def _cmp(res: dict) -> pd.DataFrame:
+    """Benchmarks used for the comparison charts and tables (NIFTY 50 / MIDCAP 100 / SMALLCAP 100)."""
+    bi = res["bench_index"]
+    return bi[[b for b in COMPARE if b in bi.columns]]
+
+
 def returns_vs_benchmarks(res: dict):
     """Sector returns (1W/1M/3M) and excess return in pp versus every benchmark.
     Returns (DataFrame[sector, r1w, r1m, r3m, x1w_n50, x1m_m100 ...], {period: {bench: return}})."""
-    si, bi = res["sector_index"], res["bench_index"]
+    si, bi = res["sector_index"], _cmp(res)
     out = pd.DataFrame(index=si.columns)
     bench_ret = {}
     for p, k in (("1w", 5), ("1m", 21), ("3m", 63)):
@@ -303,15 +313,15 @@ def returns_vs_benchmarks(res: dict):
 
 
 def rebased(res: dict, sector: str, sessions: int) -> pd.DataFrame:
-    """Sector + all benchmarks rebased to 100 at the start of the window."""
-    si, bi = res["sector_index"], res["bench_index"]
+    """Sector + NIFTY 50 / MIDCAP 100 / SMALLCAP 100 rebased to 100 at the start of the window."""
+    si, bi = res["sector_index"], _cmp(res)
     df = pd.concat([si[[sector]], bi], axis=1).tail(sessions + 1).ffill().bfill()
     return df / df.iloc[0] * 100
 
 
 def ratios(res: dict, sector: str, sessions: int) -> pd.DataFrame:
     """sector / benchmark rebased to 100: rising line = sector outperforming that benchmark."""
-    si, bi = res["sector_index"], res["bench_index"]
+    si, bi = res["sector_index"], _cmp(res)
     cols = {}
     for b in bi.columns:
         r = (si[sector] / bi[b]).tail(sessions + 1).ffill().bfill()
@@ -323,7 +333,7 @@ def ratios(res: dict, sector: str, sessions: int) -> pd.DataFrame:
 def _quadrant(x, y) -> str:
     if x is None or y is None or np.isnan(x) or np.isnan(y):
         return "UNAVAILABLE"
-    return ("LEADING" if y >= 100 else "WEAKENING") if x >= 100 else ("IMPROVING" if y >= 100 else "LAGGING")
+    return ("LEADING" if y >= 100 else "FADING") if x >= 100 else ("IMPROVING" if y >= 100 else "WEAK")
 
 
 def _stage(quad, ab20, rsi, dist20, score, fresh) -> str:
@@ -335,10 +345,10 @@ def _stage(quad, ab20, rsi, dist20, score, fresh) -> str:
         if quad == "LEADING":
             return "EXTENDED" if ext else "LEADING"
         return "IMPROVING"
-    if quad == "WEAKENING":
-        return "WEAKENING"
-    if quad == "LAGGING":
-        return "LAGGING"
+    if quad == "FADING":
+        return "FADING"
+    if quad == "WEAK":
+        return "WEAK"
     return "—"
 
 
@@ -416,11 +426,20 @@ def rotation_table(res: dict, bench_name: str = "NIFTY 50"):
         rs_above = bool(rs[s].iloc[-1] > rs_e20[s].iloc[-1]) if pd.notna(rs_e20[s].iloc[-1]) else False
         rs_xup = crossed_up(rs[s], rs_e20[s], 10)
         ex = {}
-        for tag, k in (("ex1w", 5), ("ex1m", 21)):
+        for tag, k in (("ex1w", 5), ("ex2w", 10), ("ex1m", 21)):
             ex[tag] = (float(((si[s].iloc[-1] / si[s].iloc[-1 - k]) / (b.iloc[-1] / b.iloc[-1 - k]) - 1) * 100)
                        if len(si) > k and pd.notna(b.iloc[-1 - k]) else np.nan)
         score, why, warn = _score(rec, x, y, rs_above, bench_name)
         quad = _quadrant(x, y)
+        q5 = _quadrant(*pts[-2]) if len(pts) >= 2 else quad
+        q10 = _quadrant(*pts[-3]) if len(pts) >= 3 else q5
+        moved_from, moved_when = "", 0
+        if q5 not in (quad, "UNAVAILABLE"):
+            moved_from, moved_when = q5, 5
+        elif q10 not in (quad, "UNAVAILABLE"):
+            moved_from, moved_when = q10, 10
+        dx5 = pts[-1][0] - pts[-2][0] if len(pts) >= 2 else 0.0
+        rs_dir = "up" if dx5 > 0.2 else "down" if dx5 < -0.2 else "flat"
         fresh = bool(_b(rec.get("x20_up")) or _b(rec.get("rsi50_up")) or _b(rec.get("e1020_up")) or rs_xup)
         stage = _stage(quad, _b(rec.get("ab20")), _f(rec.get("rsi_d")), _f(rec.get("dist20")), score, fresh)
         signals = []
@@ -430,7 +449,10 @@ def rotation_table(res: dict, bench_name: str = "NIFTY 50"):
         if rs_xup: signals.append("RS turning up")
         if _b(rec.get("x20_dn")): signals.append("lost 20-EMA")
         rows.append({**rec, "rrg_x": x, "rrg_y": y, "quadrant": quad, "rs_above": rs_above, "rs_xup": rs_xup,
-                     "ex1w": ex["ex1w"], "ex1m": ex["ex1m"], "score": score, "stage": stage, "fresh": fresh,
+                     "ex1w": ex["ex1w"], "ex2w": ex["ex2w"], "ex1m": ex["ex1m"],
+                     "moved_from": moved_from, "moved_when": moved_when, "rs_dir": rs_dir,
+                     "moved_up": LANE_VALUE.get(quad, -1) > LANE_VALUE.get(moved_from, 99) if moved_from else False,
+                     "score": score, "stage": stage, "fresh": fresh,
                      "signals": signals, "why": why, "warn": warn})
     out = pd.DataFrame(rows)
     out = out.sort_values(["score", "r1w"], ascending=[False, False], na_position="last").reset_index(drop=True)
