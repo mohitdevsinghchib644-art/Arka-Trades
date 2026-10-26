@@ -484,8 +484,19 @@ def _navigation_transition():
         const w = window.parent;
         const d = w.document;
         const ID = 'arka-navigation-loading-overlay';
+        // Keep the cover in place briefly after the destination page has rendered.
+        // Removing it immediately can expose Streamlit's previous DOM while React
+        // finishes replacing the old page with the new one.
         const old = d.getElementById(ID);
-        if (old) old.remove();
+        if (old) {
+          if (old.dataset.arkaRemovalScheduled !== '1') {
+            old.dataset.arkaRemovalScheduled = '1';
+            w.setTimeout(() => {
+              const current = d.getElementById(ID);
+              if (current) current.remove();
+            }, 650);
+          }
+        }
 
         if (!w.__arkaNavigationTransitionInstalled) {
           w.__arkaNavigationTransitionInstalled = true;
