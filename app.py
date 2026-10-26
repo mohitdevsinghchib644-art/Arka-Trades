@@ -8,7 +8,7 @@ import json
 import math
 from pathlib import Path
 from supabase import create_client, Client
-import user_data as ud                              # NEW — shared watchlist/portfolio storage helpers
+import user_data as ud
 from news_feed import render_news_rail, get_news_dot, _ensure_news_state, refresh_news, _fetch_news_for_stock
 from arka_ai import render_arka_ai
 from research_page import render_research_page, render_research_panel
@@ -18,31 +18,34 @@ from data_engine import (get_indices, get_quotes, scan_batch, get_static, get_hi
 from chart_engine import render_pro_chart
 from money_flow import render_money_flow
 # watchlist_page / portfolio_page are imported lazily inside their page branches
-# (see the router near the bottom) so a problem in either file can never stop
-# the rest of the terminal from loading.
+# so a problem in either file can never stop the rest of the terminal from loading.
 
 # ═══════════════════════════════════════════════════════════════════
-# v5 — WATCHLIST + PORTFOLIO MODULES WIRED IN
+# v6 — PROFESSIONAL INTERFACE
 #
-# What changed vs v4:
-#   1. NEW modules: WATCHLIST (watchlist_page.py) and PORTFOLIO
-#      (portfolio_page.py). Both appear in the Module Directory, have a
-#      compact header with a back button, and are routed at the bottom.
-#   2. Both modules share user_data.py, so the watchlist you edit there is the
-#      same list the Scanner, Alerts, dashboard and news rail already use.
-#   3. "ADD TO WATCHLIST" on a security page now INSERTS one symbol instead of
-#      deleting and re-inserting the whole table (the old way could wipe the
-#      list if the insert failed halfway).
-#   4. News rail: while you are on the Portfolio page it follows your holdings.
-#   5. FIX: scanning the Arka list used to set the news source to "admin_v4",
-#      which the news rail never matched, so it silently showed the wrong list.
-#   6. FIX: st.set_page_config now runs first, and st.secrets is read through a
-#      safe helper (no crash when secrets.toml is missing locally).
-#   7. Bare `except:` blocks replaced with `except Exception:` so Streamlit's
-#      own rerun/stop signals are never swallowed.
+# Design direction (researched against Bloomberg-style terminals, TradingView, Mercury,
+# Stripe tables and Streamlit's own theming guidance):
+#   * Near-black canvas (#050505) with stepped surfaces, 1px hairline borders, ONE accent
+#     (amber). Green / red are reserved for direction and always paired with an arrow, so
+#     meaning never depends on colour alone.
+#   * Inter for interface text, JetBrains Mono with tabular numerals for every figure.
+#   * One persistent, sticky top bar on every page: brand, workspace navigation, live
+#     market-session status, user and sign-out. One page header per workspace.
+#   * Home: KPI strip, watchlist / holdings / internals panels and a launcher grid of
+#     workspace cards. Security page: header with 52-week range, stat ribbon, one-click
+#     actions (watchlist, portfolio, Arka AI, research).
+#   * Landing + login re-skinned to the same palette (they used a separate green theme).
+#   * Copy `.streamlit/config.toml` (delivered with this file) for native dark theming.
+#
+# Fixes carried in this version
+#   * Navigation no longer flips the news rail off, so it never comes back collapsed.
+#   * Navigation uses on_click callbacks (one rerun instead of two).
+#   * st.secrets read through a safe helper; set_page_config runs first.
 # ═══════════════════════════════════════════════════════════════════
 
 st.set_page_config(page_title="Arka Trades", layout="wide", page_icon="📈", initial_sidebar_state="collapsed")
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def _secret(name: str, default=""):
@@ -83,10 +86,8 @@ def db_load_watchlist() -> list:
         return []
     try:
         res = supabase.table("watchlist").select("symbol").execute()
-        # dict.fromkeys dedupes while preserving order — a stale duplicate
-        # row in Supabase (e.g. from a non-atomic save) must never reach
-        # the UI, since sym-keyed widgets downstream (alerts page) will
-        # crash with StreamlitDuplicateElementKey on a repeated symbol.
+        # dict.fromkeys dedupes while preserving order — a stale duplicate row must never
+        # reach the UI (sym-keyed widgets downstream crash on a repeated symbol).
         return list(dict.fromkeys(r["symbol"] for r in res.data)) if res.data else []
     except Exception: return []
 
@@ -154,18 +155,16 @@ def send_telegram(msg):
             data={"chat_id":CHAT_ID,"text":msg,"parse_mode":"HTML"}, timeout=5)
     except Exception: pass
 
-# ════════════════ DESIGN SYSTEM — TERMINAL v3 ════════════════════
-DARK   = "#000000"
-DARK2  = "#0A0A0A"
-DARK3  = "#111111"
-BORDER = "#262626"
-BORDER2 = "#1A1A1A"
-IVORY  = "#E8E8E8"
-T2     = "#8A8A8A"
-T3     = "#5A5A5A"
-NAVY   = "#0A0A0A"
+# ════════════════ DESIGN TOKENS ════════════════════
+BG, S1, S2, S3 = "#050505", "#0A0A0A", "#0F0F0F", "#151515"
+LINE, LINE2 = "#1F1F1F", "#2B2B2B"
+DARK, DARK2, DARK3, BORDER = "#000000", S1, "#111111", LINE2
+BORDER2 = LINE
+IVORY, T2, T3 = "#ECECEC", "#A3A3A3", "#6B6B6B"
+NAVY = S1
 
 AMBER  = "#FF9F0A"
+AMBER2 = "#FFB340"
 CYAN   = "#5AC8FA"
 GREEN  = "#30D158"
 RED    = "#FF453A"
@@ -176,15 +175,11 @@ PINK   = "#FF6482"
 BLUE   = AMBER
 GOLD   = AMBER
 
-GRAD_BRAND = f"linear-gradient(135deg,{AMBER},{CYAN})"
-GRAD_AI    = f"linear-gradient(135deg,{PURPLE},{AMBER})"
-GRAD_TEXT  = f"linear-gradient(90deg,{CYAN},{AMBER},{PURPLE})"
-
-FONT = "'Plus Jakarta Sans','Inter',sans-serif"
-MONO = "'JetBrains Mono',monospace"
+FONT = "'Inter',system-ui,-apple-system,'Segoe UI',sans-serif"
+MONO = "'JetBrains Mono',ui-monospace,Menlo,monospace"
 
 TERM_TOKENS = {
-    "dark": DARK, "panel": DARK2, "panel2": DARK3, "border": BORDER,
+    "dark": DARK, "panel": S1, "panel2": DARK3, "border": LINE2,
     "ivory": IVORY, "t2": T2, "t3": T3, "row_alt": "#0F0F0F",
     "amber": AMBER, "cyan": CYAN, "green": GREEN, "red": RED, "purple": PURPLE,
     "font": FONT, "mono": MONO,
@@ -206,6 +201,17 @@ _ICON_PATHS = {
     "check":'<polyline points="20 6 9 17 4 12"/>',
     "gauge":'<path d="M12 14l4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
     "research":'<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M11 8v6M8 11h6"/>',
+    "home":'<path d="M3 9.5 12 3l9 6.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>',
+    "star":'<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
+    "briefcase":'<rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>',
+    "activity":'<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>',
+    "bars":'<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>',
+    "filter":'<polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>',
+    "scan":'<path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><line x1="7" y1="12" x2="17" y2="12"/>',
+    "logout":'<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>',
+    "globe":'<circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>',
+    "arrow":'<line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>',
+    "lock":'<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
 }
 
 def icon(name, size=18, color=None):
@@ -216,9 +222,9 @@ def icon(name, size=18, color=None):
 
 def icon_box(name, color=None, size=32):
     c = color or AMBER
-    return (f'<div style="width:{size}px;height:{size}px;border-radius:2px;background:{c}14;'
+    return (f'<div style="width:{size}px;height:{size}px;border-radius:4px;background:{c}14;'
             f'border:1px solid {c}33;display:flex;align-items:center;justify-content:center;'
-            f'margin-bottom:10px;">{icon(name, 16, c)}</div>')
+            f'flex-shrink:0;">{icon(name, int(size * 0.5), c)}</div>')
 
 for k, v in {"logged_in":False,"disclaimer_done":True,"show_login":False,"page":"home",
     "profile":{"name":"Trader","email":"","phone":""},"profile_photo":None,"watchlist":[],
@@ -239,103 +245,234 @@ name    = st.session_state.profile.get("name","Trader") or "Trader"
 initial = name[0].upper()
 IS_ADMIN = st.session_state.get("is_admin", False)
 
-# ── Global CSS — ARKA TERMINAL v5 ─────────────────────────────
-st.markdown(f"""
+# ════════════════ GLOBAL DESIGN SYSTEM (CSS) ════════════════
+# Plain string (not an f-string): every colour is a CSS variable, so other modules can reuse
+# var(--amber), var(--line) … in their own HTML.
+APP_CSS = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
-:root{{color-scheme:dark;}}
-*,*::before,*::after{{box-sizing:border-box;}}
-html,body,.stApp{{background:#050505 !important;color:{IVORY} !important;font-family:'Inter',sans-serif !important;}}
-header[data-testid="stHeader"]{{display:none !important;}}
-[data-testid="stSidebar"],[data-testid="stSidebarCollapsedControl"]{{display:none !important;}}
-.block-container{{padding:0 8px 28px !important;max-width:100% !important;}}
-.stButton>button{{background:#0b0b0b !important;color:#d8d8d8 !important;border:1px solid #252525 !important;border-radius:0 !important;font-family:'Inter',sans-serif !important;font-size:11px !important;font-weight:600 !important;min-height:30px !important;box-shadow:none !important;}}
-.stButton>button:hover{{border-color:{AMBER} !important;color:{AMBER} !important;background:#111 !important;}}
-.stButton>button[kind="primary"]{{background:{AMBER} !important;color:#000 !important;border-color:{AMBER} !important;}}
-.stTextInput input{{background:#0a0a0a !important;color:#eee !important;border:1px solid #303030 !important;border-radius:0 !important;font-family:'Inter',sans-serif !important;font-size:13px !important;height:40px !important;}}
-.stTextInput input:focus{{border-color:{AMBER} !important;box-shadow:0 0 0 1px {AMBER} !important;}}
-.stTextInput label,.stSelectbox label,.stRadio label{{font-size:9px !important;color:#777 !important;text-transform:uppercase !important;letter-spacing:1px !important;}}
-[data-testid="stSelectbox"]>div>div{{background:#0a0a0a !important;border:1px solid #303030 !important;border-radius:0 !important;color:#ddd !important;}}
-.stTabs [data-baseweb="tab-list"]{{background:#0a0a0a !important;border:1px solid #252525 !important;border-radius:0 !important;gap:0 !important;}}
-.stTabs [data-baseweb="tab"]{{font-family:'JetBrains Mono',monospace !important;font-size:10px !important;color:#777 !important;text-transform:uppercase !important;border-radius:0 !important;}}
-.stTabs [aria-selected="true"]{{color:{AMBER} !important;background:#101010 !important;box-shadow:inset 0 -2px 0 {AMBER};}}
-[data-testid="stMetric"]{{background:#090909 !important;border:1px solid #202020 !important;border-radius:0 !important;padding:9px !important;}}
-[data-testid="stMetricLabel"] p{{font-size:8px !important;color:#777 !important;letter-spacing:1px !important;text-transform:uppercase !important;}}
-[data-testid="stMetricValue"]{{font-family:'JetBrains Mono',monospace !important;font-size:16px !important;}}
-hr{{border-color:#202020 !important;}}
-iframe{{border:none;}}
-.pulse-dot{{width:5px;height:5px;border-radius:50%;background:{GREEN};display:inline-block;box-shadow:0 0 7px {GREEN};}}
-.terminal-shell{{background:#070707;border:1px solid #202020;border-top:2px solid {AMBER};}}
-.terminal-brandbar{{height:45px;display:flex;align-items:center;justify-content:space-between;padding:0 12px;border-bottom:1px solid #202020;background:#080808;}}
-.brand-left{{display:flex;align-items:center;gap:9px;}}
-.brand-mark{{width:24px;height:24px;background:{AMBER};display:flex;align-items:center;justify-content:center;}}
-.brand-name{{font-size:12px;font-weight:700;letter-spacing:1.3px;color:#eee;}}
-.brand-sub{{font-family:'JetBrains Mono',monospace;font-size:7px;letter-spacing:1.5px;color:#666;margin-top:2px;}}
-.brand-status{{font-family:'JetBrains Mono',monospace;font-size:8px;letter-spacing:1px;color:{GREEN};display:flex;align-items:center;gap:6px;}}
-.brand-status-wide{{justify-content:flex-end;height:34px;}}
-.module-top-title{{height:34px;display:flex;align-items:center;justify-content:center;gap:9px;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;letter-spacing:1.2px;color:#e8e8e8;border-bottom:1px solid #202020;}}
-.module-top-title small{{font-size:7px;color:#555;letter-spacing:1px;font-weight:500;}}
-.module-directory-spacer{{height:22px;border-bottom:1px solid #181818;margin-bottom:10px;}}
-.module-directory-title{{font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:1.4px;color:{AMBER};border-top:1px solid #292929;border-bottom:1px solid #202020;padding:10px 7px;margin-bottom:7px;}}
-.module-directory-card{{background:#090909;border:1px solid #242424;border-top:2px solid #252525;padding:11px 12px;min-height:158px;margin-bottom:8px;}}
-.module-dir-code{{font-family:'JetBrains Mono',monospace;color:{AMBER};font-size:9px;font-weight:700;}}
-.module-dir-label{{font-family:'JetBrains Mono',monospace;color:#eee;font-size:11px;font-weight:700;letter-spacing:.5px;margin:4px 0 7px;}}
-.module-dir-purpose{{font-size:10px;color:#888;line-height:1.55;min-height:48px;}}
-.module-dir-meta{{display:flex;justify-content:space-between;border-top:1px solid #191919;padding-top:7px;margin-top:7px;font-family:'JetBrains Mono',monospace;font-size:8px;color:#555;}}
-.module-dir-meta b{{color:{AMBER};font-weight:700;}}
-.module-dir-use{{margin-top:6px;font-size:9px;color:#aaa;line-height:1.5;}}
-.module-dir-use span{{font-family:'JetBrains Mono',monospace;color:#555;margin-right:7px;font-size:8px;}}
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+:root{
+  --bg:#050505;--s1:#0A0A0A;--s2:#0F0F0F;--s3:#151515;--line:#1F1F1F;--line2:#2B2B2B;
+  --tx:#ECECEC;--tx2:#A3A3A3;--tx3:#6B6B6B;--tx4:#454545;
+  --amber:#FF9F0A;--amber2:#FFB340;--green:#30D158;--red:#FF453A;--cyan:#5AC8FA;--purple:#BF5AF2;
+  --sans:'Inter',system-ui,-apple-system,'Segoe UI',sans-serif;
+  --mono:'JetBrains Mono',ui-monospace,Menlo,monospace;
+  color-scheme:dark;
+}
+*,*::before,*::after{box-sizing:border-box;}
+html,body,.stApp,[data-testid="stAppViewContainer"],[data-testid="stMain"]{background:var(--bg) !important;color:var(--tx) !important;font-family:var(--sans) !important;}
+*{scrollbar-width:thin;scrollbar-color:#2a2a2a transparent;}
+::-webkit-scrollbar{width:8px;height:8px;}
+::-webkit-scrollbar-thumb{background:#262626;border-radius:4px;}
+::-webkit-scrollbar-thumb:hover{background:#3a3a3a;}
+::-webkit-scrollbar-track{background:transparent;}
+::selection{background:rgba(255,159,10,.28);color:#fff;}
 
-.market-strip{{border-bottom:1px solid #202020;background:#050505;}}
-.market-row{{display:grid;grid-template-columns:82px repeat(6,minmax(145px,1fr));min-height:43px;border-bottom:1px solid #161616;}}
-.market-row:last-child{{border-bottom:0;}}
-.market-row-label{{font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;color:#666;display:flex;align-items:center;padding:0 8px;letter-spacing:1px;text-transform:uppercase;}}
-.market-cell{{border-left:1px solid #161616;padding:7px 10px;display:flex;align-items:center;justify-content:space-between;gap:6px;min-width:0;}}
-.market-cell .m-name{{font-family:'JetBrains Mono',monospace;font-size:10px;color:#8a8a8a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}}
-.market-cell .m-price{{font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;color:#e6e6e6;white-space:nowrap;}}
-.market-cell .m-chg{{font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:600;white-space:nowrap;}}
-.command-wrap{{padding:9px 0 7px;background:#050505;border-bottom:1px solid #202020;}}
-.command-label{{font-family:'JetBrains Mono',monospace;font-size:8px;color:{AMBER};letter-spacing:1.4px;margin:0 0 4px 4px;text-transform:uppercase;}}
-.command-hint{{font-family:'JetBrains Mono',monospace;font-size:8px;color:#555;text-align:right;margin-top:-24px;margin-right:9px;pointer-events:none;}}
-.security-head{{display:flex;justify-content:space-between;align-items:center;background:#090909;border:1px solid #262626;border-top:2px solid {AMBER};padding:11px 13px;margin-bottom:8px;}}
-.security-kicker{{font-family:'JetBrains Mono',monospace;color:#666;font-size:8px;letter-spacing:1.2px;}}
-.security-title{{font-size:17px;font-weight:700;color:#eee;margin-top:3px;}}
-.security-symbol{{font-family:'JetBrains Mono',monospace;color:#777;font-size:9px;margin-top:3px;}}
-.security-quote{{text-align:right;font-family:'JetBrains Mono',monospace;}}
-.quote-price{{font-size:20px;color:#eee;font-weight:600;}}
-.panel-title{{font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:600;letter-spacing:1.3px;color:{AMBER};border-bottom:1px solid #242424;padding:8px 0 6px;margin-bottom:6px;text-transform:uppercase;}}
-.overview-box{{background:#090909;border:1px solid #242424;}}
-.overview-row{{display:flex;justify-content:space-between;padding:6px 9px;border-bottom:1px solid #181818;font-size:9px;}}
-.overview-row:last-child{{border-bottom:0;}}
-.overview-row span{{color:#777;}}
-.overview-row b{{font-family:'JetBrains Mono',monospace;color:#ddd;font-weight:500;}}
-.company-desc{{background:#090909;border:1px solid #242424;padding:9px;font-size:9px;color:#858585;line-height:1.6;}}
-.module-launcher{{margin-top:9px;border-top:1px solid #242424;background:#070707;}}
-.module-launcher-head{{height:28px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #1d1d1d;padding:0 8px;}}
-.module-launcher-title{{font-family:'JetBrains Mono',monospace;font-size:8px;letter-spacing:1.3px;color:#777;text-transform:uppercase;}}
-.module-launcher-context{{font-family:'JetBrains Mono',monospace;font-size:8px;color:{AMBER};}}
-.module-cell{{padding:8px 9px;border-right:1px solid #222;min-height:48px;}}
-.module-code{{font-family:'JetBrains Mono',monospace;color:{AMBER};font-size:8px;font-weight:700;}}
-.module-label{{font-size:9px;color:#cfcfcf;margin-top:3px;}}
-.monitor-grid{{display:grid;grid-template-columns:1.15fr 1fr 1fr;gap:8px;margin-top:8px;}}
-.monitor-panel{{background:#090909;border:1px solid #242424;min-height:205px;}}
-.monitor-head{{height:38px;border-bottom:1px solid #202020;padding:0 9px;display:flex;align-items:center;justify-content:space-between;font-family:'JetBrains Mono',monospace;font-size:8px;color:{AMBER};letter-spacing:1px;}}
-.monitor-row{{display:grid;grid-template-columns:1fr 88px 70px;gap:7px;padding:9px 11px;border-bottom:1px solid #161616;font-family:'JetBrains Mono',monospace;font-size:10px;}}
-.monitor-row span:first-child{{color:#aaa;}}
-.monitor-row span:nth-child(2){{text-align:right;color:#ddd;}}
-.monitor-row span:last-child{{text-align:right;}}
-.small-positive{{color:{GREEN};}} .small-negative{{color:{RED};}}
-.news-rail{{background:#080808;border-left:1px solid #262626;min-height:100%;}}
-.home-monitor-grid{{grid-template-columns:1fr 1fr 0.85fr;align-items:stretch;}}
-.monitor-panel{{min-width:0;overflow:hidden;}}
-.monitor-row{{grid-template-columns:minmax(0,1fr) minmax(70px,88px) minmax(62px,70px);}}
-.stButton>button{{transition:border-color .12s ease,color .12s ease,background .12s ease;}}
-.stButton>button:focus-visible{{outline:1px solid {AMBER} !important;outline-offset:1px;}}
-@media(max-width:1300px){{.home-monitor-grid{{grid-template-columns:1fr 1fr;}}.home-monitor-grid .monitor-panel:last-child{{grid-column:1/-1;}}}}
-@media(max-width:800px){{.home-monitor-grid{{grid-template-columns:1fr;}}.home-monitor-grid .monitor-panel:last-child{{grid-column:auto;}}}}
-@media(max-width:1100px){{.market-row{{grid-template-columns:70px repeat(6,minmax(120px,1fr));overflow-x:auto;}}.monitor-grid{{grid-template-columns:1fr;}}}}
+/* ── chrome we do not want ── */
+header[data-testid="stHeader"],[data-testid="stToolbar"],[data-testid="stDecoration"],#MainMenu,footer,.stDeployButton,
+[data-testid="stSidebar"],[data-testid="stSidebarCollapsedControl"]{display:none !important;}
+.block-container{padding:0 18px 56px !important;max-width:100% !important;}
+[data-testid="stVerticalBlock"]{gap:.6rem;}
+
+/* ── typography ── */
+h1,h2,h3,h4,h5{font-family:var(--sans) !important;letter-spacing:-.01em;color:var(--tx) !important;}
+a{color:var(--amber);text-decoration:none;} a:hover{color:var(--amber2);}
+[data-testid="stCaptionContainer"],.stCaption{color:var(--tx3) !important;font-size:11px !important;line-height:1.55 !important;}
+[data-testid="stWidgetLabel"] p,[data-testid="stWidgetLabel"] label{font:700 9px var(--mono) !important;letter-spacing:1px !important;text-transform:uppercase !important;color:var(--tx3) !important;}
+hr{border-color:var(--line) !important;}
+iframe{border:none;}
+
+/* ── buttons ── */
+.stButton>button,.stDownloadButton>button,[data-testid^="stBaseButton-secondary"],[data-testid="stFormSubmitButton"]>button{
+  background:var(--s2) !important;color:var(--tx2) !important;border:1px solid var(--line2) !important;border-radius:4px !important;
+  font:600 11px var(--sans) !important;letter-spacing:.3px;min-height:32px !important;box-shadow:none !important;
+  transition:border-color .12s ease,color .12s ease,background .12s ease,transform .06s ease;}
+.stButton>button:hover,.stDownloadButton>button:hover{border-color:var(--amber) !important;color:var(--amber) !important;background:var(--s3) !important;}
+.stButton>button:active{transform:translateY(1px);}
+.stButton>button:focus-visible{outline:1px solid var(--amber) !important;outline-offset:2px;}
+.stButton>button:disabled{opacity:.38 !important;cursor:not-allowed;}
+.stButton>button[kind="primary"],button[data-testid^="stBaseButton-primary"],[data-testid="stFormSubmitButton"]>button[kind="primary"]{
+  background:var(--amber) !important;color:#000 !important;border-color:var(--amber) !important;font-weight:700 !important;}
+.stButton>button[kind="primary"]:hover,button[data-testid^="stBaseButton-primary"]:hover{background:var(--amber2) !important;border-color:var(--amber2) !important;color:#000 !important;}
+
+/* ── inputs ── */
+.stTextInput input,.stNumberInput input,.stDateInput input,.stTextArea textarea{
+  background:var(--s1) !important;color:var(--tx) !important;border:1px solid var(--line2) !important;border-radius:4px !important;
+  font:13px var(--sans) !important;}
+.stTextInput input,.stNumberInput input{height:40px !important;}
+.stTextInput input:focus,.stNumberInput input:focus,.stDateInput input:focus,.stTextArea textarea:focus{border-color:var(--amber) !important;box-shadow:0 0 0 1px var(--amber) !important;}
+input::placeholder,textarea::placeholder{color:#5a5a5a !important;}
+[data-baseweb="select"]>div{background:var(--s1) !important;border:1px solid var(--line2) !important;border-radius:4px !important;color:var(--tx) !important;min-height:38px;}
+[data-baseweb="select"]>div:hover{border-color:var(--tx3) !important;}
+[data-baseweb="select"] input{color:var(--tx) !important;}
+[data-baseweb="popover"] ul,[data-baseweb="menu"]{background:var(--s2) !important;border:1px solid var(--line2) !important;}
+[data-baseweb="menu"] li:hover,[role="option"]:hover{background:var(--s3) !important;}
+[data-baseweb="tag"]{background:rgba(255,159,10,.12) !important;border:1px solid rgba(255,159,10,.35) !important;border-radius:3px !important;}
+[data-baseweb="tag"] span{color:var(--amber) !important;font:600 10px var(--mono) !important;}
+[data-testid="stFileUploaderDropzone"]{background:var(--s1) !important;border:1px dashed var(--line2) !important;border-radius:4px !important;}
+[data-testid="stForm"]{border:1px solid var(--line) !important;border-radius:4px !important;background:var(--s1);padding:12px !important;}
+div[class*="st-key-cmdbar"] [data-testid="stForm"]{border:0 !important;background:transparent !important;padding:0 !important;}
+
+/* ── radio as segmented pills ── */
+[data-testid="stRadio"] [role="radiogroup"]{gap:6px !important;flex-wrap:wrap;}
+[data-testid="stRadio"] label[data-baseweb="radio"]{background:var(--s1);border:1px solid var(--line2);border-radius:4px;padding:5px 11px 5px 9px;margin:0 !important;transition:border-color .12s ease,background .12s ease;}
+[data-testid="stRadio"] label[data-baseweb="radio"]:hover{border-color:var(--tx3);}
+[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked){border-color:var(--amber);background:rgba(255,159,10,.10);}
+[data-testid="stRadio"] label[data-baseweb="radio"] p{font:700 10px var(--mono) !important;letter-spacing:.7px;text-transform:uppercase;color:var(--tx2) !important;}
+[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p{color:var(--amber) !important;}
+
+/* ── tabs: underline style ── */
+.stTabs [data-baseweb="tab-list"]{background:transparent !important;border:0 !important;border-bottom:1px solid var(--line) !important;gap:2px !important;}
+.stTabs [data-baseweb="tab"]{background:transparent !important;border-radius:0 !important;font:700 10px var(--mono) !important;letter-spacing:.9px;text-transform:uppercase;color:var(--tx3) !important;padding:11px 16px !important;height:auto !important;}
+.stTabs [data-baseweb="tab"]:hover{color:var(--tx) !important;background:rgba(255,255,255,.03) !important;}
+.stTabs [aria-selected="true"]{color:var(--amber) !important;background:transparent !important;}
+.stTabs [data-baseweb="tab-highlight"]{background:var(--amber) !important;height:2px !important;}
+.stTabs [data-baseweb="tab-border"]{background:var(--line) !important;}
+
+/* ── metrics / expanders / alerts / toasts ── */
+[data-testid="stMetric"]{background:var(--s1) !important;border:1px solid var(--line) !important;border-top:2px solid var(--line2) !important;border-radius:0 !important;padding:11px 13px !important;}
+[data-testid="stMetricLabel"] p{font:700 9px var(--mono) !important;letter-spacing:1px;text-transform:uppercase;color:var(--tx3) !important;}
+[data-testid="stMetricValue"]{font:600 18px var(--mono) !important;font-variant-numeric:tabular-nums;}
+[data-testid="stMetricDelta"]{font:600 11px var(--mono) !important;}
+[data-testid="stExpander"]{border:1px solid var(--line) !important;border-radius:0 !important;background:var(--s1) !important;}
+[data-testid="stExpander"] summary{font:700 10px var(--mono) !important;letter-spacing:.8px;text-transform:uppercase;color:var(--tx2) !important;}
+[data-testid="stAlert"]{background:var(--s1) !important;border:1px solid var(--line2) !important;border-left:3px solid var(--cyan) !important;border-radius:0 !important;}
+[data-testid="stAlert"]:has([data-testid="stAlertContentWarning"]){border-left-color:var(--amber) !important;}
+[data-testid="stAlert"]:has([data-testid="stAlertContentError"]){border-left-color:var(--red) !important;}
+[data-testid="stAlert"]:has([data-testid="stAlertContentSuccess"]){border-left-color:var(--green) !important;}
+[data-testid="stToast"]{background:var(--s2) !important;border:1px solid var(--line2) !important;border-left:3px solid var(--amber) !important;border-radius:4px !important;}
+[data-testid="stDataFrame"]{border:1px solid var(--line);}
+.stProgress>div>div>div>div{background:var(--amber) !important;}
+
+/* ═════════ application shell ═════════ */
+div[class*="st-key-topbar"]{position:sticky;top:0;z-index:100;background:rgba(5,5,5,.97);backdrop-filter:blur(8px);border-top:2px solid var(--amber);border-bottom:1px solid var(--line);margin:0 -18px 0;padding:0 18px;}
+.ak-brand{display:flex;align-items:center;gap:10px;height:46px;}
+.ak-mark{width:26px;height:26px;background:var(--amber);border-radius:4px;display:flex;align-items:center;justify-content:center;}
+.ak-bn{font:800 12px var(--sans);letter-spacing:1.6px;color:var(--tx);}
+.ak-bs{font:600 7px var(--mono);letter-spacing:1.6px;color:var(--tx3);margin-top:2px;}
+div[class*="st-key-topnav"] .stButton>button{background:transparent !important;border:0 !important;border-bottom:2px solid transparent !important;border-radius:0 !important;color:var(--tx3) !important;font:700 10px var(--mono) !important;letter-spacing:.9px;min-height:46px !important;text-transform:uppercase;padding:0 4px !important;}
+div[class*="st-key-topnav"] .stButton>button:hover{color:var(--tx) !important;background:rgba(255,255,255,.035) !important;border-bottom-color:var(--line2) !important;}
+div[class*="st-key-topnav"] .stButton>button[kind="primary"],div[class*="st-key-topnav"] button[data-testid^="stBaseButton-primary"]{background:transparent !important;color:var(--amber) !important;border-bottom:2px solid var(--amber) !important;}
+div[class*="st-key-topnav"] [data-testid="stHorizontalBlock"]{gap:0 !important;}
+div[class*="st-key-topuser"] .stButton>button{min-height:28px !important;font:700 9px var(--mono) !important;letter-spacing:.8px;}
+.ak-chips{display:flex;align-items:center;justify-content:flex-end;gap:7px;height:46px;}
+.ak-chip{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border:1px solid var(--line2);border-radius:999px;font:700 9px var(--mono);letter-spacing:.8px;color:var(--tx2);white-space:nowrap;}
+.ak-chip.live{color:var(--green);border-color:rgba(48,209,88,.35);background:rgba(48,209,88,.07);}
+.ak-chip.pre{color:var(--amber);border-color:rgba(255,159,10,.35);background:rgba(255,159,10,.07);}
+.ak-chip.closed{color:var(--tx3);}
+.ak-dot{width:6px;height:6px;border-radius:50%;background:currentColor;display:inline-block;}
+.ak-chip.live .ak-dot{box-shadow:0 0 8px var(--green);animation:akpulse 2s ease-in-out infinite;}
+@keyframes akpulse{0%,100%{opacity:1}50%{opacity:.35}}
+.ak-av{width:22px;height:22px;border-radius:50%;background:var(--s3);border:1px solid var(--line2);display:inline-flex;align-items:center;justify-content:center;font:700 10px var(--sans);color:var(--amber);}
+
+.ak-ph{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;padding:18px 2px 14px;border-bottom:1px solid var(--line);margin-bottom:12px;}
+.ak-ph .k{font:700 9px var(--mono);letter-spacing:1.6px;color:var(--amber);}
+.ak-ph .t{font:800 24px var(--sans);letter-spacing:-.4px;color:var(--tx);margin-top:4px;}
+.ak-ph .d{font:12px var(--sans);color:var(--tx3);margin-top:3px;}
+.ak-ph .r{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end;}
+
+/* index strips */
+.ak-strips{border:1px solid var(--line);background:var(--s1);margin:12px 0 0;}
+.ak-strip{display:grid;grid-template-columns:78px repeat(6,minmax(0,1fr));border-bottom:1px solid var(--line);}
+.ak-strip:last-child{border-bottom:0;}
+.ak-sl{display:flex;align-items:center;padding:0 12px;font:700 9px var(--mono);letter-spacing:1.2px;color:var(--tx3);background:var(--s2);}
+.ak-ix{position:relative;padding:9px 12px 11px;border-left:1px solid var(--line);min-width:0;}
+.ak-ix .n{font:600 9px var(--mono);letter-spacing:.6px;color:var(--tx3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.ak-ix .p{font:600 14px var(--mono);font-variant-numeric:tabular-nums;color:var(--tx);margin-top:3px;white-space:nowrap;}
+.ak-ix .c{position:absolute;right:10px;top:10px;font:700 10px var(--mono);font-variant-numeric:tabular-nums;padding:1px 6px;border-radius:3px;white-space:nowrap;}
+.ak-ix .m{position:absolute;left:0;bottom:0;height:2px;opacity:.8;}
+.ak-up{color:var(--green);background:rgba(48,209,88,.10);} .ak-dn{color:var(--red);background:rgba(255,69,58,.10);} .ak-fl{color:var(--tx3);background:rgba(255,255,255,.04);}
+
+/* command bar */
+.ak-cmd-h{display:flex;justify-content:space-between;align-items:baseline;margin:14px 2px 6px;}
+.ak-cmd-h b{font:700 9px var(--mono);letter-spacing:1.4px;color:var(--amber);}
+.ak-cmd-h span{font:10px var(--sans);color:var(--tx3);}
+
+/* KPI cards */
+.ak-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(176px,1fr));gap:8px;margin:12px 0;}
+.ak-kpi{background:var(--s1);border:1px solid var(--line);border-top:2px solid var(--a,var(--line2));padding:12px 14px;min-width:0;}
+.ak-kpi .l{font:700 8px var(--mono);letter-spacing:1.1px;color:var(--tx3);text-transform:uppercase;}
+.ak-kpi .v{font:700 20px var(--mono);font-variant-numeric:tabular-nums;color:var(--tx);margin-top:6px;white-space:nowrap;}
+.ak-kpi .s{font:10px var(--mono);color:var(--tx3);margin-top:4px;}
+
+/* panels */
+.ak-grid3{display:grid;grid-template-columns:1.1fr 1.1fr .8fr;gap:8px;margin-top:4px;}
+@media(max-width:1300px){.ak-grid3{grid-template-columns:1fr 1fr;}.ak-grid3>.ak-panel:last-child{grid-column:1/-1;}}
+@media(max-width:800px){.ak-grid3{grid-template-columns:1fr;}.ak-strip{grid-template-columns:60px repeat(3,minmax(0,1fr));}.ak-strip .ak-ix:nth-child(n+5){display:none;}}
+.ak-panel{background:var(--s1);border:1px solid var(--line);min-width:0;overflow:hidden;}
+.ak-pt{height:38px;padding:0 12px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);background:var(--s2);}
+.ak-pt b{font:700 9px var(--mono);letter-spacing:1.2px;color:var(--amber);}
+.ak-pt span{font:600 9px var(--mono);color:var(--tx3);}
+.ak-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:12px;align-items:center;padding:9px 12px;border-bottom:1px solid #141414;font:11px var(--mono);}
+.ak-row:last-child{border-bottom:0;}
+.ak-row:hover{background:rgba(255,255,255,.02);}
+.ak-row .s{font:700 11px var(--mono);color:var(--tx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.ak-row .p{font-variant-numeric:tabular-nums;color:var(--tx2);text-align:right;}
+.ak-row .c{font-weight:700;font-variant-numeric:tabular-nums;min-width:68px;text-align:right;padding:2px 7px;border-radius:3px;}
+.ak-empty{padding:18px 14px;font:11px var(--sans);color:var(--tx3);line-height:1.7;}
+.ak-empty b{color:var(--tx2);}
+.ak-bar{display:flex;height:6px;margin:12px;background:#151515;}
+.ak-bar i{display:block;height:100%;}
+
+/* section titles */
+.ak-sec{display:flex;align-items:center;gap:12px;margin:26px 0 12px;}
+.ak-sec:before{content:"";width:3px;height:14px;background:var(--amber);}
+.ak-sec b{font:700 11px var(--mono);letter-spacing:1.6px;color:var(--tx);text-transform:uppercase;white-space:nowrap;}
+.ak-sec span{font:11px var(--sans);color:var(--tx3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.ak-sec i{flex:1;height:1px;background:var(--line);}
+
+/* workspace cards */
+div[class*="st-key-ak_mod_"]{background:var(--s1);border:1px solid var(--line);border-top:2px solid var(--line2);padding:14px 14px 4px;transition:border-color .14s ease,background .14s ease;gap:.2rem;}
+div[class*="st-key-ak_mod_"]:hover{background:var(--s2);border-color:var(--line2);border-top-color:var(--amber);}
+div[class*="st-key-ak_mod_"] .stButton>button{background:transparent !important;border:0 !important;border-top:1px solid var(--line) !important;border-radius:0 !important;color:var(--amber) !important;justify-content:flex-start !important;padding:10px 0 6px !important;font:700 10px var(--mono) !important;letter-spacing:1.1px;min-height:36px !important;}
+div[class*="st-key-ak_mod_"] .stButton>button:hover{color:var(--amber2) !important;}
+.ak-mc{display:flex;gap:12px;align-items:flex-start;}
+.ak-mc .t{font:700 13px var(--sans);color:var(--tx);display:flex;align-items:center;gap:8px;}
+.ak-mc .t em{font:700 8px var(--mono);letter-spacing:.9px;font-style:normal;color:var(--tx3);border:1px solid var(--line2);padding:1px 6px;border-radius:3px;}
+.ak-mc .d{font:11px var(--sans);color:var(--tx3);line-height:1.6;margin-top:5px;min-height:36px;}
+
+/* security page */
+.ak-sh{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;background:var(--s1);border:1px solid var(--line);border-top:2px solid var(--amber);padding:16px 18px;}
+.ak-sh .sym{display:inline-block;font:800 10px var(--mono);letter-spacing:1px;color:#000;background:var(--amber);padding:2px 8px;border-radius:3px;}
+.ak-sh .nm{font:800 22px var(--sans);letter-spacing:-.3px;color:var(--tx);margin-top:8px;}
+.ak-sh .tg{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;}
+.ak-tag{font:600 9px var(--mono);letter-spacing:.7px;color:var(--tx2);border:1px solid var(--line2);padding:2px 8px;border-radius:3px;text-transform:uppercase;}
+.ak-sh .px{text-align:right;}
+.ak-sh .px .v{font:700 30px var(--mono);font-variant-numeric:tabular-nums;color:var(--tx);}
+.ak-sh .px .c{display:inline-block;margin-top:6px;font:700 12px var(--mono);padding:3px 9px;border-radius:3px;}
+.ak-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));border:1px solid var(--line);border-top:0;background:var(--s1);}
+.ak-st{padding:10px 14px;border-right:1px solid var(--line);min-width:0;}
+.ak-st:last-child{border-right:0;}
+.ak-st .l{font:700 8px var(--mono);letter-spacing:1px;color:var(--tx3);text-transform:uppercase;}
+.ak-st .v{font:600 13px var(--mono);font-variant-numeric:tabular-nums;color:var(--tx);margin-top:4px;white-space:nowrap;}
+.ak-rng{margin:12px 2px 2px;}
+.ak-rng .t{display:flex;justify-content:space-between;font:600 9px var(--mono);color:var(--tx3);letter-spacing:.6px;margin-bottom:6px;}
+.ak-rng .b{position:relative;height:5px;background:linear-gradient(90deg,rgba(255,69,58,.35),#262626 50%,rgba(48,209,88,.35));border-radius:3px;}
+.ak-rng .b i{position:absolute;top:-4px;width:3px;height:13px;background:var(--amber);border-radius:2px;transform:translateX(-1px);box-shadow:0 0 8px rgba(255,159,10,.6);}
+.ak-ov{background:var(--s1);border:1px solid var(--line);}
+.ak-ov div{display:flex;justify-content:space-between;padding:8px 12px;border-bottom:1px solid #141414;font-size:11px;}
+.ak-ov div:last-child{border-bottom:0;}
+.ak-ov span{color:var(--tx3);} .ak-ov b{font:500 11px var(--mono);color:var(--tx);}
+.ak-desc{background:var(--s1);border:1px solid var(--line);padding:12px;font-size:11px;color:var(--tx3);line-height:1.7;}
+.ak-pt2{font:700 9px var(--mono);letter-spacing:1.3px;color:var(--amber);border-bottom:1px solid var(--line);padding:10px 0 7px;margin:4px 0 8px;text-transform:uppercase;}
+
+/* scanner cards */
+.ak-sc{background:var(--s1);border:1px solid var(--line);border-top:2px solid var(--c,var(--line2));padding:12px;text-align:center;margin-bottom:4px;}
+.ak-sc b{color:var(--tx);font-size:13px;}
+.ak-sc .px{font:600 14px var(--mono);font-variant-numeric:tabular-nums;color:var(--tx);margin:8px 0 4px;}
+.ak-sc .rs{font:600 10px var(--mono);}
+
+/* news rail + footer + misc */
+.news-rail{background:var(--s1);border:1px solid var(--line);}
+.news-rail-collapsed{padding:9px 12px;border:1px solid var(--line);background:var(--s1);font:700 9px var(--mono);letter-spacing:1px;color:var(--tx3);}
+.news-rail-collapsed span{color:var(--tx4);margin-left:6px;}
+.ak-foot{margin-top:34px;padding:14px 2px 0;border-top:1px solid var(--line);font:10px var(--sans);color:var(--tx3);line-height:1.7;display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap;}
+.term-panel{background:var(--s1);border:1px solid var(--line);padding:14px;}
+.panel-title{font:700 9px var(--mono);letter-spacing:1.3px;color:var(--amber);border-bottom:1px solid var(--line);padding:9px 0 7px;margin-bottom:8px;text-transform:uppercase;}
+.pulse-dot{width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block;box-shadow:0 0 8px var(--green);}
 </style>
-""", unsafe_allow_html=True)
+"""
+st.markdown(APP_CSS, unsafe_allow_html=True)
 
 # ── Helpers ──────────────────────────────────────────────────
 def parse_csv(file):
@@ -359,8 +496,7 @@ def parse_csv(file):
             syms.append(v)
     return list(dict.fromkeys(syms))
 
-# Market data functions (get_static, get_price batch, get_index, history) now
-# live in data_engine.py — parallel, batched and cached. Nothing to define here.
+# Market data functions live in data_engine.py — parallel, batched and cached.
 
 # Index tickers. Each entry is (label, (primary, fallback, fallback...)).
 MIDCAP_CANDIDATES = ["NIFTYMDCP100.NS", "^NSEMDCP50", "NIFTY_MIDCAP_100.NS", "^CRSMID"]
@@ -390,18 +526,16 @@ def check_alerts(results):
             send_telegram(msg)
             st.session_state.alert_fired.add(sym)
 
-def section(title, accent=None):
-    a = accent or AMBER
-    st.markdown(f"""<div style="display:flex;align-items:center;gap:10px;margin:26px 0 12px;">
-        <div style="width:3px;height:14px;background:{a};"></div>
-        <div style="font-family:{MONO};font-size:12px;font-weight:700;color:{IVORY};letter-spacing:1.5px;text-transform:uppercase;white-space:nowrap;">{title}</div>
-        <div style="flex:1;height:1px;background:{BORDER};"></div></div>""", unsafe_allow_html=True)
+def section(title, sub="", accent=None):
+    """Section heading used across the app: accent bar · TITLE · muted note · hairline."""
+    note = f"<span>{sub}</span>" if sub else ""
+    st.markdown(f'<div class="ak-sec"><b>{title}</b>{note}<i></i></div>', unsafe_allow_html=True)
 
 def change_pill(chg):
-    c = GREEN if chg >= 0 else RED
+    cls = "ak-up" if chg >= 0 else "ak-dn"
     arrow = "▲" if chg >= 0 else "▼"
-    return (f'<span style="color:{c};font-family:{MONO};font-size:11px;font-weight:700;'
-            f'border:1px solid {c}44;padding:1px 6px;">{arrow} {abs(chg):.2f}%</span>')
+    return (f'<span class="{cls}" style="font-family:{MONO};font-size:11px;font-weight:700;'
+            f'padding:2px 7px;border-radius:3px;">{arrow} {abs(chg):.2f}%</span>')
 
 def sparkline(values, color=None, w=110, h=30):
     if not values or len(values) < 2: return ""
@@ -417,6 +551,28 @@ def checkline(text, c=None):
     return (f'<div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:12px;">'
             f'<span style="flex-shrink:0;margin-top:2px;">{icon("check", 16, c or GREEN)}</span>'
             f'<span style="font-size:14px;color:{IVORY};line-height:1.6;">{text}</span></div>')
+
+def _inr_short(x):
+    """₹1.25 Cr / ₹3.40 L / ₹45,200 — Indian compact format."""
+    if x is None or (isinstance(x, float) and not math.isfinite(x)):
+        return "—"
+    a, sign = abs(x), ("-" if x < 0 else "")
+    if a >= 1e7: return f"{sign}₹{a / 1e7:.2f} Cr"
+    if a >= 1e5: return f"{sign}₹{a / 1e5:.2f} L"
+    return f"{sign}₹{a:,.0f}"
+
+def _market_status():
+    """NSE cash-market session status in IST (public holidays are not accounted for)."""
+    now = datetime.now(IST)
+    t = now.hour * 60 + now.minute
+    stamp = now.strftime("%H:%M IST")
+    if now.weekday() >= 5:
+        return "MARKET CLOSED", "closed", f"Weekend · {stamp}"
+    if 9 * 60 <= t < 9 * 60 + 15:
+        return "PRE-OPEN", "pre", f"Opens 09:15 · {stamp}"
+    if 9 * 60 + 15 <= t <= 15 * 60 + 30:
+        return "MARKET OPEN", "live", f"Closes 15:30 · {stamp}"
+    return "MARKET CLOSED", "closed", f"{'Opens 09:15' if t < 9 * 60 else 'Closed 15:30'} · {stamp}"
 
 # ═══════════════════════════════════════════════════════════════════
 # MARKET MOOD INDEX (MMI)
@@ -478,7 +634,7 @@ def _mmi_load_last_known():
         fetched = datetime.fromisoformat(d["fetched_at_utc"])
         age = datetime.now(timezone.utc) - fetched
         return {"score": d["score"], "zone": d["zone"], "age": age,
-                "fetched_at_ist": fetched.astimezone(timezone(timedelta(hours=5, minutes=30)))}
+                "fetched_at_ist": fetched.astimezone(IST)}
     except Exception:
         return None
 
@@ -491,7 +647,7 @@ def _mmi_fetch_live():
                           "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml",
         })
-        resp = session.get(_MMI_URL, timeout=10)
+        resp = session.get(_MMI_URL, timeout=4)          # short timeout: the home page must never wait on this
         if resp.status_code != 200:
             return None
         score = _mmi_parse_score(resp.text)
@@ -503,7 +659,6 @@ def _mmi_fetch_live():
         return None
 
 def get_mmi():
-    IST = timezone(timedelta(hours=5, minutes=30))
     live = _mmi_fetch_live()
     if live:
         _mmi_save_last_known(live["score"], live["zone"])
@@ -514,126 +669,177 @@ def get_mmi():
         return {"status": "stale", "score": cached["score"], "zone": cached["zone"],
                 "age": cached["age"], "fetched_at_ist": cached["fetched_at_ist"]}
     return {"status": "unavailable"}
+# ════════════════════════════════════════════════════════════
+# LANDING + LOGIN — same palette as the terminal (amber on graphite)
+# ════════════════════════════════════════════════════════════
+LANDING_CSS = """
+<style>
+.stApp{background:radial-gradient(ellipse 70% 38% at 50% -6%,rgba(255,159,10,.08),transparent),#050505 !important;}
+.block-container{padding-top:0 !important;max-width:1440px !important;padding-left:20px !important;padding-right:20px !important;}
+[data-testid="stVerticalBlock"]{gap:.4rem;}
+iframe{display:block;border:none;}
+div[class*="st-key-cta_main"],div[class*="st-key-cta_bottom"]{display:flex;justify-content:center;}
+div[class*="st-key-cta_main"]{margin-top:-128px;position:relative;z-index:10;}
+div[class*="st-key-cta_main"] button,div[class*="st-key-cta_bottom"] button{padding:0 44px !important;min-height:48px !important;text-transform:uppercase !important;font:800 12px var(--sans) !important;letter-spacing:1.3px !important;border-radius:4px !important;}
+div[class*="st-key-loginwrap"] [data-testid="stForm"]{padding:26px !important;background:var(--s1) !important;border:1px solid var(--line2) !important;border-top:2px solid var(--amber) !important;border-radius:4px !important;}
 
-# ════════════════════════════════════════════════════════════
-# LANDING PAGE — green hero theme, seamless on scroll
-# (Intentionally UNCHANGED — separate design system from the app
-# interior, not part of the terminal reskin.)
-# ════════════════════════════════════════════════════════════
+.lp-nav{position:sticky;top:0;z-index:60;display:flex;align-items:center;justify-content:space-between;height:58px;margin:0 -20px;padding:0 28px;background:rgba(5,5,5,.92);backdrop-filter:blur(10px);border-bottom:1px solid var(--line);}
+.lp-brand{display:flex;align-items:center;gap:10px;}
+.lp-mark{width:28px;height:28px;border-radius:5px;background:var(--amber);display:flex;align-items:center;justify-content:center;}
+.lp-bn{font:800 13px var(--sans);letter-spacing:1.8px;color:var(--tx);}
+.lp-links{display:flex;gap:26px;align-items:center;}
+.lp-links a{font:600 12px var(--sans);color:var(--tx2);} .lp-links a:hover{color:var(--tx);}
+.lp-links a.go{font:800 10px var(--mono);letter-spacing:1.1px;color:#000;background:var(--amber);padding:8px 16px;border-radius:4px;text-transform:uppercase;}
+.lp-links a.go:hover{background:var(--amber2);color:#000;}
+@media(max-width:800px){.lp-links a:not(.go){display:none;}}
+
+.lp-band{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));border:1px solid var(--line);background:var(--s1);margin:34px 0 0;}
+.lp-stat{padding:22px 24px;border-right:1px solid var(--line);}
+.lp-stat:last-child{border-right:0;}
+.lp-stat .n{font:700 28px var(--mono);color:var(--amber);font-variant-numeric:tabular-nums;}
+.lp-stat .l{font:600 12px var(--sans);color:var(--tx3);margin-top:4px;}
+
+.lp-h{text-align:center;margin:84px auto 30px;max-width:760px;}
+.lp-h .e{font:700 10px var(--mono);letter-spacing:2.2px;color:var(--amber);text-transform:uppercase;}
+.lp-h .t{font:800 34px var(--sans);letter-spacing:-.8px;color:var(--tx);margin-top:10px;line-height:1.15;}
+.lp-h .s{font:14px var(--sans);color:var(--tx3);margin-top:12px;line-height:1.7;}
+.lp-feats{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:10px;}
+.lp-card{background:var(--s1);border:1px solid var(--line);border-top:2px solid var(--line2);padding:22px;transition:border-color .15s ease,background .15s ease;}
+.lp-card:hover{border-top-color:var(--amber);background:var(--s2);}
+.lp-card .t{font:700 15px var(--sans);color:var(--tx);margin:14px 0 8px;}
+.lp-card .d{font:13px var(--sans);color:var(--tx3);line-height:1.7;}
+
+.lp-dd .e{font:700 10px var(--mono);letter-spacing:2px;color:var(--amber);text-transform:uppercase;margin-bottom:10px;}
+.lp-dd .t{font:800 30px var(--sans);letter-spacing:-.7px;color:var(--tx);line-height:1.2;margin-bottom:18px;}
+.lp-mock{background:var(--s1);border:1px solid var(--line2);border-top:2px solid var(--amber);border-radius:2px;overflow:hidden;}
+.lp-mh{display:flex;align-items:center;gap:6px;padding:10px 14px;border-bottom:1px solid var(--line);background:var(--s2);}
+.lp-mh i{width:8px;height:8px;border-radius:50%;background:#2e2e2e;display:inline-block;}
+.lp-mh span{font:700 9px var(--mono);letter-spacing:1.2px;color:var(--tx3);margin-left:8px;flex:1;}
+.lp-mh em{font:700 8px var(--mono);letter-spacing:1px;font-style:normal;color:var(--tx4);border:1px solid var(--line2);padding:1px 7px;border-radius:3px;}
+.lp-mb{padding:14px;}
+.lp-lanes{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
+.lp-lane{border:1px solid var(--line);border-top:2px solid var(--c);padding:10px 12px;background:#080808;min-height:92px;}
+.lp-lane b{font:800 9px var(--mono);letter-spacing:1px;color:var(--c);}
+.lp-lane small{display:block;font:10px var(--sans);color:var(--tx3);margin:3px 0 8px;}
+.lp-pill{display:inline-block;margin:0 5px 5px 0;padding:4px 9px;border:1px solid var(--line2);border-left:3px solid var(--c);border-radius:4px;font:600 11px var(--sans);color:var(--tx);}
+.lp-pill em{font:800 8px var(--mono);font-style:normal;color:var(--green);margin-left:6px;}
+.lp-k3{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px;}
+.lp-k{border:1px solid var(--line);border-top:2px solid var(--line2);padding:10px 12px;background:#080808;}
+.lp-k .l{font:700 8px var(--mono);letter-spacing:1px;color:var(--tx3);}
+.lp-k .v{font:700 16px var(--mono);color:var(--tx);margin-top:5px;}
+.lp-bars div{display:flex;align-items:center;gap:10px;margin:7px 0;font:11px var(--sans);color:var(--tx2);}
+.lp-bars span{width:130px;flex-shrink:0;}
+.lp-bars i{display:block;height:6px;background:var(--amber);}
+.lp-bars em{font:600 10px var(--mono);font-style:normal;color:var(--tx3);}
+.lp-rules{background:#080808;border:1px solid var(--line);padding:14px;font:12px var(--mono);color:var(--tx3);line-height:2.05;}
+.lp-rules .y{color:var(--green);} .lp-rules .n{color:var(--red);}
+
+.lp-style{border:1px solid var(--line);border-top:2px solid var(--c);background:var(--s1);padding:24px;min-height:268px;}
+.lp-style .t{font:800 16px var(--sans);color:var(--tx);margin:14px 0 16px;}
+.lp-steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px;}
+.lp-step{border:1px solid var(--line);background:var(--s1);padding:24px;position:relative;}
+.lp-step .no{font:700 11px var(--mono);letter-spacing:2px;color:var(--amber);}
+.lp-step .t{font:800 16px var(--sans);color:var(--tx);margin:10px 0 8px;}
+.lp-step .d{font:13px var(--sans);color:var(--tx3);line-height:1.7;}
+.lp-cta{margin:84px 0 18px;text-align:center;padding:52px 20px 34px;border:1px solid var(--line2);border-top:2px solid var(--amber);background:var(--s1);}
+.lp-cta .t{font:800 32px var(--sans);letter-spacing:-.7px;color:var(--tx);}
+.lp-cta .s{font:14px var(--sans);color:var(--tx3);margin-top:10px;}
+.lp-foot{text-align:center;padding:40px 0 34px;font:12px var(--sans);color:var(--tx3);line-height:1.8;}
+.lp-foot small{display:block;font-size:11px;opacity:.7;margin-top:6px;}
+
+.lg-left{padding:30px 6px 0;}
+.lg-left .t{font:800 36px var(--sans);letter-spacing:-.9px;color:var(--tx);line-height:1.12;margin:26px 0 14px;}
+.lg-left .s{font:14px var(--sans);color:var(--tx3);line-height:1.7;max-width:420px;}
+.lg-pt{display:flex;gap:12px;align-items:flex-start;margin-top:20px;}
+.lg-pt b{display:block;font:700 13px var(--sans);color:var(--tx);} .lg-pt span{font:12px var(--sans);color:var(--tx3);line-height:1.6;}
+.lg-card-h{margin-bottom:14px;} .lg-card-h b{font:800 20px var(--sans);color:var(--tx);} .lg-card-h span{display:block;font:12px var(--sans);color:var(--tx3);margin-top:4px;}
+</style>
+"""
+
 if not st.session_state.logged_in:
-
-    L_DARK="#070b0a"; L_DARK2="#0d1512"; L_DARK3="#13201b"; L_BORDER="#1d2f27"
-    L_IVORY="#e9f5ef"; L_T2="#8aa79a"
-    L_INDIGO="#5ed29c"; L_CYAN="#2dd4bf"; L_GREEN="#34d399"; L_PURPLE="#7dd3c0"; L_PINK="#5eead4"
-    L_GRAD_BRAND=f"linear-gradient(135deg,{L_INDIGO},{L_CYAN})"
-    L_GRAD_TEXT=f"linear-gradient(90deg,{L_INDIGO},{L_CYAN},{L_PURPLE})"
 
     if st.query_params.get("login") == "1":
         st.session_state.show_login = True
         st.query_params.clear()
 
-    st.markdown(f"""
-    <style>
-    .stApp{{background:radial-gradient(ellipse 80% 50% at 50% -10%, rgba(94,210,156,0.07), transparent), #070b0a !important;}}
-    .block-container{{padding-top:0 !important;max-width:1500px !important;padding-left:16px !important;padding-right:16px !important;}}
-    [data-testid="stVerticalBlock"]{{gap:0.4rem;}}
-    iframe{{display:block;border:none;}}
-    .stButton>button[kind="primary"],.stFormSubmitButton>button[kind="primary"]{{background:#5ed29c !important;color:#070b0a !important;border:none !important;border-radius:9999px !important;font-weight:800 !important;letter-spacing:1px !important;}}
-    div[class*="st-key-cta_main"]{{display:flex;justify-content:center;margin-top:-150px;position:relative;z-index:10;}}
-    div[class*="st-key-cta_main"] button{{padding:14px 44px !important;text-transform:uppercase !important;font-size:13px !important;}}
-    </style>""", unsafe_allow_html=True)
+    st.markdown(LANDING_CSS, unsafe_allow_html=True)
 
+    def _lp_nav():
+        st.markdown(
+            f'<div class="lp-nav"><div class="lp-brand"><div class="lp-mark">{icon("trend", 16, "#000")}</div>'
+            '<div class="lp-bn">ARKA TRADES</div></div>'
+            '<div class="lp-links"><a href="#lp-platform">Platform</a><a href="#lp-rotation">Sector rotation</a>'
+            '<a href="#lp-start">Get started</a><a class="go" href="?login=1" target="_self">Sign in</a></div></div>',
+            unsafe_allow_html=True)
+
+    # ───────────── login ─────────────
     if st.session_state.show_login:
-        st.markdown(f"""
-        <div style="text-align:center;padding:70px 0 10px;">
-            <div style="display:inline-flex;align-items:center;gap:10px;">
-                <div style="width:38px;height:38px;border-radius:10px;background:{L_GRAD_BRAND};display:flex;align-items:center;justify-content:center;">{icon("trend", 19, "#070b0a")}</div>
-                <div style="text-align:left;">
-                    <div style="font-size:18px;font-weight:800;color:{L_IVORY};letter-spacing:1px;">ARKA TRADES</div>
-                    <div style="font-size:9px;letter-spacing:2px;color:{L_T2};text-transform:uppercase;">Market Analytics Platform</div>
-                </div>
-            </div>
-        </div>""", unsafe_allow_html=True)
-        _, login_col, _ = st.columns([1, 1.1, 1])
-        with login_col:
-            with st.form("lf"):
-                st.markdown(f"""<div style="margin-bottom:14px;text-align:center;">
-                    <div style="font-size:20px;font-weight:800;color:{L_IVORY};">Member Login</div>
-                    <div style="font-size:12px;color:{L_T2};margin-top:4px;">Sign in to access your terminal</div></div>""", unsafe_allow_html=True)
-                u = st.text_input("Username", placeholder="Enter username")
-                p = st.text_input("Password", placeholder="Enter password", type="password")
-                ok = st.form_submit_button("Sign In", use_container_width=True, type="primary")
-                ph = st.empty()
-                if ok:
-                    if u.strip()==_ADMIN_USER and p.strip()==_ADMIN_PASS:
-                        ph.success("Welcome, Admin!")
-                        st.session_state.logged_in = True; st.session_state.is_admin = True; st.rerun()
-                    elif u.strip().lower()==str(_MEMBER_USER).lower() and p.strip().lower()==str(_MEMBER_PASS).lower():
-                        ph.success("Login successful.")
-                        st.session_state.logged_in = True; st.session_state.is_admin = False; st.rerun()
-                    else:
-                        ph.error("Invalid username or password.")
-            if st.button("← Back to home", use_container_width=True, key="back_home"):
-                st.session_state.show_login = False; st.rerun()
+        _lp_nav()
+        _, wrap, _ = st.columns([0.35, 3.3, 0.35])
+        with wrap:
+            left, right = st.columns([1.15, 1], gap="large")
+            with left:
+                st.markdown(f"""<div class="lg-left">
+                    <div class="lp-brand"><div class="lp-mark">{icon("trend", 16, "#000")}</div><div class="lp-bn">ARKA TRADES</div></div>
+                    <div class="t">Your market terminal,<br>one sign-in away.</div>
+                    <div class="s">Pick up where you left off: your watchlist, portfolio, alerts and sector radar are synced to the cloud.</div>
+                    <div class="lg-pt">{icon_box("activity", AMBER, 34)}<div><b>Sector rotation radar</b><span>See which sectors are turning up, with RSI, EMA position and relative strength.</span></div></div>
+                    <div class="lg-pt">{icon_box("briefcase", CYAN, 34)}<div><b>Portfolio analytics</b><span>Live P&amp;L, sector exposure, risk and an automatic health check.</span></div></div>
+                    <div class="lg-pt">{icon_box("bell", GREEN, 34)}<div><b>Alerts on Telegram</b><span>PDH, PDL and price triggers delivered the moment they fire.</span></div></div>
+                </div>""", unsafe_allow_html=True)
+            with right:
+                with st.container(key="loginwrap"):
+                    with st.form("lf"):
+                        st.markdown('<div class="lg-card-h"><b>Member login</b><span>Sign in to access your terminal</span></div>', unsafe_allow_html=True)
+                        u = st.text_input("Username", placeholder="Enter username")
+                        p = st.text_input("Password", placeholder="Enter password", type="password")
+                        ok = st.form_submit_button("Sign in", use_container_width=True, type="primary")
+                        ph = st.empty()
+                        if ok:
+                            if u.strip()==_ADMIN_USER and p.strip()==_ADMIN_PASS:
+                                ph.success("Welcome, Admin!")
+                                st.session_state.logged_in = True; st.session_state.is_admin = True; st.rerun()
+                            elif u.strip().lower()==str(_MEMBER_USER).lower() and p.strip().lower()==str(_MEMBER_PASS).lower():
+                                ph.success("Login successful.")
+                                st.session_state.logged_in = True; st.session_state.is_admin = False; st.rerun()
+                            else:
+                                ph.error("Invalid username or password.")
+                    if st.button("← Back to home", use_container_width=True, key="back_home"):
+                        st.session_state.show_login = False; st.rerun()
+                    st.caption("Educational market analytics. Not SEBI registered. Not investment advice.")
         st.stop()
 
+    # ───────────── landing ─────────────
+    _lp_nav()
     hero_html = """
 <!DOCTYPE html><html><head>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700;800&family=Plus+Jakarta+Sans:wght@700;800&family=Instrument+Serif:ital@1&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 <style>
 *{margin:0;padding:0;box-sizing:border-box;}html,body{height:100%;}
-body{background:#070b0a;font-family:'Inter',sans-serif;overflow:hidden;}
-.hero{position:relative;width:100%;height:100%;min-height:700px;overflow:hidden;}
-#bgvid{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0.6;}
-.ov-left{position:absolute;inset:0;background:linear-gradient(to right,#070b0a 0%,transparent 60%);}
-.ov-bottom{position:absolute;inset:0;background:linear-gradient(to top,#070b0a 0%,transparent 50%);}
-.gridline{position:absolute;top:0;bottom:0;width:1px;background:rgba(255,255,255,0.1);display:none;}
-@media(min-width:768px){.gridline{display:block;}}
-.g25{left:25%;}.g50{left:50%;}.g75{left:75%;}
-.glow{position:absolute;top:4%;left:50%;transform:translateX(-50%);pointer-events:none;}
-nav{position:absolute;top:0;left:0;right:0;z-index:50;display:flex;align-items:center;justify-content:space-between;padding:24px 40px;}
-.logo{display:flex;align-items:center;gap:10px;color:#fff;font-weight:800;font-family:'Plus Jakarta Sans';letter-spacing:1px;font-size:15px;}
-.logo svg{width:26px;height:26px;}
-.menu{display:none;gap:36px;}
-@media(min-width:768px){.menu{display:flex;}}
-.menu span{color:#fff;font-size:15px;font-weight:600;cursor:default;}
-.content{position:relative;z-index:10;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:60px 20px 120px;}
-.glass{position:relative;width:300px;height:220px;border-radius:22px;transform:translateY(-25px);background:rgba(255,255,255,0.01);background-blend-mode:luminosity;backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);box-shadow:inset 0 1px 1px rgba(255,255,255,0.1);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:24px;}
-.glass::before{content:'';position:absolute;inset:0;border-radius:22px;padding:1.4px;background:linear-gradient(180deg,rgba(255,255,255,0.5),rgba(255,255,255,0.05));-webkit-mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);-webkit-mask-composite:xor;mask-composite:exclude;pointer-events:none;}
-.glass .tag{font-size:17px;color:#5ed29c;font-family:'JetBrains Mono',monospace;letter-spacing:3px;}
-.glass h3{font-size:24px;color:#fff;font-weight:700;line-height:1.3;}
-.glass h3 em{font-family:'Instrument Serif',serif;font-style:italic;font-weight:400;}
-.glass p{font-size:13px;color:rgba(255,255,255,0.65);line-height:1.6;max-width:240px;}
-.eyebrow{font-family:'Plus Jakarta Sans';font-weight:700;font-size:11px;letter-spacing:3px;color:#5ed29c;text-transform:uppercase;margin-bottom:18px;}
-h1{font-family:'Inter';font-weight:800;text-transform:uppercase;letter-spacing:-0.02em;color:#fff;font-size:38px;line-height:1.05;max-width:900px;}
-@media(min-width:768px){h1{font-size:66px;}}
-h1 .dot{color:#5ed29c;}
-.desc{font-size:14px;color:rgba(255,255,255,0.7);max-width:512px;line-height:1.7;margin:22px 0 0;}
+body{background:#050505;font-family:'Inter',sans-serif;overflow:hidden;color:#fff;}
+.hero{position:relative;width:100%;height:100%;min-height:640px;overflow:hidden;}
+#bgvid{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:.34;filter:grayscale(.4);}
+.ov{position:absolute;inset:0;background:radial-gradient(ellipse 70% 55% at 50% 36%,rgba(255,159,10,.12),transparent 70%),linear-gradient(to bottom,rgba(5,5,5,.6) 0%,rgba(5,5,5,.15) 45%,#050505 100%);}
+.grid{position:absolute;inset:0;background-image:linear-gradient(rgba(255,255,255,.04) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.04) 1px,transparent 1px);background-size:64px 64px;-webkit-mask-image:radial-gradient(ellipse 80% 70% at 50% 38%,#000 25%,transparent 80%);mask-image:radial-gradient(ellipse 80% 70% at 50% 38%,#000 25%,transparent 80%);}
+.content{position:relative;z-index:10;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:40px 22px 150px;}
+.pill{display:inline-flex;align-items:center;gap:9px;padding:6px 14px;border:1px solid rgba(255,159,10,.35);background:rgba(255,159,10,.07);border-radius:999px;font:700 10px 'JetBrains Mono',monospace;letter-spacing:1.6px;color:#FF9F0A;text-transform:uppercase;margin-bottom:26px;}
+.pill i{width:6px;height:6px;border-radius:50%;background:#30D158;box-shadow:0 0 8px #30D158;}
+h1{font-weight:800;letter-spacing:-.035em;color:#fff;font-size:clamp(36px,6.4vw,76px);line-height:1.02;max-width:980px;}
+h1 span{color:#FF9F0A;}
+.sub{font-size:clamp(14px,1.6vw,17px);color:rgba(255,255,255,.66);max-width:640px;line-height:1.7;margin:24px 0 0;}
+.chips{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:28px;}
+.chips span{padding:6px 13px;border:1px solid rgba(255,255,255,.14);border-radius:4px;background:rgba(255,255,255,.035);font:600 11px 'Inter',sans-serif;color:rgba(255,255,255,.78);}
 </style></head><body>
 <div class="hero">
   <video id="bgvid" autoplay muted loop playsinline></video>
-  <div class="ov-left"></div><div class="ov-bottom"></div>
-  <div class="gridline g25"></div><div class="gridline g50"></div><div class="gridline g75"></div>
-  <svg class="glow" width="900" height="400" viewBox="0 0 900 400">
-    <defs><filter id="b25" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="25"/></filter></defs>
-    <ellipse cx="450" cy="160" rx="380" ry="90" fill="#0e3b2e" opacity="0.85" filter="url(#b25)"/>
-    <ellipse cx="450" cy="160" rx="220" ry="50" fill="#22d3a0" opacity="0.25" filter="url(#b25)"/>
-  </svg>
-  <nav>
-    <div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>ARKA TRADES</div>
-    <div class="menu"><span>SCANNER</span><span>ALERTS</span><span>ARKA AI</span></div>
-  </nav>
+  <div class="ov"></div><div class="grid"></div>
   <div class="content">
-    <div class="glass">
-      <div class="tag">[ 2026 ]</div>
-      <h3>Built for <em>Serious</em><br>Market Traders</h3>
-      <p>AI scanning, instant alerts and chart intelligence in one terminal.</p>
-    </div>
-    <div class="eyebrow">AI-Powered Market Analytics</div>
-    <h1>Launch Your Trading Edge<span class="dot">.</span></h1>
-    <p class="desc">Save your trading setups once. Arka's AI analyzes charts, scans the entire NSE universe for matches, and alerts you the moment your conditions trigger.</p>
+    <div class="pill"><i></i>NSE · Live market terminal</div>
+    <h1>Trade with context,<br>not <span>guesswork.</span></h1>
+    <p class="sub">Sector rotation radar, portfolio analytics, watchlists, scanners and AI chart analysis in one fast, cloud-synced workspace built for Indian traders.</p>
+    <div class="chips"><span>Sector rotation radar</span><span>Portfolio analytics</span><span>AI chart analysis</span><span>Telegram alerts</span></div>
   </div>
 </div>
 <script>
@@ -643,96 +849,127 @@ if(window.Hls&&Hls.isSupported()){const h=new Hls({enableWorker:false});h.loadSo
 else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=s;}
 </script></body></html>
 """
-    components.html(hero_html, height=720, scrolling=False)
-
-    if st.button("Get Started →", type="primary", key="cta_main"):
+    components.html(hero_html, height=680, scrolling=False)
+    if st.button("Get started →", type="primary", key="cta_main"):
         st.session_state.show_login = True
         st.rerun()
 
-    st.markdown("<div style='height:40px;'></div>", unsafe_allow_html=True)
-    s1, s2, s3, s4 = st.columns(4)
-    for col, num, label, c in [(s1,"2000+","NSE stocks covered",L_CYAN),(s2,"<90s","Scan time after pre-filter",L_INDIGO),
-        (s3,"10s","Live price refresh",L_GREEN),(s4,"24/7","AI memory of your setups",L_PURPLE)]:
-        with col:
-            st.markdown(f"""<div class="fade-up" style="background:{L_DARK2};border:1px solid {L_BORDER};border-top:2px solid {c};border-radius:12px;padding:20px;text-align:center;">
-                <div style="font-family:{MONO};font-size:26px;font-weight:700;color:{c};margin-bottom:4px;">{num}</div>
-                <div style="font-size:12px;color:{L_T2};font-weight:600;">{label}</div></div>""", unsafe_allow_html=True)
+    # stats band (figures as originally published for the product)
+    st.markdown(
+        '<div class="lp-band">'
+        '<div class="lp-stat"><div class="n">2000+</div><div class="l">NSE stocks covered</div></div>'
+        '<div class="lp-stat"><div class="n">&lt;90s</div><div class="l">Scan time after pre-filter</div></div>'
+        '<div class="lp-stat"><div class="n">10s</div><div class="l">Live price refresh</div></div>'
+        '<div class="lp-stat"><div class="n">24/7</div><div class="l">Cloud-synced workspace</div></div></div>',
+        unsafe_allow_html=True)
 
-    st.markdown("<div style='height:56px;'></div>", unsafe_allow_html=True)
-    fa1, fa2 = st.columns([1, 1])
-    with fa1:
-        st.markdown(f"""<div class="fade-up" style="padding:24px 8px;">{icon_box("brain", L_PURPLE, 38)}
-            <div style="font-size:12px;font-weight:700;letter-spacing:2px;color:{L_PURPLE};text-transform:uppercase;margin-bottom:10px;">AI Chart Analysis</div>
-            <div style="font-size:28px;font-weight:800;color:{L_IVORY};letter-spacing:-0.5px;line-height:1.25;margin-bottom:16px;">Teach the AI your setups.<br>It never forgets.</div>
+    # platform grid
+    st.markdown('<div id="lp-platform"></div><div class="lp-h"><div class="e">The platform</div>'
+                '<div class="t">Everything a market desk needs, in one terminal.</div>'
+                '<div class="s">Nine connected workspaces share one watchlist, one portfolio and one search, so context follows you from idea to analysis.</div></div>',
+                unsafe_allow_html=True)
+    feats = [
+        ("activity", AMBER, "Money Flow", "Sector rotation radar with RSI, EMA position and relative strength against the market, mid-caps and small-caps."),
+        ("briefcase", CYAN, "Portfolio", "Record buy lots and get live P&amp;L, XIRR, sector exposure, risk metrics and an automatic health check."),
+        ("star", AMBER, "Watchlist", "Track NSE stocks with live price, RSI and PDH / PDL status. Saved permanently and synced everywhere."),
+        ("filter", PURPLE, "Scanner &amp; Screener", "Scan your own lists or build rule-based screens across the NSE universe to find candidates fast."),
+        ("brain", PURPLE, "Arka AI", "Vision-based chart analysis checked against your own trading rules and reference charts."),
+        ("bell", GREEN, "Alerts", "PDH, PDL and custom price alerts pushed to Telegram the moment your level breaks."),
+    ]
+    st.markdown('<div class="lp-feats">' + "".join(
+        f'<div class="lp-card">{icon_box(ic, c, 38)}<div class="t">{t}</div><div class="d">{d}</div></div>' for ic, c, t, d in feats) + '</div>',
+        unsafe_allow_html=True)
+
+    # deep dive 1 — sector rotation
+    st.markdown('<div id="lp-rotation" style="height:70px"></div>', unsafe_allow_html=True)
+    dd1, dd2 = st.columns([1, 1.05], gap="large")
+    with dd1:
+        st.markdown(f"""<div class="lp-dd" style="padding-top:18px;"><div class="e">Sector rotation</div>
+            <div class="t">See which sectors are turning up, before the crowd.</div>
+            {checkline("Every sector is placed in a plain-English lane: leading, improving, fading or weak")}
+            {checkline("Transparent 0-100 score built from trend, momentum, relative strength, breadth and flow")}
+            {checkline("RSI plus green / red EMA 10, 20, 50, 200 chips and distance from each average")}
+            {checkline("Compare any sector with the average stock, NIFTY 50, Midcap 100 and Smallcap 100")}</div>""", unsafe_allow_html=True)
+    with dd2:
+        st.markdown("""<div class="lp-mock"><div class="lp-mh"><i></i><i></i><i></i><span>MONEY FLOW · ROTATION BOARD</span><em>ILLUSTRATIVE</em></div>
+            <div class="lp-mb"><div class="lp-lanes">
+              <div class="lp-lane" style="--c:#5AC8FA"><b>IMPROVING</b><small>Behind, but catching up</small><span class="lp-pill" style="--c:#30D158">Capital Goods<em>★ ROTATING IN</em></span><span class="lp-pill" style="--c:#5AC8FA">Realty</span></div>
+              <div class="lp-lane" style="--c:#30D158"><b>LEADING</b><small>Beating the market, speeding up</small><span class="lp-pill" style="--c:#30D158">Banks</span><span class="lp-pill" style="--c:#30D158">Insurance</span></div>
+              <div class="lp-lane" style="--c:#FF453A"><b>WEAK</b><small>Behind and falling further</small><span class="lp-pill" style="--c:#FF453A">Utilities</span><span class="lp-pill" style="--c:#FF453A">Textiles</span></div>
+              <div class="lp-lane" style="--c:#FF9F0A"><b>FADING</b><small>Ahead, but losing steam</small><span class="lp-pill" style="--c:#FF9F0A">Metals &amp; Mining</span></div>
+            </div></div></div>""", unsafe_allow_html=True)
+
+    # deep dive 2 — portfolio
+    st.markdown('<div style="height:56px"></div>', unsafe_allow_html=True)
+    pd1, pd2 = st.columns([1.05, 1], gap="large")
+    with pd1:
+        st.markdown("""<div class="lp-mock"><div class="lp-mh"><i></i><i></i><i></i><span>PORTFOLIO · REVIEW</span><em>ILLUSTRATIVE</em></div>
+            <div class="lp-mb"><div class="lp-k3">
+              <div class="lp-k"><div class="l">VALUE</div><div class="v">₹12.40 L</div></div>
+              <div class="lp-k"><div class="l">XIRR</div><div class="v" style="color:#30D158">+18.2%</div></div>
+              <div class="lp-k"><div class="l">HEALTH</div><div class="v" style="color:#FF9F0A">72 / 100</div></div></div>
+              <div class="lp-bars">
+                <div><span>Financial Services</span><i style="width:62%"></i><em>34%</em></div>
+                <div><span>Information Technology</span><i style="width:40%"></i><em>22%</em></div>
+                <div><span>Energy</span><i style="width:26%"></i><em>14%</em></div>
+                <div><span>Healthcare</span><i style="width:18%"></i><em>10%</em></div>
+              </div></div></div>""", unsafe_allow_html=True)
+    with pd2:
+        st.markdown(f"""<div class="lp-dd" style="padding-top:18px;"><div class="e">Portfolio analytics</div>
+            <div class="t">A review that reads like a research desk, not a broker app.</div>
+            {checkline("Sector and industry exposure, market-cap mix and concentration at a glance")}
+            {checkline("Growth of your money versus a NIFTY 50 investment with the same cash flows")}
+            {checkline("Volatility, drawdown, beta, one-day VaR and a correlation map")}
+            {checkline("Plain-English health check that flags concentration and deep losers")}</div>""", unsafe_allow_html=True)
+
+    # deep dive 3 — AI
+    st.markdown('<div style="height:56px"></div>', unsafe_allow_html=True)
+    ad1, ad2 = st.columns([1, 1.05], gap="large")
+    with ad1:
+        st.markdown(f"""<div class="lp-dd" style="padding-top:18px;"><div class="e">Arka AI</div>
+            <div class="t">Teach the AI your setups. It never forgets.</div>
             {checkline("Save your personal trading rules, entry conditions and reference charts once")}
-            {checkline("Gemini-powered vision analyzes any chart against <strong>your</strong> rules")}
+            {checkline("Vision analysis checks any chart against <strong>your</strong> rules")}
             {checkline("Get a verdict, score and rule-by-rule breakdown in seconds")}
-            {checkline("Vector memory stores every setup permanently")}</div>""", unsafe_allow_html=True)
-    with fa2:
-        st.markdown(f"""<div class="fade-up" style="background:{L_DARK2};border:1px solid {L_BORDER};border-top:2px solid {L_PURPLE};border-radius:16px;padding:24px;margin-top:24px;">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
-                <span style="font-size:13px;font-weight:700;color:{L_IVORY};">RELIANCE · Daily</span>
-                <span style="background:rgba(52,211,153,.12);color:{L_GREEN};font-size:11px;font-weight:700;padding:4px 12px;border-radius:20px;border:1px solid {L_GREEN}33;">VALID · 8/10</span></div>
-            <div style="background:{L_DARK3};border-radius:10px;padding:16px;font-family:{MONO};font-size:12px;color:{L_T2};line-height:2;">
-                <span style="color:{L_GREEN};">+ Rule matched:</span> Close above PDH on breakout candle<br>
-                <span style="color:{L_GREEN};">+ Rule matched:</span> Volume 1.8x vs 20-day average<br>
-                <span style="color:{L_GREEN};">+ Rule matched:</span> RSI 61 — within momentum zone<br>
-                <span style="color:{RED};">- Flagged:</span> Overhead supply at 2,980 level</div>
-            <div style="font-size:12px;color:{L_T2};margin-top:12px;line-height:1.7;">"Structure is clean. Entry valid above 2,941 with stop at 2,896."</div></div>""", unsafe_allow_html=True)
+            {checkline("Vector memory keeps every setup permanently")}</div>""", unsafe_allow_html=True)
+    with ad2:
+        st.markdown("""<div class="lp-mock"><div class="lp-mh"><i></i><i></i><i></i><span>ARKA AI · SETUP ANALYSIS</span><em>ILLUSTRATIVE</em></div>
+            <div class="lp-mb"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+              <span style="font:700 13px 'Inter',sans-serif;color:#ECECEC">RELIANCE · Daily</span>
+              <span style="font:700 10px 'JetBrains Mono',monospace;color:#30D158;background:rgba(48,209,88,.1);border:1px solid rgba(48,209,88,.3);padding:3px 10px;border-radius:3px">VALID · 8/10</span></div>
+              <div class="lp-rules"><span class="y">+ Rule matched:</span> Close above PDH on breakout candle<br><span class="y">+ Rule matched:</span> Volume 1.8x vs 20-day average<br><span class="y">+ Rule matched:</span> RSI 61, within momentum zone<br><span class="n">- Flagged:</span> Overhead supply near a prior high</div>
+            </div></div>""", unsafe_allow_html=True)
 
-    st.markdown("<div style='height:48px;'></div>", unsafe_allow_html=True)
-    fb1, fb2 = st.columns([1, 1])
-    with fb1:
-        st.markdown(f"""<div class="fade-up" style="background:{L_DARK2};border:1px solid {L_BORDER};border-top:2px solid {L_GREEN};border-radius:16px;padding:24px;margin-top:24px;">
-            <div style="font-size:13px;font-weight:700;color:{L_IVORY};margin-bottom:14px;">Scan: "Bull Flag + Volume Surge" · Full NSE</div>
-            <table style="width:100%;border-collapse:collapse;font-size:12px;">
-                <tr style="color:{L_T2};text-align:left;"><th style="padding:6px 8px;">Symbol</th><th style="padding:6px 8px;">Price</th><th style="padding:6px 8px;">Signal</th><th style="padding:6px 8px;">Score</th></tr>
-                <tr><td style="padding:8px;color:{L_IVORY};font-weight:700;border-top:1px solid {L_BORDER};">TATAMOTORS</td><td style="padding:8px;font-family:{MONO};color:{L_IVORY};border-top:1px solid {L_BORDER};">1,024.50</td><td style="padding:8px;border-top:1px solid {L_BORDER};"><span style="color:{L_GREEN};font-weight:700;">STRONG MATCH</span></td><td style="padding:8px;font-family:{MONO};color:{L_GREEN};border-top:1px solid {L_BORDER};">9/10</td></tr>
-                <tr><td style="padding:8px;color:{L_IVORY};font-weight:700;border-top:1px solid {L_BORDER};">CHOLAFIN</td><td style="padding:8px;font-family:{MONO};color:{L_IVORY};border-top:1px solid {L_BORDER};">1,388.20</td><td style="padding:8px;border-top:1px solid {L_BORDER};"><span style="color:{L_GREEN};font-weight:700;">STRONG MATCH</span></td><td style="padding:8px;font-family:{MONO};color:{L_GREEN};border-top:1px solid {L_BORDER};">8/10</td></tr>
-                <tr><td style="padding:8px;color:{L_IVORY};font-weight:700;border-top:1px solid {L_BORDER};">PERSISTENT</td><td style="padding:8px;font-family:{MONO};color:{L_IVORY};border-top:1px solid {L_BORDER};">4,832.00</td><td style="padding:8px;border-top:1px solid {L_BORDER};"><span style="color:{L_CYAN};font-weight:700;">PARTIAL</span></td><td style="padding:8px;font-family:{MONO};color:{L_CYAN};border-top:1px solid {L_BORDER};">7/10</td></tr>
-            </table></div>""", unsafe_allow_html=True)
-    with fb2:
-        st.markdown(f"""<div class="fade-up" style="padding:24px 8px;">{icon_box("search", L_GREEN, 38)}
-            <div style="font-size:12px;font-weight:700;letter-spacing:2px;color:{L_GREEN};text-transform:uppercase;margin-bottom:10px;">AI Smart Scanner</div>
-            <div style="font-size:28px;font-weight:800;color:{L_IVORY};letter-spacing:-0.5px;line-height:1.25;margin-bottom:16px;">Your setups, scanned across<br>the entire market.</div>
-            {checkline("Describe your setup in plain English — AI extracts the rules")}
-            {checkline("Price pre-filter across all ~2000 NSE stocks, then deep scan")}
-            {checkline("Gemini Vision compares charts against your reference image")}
-            {checkline("Ranked similarity verdicts with entry and risk notes")}</div>""", unsafe_allow_html=True)
-
-    st.markdown("<div style='height:56px;'></div>", unsafe_allow_html=True)
-    st.markdown(f"""<div style="text-align:center;margin-bottom:28px;">
-        <div style="font-size:12px;font-weight:700;letter-spacing:2px;color:{L_CYAN};text-transform:uppercase;margin-bottom:8px;">Built for your style</div>
-        <div style="font-size:28px;font-weight:800;color:{L_IVORY};">Momentum. Swing. Positional.</div></div>""", unsafe_allow_html=True)
-    t1, t2, t3 = st.columns(3)
-    for col, ic, ic_c, title, items in [
-        (t1,"zap",AMBER,"Momentum Traders",["PDH / PDL breakout detection in real time","10-second live price refresh","Volume spike flags vs 20-day average","Instant Telegram push when levels break"]),
-        (t2,"trend",L_CYAN,"Swing Traders",["Multi-day setup scanning: flags, bases, ranges","RSI and ROC filters across your watchlist","AI pattern matching vs saved reference charts","Daily structure analysis with SMA 20/50"]),
-        (t3,"layers",L_PURPLE,"Positional Traders",["Curated Arka Watchlist maintained by the desk","Today-only news feed per stock","Live index dashboard for market breadth","Cloud-synced watchlists on any device"])]:
+    # styles
+    st.markdown('<div class="lp-h"><div class="e">Built for your style</div><div class="t">Momentum. Swing. Positional.</div></div>', unsafe_allow_html=True)
+    sty = [("zap", AMBER, "Momentum traders", ["PDH / PDL breakout detection", "Live price and RSI on every watchlist row", "Volume spike flags versus the 20-day average", "Instant Telegram push when levels break"]),
+           ("trend", CYAN, "Swing traders", ["Sector rotation radar to find the next leaders", "RSI and EMA position across your lists", "AI pattern matching against saved reference charts", "Distance from the 10 / 20 EMA for pullback entries"]),
+           ("layers", PURPLE, "Positional investors", ["Portfolio health, XIRR and sector exposure", "Curated Arka desk watchlist", "News light on holdings with fresh headlines", "Cloud-synced lists on any device"])]
+    sc = st.columns(3, gap="small")
+    for col, (ic, c, title, items) in zip(sc, sty):
         with col:
-            checks = "".join(checkline(i, ic_c) for i in items)
-            st.markdown(f"""<div class="fade-up" style="background:{L_DARK2};border:1px solid {L_BORDER};border-top:2px solid {ic_c};border-radius:14px;padding:26px;min-height:300px;">
-                {icon_box(ic, ic_c, 38)}<div style="font-size:16px;font-weight:800;color:{L_IVORY};margin-bottom:16px;">{title}</div>{checks}</div>""", unsafe_allow_html=True)
+            st.markdown(f'<div class="lp-style" style="--c:{c}">{icon_box(ic, c, 38)}<div class="t">{title}</div>'
+                        + "".join(checkline(i, c) for i in items) + '</div>', unsafe_allow_html=True)
 
-    st.markdown("<div style='height:56px;'></div>", unsafe_allow_html=True)
-    st.markdown(f"""<div style="text-align:center;margin-bottom:28px;">
-        <div style="font-size:12px;font-weight:700;letter-spacing:2px;color:{L_CYAN};text-transform:uppercase;margin-bottom:8px;">Onboarding roadmap</div>
-        <div style="font-size:28px;font-weight:800;color:{L_IVORY};">Live in two weeks.</div></div>""", unsafe_allow_html=True)
-    rm1, rm2, rm3 = st.columns(3)
-    for col,(day,title,desc,c) in zip([rm1,rm2,rm3],[
-        ("DAY 1","Connection & Import","Sign in and upload your TradingView watchlist. Cloud sync is instant.",L_CYAN),
-        ("DAY 7","AI Strategy Training","Teach Arka your setups, rules and reference charts.",L_PURPLE),
-        ("DAY 14","Automated Scans Live","Full-universe scans and Telegram alerts on your exact conditions.",L_GREEN)]):
-        with col:
-            st.markdown(f"""<div class="fade-up" style="background:{L_DARK2};border:1px solid {L_BORDER};border-top:2px solid {c};border-radius:14px;padding:24px;">
-                <div style="font-family:{MONO};font-size:11px;font-weight:700;color:{c};letter-spacing:2px;margin-bottom:10px;">{day}</div>
-                <div style="font-size:15px;font-weight:800;color:{L_IVORY};margin-bottom:8px;">{title}</div>
-                <div style="font-size:13px;color:{L_T2};line-height:1.7;">{desc}</div></div>""", unsafe_allow_html=True)
+    # steps
+    st.markdown('<div id="lp-start"></div><div class="lp-h"><div class="e">Onboarding</div><div class="t">Live in three steps.</div></div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="lp-steps">'
+        '<div class="lp-step"><div class="no">STEP 01 · DAY 1</div><div class="t">Connect and import</div><div class="d">Sign in and upload your TradingView watchlist. Cloud sync is instant.</div></div>'
+        '<div class="lp-step"><div class="no">STEP 02 · DAY 7</div><div class="t">Teach your strategy</div><div class="d">Give Arka your setups, rules and reference charts.</div></div>'
+        '<div class="lp-step"><div class="no">STEP 03 · DAY 14</div><div class="t">Automate the routine</div><div class="d">Full-universe scans and Telegram alerts on your exact conditions.</div></div></div>',
+        unsafe_allow_html=True)
 
-    st.markdown(f"""<div style="text-align:center;padding:56px 0 40px;">
-        <div style="font-size:13px;color:{L_T2};margin-bottom:6px;">Arka Trades · Finance &amp; Market Education</div>
-        <div style="font-size:11px;color:{L_T2};opacity:.6;">Not SEBI registered. All content is for educational purposes only.
-        Trading involves risk — decisions and outcomes are entirely your own.</div></div>""", unsafe_allow_html=True)
+    # closing CTA
+    st.markdown('<div class="lp-cta"><div class="t">Ready to open your terminal?</div>'
+                '<div class="s">Sign in to your workspace. Your lists, portfolio and alerts are waiting.</div></div>', unsafe_allow_html=True)
+    if st.button("Sign in to Arka →", type="primary", key="cta_bottom"):
+        st.session_state.show_login = True
+        st.rerun()
+
+    st.markdown('<div class="lp-foot">Arka Trades · Finance &amp; Market Education'
+                '<small>Not SEBI registered. All content is for educational purposes only. Trading involves risk: decisions and outcomes are entirely your own. '
+                'Examples shown are illustrative and not recommendations.</small></div>', unsafe_allow_html=True)
     st.stop()
 
 # ════════════════ MAIN APP ═══════════════════════════════════
