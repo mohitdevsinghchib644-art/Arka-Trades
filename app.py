@@ -474,6 +474,55 @@ div[class*="st-key-ak_mod_"] .stButton>button:hover{color:var(--amber2) !importa
 """
 st.markdown(APP_CSS, unsafe_allow_html=True)
 
+# ── Navigation transition only: cover stale Streamlit content during reruns ──
+# UI-only fix: no changes to authentication, routing, data or module code.
+def _navigation_transition():
+    components.html("""
+    <script>
+    (function () {
+      try {
+        const w = window.parent;
+        const d = w.document;
+        const ID = 'arka-navigation-loading-overlay';
+        const old = d.getElementById(ID);
+        if (old) old.remove();
+
+        if (!w.__arkaNavigationTransitionInstalled) {
+          w.__arkaNavigationTransitionInstalled = true;
+          const show = () => {
+            let overlay = d.getElementById(ID);
+            if (!overlay) {
+              overlay = d.createElement('div');
+              overlay.id = ID;
+              overlay.innerHTML = '<div class="arka-loading-mark">A</div><div class="arka-loading-title">ARKA TRADES</div><div class="arka-loading-sub">Opening workspace…</div><div class="arka-loading-line"><i></i></div>';
+              overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483647;background:#050505;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:Inter,system-ui,sans-serif;color:#ececec;';
+              const style = d.createElement('style');
+              style.textContent = '#'+ID+' .arka-loading-mark{width:38px;height:38px;background:#ff9f0a;color:#000;border-radius:4px;display:flex;align-items:center;justify-content:center;font-weight:900;font-size:20px;margin-bottom:14px}#'+ID+' .arka-loading-title{font-weight:800;font-size:12px;letter-spacing:2px}#'+ID+' .arka-loading-sub{font-size:11px;color:#777;margin-top:9px}#'+ID+' .arka-loading-line{width:150px;height:2px;background:#1f1f1f;margin-top:20px;overflow:hidden}#'+ID+' .arka-loading-line i{display:block;width:40%;height:100%;background:#ff9f0a;animation:arkaLoad 1s ease-in-out infinite alternate}@keyframes arkaLoad{from{transform:translateX(-10%)}to{transform:translateX(160%)}}';
+              overlay.appendChild(style);
+              d.body.appendChild(overlay);
+            }
+          };
+          const isNavigation = (el) => {
+            const b = el && el.closest ? el.closest('button') : null;
+            if (!b) return false;
+            const t = (b.innerText || b.getAttribute('aria-label') || '').trim().toUpperCase();
+            return /^(HOME|MONEY FLOW|BREADTH|WATCHLIST|PORTFOLIO|ALERTS|SCANNER|SCREENER|RESEARCH|ARKA AI|SIGN OUT|SIGN IN|GET STARTED →|SIGN IN TO ARKA →|← BACK TO HOME)$/.test(t);
+          };
+          d.addEventListener('click', function (e) {
+            if (isNavigation(e.target)) show();
+          }, true);
+          d.addEventListener('submit', function (e) {
+            const f = e.target;
+            if (f && f.closest && f.closest('[class*="st-key-loginwrap"]')) show();
+          }, true);
+        }
+      } catch (e) {
+        // If the browser isolates component frames, normal Streamlit navigation still works.
+      }
+    })();
+    </script>
+    """, height=0, width=0)
+
 # ── Helpers ──────────────────────────────────────────────────
 def parse_csv(file):
     """
@@ -807,6 +856,7 @@ if not st.session_state.logged_in:
                     if st.button("← Back to home", use_container_width=True, key="back_home"):
                         st.session_state.show_login = False; st.rerun()
                     st.caption("Educational market analytics. Not SEBI registered. Not investment advice.")
+        _navigation_transition()
         st.stop()
 
     # ───────────── landing ─────────────
@@ -970,6 +1020,7 @@ else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=s;}
     st.markdown('<div class="lp-foot">Arka Trades · Finance &amp; Market Education'
                 '<small>Not SEBI registered. All content is for educational purposes only. Trading involves risk: decisions and outcomes are entirely your own. '
                 'Examples shown are illustrative and not recommendations.</small></div>', unsafe_allow_html=True)
+    _navigation_transition()
     st.stop()
   # ════════════════ APPLICATION SHELL ═══════════════════════════════════
 from html import escape as _esc
@@ -1636,3 +1687,5 @@ if right_rail is not None:
         _news_rail_fragment()
 
 _render_footer()
+
+_navigation_transition()
