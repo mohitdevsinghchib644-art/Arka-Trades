@@ -474,6 +474,72 @@ div[class*="st-key-ak_mod_"] .stButton>button:hover{color:var(--amber2) !importa
 """
 st.markdown(APP_CSS, unsafe_allow_html=True)
 
+# Compatibility layer: the existing workspace renderer still emits the original
+# terminal component classes. Style those components with the upgraded v6 tokens.
+TERMINAL_COMPAT_CSS = r"""
+<style>
+.terminal-shell{background:var(--s1);border:1px solid var(--line);border-top:2px solid var(--amber);min-width:0;}
+.brand-status{font:700 9px var(--mono);letter-spacing:1px;color:var(--green);display:flex;align-items:center;gap:7px;}
+.brand-status-wide{justify-content:flex-end;min-height:34px;}
+.module-top-title{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border-bottom:1px solid var(--line);font:700 10px var(--mono);letter-spacing:1.2px;color:var(--tx);}
+.module-top-title small{font:600 8px var(--mono);color:var(--tx3);letter-spacing:1px;}
+.module-directory-spacer{height:16px;border-bottom:1px solid var(--line);margin-bottom:10px;}
+.module-directory-title{font:700 9px var(--mono);letter-spacing:1.3px;color:var(--amber);padding:10px 8px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);margin-bottom:8px;}
+.module-directory-card{background:var(--s1);border:1px solid var(--line);border-top:2px solid var(--line2);padding:12px;min-height:150px;margin-bottom:8px;}
+.module-dir-purpose{font:12px var(--sans);color:var(--tx3);line-height:1.6;min-height:50px;}
+.module-dir-meta{display:flex;justify-content:space-between;border-top:1px solid var(--line);padding-top:8px;margin-top:8px;font:8px var(--mono);color:var(--tx3);letter-spacing:.6px;}
+.module-dir-meta b{color:var(--amber);}
+.module-dir-use{font:10px var(--sans);color:var(--tx2);line-height:1.5;margin-top:7px;}
+.module-dir-use span{font:8px var(--mono);color:var(--tx3);margin-right:6px;}
+.market-strip{background:var(--s1);border:1px solid var(--line);border-bottom:0;overflow-x:auto;}
+.market-row{display:grid;grid-template-columns:78px repeat(6,minmax(118px,1fr));min-height:43px;border-bottom:1px solid var(--line);}
+.market-row:last-child{border-bottom:0;}
+.market-row-label{display:flex;align-items:center;padding:0 10px;background:var(--s2);font:700 8px var(--mono);letter-spacing:1px;color:var(--tx3);}
+.market-cell{display:flex;align-items:center;justify-content:space-between;gap:6px;min-width:0;padding:8px 10px;border-left:1px solid var(--line);}
+.market-cell .m-name{font:600 8px var(--mono);color:var(--tx3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.market-cell .m-price{font:600 12px var(--mono);font-variant-numeric:tabular-nums;color:var(--tx);white-space:nowrap;}
+.market-cell .m-chg{font:700 9px var(--mono);white-space:nowrap;}
+.command-wrap{padding:12px 10px;background:var(--s1);border:1px solid var(--line);border-top:0;}
+.command-label{font:700 8px var(--mono);letter-spacing:1.3px;color:var(--amber);margin:0 0 7px;}
+.security-head{display:flex;justify-content:space-between;align-items:center;gap:12px;background:var(--s1);border:1px solid var(--line);border-top:2px solid var(--amber);padding:14px 16px;margin:12px 0;}
+.security-kicker{font:700 8px var(--mono);letter-spacing:1.2px;color:var(--tx3);}
+.security-title{font:800 20px var(--sans);color:var(--tx);margin-top:4px;}
+.security-symbol{font:600 9px var(--mono);color:var(--tx3);margin-top:4px;}
+.security-quote{text-align:right;font-family:var(--mono);}
+.quote-price{font:700 21px var(--mono);font-variant-numeric:tabular-nums;color:var(--tx);}
+.overview-box{background:var(--s1);border:1px solid var(--line);}
+.overview-row{display:flex;justify-content:space-between;gap:12px;padding:9px 10px;border-bottom:1px solid var(--line);font:11px var(--sans);}
+.overview-row:last-child{border-bottom:0;}
+.overview-row span{color:var(--tx3);}
+.overview-row b{font:600 10px var(--mono);color:var(--tx);text-align:right;}
+.company-desc{background:var(--s1);border:1px solid var(--line);padding:12px;font:11px/1.65 var(--sans);color:var(--tx3);}
+.module-launcher{margin-top:10px;background:var(--s1);border:1px solid var(--line);}
+.module-launcher-head{display:flex;align-items:center;justify-content:space-between;min-height:34px;padding:0 12px;border-bottom:1px solid var(--line);}
+.module-launcher-title{font:700 8px var(--mono);letter-spacing:1.2px;color:var(--tx3);}
+.module-launcher-context{font:700 8px var(--mono);color:var(--amber);}
+.module-cell{padding:10px;border-right:1px solid var(--line);min-height:54px;}
+.module-code{font:700 8px var(--mono);color:var(--amber);}
+.module-label{font:600 10px var(--sans);color:var(--tx);margin-top:4px;}
+.monitor-grid{display:grid;grid-template-columns:1.15fr 1fr 1fr;gap:8px;margin-top:10px;}
+.monitor-panel{background:var(--s1);border:1px solid var(--line);min-width:0;overflow:hidden;}
+.monitor-head{display:flex;align-items:center;justify-content:space-between;min-height:38px;padding:0 12px;border-bottom:1px solid var(--line);background:var(--s2);font:700 8px var(--mono);letter-spacing:1.1px;color:var(--amber);}
+.monitor-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(68px,88px) minmax(60px,72px);gap:8px;padding:10px 12px;border-bottom:1px solid var(--line);font:10px var(--mono);}
+.monitor-row span:first-child{color:var(--tx2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.monitor-row span:nth-child(2),.monitor-row span:last-child{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;}
+.monitor-row span:nth-child(2){color:var(--tx);}
+.small-positive{color:var(--green)!important;}.small-negative{color:var(--red)!important;}
+.home-monitor-grid{grid-template-columns:1fr 1fr .85fr;align-items:stretch;}
+.monitor-panel{min-height:180px;}
+.news-rail{background:var(--s1);border:1px solid var(--line);padding:10px;min-width:0;}
+.news-rail-collapsed{padding:10px 12px;border:1px solid var(--line);background:var(--s1);font:700 9px var(--mono);letter-spacing:1px;color:var(--tx3);}
+.news-rail-collapsed span{color:var(--tx2);margin-left:6px;}
+.term-panel{background:var(--s1);border:1px solid var(--line);padding:14px;}
+@media(max-width:1300px){.home-monitor-grid{grid-template-columns:1fr 1fr;}.home-monitor-grid .monitor-panel:last-child{grid-column:1/-1;}}
+@media(max-width:900px){.market-row{grid-template-columns:65px repeat(6,minmax(105px,1fr));}.home-monitor-grid,.monitor-grid{grid-template-columns:1fr;}.home-monitor-grid .monitor-panel:last-child{grid-column:auto;}.security-head{align-items:flex-start;}.security-title{font-size:17px;}}
+</style>
+"""
+st.markdown(TERMINAL_COMPAT_CSS, unsafe_allow_html=True)
+
 # ── Helpers ──────────────────────────────────────────────────
 def parse_csv(file):
     """
@@ -1080,7 +1146,6 @@ def _render_compact_module_header(title, code=""):
                     _go_home()
                 else:
                     st.session_state.page = target
-                    st.session_state["show_news_rail"] = False
                     sym = st.session_state.get("active_security")
                     if sym:
                         st.session_state["research_last_query"] = sym
@@ -1144,7 +1209,6 @@ def _render_terminal_brandbar():
                     _go_home()
                 else:
                     st.session_state.page = target
-                    st.session_state["show_news_rail"] = False
                     sym = st.session_state.get("active_security")
                     if sym:
                         st.session_state["research_last_query"] = sym
@@ -1359,7 +1423,6 @@ def _render_dashboard():
         with qcols[i % len(qcols)]:
             if st.button(label, key=f"home_quick_{target}", use_container_width=True):
                 st.session_state.page = target
-                st.session_state["show_news_rail"] = False
                 sym = st.session_state.get("active_security")
                 if sym:
                     st.session_state["research_last_query"] = sym
