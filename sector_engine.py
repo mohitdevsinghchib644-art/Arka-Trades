@@ -1,44 +1,46 @@
 """
-sector_engine.py — Arka stock-universe SECTOR analytics v2 (pure functions, no network).
+sector_engine.py — Arka stock-universe SECTOR analytics v3 (pure functions, no network).
 
 Input : {"SYM.NS": OHLCV DataFrame, "^NSEI": benchmark}  +  meta DataFrame[symbol, industry, company]
         optional benches = {"NIFTY 50": Series, "MIDCAP 100": Series, "SMALLCAP 100": Series} (daily closes)
 Output: per-sector table, per-stock table, sector index series, benchmark series, breadth series,
-        and helper functions for benchmark comparison and ROTATION DETECTION.
+        data-quality report, and helpers for benchmark comparison, rotation detection and AUDIT.
 
-Sector index = equal-weight, daily-rebalanced average of the sector's stocks (rebased to 100).
-Everything technical (RSI, EMAs, crosses) is computed on that index, so a sector is read like a chart.
+WHAT CHANGED IN v3 (why sector numbers could be wrong in v2)
+-------------------------------------------------------------
+1. LATEST-SESSION COVERAGE GUARD.  v2 used the newest date found in ANY ticker. When only part of the
+   universe has published today's bar, every other stock was forward-filled as a 0.00% day, so the sector
+   index barely moved while the real market did (tested: true +2.5% day shown as +0.25%). Sectors that had
+   actually rallied above their 10/20-EMA still printed red. v3 only analyses sessions where at least
+   60% of the usual universe has a real bar, drops the incomplete tail, and reports `quality`.
+2. NO-BAR != 0% RETURN.  A stock with no bar on a date is now EXCLUDED from that day's sector average
+   instead of contributing a fake 0.00%.
+3. BAD-TICK / SPLIT REPAIR.  One bad print in one of 40 stocks moved a v2 sector index by +236% in testing.
+   v3 detects (a) bad ticks that revert next day -> repaired; (b) split/bonus-like persistent steps
+   (x0.5, x1/3, x0.25, x0.2, x0.1, x2/3 and reverse) -> history back-adjusted; (c) any other > 60% jump ->
+   excluded from the average. Remaining daily returns are clipped to +/-25% (NSE circuit scale).
+   Every repair is listed in quality["events"].
+4. LIQUIDITY-WEIGHTED SECTOR INDEX (default).  Official NSE sector indices are cap-weighted, so large names
+   lead them. An equal-weight index of every listed stock (incl. micro-caps) can sit below its 10-EMA while
+   the official index is above it. v3 weights each stock by its prior 20-day average traded value
+   (capped at max(25%, 2/n) per stock) — a close proxy for free-float cap. weighting="equal" restores v2 behaviour.
+5. TRADINGVIEW-PARITY INDICATORS.  EMA and Wilder-RSI are SMA-seeded exactly like TradingView's ta.ema / ta.rsi
+   (v2 seeded with the first value, which biased the EMA-200 by up to ~8% on a 1-year window).
+6. AUDIT TOOLS.  self_check(res) re-derives every flag/distance and reports mismatches;
+   explain_sector(res, sector) returns the raw numbers behind a row (index level, each EMA, last closes,
+   per-stock contribution today) so any value can be checked against a chart in seconds.
 
-Definitions
-  RSI(14)        Wilder RSI of the sector index (daily and weekly)
-  EMA 10/20/50/200  price (sector index) above = green chip, below = red chip; distance = % from the EMA
-  Turnover       close x volume of the latest session in Rs crore (Yahoo volume, an approximation of NSE value)
-  Share %        sector turnover / total universe turnover; delta in percentage points
-  Chaikin CMF    sum(money-flow-volume, 20) / sum(volume, 20)
-  % > 20EMA      share of the sector's stocks closing above their own 20-EMA (breadth)
+Definitions (unchanged)
+  RSI(14) Wilder (daily + weekly) of the sector index · EMA 10/20/50/200 flags + % distance
+  Turnover = close x volume of the latest session (Rs crore, Yahoo volume ≈ NSE value)
+  Share % = sector turnover / universe turnover · Chaikin CMF(20) · % stocks > 20-EMA (breadth)
+  Rotation (RRG-style, simplified): RS-Ratio = 100 x RS / SMA(RS,50); RS-Momentum = 100 x ratio / ratio[10 sessions ago]
+  Lanes LEADING · FADING · WEAK · IMPROVING;  score 0-100 (trend 30, momentum 20, relative 25, breadth 15, flow 10)
+  Stages ROTATING IN · LEADING · EXTENDED · IMPROVING · FADING · WEAK
 
-Rotation detection (RRG-style, simplified - not the licensed JdK RRG)
-  RS line        sector index / benchmark index
-  RS-Ratio  (x)  100 x RS / SMA(RS, 50)        > 100 = outperforming its own 50-session trend
-  RS-Momentum(y) 100 x RS-Ratio / RS-Ratio[10 sessions ago]   > 100 = relative trend accelerating
-  Lanes          LEADING (x>=100,y>=100) · FADING (x>=100,y<100) · WEAK (x<100,y<100) · IMPROVING (x<100,y>=100)
-
-  Rotation score (0-100, transparent)
-     Trend 30      above 20-EMA 10 · above 50-EMA 10 · 10-EMA over 20-EMA 5 · 20-EMA over 50-EMA 5
-     Momentum 20   RSI > 50: 10 · RSI rising vs 5 sessions ago: 5 · RSI not overheated (<= 75): 5
-     Relative 25   RS-Ratio >= 100: 10 · RS-Momentum >= 100: 10 · RS line above its 20-EMA: 5
-     Breadth 15    >= 50% of stocks above 20-EMA: 8 · that share rising over 5 sessions: 7
-     Flow 10       Chaikin CMF > 0: 5 · turnover share up over the week: 5
-
-  Stages
-     ROTATING IN   LEADING/IMPROVING quadrant + a fresh turn (20-EMA reclaim, RSI back over 50, 10/20 EMA cross or RS
-                   line crossing up within 5-10 sessions) + above 20-EMA + RSI >= 50 + not extended + score >= 55
-     LEADING       leading quadrant, trend intact          EXTENDED   leading but > 6% above 20-EMA or RSI > 72
-     IMPROVING     relative momentum turning up, not yet confirmed by price
-     FADING        ahead of the benchmark but losing steam    WEAK      behind and falling further behind
-
-Honest limits: "sector" is the NSE industry classification from the index constituent files; turnover is not
+Honest limits: "sector" = NSE industry classification from the index constituent files; turnover is not
 exchange-reported value; scores and stages are evidence from price, breadth and volume - not forecasts.
+With only ~1 year of history the EMA-200 is approximate (quality["ema200_reliable"] tells you).
 """
 from __future__ import annotations
 
@@ -58,6 +60,17 @@ BK = {MARKET: "mkt", "NIFTY 50": "n50", "MIDCAP 100": "m100", "SMALLCAP 100": "s
 STAGES = ("ROTATING IN", "LEADING", "EXTENDED", "IMPROVING", "FADING", "WEAK")
 LANE_VALUE = {"LEADING": 3, "IMPROVING": 2, "FADING": 1, "WEAK": 0}
 
+# data-quality controls
+MIN_COVERAGE = 0.60          # a session counts only if >= 60% of the usual universe has a real bar
+CLIP_PCT = 25.0              # daily-return clip used for index construction
+DROP_PCT = 60.0              # single-day moves beyond this are never treated as real returns
+SPLIT_RATIOS = (0.5, 1 / 3, 0.25, 0.2, 0.1, 2 / 3, 2.0, 3.0, 4.0, 5.0, 10.0)
+SPLIT_TOL = 0.04
+SPLIT_MIN_MOVE = 30.0
+REVERT_TOL = 0.08
+WEIGHT_CAP_MIN = 0.25
+ST_BAD_TICK, ST_CORP, ST_EXCLUDED = "bad tick (repaired)", "split/bonus-like (history adjusted)", "unexplained jump (excluded)"
+
 
 # ───────────────────────── small helpers ─────────────────────────
 def norm_series(s) -> pd.Series:
@@ -71,13 +84,32 @@ def norm_series(s) -> pd.Series:
     return s[~s.index.duplicated(keep="last")].sort_index().astype(float)
 
 
+def _seeded_ewm(df: pd.DataFrame, n: int, alpha: float) -> pd.DataFrame:
+    """Recursive average seeded with the SMA of the first n valid values (TradingView's ta.ema / ta.rma)."""
+    cnt = df.notna().cumsum()
+    seed = df.rolling(n, min_periods=n).mean()
+    x = df.where(cnt > n).where(cnt != n, seed)
+    return x.ewm(alpha=alpha, adjust=False).mean()
+
+
+def ema_df(df: pd.DataFrame, n: int) -> pd.DataFrame:
+    return _seeded_ewm(df, n, 2.0 / (n + 1))
+
+
+def ema_series(s: pd.Series, n: int) -> pd.Series:
+    return ema_df(s.to_frame("x"), n)["x"]
+
+
 def rsi_series(close, n: int = 14):
-    """Wilder RSI (works on a Series or a DataFrame)."""
-    delta = close.diff()
-    up = delta.clip(lower=0).ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
-    dn = (-delta.clip(upper=0)).ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
+    """Wilder RSI, SMA-seeded like TradingView (works on a Series or a DataFrame)."""
+    is_s = isinstance(close, pd.Series)
+    d = close.to_frame("x") if is_s else close
+    delta = d.diff()
+    up = _seeded_ewm(delta.clip(lower=0).where(delta.notna()), n, 1.0 / n)
+    dn = _seeded_ewm((-delta.clip(upper=0)).where(delta.notna()), n, 1.0 / n)
     out = 100 - 100 / (1 + up / dn.replace(0, np.nan))
-    return out.where(~((dn == 0) & up.notna()), 100.0)
+    out = out.where(~((dn == 0) & up.notna()), 100.0)
+    return out["x"] if is_s else out
 
 
 def crossed_up(a: pd.Series, b, lookback: int) -> bool:
@@ -119,18 +151,20 @@ def _f(v):
 # ───────────────────────── technicals on one index series ─────────────────────────
 def tech_block(c: pd.Series) -> dict:
     """RSI, EMA 10/20/50/200 flags + distances, and fresh-turn events for one price series."""
-    keys = (["rsi_d", "rsi_d_5", "rsi_w", "e10_gt_20", "e20_gt_50", "x20_up", "x20_dn", "rsi50_up", "e1020_up"]
-            + [f"ab{s}" for s in EMA_SPANS] + [f"dist{s}" for s in EMA_SPANS])
+    keys = (["rsi_d", "rsi_d_5", "rsi_w", "e10_gt_20", "e20_gt_50", "x20_up", "x20_dn", "rsi50_up", "e1020_up", "idx_last"]
+            + [f"ab{s}" for s in EMA_SPANS] + [f"dist{s}" for s in EMA_SPANS] + [f"ema{s}" for s in EMA_SPANS])
     out = {k: np.nan for k in keys}
     c = c.dropna()
     n = len(c)
     if n < 30:
         return out
     last = float(c.iloc[-1])
-    ema = {s: c.ewm(span=s, adjust=False).mean() for s in EMA_SPANS}
+    out["idx_last"] = last
+    ema = {s: ema_series(c, s) for s in EMA_SPANS}
     for s in EMA_SPANS:
-        if n >= s:
+        if n >= s and pd.notna(ema[s].iloc[-1]):
             e = float(ema[s].iloc[-1])
+            out[f"ema{s}"] = e
             out[f"ab{s}"] = last > e
             out[f"dist{s}"] = (last / e - 1) * 100
     out["e10_gt_20"] = bool(ema[10].iloc[-1] > ema[20].iloc[-1])
@@ -150,39 +184,119 @@ def tech_block(c: pd.Series) -> dict:
     return out
 
 
+# ───────────────────────── data cleaning ─────────────────────────
+def _prep_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """tz-naive normalised daily index, unique, sorted, positive prices only."""
+    d = df[["High", "Low", "Close", "Volume"]].copy()
+    idx = pd.to_datetime(d.index)
+    if getattr(idx, "tz", None) is not None:
+        idx = idx.tz_localize(None)
+    d.index = idx.normalize()
+    d = d[~d.index.duplicated(keep="last")].sort_index()
+    for c in d.columns:
+        d[c] = pd.to_numeric(d[c], errors="coerce")
+    d = d[(d["Close"] > 0) & (d["High"] > 0) & (d["Low"] > 0)]
+    return d
+
+
+def _split_like(ret_pct: pd.DataFrame) -> pd.DataFrame:
+    ratio = 1 + ret_pct / 100
+    hit = pd.DataFrame(False, index=ret_pct.index, columns=ret_pct.columns)
+    for f in SPLIT_RATIOS:
+        hit |= ((ratio / f) - 1).abs() < SPLIT_TOL
+    return hit & (ret_pct.abs() > SPLIT_MIN_MOVE)
+
+
+def _repair_prices(close, high, low, ret_pct):
+    """Repair bad ticks and split-like steps. Returns (close, high, low, excluded_mask, events)."""
+    split = _split_like(ret_pct).to_numpy()
+    suspect = (split | (ret_pct.abs() > DROP_PCT).fillna(False).to_numpy())
+    C, H, L = close.to_numpy(copy=True), high.to_numpy(copy=True), low.to_numpy(copy=True)
+    excluded = np.zeros(C.shape, dtype=bool)
+    events = []
+    ii, jj = np.where(suspect)
+    for k in np.argsort(ii, kind="stable"):
+        i, j = ii[k], jj[k]
+        if i == 0:
+            continue
+        prev, cur = C[i - 1, j], C[i, j]
+        if not (prev > 0 and cur > 0):
+            continue
+        ratio = cur / prev
+        nxt = C[i + 1, j] if i + 1 < len(C) else np.nan
+        if np.isfinite(nxt) and abs(nxt / prev - 1) < REVERT_TOL:          # spike that reverted: bad tick
+            C[i, j] = H[i, j] = L[i, j] = prev
+            kind = ST_BAD_TICK
+        elif split[i, j]:                                                  # persistent step: corporate action
+            C[:i, j] *= ratio
+            H[:i, j] *= ratio
+            L[:i, j] *= ratio
+            kind = ST_CORP
+        else:
+            excluded[i, j] = True
+            kind = ST_EXCLUDED
+        events.append({"symbol": close.columns[j], "date": str(close.index[i])[:10], "move_pct": float((ratio - 1) * 100), "action": kind})
+    mk = lambda a: pd.DataFrame(a, index=close.index, columns=close.columns)
+    return mk(C), mk(H), mk(L), mk(excluded), events
+
+
 # ───────────────────────── universe analysis ─────────────────────────
-def _panel(frames: dict, syms: list, col: str, index) -> pd.DataFrame:
-    return pd.DataFrame({s: frames[f"{s}.NS"][col] for s in syms}).reindex(index)
-
-
-def analyse_universe(frames: dict, meta: pd.DataFrame, bench: str = "^NSEI", benches: dict | None = None) -> dict:
+def analyse_universe(frames: dict, meta: pd.DataFrame, bench: str = "^NSEI", benches: dict | None = None,
+                     weighting: str = "liquidity", min_coverage: float = MIN_COVERAGE) -> dict:
     meta = meta.drop_duplicates("symbol")
-    usable = [s for s in meta["symbol"] if f"{s}.NS" in frames and len(frames[f"{s}.NS"]) >= 60]
+    clean = {}
+    for s in meta["symbol"]:
+        key = f"{s}.NS"
+        if key in frames and frames[key] is not None and len(frames[key]) >= 60:
+            try:
+                d = _prep_frame(frames[key])
+            except Exception:
+                continue
+            if len(d) >= 60:
+                clean[s] = d
+    usable = list(clean)
     if len(usable) < 30:
         raise ValueError(f"only {len(usable)} stocks returned usable history (need 30+)")
-    all_dates = sorted(set().union(*[set(frames[f"{s}.NS"].index) for s in usable]))
-    idx = pd.DatetimeIndex(all_dates)
-    last_date = idx[-1]
-    syms = [s for s in usable if (last_date - frames[f"{s}.NS"].index[-1]).days <= 4]      # drop stale tickers
+
+    idx_all = pd.DatetimeIndex(sorted(set().union(*[set(d.index) for d in clean.values()])))
+    has_all = pd.DataFrame({s: pd.Series(True, index=clean[s].index) for s in usable}).reindex(idx_all).fillna(False).astype(bool)
+    cover_all = has_all.sum(axis=1) / len(usable)
+
+    # 1) coverage guard: only analyse sessions with (near) complete data
+    thr = min_coverage * float(cover_all.tail(30).median())
+    good = cover_all.index[cover_all >= thr]
+    last_date = good.max()
+    dropped_tail = [str(d)[:10] for d in idx_all[idx_all > last_date]]
+    idx = idx_all[idx_all <= last_date]
+    cover_last = float(cover_all.loc[last_date])
+
+    syms = [s for s in usable if (last_date - clean[s].index[-1]).days <= 4 or clean[s].index[-1] > last_date]
     stale = sorted(set(usable) - set(syms))
     if len(syms) < 30:
         raise ValueError("too many stale tickers")
 
-    close = _panel(frames, syms, "Close", idx).ffill()
-    high = _panel(frames, syms, "High", idx).ffill()
-    low = _panel(frames, syms, "Low", idx).ffill()
-    vol = _panel(frames, syms, "Volume", idx).fillna(0)
+    pan = lambda col: pd.DataFrame({s: clean[s][col] for s in syms}).reindex(idx)
+    close_raw = pan("Close")
+    has_bar = close_raw.notna()
+    close, high, low = close_raw.ffill(), pan("High").ffill(), pan("Low").ffill()
+    vol = pan("Volume").fillna(0)
+
     ind = meta.set_index("symbol")["industry"].reindex(syms).fillna("Unclassified").astype(str)
     counts = ind.value_counts()
     ind = ind[ind.isin(counts[counts >= MIN_STOCKS_PER_SECTOR].index)]
     syms = ind.index.tolist()
-    close, high, low, vol = close[syms], high[syms], low[syms], vol[syms]
+    close, high, low, vol, has_bar = close[syms], high[syms], low[syms], vol[syms], has_bar[syms]
 
-    turn = close * vol
-    ret1 = (close / close.shift(1) - 1) * 100
+    # 3) repair bad ticks / splits, then returns (no bar => no return)
+    ret_pre = ((close / close.shift(1) - 1) * 100).where(has_bar)
+    close, high, low, excluded, events = _repair_prices(close, high, low, ret_pre)
+    ret1_raw = ((close / close.shift(1) - 1) * 100).where(has_bar)            # honest daily % change of each stock
+    ret1 = ret1_raw.mask(excluded).clip(-CLIP_PCT, CLIP_PCT)                   # used for index construction
     ret5 = (close / close.shift(5) - 1) * 100
     ret21 = (close / close.shift(21) - 1) * 100
-    emaS = {s: close.ewm(span=s, adjust=False).mean() for s in EMA_SPANS}
+
+    turn = close * vol
+    emaS = {s: ema_df(close, s) for s in EMA_SPANS}
     ema20 = emaS[20]
     rsi = rsi_series(close)
     brk = close > high.rolling(20).max().shift(1)
@@ -192,63 +306,77 @@ def analyse_universe(frames: dict, meta: pd.DataFrame, bench: str = "^NSEI", ben
     cmf_stock = mfv.rolling(20).sum() / vol.rolling(20).sum().replace(0, np.nan)
 
     grp = lambda df: df.T.groupby(ind).sum().T                  # dates x sectors, summed across stocks
+    n = ind.groupby(ind).size()
+
+    # 4) sector index: liquidity-weighted (default) or equal-weight; weights lagged one session, capped
+    def sector_return(weights: pd.DataFrame) -> pd.DataFrame:
+        valid = ret1.notna()
+        num = grp((weights * ret1).where(valid, 0.0))
+        den = grp(weights.where(valid, 0.0))
+        return (num / den.replace(0, np.nan)) / 100
+
+    eq_w = pd.DataFrame(1.0, index=idx, columns=syms)
+    eq_w = eq_w.div(grp(eq_w)[ind.values].set_axis(syms, axis=1))
+    if weighting == "equal":
+        wn = eq_w
+    else:
+        w = turn.rolling(20, min_periods=1).mean().shift(1).clip(lower=1.0).fillna(1.0)
+        wn = w.div(grp(w)[ind.values].set_axis(syms, axis=1))
+        cap = pd.Series(np.maximum(WEIGHT_CAP_MIN, 2.0 / ind.map(n).astype(float)).values, index=syms)
+        wn = wn.clip(upper=cap, axis=1)
+        wn = wn.div(grp(wn)[ind.values].set_axis(syms, axis=1))
+    sec_ret = sector_return(wn)
+    sec_idx = (1 + sec_ret.fillna(0)).cumprod() * 100
+    sec_idx_eq = (1 + sector_return(eq_w).fillna(0)).cumprod() * 100
+
+    # today's breadth / turnover split use the honest daily change
+    r1_last, r5_last = ret1_raw.iloc[-1], ret5.iloc[-1]
     t_sec = grp(turn)
     share = t_sec.div(t_sec.sum(axis=1).replace(0, np.nan), axis=0) * 100
     cmf_sec = grp(mfv).rolling(20).sum() / grp(vol).rolling(20).sum().replace(0, np.nan)
-
-    r1_last, r5_last = ret1.iloc[-1], ret5.iloc[-1]
     adv = (r1_last > 0).groupby(ind).sum()
     dec = (r1_last < 0).groupby(ind).sum()
-    n = ind.groupby(ind).size()
     up_turn = turn.iloc[-1].where(r1_last > 0, 0).groupby(ind).sum()
     dn_turn = turn.iloc[-1].where(r1_last < 0, 0).groupby(ind).sum()
     t_last = t_sec.iloc[-1]
     t_avg20 = t_sec.iloc[-21:-1].mean()
-
-    # breadth over time: share of each sector's stocks above their own 20-EMA
     ab20_ser = (close > ema20).where(ema20.notna()).astype(float).T.groupby(ind).mean().T * 100
     cnt = close.count()
-    flag = {}
-    dist = {}
+    flag, dist = {}, {}
     for s in EMA_SPANS:
         e = emaS[s].iloc[-1]
         ok = (cnt >= s) & e.notna()
         flag[s] = (close.iloc[-1] > e).where(ok)
         dist[s] = ((close.iloc[-1] / e - 1) * 100).where(ok)
 
-    # sector index (equal-weight, daily rebalanced) + benchmarks
-    sec_ret = ret1.T.groupby(ind).mean().T / 100
-    sec_idx = (1 + sec_ret.fillna(0)).cumprod() * 100
+    # benchmarks
     bser = {}
     if benches:
         for k, v in benches.items():
-            s = norm_series(v)
-            if len(s) > 30:
-                bser[k] = s
+            s_ = norm_series(v)
+            if len(s_) > 30:
+                bser[k] = s_
     elif frames.get(bench) is not None:
         bser["NIFTY 50"] = norm_series(frames[bench]["Close"])
-    bser[MARKET] = (1 + (ret1.mean(axis=1) / 100).fillna(0)).cumprod() * 100       # average stock in the universe
+    bser[MARKET] = (1 + (ret1.mean(axis=1) / 100).fillna(0)).cumprod() * 100
     bench_idx = pd.DataFrame({k: bser[k].reindex(idx.union(bser[k].index)).ffill().reindex(idx)
                               for k in BENCH_ORDER if k in bser}, index=idx)
 
     def sret(k):
         return (sec_idx.iloc[-1] / sec_idx.iloc[-1 - k] - 1) * 100 if len(sec_idx) > k else pd.Series(np.nan, index=sec_idx.columns)
 
-    # leaders: top 3 by 1W return among the sector's more liquid names
-    leaders = {}
-    tl = turn.iloc[-1]
+    leaders, tl = {}, turn.iloc[-1]
     for sec, members in ind.groupby(ind).groups.items():
         m = list(members)
         liquid = [s for s in m if tl[s] >= tl[m].quantile(.25)]
-        pick = r5_last[liquid].dropna().sort_values(ascending=False).head(3).index.tolist()
-        leaders[sec] = ", ".join(pick)
+        leaders[sec] = ", ".join(r5_last[liquid].dropna().sort_values(ascending=False).head(3).index.tolist())
 
     f = lambda sr: sr.reindex(n.index).values
     sectors = pd.DataFrame({
         "sector": n.index, "stocks": n.values,
         "turnover_cr": f(t_last / 1e7), "turn_avg20_cr": f(t_avg20 / 1e7),
         "turn_vs20": f(t_last / t_avg20.replace(0, np.nan)),
-        "r1d": f(r1_last.groupby(ind).mean()), "r1w": f(sret(5)), "r1m": f(sret(21)), "r3m": f(sret(63)),
+        "r1d": f(sec_ret.iloc[-1] * 100), "r1w": f(sret(5)), "r1m": f(sret(21)), "r3m": f(sret(63)),
         "share": f(share.iloc[-1]),
         "dshare_d": f(share.iloc[-1] - share.iloc[-2]), "dshare_w": f(share.iloc[-1] - share.iloc[-6]),
         "adv": f(adv), "dec": f(dec), "ad_net": f((adv - dec) / n),
@@ -274,17 +402,82 @@ def analyse_universe(frames: dict, meta: pd.DataFrame, bench: str = "^NSEI", ben
         **{f"ab{s}": flag[s].values for s in EMA_SPANS}, **{f"dist{s}": dist[s].values for s in EMA_SPANS},
     }).replace([np.inf, -np.inf], np.nan)
 
+    contrib = pd.DataFrame({"symbol": syms, "sector": ind.values, "weight": wn.iloc[-1].values * 100,
+                            "ret1": ret1.iloc[-1].values, "has_bar": has_bar.iloc[-1].values})
+    contrib["contrib_pp"] = contrib["weight"] * contrib["ret1"].fillna(0) / 100
+
     sparks = {}
     for s in sec_idx.columns:
         t = sec_idx[s].dropna().tail(40)
         if len(t) > 5:
             sparks[s] = (t / t.iloc[0] * 100).round(2).tolist()
 
+    quality = {
+        "asof": str(last_date)[:10],
+        "coverage": cover_last,                                   # share of the universe with a REAL bar on the last session
+        "coverage_ok": bool(cover_last >= 0.85),
+        "dropped_partial_sessions": dropped_tail,
+        "no_bar_today": int((~has_bar.iloc[-1]).sum()),
+        "events": events[:60], "n_events": len(events),
+        "weighting": weighting,
+        "history_sessions": int(len(idx)),
+        "ema200_reliable": bool(len(idx) >= 400),
+        "method": ("Liquidity-weighted (prior 20-day traded value, per-stock cap max(25%, 2/n))" if weighting != "equal" else "Equal-weight")
+                  + ", daily-rebalanced; no-bar days excluded; bad-tick/split repair; returns clipped ±25%; TradingView-style EMA/RSI seeding.",
+    }
     return {"sectors": sectors, "stocks": stocks, "sparks": sparks,
-            "sector_index": sec_idx, "bench_index": bench_idx, "ab20_series": ab20_ser,
+            "sector_index": sec_idx, "sector_index_equal": sec_idx_eq, "bench_index": bench_idx, "ab20_series": ab20_ser,
             "cmf_series": cmf_sec.tail(60), "share_series": share.tail(60),
+            "contrib_last": contrib, "quality": quality,
             "asof": str(last_date)[:10], "n_stocks": len(syms), "stale": stale,
             "unmapped": sorted(set(meta["symbol"]) - set(usable))}
+
+
+# ───────────────────────── audit tools ─────────────────────────
+def self_check(res: dict, tol: float = 1e-6) -> list:
+    """Re-derive every EMA flag / distance from the sector index and compare with the table. Empty list = consistent."""
+    problems = []
+    si, sec = res["sector_index"], res["sectors"]
+    for rec in sec.to_dict("records"):
+        s = rec["sector"]
+        if s not in si.columns:
+            continue
+        t = tech_block(si[s])
+        for n_ in EMA_SPANS:
+            a, b = _b(rec.get(f"ab{n_}")), _b(t.get(f"ab{n_}"))
+            if a != b:
+                problems.append(f"{s}: EMA{n_} flag table={a} recomputed={b}")
+            d1, d2 = _f(rec.get(f"dist{n_}")), _f(t.get(f"dist{n_}"))
+            if (d1 is None) != (d2 is None) or (d1 is not None and abs(d1 - d2) > tol):
+                problems.append(f"{s}: EMA{n_} distance table={d1} recomputed={d2}")
+            if d1 is not None and a is not None and (d1 > 0) != a:
+                problems.append(f"{s}: EMA{n_} chip colour contradicts distance ({d1:+.2f}%)")
+    return problems
+
+
+def explain_sector(res: dict, sector: str, last_n: int = 8) -> dict:
+    """Raw numbers behind one sector row — compare these with a chart to verify any value."""
+    si = res["sector_index"][sector].dropna()
+    ema = {n_: ema_series(si, n_) for n_ in EMA_SPANS}
+    last = float(si.iloc[-1])
+    rows = []
+    for d in si.index[-last_n:]:
+        rows.append({"date": str(d)[:10], "index": float(si.loc[d]), **{f"ema{n_}": float(ema[n_].loc[d]) if pd.notna(ema[n_].loc[d]) else None for n_ in EMA_SPANS}})
+    c = res["contrib_last"]
+    c = c[c["sector"] == sector].sort_values("contrib_pp", ascending=False)
+    q = res["quality"]
+    return {
+        "sector": sector, "asof": res["asof"], "method": q["method"], "coverage_last_session": q["coverage"],
+        "index_last": last,
+        "ema": {n_: (float(ema[n_].iloc[-1]) if pd.notna(ema[n_].iloc[-1]) else None) for n_ in EMA_SPANS},
+        "distance_pct": {n_: ((last / float(ema[n_].iloc[-1]) - 1) * 100 if pd.notna(ema[n_].iloc[-1]) else None) for n_ in EMA_SPANS},
+        "above": {n_: (last > float(ema[n_].iloc[-1]) if pd.notna(ema[n_].iloc[-1]) else None) for n_ in EMA_SPANS},
+        "recent": pd.DataFrame(rows),
+        "equal_weight_distance_pct_ema10": float((res["sector_index_equal"][sector].iloc[-1] / ema_series(res["sector_index_equal"][sector].dropna(), 10).iloc[-1] - 1) * 100),
+        "top_contributors": c.head(5)[["symbol", "weight", "ret1", "contrib_pp"]],
+        "top_detractors": c.tail(5)[["symbol", "weight", "ret1", "contrib_pp"]].iloc[::-1],
+        "stocks_with_bar_today": int(c["has_bar"].sum()), "stocks_total": int(len(c)),
+    }
 
 
 # ───────────────────────── benchmark comparison ─────────────────────────
@@ -411,7 +604,7 @@ def rotation_table(res: dict, bench_name: str = "NIFTY 50"):
     rs = si.div(b, axis=0)
     ratio = rs / rs.rolling(RS_TREND, min_periods=RS_TREND).mean() * 100
     mom = ratio / ratio.shift(RS_MOM) * 100
-    rs_e20 = rs.ewm(span=20, adjust=False).mean()
+    rs_e20 = ema_df(rs, 20)
 
     trails, rows = {}, []
     for rec in sec.to_dict("records"):
