@@ -476,7 +476,9 @@ def fetch_many(symbols: tuple) -> dict:
     raw = yf.download(tick, period="1y", interval="1d", group_by="ticker", threads=True, progress=False, auto_adjust=True)
     frames = _split_download(raw, tick)
     return {t[:-3]: f for t, f in frames.items()}
-  # ══════════════════════════════════════════════════════════
+
+
+# ══════════════════════════════════════════════════════════
 # 4. DETERMINISTIC ENGINE  (pure functions: no network, no Streamlit)
 # ══════════════════════════════════════════════════════════
 def _f(x, nd=2):
@@ -923,7 +925,9 @@ def position_size(plan: dict | None, risk_amount: float) -> dict:
     qty = int(risk_amount // per_share)
     return {"risk_amount": risk_amount, "risk_per_share": round(per_share, 2), "qty": qty,
             "capital": round(qty * plan["entry_ref"], 2)}
-  # ══════════════════════════════════════════════════════════
+
+
+# ══════════════════════════════════════════════════════════
 # 5. WHAT TO DRAW  +  CHARTS
 # ══════════════════════════════════════════════════════════
 def build_spec(det: dict, draw: dict | None, plan: dict | None) -> dict:
@@ -1459,603 +1463,779 @@ def radar_scan(symbols: list, style: dict) -> list:
     rows.sort(key=lambda r: -r["score"])
     return rows
 
-# ═════════════════════════════════════════════════════════════════════════════
-# 9. V9 USER INTERFACE
-# This UI is written for the V9 engine above. It does not append or override
-# any V8 analysis/storage functions.
-# ═════════════════════════════════════════════════════════════════════════════
 
-def _aa_v9_css():
-    st.markdown("""
-    <style>
-      .aa9-wrap{background:#050505;color:#ECECEC}
-      .aa9-hero{border-bottom:1px solid #272727;padding:8px 0 16px;margin-bottom:14px}
-      .aa9-kicker{font:700 9px 'JetBrains Mono',monospace;letter-spacing:2px;color:#FF9F0A;text-transform:uppercase}
-      .aa9-title{font:800 27px Inter,system-ui,sans-serif;letter-spacing:-.6px;color:#ECECEC;margin-top:5px}
-      .aa9-sub{font:11px Inter,system-ui,sans-serif;color:#777;margin-top:5px}
-      .aa9-panel{background:#0A0A0A;border:1px solid #242424;border-top:2px solid #343434;padding:12px 14px;margin:4px 0 10px}
-      .aa9-label{font:700 9px 'JetBrains Mono',monospace;letter-spacing:1.1px;color:#A3A3A3;text-transform:uppercase}
-      .aa9-value{font:700 20px 'JetBrains Mono',monospace;color:#ECECEC;margin-top:5px}
-      .aa9-muted{font:11px Inter,system-ui,sans-serif;color:#858585;line-height:1.6}
-      .aa9-status{font:700 10px 'JetBrains Mono',monospace;letter-spacing:.8px;padding:4px 7px;border:1px solid #333;display:inline-block}
-      div[data-testid="stTabs"] button{font-size:10px!important;font-weight:700!important;letter-spacing:.7px!important}
-      div[data-testid="stForm"]{border:1px solid #222!important;border-radius:3px!important;background:#080808!important}
-      .stButton>button,.stDownloadButton>button{border-radius:3px!important}
-    </style>
-    """, unsafe_allow_html=True)
+# ══════════════════════════════════════════════════════════
+# 9. INTERFACE
+# ══════════════════════════════════════════════════════════
+ARKA_CSS = """
+<style>
+.aa-chips{display:flex;flex-wrap:wrap;gap:8px;margin:2px 0 12px;}
+.aa-chip{display:inline-flex;align-items:center;gap:7px;padding:4px 11px;border:1px solid #2B2B2B;border-radius:999px;font:700 9px 'JetBrains Mono',monospace;letter-spacing:.8px;color:#A3A3A3;text-transform:uppercase;white-space:nowrap;}
+.aa-chip i{width:6px;height:6px;border-radius:50%;background:currentColor;display:inline-block;}
+.aa-chip.ok{color:#30D158;border-color:rgba(48,209,88,.35);background:rgba(48,209,88,.07);}
+.aa-chip.warn{color:#FF9F0A;border-color:rgba(255,159,10,.35);background:rgba(255,159,10,.07);}
+.aa-chip.bad{color:#FF453A;border-color:rgba(255,69,58,.35);background:rgba(255,69,58,.07);}
+.aa-intro{border:1px solid #1F1F1F;border-left:3px solid #FF9F0A;background:#0A0A0A;padding:14px 18px;margin:4px 0 12px;font:13px 'Inter',sans-serif;color:#A3A3A3;line-height:1.7;}
+.aa-intro b{color:#ECECEC;}
+.aa-steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:8px;margin:8px 0 14px;}
+.aa-step{border:1px solid #1F1F1F;border-top:2px solid #2B2B2B;background:#0A0A0A;padding:14px 16px;}
+.aa-step .n{font:800 9px 'JetBrains Mono',monospace;letter-spacing:1.4px;color:#FF9F0A;}
+.aa-step .t{font:700 14px 'Inter',sans-serif;color:#ECECEC;margin:6px 0 4px;}
+.aa-step .d{font:12px 'Inter',sans-serif;color:#6B6B6B;line-height:1.6;}
+
+.aa-hero{display:grid;grid-template-columns:minmax(200px,1.05fr) minmax(250px,1.4fr) auto minmax(250px,1.3fr);gap:24px;align-items:center;background:#0A0A0A;border:1px solid #1F1F1F;border-top:2px solid var(--vc,#FF9F0A);padding:18px 22px;margin-top:8px;}
+@media(max-width:1150px){.aa-hero{grid-template-columns:1fr 1fr;}}
+.aa-sym{display:inline-block;font:800 10px 'JetBrains Mono',monospace;letter-spacing:1px;color:#000;background:#FF9F0A;padding:2px 9px;border-radius:3px;}
+.aa-px{font:700 28px 'JetBrains Mono',monospace;color:#ECECEC;margin-top:8px;font-variant-numeric:tabular-nums;}
+.aa-px em{font:700 12px 'JetBrains Mono',monospace;font-style:normal;padding:2px 8px;border-radius:3px;margin-left:8px;vertical-align:middle;}
+.aa-px em.up{color:#30D158;background:rgba(48,209,88,.10);} .aa-px em.dn{color:#FF453A;background:rgba(255,69,58,.10);}
+.aa-sub{font:10px 'JetBrains Mono',monospace;color:#6B6B6B;margin-top:6px;letter-spacing:.4px;}
+.aa-verdict{display:inline-block;font:800 12px 'JetBrains Mono',monospace;letter-spacing:1.4px;padding:7px 14px;border:1px solid var(--vc);color:var(--vc);background:rgba(255,255,255,.02);border-radius:3px;}
+.aa-hm .aa-chips{margin:10px 0 0;}
+.aa-mini{display:grid;grid-template-columns:repeat(2,1fr);gap:8px 18px;}
+.aa-mini div span{display:block;font:700 8px 'JetBrains Mono',monospace;letter-spacing:1px;color:#6B6B6B;}
+.aa-mini div b{font:600 14px 'JetBrains Mono',monospace;color:#ECECEC;font-variant-numeric:tabular-nums;}
+.aa-mini div b.dn{color:#FF453A;} .aa-mini div b.up{color:#30D158;}
+.aa-head{border:1px solid #1F1F1F;border-top:0;background:#0F0F0F;padding:12px 22px;font:600 14px 'Inter',sans-serif;color:#ECECEC;line-height:1.6;}
+.aa-head span{color:#6B6B6B;font:11px 'JetBrains Mono',monospace;margin-left:10px;}
+
+.aa-card{background:#0A0A0A;border:1px solid #1F1F1F;border-top:2px solid #2B2B2B;padding:14px 16px;min-height:100px;}
+.aa-ct{display:flex;justify-content:space-between;align-items:center;font:700 10px 'JetBrains Mono',monospace;letter-spacing:1.3px;color:#FF9F0A;border-bottom:1px solid #1F1F1F;padding-bottom:9px;margin-bottom:6px;text-transform:uppercase;}
+.aa-ct span{color:#6B6B6B;font-weight:600;letter-spacing:.6px;}
+.aa-kv{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px solid #141414;font:12px 'Inter',sans-serif;color:#A3A3A3;}
+.aa-kv b{font:600 12px 'JetBrains Mono',monospace;color:#ECECEC;text-align:right;}
+.aa-kv b.dn{color:#FF453A;} .aa-kv b.up{color:#30D158;} .aa-kv b.cy{color:#5AC8FA;}
+.aa-kv em{display:block;font:10px 'Inter',sans-serif;font-style:normal;color:#6B6B6B;text-align:right;margin-top:2px;max-width:260px;}
+.aa-note{font:11px 'Inter',sans-serif;color:#6B6B6B;line-height:1.7;margin-top:8px;}
+.aa-empty{border:1px dashed #2B2B2B;padding:22px;text-align:center;color:#6B6B6B;font:11px 'JetBrains Mono',monospace;letter-spacing:.5px;line-height:1.8;}
+
+.aa-sh{display:flex;justify-content:space-between;gap:8px;margin-top:10px;font:700 11px 'Inter',sans-serif;color:#ECECEC;}
+.aa-sh span{font:700 9px 'JetBrains Mono',monospace;color:#FF9F0A;letter-spacing:.8px;}
+.aa-ck{border:1px solid #1F1F1F;border-left:3px solid var(--c);background:#0F0F0F;padding:8px 11px;margin-top:5px;}
+.aa-ck .h{display:flex;justify-content:space-between;gap:8px;font:600 11px 'Inter',sans-serif;color:#ECECEC;}
+.aa-ck .h span{font:700 8px 'JetBrains Mono',monospace;letter-spacing:.8px;color:var(--c);white-space:nowrap;}
+.aa-ck .r{font:10px 'Inter',sans-serif;color:#A3A3A3;line-height:1.5;margin-top:4px;}
+.aa-ck .b{height:2px;background:#1a1a1a;margin-top:6px;} .aa-ck .b i{display:block;height:2px;background:var(--c);}
+.aa-ref{display:inline-block;font:700 8px 'JetBrains Mono',monospace;color:#5AC8FA;border:1px solid rgba(90,200,250,.3);padding:0 5px;border-radius:3px;margin-left:5px;}
+
+.aa-list{list-style:none;margin:0;padding:0;}
+.aa-list li{display:flex;gap:9px;padding:7px 0;border-bottom:1px solid #141414;font:12px 'Inter',sans-serif;color:#C8C8C8;line-height:1.55;}
+.aa-list li:last-child{border-bottom:0;}
+.aa-list li:before{content:var(--ic);color:var(--c);font:700 12px 'JetBrains Mono',monospace;flex-shrink:0;}
+.aa-scn{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:8px;}
+.aa-sc{background:#0A0A0A;border:1px solid #1F1F1F;border-top:2px solid var(--c);padding:14px 16px;}
+.aa-sc .t{font:800 10px 'JetBrains Mono',monospace;letter-spacing:1.2px;color:var(--c);}
+.aa-sc .l{font:700 18px 'JetBrains Mono',monospace;color:#ECECEC;margin:8px 0 4px;}
+.aa-sc .d{font:12px 'Inter',sans-serif;color:#A3A3A3;line-height:1.6;}
+.aa-sc .d b{color:#ECECEC;}
+
+.aa-tw{overflow:auto;border:1px solid #1F1F1F;background:#070707;margin:6px 0 10px;}
+.aa-t{width:100%;border-collapse:separate;border-spacing:0;font:12px 'Inter',sans-serif;color:#E0E0E0;}
+.aa-t th{position:sticky;top:0;background:#0C0C0C;color:#777;font:700 9px 'JetBrains Mono',monospace;letter-spacing:.9px;text-transform:uppercase;text-align:left;padding:10px;border-bottom:1px solid #252525;white-space:nowrap;}
+.aa-t td{padding:9px 10px;border-bottom:1px solid #141414;white-space:nowrap;vertical-align:middle;}
+.aa-t tbody tr:hover td{background:rgba(255,159,10,.05);}
+.aa-t td.n{font:11px 'JetBrains Mono',monospace;text-align:right;color:#CFCFCF;font-variant-numeric:tabular-nums;}
+.aa-t b{color:#FF9F0A;font:700 11px 'JetBrains Mono',monospace;}
+.aa-pill{display:inline-block;padding:2px 8px;border-radius:999px;font:800 8px 'JetBrains Mono',monospace;letter-spacing:.8px;border:1px solid var(--c);color:var(--c);}
+.aa-q{display:inline-flex;align-items:center;gap:7px;font:700 11px 'JetBrains Mono',monospace;color:#ECECEC;}
+.aa-q i{display:inline-block;width:54px;height:5px;background:#1a1a1a;position:relative;} .aa-q i:after{content:"";position:absolute;left:0;top:0;height:100%;width:var(--w);background:var(--c);}
+.aa-sec{display:flex;align-items:center;gap:12px;margin:26px 0 10px;}
+.aa-sec:before{content:"";width:3px;height:14px;background:#FF9F0A;}
+.aa-sec b{font:700 11px 'JetBrains Mono',monospace;letter-spacing:1.6px;color:#ECECEC;text-transform:uppercase;white-space:nowrap;}
+.aa-sec span{font:11px 'Inter',sans-serif;color:#6B6B6B;} .aa-sec i{flex:1;height:1px;background:#1F1F1F;}
+.aa-lab{border:1px solid #1F1F1F;background:#0A0A0A;padding:8px 12px;margin-top:6px;font:12px 'Inter',sans-serif;color:#A3A3A3;}
+.aa-lab b{font:700 11px 'JetBrains Mono',monospace;color:#FF9F0A;margin-right:8px;}
+.aa-item{border:1px solid #1F1F1F;border-left:3px solid var(--c);background:#0A0A0A;padding:11px 14px;margin-top:6px;}
+.aa-item .h{display:flex;justify-content:space-between;gap:10px;align-items:center;} .aa-item .h b{font:700 13px 'Inter',sans-serif;color:#ECECEC;}
+.aa-item .d{font:11px 'Inter',sans-serif;color:#6B6B6B;margin-top:4px;line-height:1.6;}
+</style>
+"""
 
 
-def _aa_v9_price(value):
-    try:
-        v = float(value)
-        return f"₹{v:,.2f}" if math.isfinite(v) else "—"
-    except Exception:
-        return "—"
+def _inject_css():
+    st.markdown(ARKA_CSS, unsafe_allow_html=True)
 
 
-def _aa_v9_list_block(title, items, empty="None recorded."):
-    st.markdown(f"**{title}**")
-    if items:
-        for item in items:
-            st.markdown(f"- {esc(item)}")
+def _sec(title: str, sub: str = ""):
+    s = f"<span>{esc(sub)}</span>" if sub else ""
+    st.markdown(f'<div class="aa-sec"><b>{esc(title)}</b>{s}<i></i></div>', unsafe_allow_html=True)
+
+
+def _fmt(p, nd=2):
+    return f"{p:,.{nd}f}" if isinstance(p, (int, float)) and math.isfinite(p) else "—"
+
+
+def _chip(text, cls=""):
+    return f'<span class="aa-chip {cls}"><i></i>{esc(text)}</span>'
+
+
+def html_status() -> str:
+    ai_ok = get_gemini() is not None
+    mem = storage_mode()
+    n_set, n_les, n_lab = len(active_items("setup")), len(active_items("lesson")), len(active_items("feedback"))
+    chips = [_chip("AI ENGINE ONLINE" if ai_ok else "AI OFFLINE · ENGINE ONLY", "ok" if ai_ok else "warn"),
+             _chip("PLAYBOOK SAVED TO CLOUD" if mem == "CLOUD" else "PLAYBOOK: THIS SESSION ONLY", "ok" if mem == "CLOUD" else "warn"),
+             _chip(f"{n_set} ACTIVE SETUP{'S' if n_set != 1 else ''}", "ok" if n_set else "bad"),
+             _chip(f"{n_les} LESSON{'S' if n_les != 1 else ''}", "ok" if n_les else ""),
+             _chip(f"{n_lab} LABELLED ZONE SET{'S' if n_lab != 1 else ''}", "ok" if n_lab else ""),
+             _chip("ZONE STYLE: " + style_source(), "ok" if style_source() != "DEFAULT" else "")]
+    if not HAS_PLOTLY:
+        chips.append(_chip("INSTALL PLOTLY FOR INTERACTIVE CHARTS", "warn"))
+    return '<div class="aa-chips">' + "".join(chips) + "</div>"
+
+
+def _pill(text, color):
+    return f'<span class="aa-pill" style="--c:{color}">{esc(text)}</span>'
+
+
+def _ring(score: int, color: str) -> str:
+    c = 2 * math.pi * 34
+    return (f'<svg width="96" height="96" viewBox="0 0 92 92"><circle cx="46" cy="46" r="34" fill="none" stroke="#1a1a1a" stroke-width="7"/>'
+            f'<circle cx="46" cy="46" r="34" fill="none" stroke="{color}" stroke-width="7" stroke-linecap="round" '
+            f'stroke-dasharray="{max(0, min(100, score)) / 100 * c:.1f} {c:.1f}" transform="rotate(-90 46 46)"/>'
+            f'<text x="46" y="50" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="22" font-weight="700" fill="#ECECEC">{score}</text>'
+            f'<text x="46" y="65" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="7" letter-spacing="1" fill="#6B6B6B">SCORE</text></svg>')
+
+
+def html_hero(r: dict) -> str:
+    det, ai = r["det"], r.get("ai") or {}
+    label, color = verdict_text(r)
+    score = r["score"]
+    grade = ai.get("grade") or grade_for(score)
+    chg = det["day_chg_pct"]
+    chg_cls = "up" if chg >= 0 else "dn"
+    struct = det["structure"]
+    bias = ai.get("bias") or ("BULLISH" if struct.startswith("UPTREND") else "BEARISH" if struct.startswith("DOWNTREND") else "NEUTRAL")
+    in_zone = any(z["in_zone"] for z in det["zones"])
+    state = ai.get("setup_state") or ("PRICE IN ZONE" if in_zone else "WATCHING")
+    bias_cls = "ok" if bias == "BULLISH" else "bad" if bias == "BEARISH" else ""
+    chips = (_chip(f"GRADE {grade}", "ok" if grade in ("A+", "A") else "warn" if grade in ("B", "C") else "bad") + _chip(f"BIAS {bias}", bias_cls)
+             + _chip(f"STATE {state}") + _chip(("AI + ENGINE" if ai else "ENGINE ONLY"), "ok" if ai else "warn"))
+    p = r.get("plan")
+    if p:
+        t1 = p["targets"][0] if p["targets"] else None
+        mini = ('<div class="aa-mini">'
+                f'<div><span>{p["direction"]} ENTRY</span><b>{_fmt(p["entry_ref"])}</b></div><div><span>STOP</span><b class="dn">{_fmt(p["stop"])}</b></div>'
+                f'<div><span>TARGET 1</span><b class="up">{_fmt(t1["price"]) if t1 else "—"}</b></div>'
+                f'<div><span>REWARD : RISK</span><b>{(str(t1["rr"]) + " R") if t1 else "—"}</b></div></div>')
     else:
-        st.caption(empty)
+        mini = '<div class="aa-empty" style="padding:14px">NO TRADE PLAN RIGHT NOW<br>waiting for price to reach one of your zones</div>'
+    head = ai.get("headline") or _engine_headline(det)
+    return (f'<div class="aa-hero" style="--vc:{color}"><div><span class="aa-sym">{esc(r["ticker"])}</span>'
+            f'<div class="aa-px">₹{_fmt(det["close"])}<em class="{chg_cls}">{"▲" if chg >= 0 else "▼"} {abs(chg):.2f}%</em></div>'
+            f'<div class="aa-sub">DAILY · AS OF {esc(det["asof"])} · ATR {det["atr_pct"]}% · RSI {_fmt(det["rsi"], 0)}</div></div>'
+            f'<div class="aa-hm"><span class="aa-verdict" style="--vc:{color}">{esc(label)}</span><div class="aa-chips">{chips}</div></div>'
+            f'<div>{_ring(score, color)}</div><div>{mini}</div></div>'
+            f'<div class="aa-head">{esc(head)}<span>{esc(r["ran_at"])}</span></div>')
 
 
-def _aa_v9_plan_panel(plan, current_price):
-    if not plan:
-        st.info("No trade plan qualified from the available detections. That is a valid engine result; it does not mean a trade must be taken.")
-        return
-    direction = plan.get("direction", "—")
-    st.markdown(f"### {esc(direction)} plan")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Entry zone", f"{plan.get('entry_low', 0):,.2f} – {plan.get('entry_high', 0):,.2f}")
-    c2.metric("Reference entry", _aa_v9_price(plan.get("entry_ref")))
-    c3.metric("Stop", _aa_v9_price(plan.get("stop")))
-    targets = plan.get("targets") or []
-    if targets:
-        target_rows = []
-        risk = abs(float(plan.get("entry_ref") or 0) - float(plan.get("stop") or 0))
-        for i, target in enumerate(targets, 1):
-            rr = target.get("rr")
-            if rr is None and risk:
-                rr = abs(float(target.get("price", 0)) - float(plan.get("entry_ref") or 0)) / risk
-            target_rows.append({
-                "Target": f"T{i}",
-                "Price": _aa_v9_price(target.get("price")),
-                "Reference": target.get("ref", "—"),
-                "Reason": target.get("reason", "—"),
-                "R:R": f"{rr:.2f}R" if isinstance(rr, (float, int)) else "—",
-            })
-        st.dataframe(pd.DataFrame(target_rows), use_container_width=True, hide_index=True)
-    if plan.get("stop_reason"):
-        st.caption(f"Stop logic: {plan['stop_reason']}")
-    if plan.get("invalidation"):
-        st.caption(f"Invalidation: {plan['invalidation']}")
-    confirmations = plan.get("confirmation_needed") or []
-    if confirmations:
-        _aa_v9_list_block("CONFIRMATION NEEDED", confirmations)
+def _engine_headline(det: dict) -> str:
+    zs = [z for z in det["zones"] if z["dist_atr"] is not None]
+    if not zs:
+        return f"No supply or demand zones detected with your current style. Structure: {det['structure'].lower()}."
+    z = min(zs, key=lambda x: x["dist_atr"])
+    where = "price is inside it now" if z["in_zone"] else f"{abs(z['dist_pct']):.1f}% ({z['dist_atr']:.1f} ATR) away"
+    return f"{len(det['zones'])} zones detected. Nearest: {z['id']} ({z['type']}, quality {z['quality']}, {z['status'].lower()}); {where}. Structure: {det['structure'].lower()}."
 
 
-def _aa_v9_render_analysis(report):
-    det = report["det"]
-    ai = report.get("ai") or {}
-    plan = report.get("plan")
-    score = int(report.get("score", 0))
-    verdict, verdict_color = verdict_text(report)
+def html_plan(r: dict, risk: float) -> str:
+    p, ai = r.get("plan"), r.get("ai") or {}
+    if not p:
+        why = ("The AI found no entry that fits your playbook right now." if ai.get("no_trade")
+               else "No zone is close enough to price for a clean plan.")
+        alt = ""
+        e = r.get("engine_plan")
+        if ai.get("no_trade") and e:
+            alt = (f'<div class="aa-note">Engine alternative (not matched to your playbook): {e["direction"]} from {e["ref_zone"]}, entry '
+                   f'{_fmt(e["entry_low"])}-{_fmt(e["entry_high"])}, stop {_fmt(e["stop"])}.</div>')
+        return f'<div class="aa-card"><div class="aa-ct">Trade plan<span>none</span></div><div class="aa-empty">{esc(why)}</div>{alt}</div>'
+    dcls = "up" if p["direction"] == "LONG" else "dn"
+    ref_zone = p.get("ref_zone") or "-"
+    tag = " · counter-trend" if p.get("counter_trend") else ""
+    rows = [f'<div class="aa-kv"><span>Direction</span><b class="{dcls}">{p["direction"]}{tag}</b></div>',
+            f'<div class="aa-kv"><span>Based on</span><b>{esc(ref_zone)}</b></div>',
+            f'<div class="aa-kv"><span>Entry zone</span><b class="cy">{_fmt(p["entry_low"])} – {_fmt(p["entry_high"])}</b></div>',
+            f'<div class="aa-kv"><span>Entry reference</span><b>{_fmt(p["entry_ref"])}</b></div>',
+            f'<div class="aa-kv"><span>Stop</span><div><b class="dn">{_fmt(p["stop"])}</b><em>{esc(p.get("stop_reason", ""))}</em></div></div>']
+    for i, t in enumerate(p["targets"], 1):
+        rr = f'{t["rr"]} R' if t.get("rr") is not None else ""
+        rows.append(f'<div class="aa-kv"><span>Target {i} · {esc(t.get("ref", ""))}</span><div><b class="up">{_fmt(t["price"])}</b><em>{rr} · {esc(t.get("reason", ""))}</em></div></div>')
+    sz = position_size(p, risk)
+    if sz:
+        rows.append(f'<div class="aa-kv"><span>Position size @ ₹{risk:,.0f} risk</span><div><b>{sz["qty"]:,} shares</b>'
+                    f'<em>₹{sz["risk_per_share"]} risk per share · about ₹{sz["capital"]:,.0f} deployed</em></div></div>')
+    extra = ""
+    if p.get("invalidation"):
+        extra += f'<div class="aa-note"><b style="color:#ECECEC">Invalidation:</b> {esc(p["invalidation"])}</div>'
+    if p.get("confirmation_needed"):
+        extra += '<div class="aa-note"><b style="color:#ECECEC">Wait for:</b> ' + " · ".join(esc(x) for x in p["confirmation_needed"]) + "</div>"
+    return f'<div class="aa-card"><div class="aa-ct">Trade plan<span>{"AI" if p.get("source") == "ai" else "ENGINE"}</span></div>{"".join(rows)}{extra}</div>'
 
-    st.markdown(
-        f'<div class="aa9-hero"><div class="aa9-kicker">ANALYSIS REPORT · {esc(report["asof"])}</div>'
-        f'<div class="aa9-title">{esc(report["ticker"])} <span style="color:#FF9F0A">/</span> '
-        f'<span style="color:{verdict_color}">{esc(verdict)}</span></div>'
-        f'<div class="aa9-sub">{esc(ai.get("headline") or det.get("structure") or "Deterministic market-structure analysis")}</div></div>',
-        unsafe_allow_html=True,
-    )
 
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("LAST DAILY CLOSE", _aa_v9_price(det.get("close")))
-    m2.metric("DAY CHANGE", f'{det.get("day_chg_pct", 0):+.2f}%')
-    m3.metric("ENGINE / AI SCORE", f"{score}/100", f"Grade {ai.get('grade') or grade_for(score)}")
-    m4.metric("RSI 14", f'{det.get("rsi"):.1f}' if isinstance(det.get("rsi"), (float, int)) else "—")
-    m5.metric("STRUCTURE", str(det.get("structure", "—")).split(" (")[0])
+def html_scorecard(r: dict) -> str:
+    ai = r.get("ai")
+    if not ai:
+        msg = "AI is offline, so your written rules cannot be checked. Zones, levels and the plan above come from the engine." if not r.get("ai_error") else f"AI analysis failed: {r['ai_error']}"
+        return f'<div class="aa-card"><div class="aa-ct">Setup scorecard<span>engine only</span></div><div class="aa-empty">{esc(msg)}</div></div>'
+    if not ai["setups"]:
+        return ('<div class="aa-card"><div class="aa-ct">Setup scorecard<span>no setup taught</span></div><div class="aa-empty">'
+                'No active setup in your playbook.<br>Open TEACH to import a PDF or write your rules.</div></div>')
+    colors = {"PRESENT": GREEN, "NOT_PRESENT": RED, "UNCLEAR": AMBER}
+    labels = {"PRESENT": "✓ PRESENT", "NOT_PRESENT": "✕ NOT PRESENT", "UNCLEAR": "◐ UNCLEAR"}
+    out = ['<div class="aa-card"><div class="aa-ct">Setup scorecard<span>your rules, one by one</span></div>']
+    for s in ai["setups"]:
+        out.append(f'<div class="aa-sh"><div>{esc(s["name"])}</div><span>{s["match_pct"]}% MATCH · {esc(s["state"])}</span></div>')
+        for c in s["checks"]:
+            col = colors[c["status"]]
+            refs = "".join(f'<span class="aa-ref">{esc(x)}</span>' for x in c["refs"])
+            out.append(f'<div class="aa-ck" style="--c:{col}"><div class="h"><div>{esc(c["rule_name"])}{refs}</div><span>{labels[c["status"]]}</span></div>'
+                       f'<div class="r">{esc(c["reason"])}</div><div class="b"><i style="width:{c["confidence"]}%"></i></div></div>')
+    out.append("</div>")
+    return "".join(out)
 
-    if report.get("ai_error"):
-        st.warning("Gemini analysis did not complete. The page is showing the deterministic engine result instead.")
-        with st.expander("AI error details"):
-            st.code(str(report["ai_error"]))
-    elif not ai:
-        st.caption("Engine-only result. Configure GEMINI_KEY and the Gemini package to enable playbook-based AI judgement.")
 
-    if ai:
-        st.markdown(f'<div class="aa9-panel"><div class="aa9-label">SETUP STATE · BIAS</div>'
-                    f'<div class="aa9-value">{esc(ai.get("setup_state","WATCHING"))} · {esc(ai.get("bias","NEUTRAL"))}</div>'
-                    f'<div class="aa9-muted" style="margin-top:6px">Score measures evidence match to your playbook; it is not a probability of profit.</div></div>',
-                    unsafe_allow_html=True)
+def html_read(ai: dict | None) -> str:
+    if not ai:
+        return '<div class="aa-card"><div class="aa-ct">The read<span>AI offline</span></div><div class="aa-empty">Supports, contradictions and what to watch appear here when the AI is online.</div></div>'
 
-    # Chart controls and annotated chart
-    st.markdown("### Price structure")
-    cc1, cc2, cc3, cc4, cc5 = st.columns(5)
-    show = {
-        "zones": cc1.checkbox("Supply / demand zones", True, key="aa9_show_zones"),
-        "levels": cc2.checkbox("Support / resistance", True, key="aa9_show_levels"),
-        "lines": cc3.checkbox("Trendlines", True, key="aa9_show_lines"),
-        "plan": cc4.checkbox("Trade plan", True, key="aa9_show_plan"),
-        "mas": cc5.checkbox("Moving averages", True, key="aa9_show_mas"),
-        "markers": True,
-    }
-    if HAS_PLOTLY:
-        try:
-            fig = fig_plotly(report["df"], report["spec"], window=int(report.get("window", 120)), show=show)
-            if fig is not None:
-                st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "scrollZoom": True})
-        except Exception as exc:
-            st.warning(f"Interactive chart could not be drawn: {exc}")
+    def block(title, items, color, icon):
+        li = "".join(f"<li>{esc(x)}</li>" for x in items) or '<li style="color:#6B6B6B">Nothing to report.</li>'
+        return f'<div class="aa-sh" style="margin-top:12px"><div>{title}</div></div><ul class="aa-list" style="--c:{color};--ic:\'{icon}\'">{li}</ul>'
+    return ('<div class="aa-card"><div class="aa-ct">The read<span>against YOUR playbook</span></div>'
+            + block("What supports your setup", ai["supports"], GREEN, "+") + block("What contradicts it", ai["contradicts"], RED, "-")
+            + block("Watch before acting", ai["watch_next"], AMBER, ">") + "</div>")
+
+
+def html_zones(r: dict) -> str:
+    ai, det = r.get("ai") or {}, r["det"]
+    mine = {z["id"]: z for z in ai.get("my_zones", [])}
+    rows = []
+    for z in sorted(det["zones"], key=lambda x: (x["dist_atr"] if x["dist_atr"] is not None else 99)):
+        col = GREEN if z["type"] == "demand" else RED
+        qc = GREEN if z["quality"] >= 70 else AMBER if z["quality"] >= 50 else RED
+        flags = []
+        if z.get("htf"):
+            flags.append("WEEKLY CONFLUENCE")
+        if z["bos"]:
+            flags.append("BROKE STRUCTURE")
+        if z["aligned"]:
+            flags.append("WITH TREND")
+        m = mine.get(z["id"])
+        if m and m["matches_my_style"]:
+            flags.append("YOUR STYLE")
+        role = esc(m["role"].replace("_", " ")) if m else "—"
+        rows.append(f'<tr><td><b>{z["id"]}</b></td><td>{_pill(z["type"].upper(), col)}</td><td>{z["pattern"]}</td>'
+                    f'<td class="n">{_fmt(z["bottom"])} – {_fmt(z["top"])}</td><td class="n">{z["thickness_atr"]} ATR</td>'
+                    f'<td><span class="aa-q" style="--c:{qc};--w:{z["quality"]}%"><i></i>{z["quality"]}</span></td><td>{esc(z["status"])}</td>'
+                    f'<td class="n">{_fmt(z["dist_pct"])}% · {z["dist_atr"]} ATR</td><td class="n">{esc(z["formed"])}</td><td>{role}</td>'
+                    f'<td>{" ".join(_pill(f, CYAN) for f in flags) or "—"}</td></tr>')
+    if not rows:
+        return '<div class="aa-empty">No zones detected with your current zone style.</div>'
+    head = "".join(f"<th>{h}</th>" for h in ("ID", "Type", "Pattern", "Zone", "Thickness", "Quality", "Status", "Distance", "Formed", "Role", "Flags"))
+    return f'<div class="aa-tw"><table class="aa-t"><thead><tr>{head}</tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
+
+
+def html_levels(r: dict) -> str:
+    det = r["det"]
+    rows = []
+    for lv in sorted(det["levels"], key=lambda x: -x["price"]):
+        col = GREEN if lv["kind"] == "support" else RED
+        rows.append(f'<tr><td><b>{lv["id"]}</b></td><td>{_pill(lv["kind"].upper(), col)}</td><td class="n">{_fmt(lv["price"])}</td><td class="n">{lv["touches"]}</td>'
+                    f'<td class="n">{_fmt(lv["dist_pct"])}%</td><td>{"role reversal" if lv["flip"] else "—"}</td></tr>')
+    for t in det["trendlines"]:
+        col = GREEN if t["kind"] == "support" else RED
+        rows.append(f'<tr><td><b>{t["id"]}</b></td><td>{_pill("TRENDLINE · " + t["kind"].upper(), col)}</td><td class="n">{_fmt(t["p1"])}</td>'
+                    f'<td class="n">{t["touches"]}</td><td class="n">{_fmt(t["dist_pct"])}%</td><td>slope {t["slope_pct_per_bar"]}%/bar</td></tr>')
+    if not rows:
+        return '<div class="aa-empty">No support / resistance levels with enough touches.</div>'
+    head = "".join(f"<th>{h}</th>" for h in ("ID", "Kind", "Price", "Touches", "Distance", "Note"))
+    return f'<div class="aa-tw"><table class="aa-t"><thead><tr>{head}</tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
+
+
+def html_scenarios(ai: dict | None) -> str:
+    if not ai:
+        return ""
+    cards = []
+    for key, title, col in (("bull", "BULL CASE", GREEN), ("bear", "BEAR CASE", RED), ("neutral", "NEUTRAL / RANGE", AMBER)):
+        s = ai["scenarios"][key]
+        lvl = _fmt(s.get("level")) if isinstance(s.get("level"), (int, float)) else "—"
+        cards.append(f'<div class="aa-sc" style="--c:{col}"><div class="t">{title}</div><div class="l">{lvl}</div>'
+                     f'<div class="d"><b>Trigger:</b> {esc(s.get("trigger") or "—")}<br><b>Path:</b> {esc(s.get("path") or "—")}</div></div>')
+    return '<div class="aa-scn">' + "".join(cards) + "</div>"
+
+
+def png_for(r: dict, window: int) -> bytes:
+    cache = r.setdefault("png_cache", {})
+    if window not in cache:
+        label, _ = verdict_text(r)
+        cache[window] = render_png(r["df"], r["spec"], window=window, title=f"{r['ticker']}  ·  Daily  ·  {r['asof']}  ·  {label}  ·  score {r['score']}")
+    return cache[window]
+
+
+def render_chart(r: dict, window: int):
+    cols = st.columns(6)
+    show = {"zones": cols[0].checkbox("Zones", True, key="aa_t_zones"), "levels": cols[1].checkbox("Levels", True, key="aa_t_levels"),
+            "lines": cols[2].checkbox("Trendlines", True, key="aa_t_lines"), "plan": cols[3].checkbox("Trade plan", True, key="aa_t_plan"),
+            "mas": cols[4].checkbox("Moving averages", True, key="aa_t_mas"), "markers": cols[5].checkbox("Signals", True, key="aa_t_mk")}
+    fig = fig_plotly(r["df"], r["spec"], window, show)
+    if fig is not None:
+        st.plotly_chart(fig, use_container_width=True, key="aa_chart", config={"displaylogo": False, "scrollZoom": True,
+                                                                              "modeBarButtonsToRemove": ["lasso2d", "select2d"]})
     else:
-        st.info("Plotly is not installed. Install plotly to display the interactive chart.")
-    try:
-        png = render_png(report["df"], report["spec"], window=int(report.get("window", 120)),
-                         title=f'{report["ticker"]} · {report["asof"]}')
-        st.download_button("Download annotated chart (PNG)", png,
-                           file_name=f'{report["ticker"].replace("^","")}_arka_ai.png',
-                           mime="image/png", key="aa9_download_png")
-    except Exception as exc:
-        st.caption(f"PNG export unavailable: {exc}")
-
-    st.markdown("### Trade plan")
-    _aa_v9_plan_panel(plan, det.get("close"))
-
-    # The two-timeframe context is a separate context panel, not a second strategy.
-    weekly = report.get("det_w")
-    with st.expander("Weekly context", expanded=False):
-        if weekly:
-            wc1, wc2, wc3, wc4 = st.columns(4)
-            wc1.metric("Weekly close", _aa_v9_price(weekly.get("close")))
-            wc2.metric("Weekly structure", str(weekly.get("structure", "—")).split(" (")[0])
-            wc3.metric("Weekly RSI", f'{weekly.get("rsi"):.1f}' if isinstance(weekly.get("rsi"), (float, int)) else "—")
-            wc4.metric("MA state", weekly.get("ma_state", "—"))
-            st.caption("Weekly detections are context only; the marked-up chart and trade plan use daily candles.")
-        else:
-            st.caption("Weekly history was unavailable or insufficient for analysis.")
-
-    if ai:
-        left, right = st.columns(2)
-        with left:
-            _aa_v9_list_block("SUPPORTS", ai.get("supports", []))
-            _aa_v9_list_block("WATCH NEXT", ai.get("watch_next", []))
-        with right:
-            _aa_v9_list_block("CONTRADICTIONS", ai.get("contradicts", []))
-            _aa_v9_list_block("CONTEXT ONLY · NOT USED FOR VERDICT", ai.get("context", []))
-        st.markdown("### Market scenarios")
-        scenario_cols = st.columns(3)
-        for col, key, title in zip(scenario_cols, ("bull", "bear", "neutral"), ("BULL CASE", "BEAR CASE", "NEUTRAL CASE")):
-            scenario = (ai.get("scenarios") or {}).get(key) or {}
-            with col:
-                st.markdown(f'<div class="aa9-panel"><div class="aa9-label">{title}</div>'
-                            f'<div style="font:600 12px Inter;color:#ECECEC;margin-top:8px">{esc(scenario.get("trigger") or "No trigger supplied")}</div>'
-                            f'<div class="aa9-muted" style="margin-top:7px">{esc(scenario.get("path") or "—")}</div>'
-                            f'<div class="aa9-muted" style="margin-top:7px">Level: {esc(scenario.get("level") if scenario.get("level") is not None else "—")}</div></div>',
-                            unsafe_allow_html=True)
-        if ai.get("setups"):
-            st.markdown("### Playbook checklist")
-            for setup in ai["setups"]:
-                with st.expander(f'{setup.get("name","Setup")} · {setup.get("match_pct",0)}% match · {setup.get("state","")}', expanded=False):
-                    checks = setup.get("checks") or []
-                    if checks:
-                        st.dataframe(pd.DataFrame([
-                            {"Rule": c.get("rule_name") or c.get("rule_id"), "Status": c.get("status"),
-                             "Confidence": c.get("confidence"), "Reason": c.get("reason"), "Evidence refs": ", ".join(c.get("refs") or [])}
-                            for c in checks
-                        ]), use_container_width=True, hide_index=True)
-                    else:
-                        st.caption("No individual checks were returned for this setup.")
-        if ai.get("my_zones"):
-            st.markdown("### Zones against your style")
-            st.dataframe(pd.DataFrame([
-                {"Detection": z.get("id"), "Role": z.get("role"), "Style match": "YES" if z.get("matches_my_style") else "NO",
-                 "Comment": z.get("comment", "")}
-                for z in ai["my_zones"]
-            ]), use_container_width=True, hide_index=True)
-        if ai.get("narrative"):
-            with st.expander("Full analysis narrative", expanded=True):
-                st.write(ai["narrative"])
-
-    # Evidence lists from the deterministic engine always remain available.
-    with st.expander(f"Detected zones ({len(det.get('zones', []))})", expanded=False):
-        zones = det.get("zones", [])
-        if zones:
-            st.dataframe(pd.DataFrame([{
-                "ID": z.get("id"), "Type": z.get("type", "").upper(), "Pattern": z.get("pattern"),
-                "Top": z.get("top"), "Bottom": z.get("bottom"), "Quality": z.get("quality"),
-                "Status": z.get("status"), "Distance ATR": z.get("dist_atr"), "Formed": z.get("formed"),
-                "Tests": z.get("tests")
-            } for z in zones]), use_container_width=True, hide_index=True)
-        else:
-            st.caption("No zones met the current engine filters.")
-    with st.expander(f"Support / resistance levels ({len(det.get('levels', []))})", expanded=False):
-        levels = det.get("levels", [])
-        if levels:
-            st.dataframe(pd.DataFrame([{"ID": x.get("id"), "Type": x.get("kind"), "Price": x.get("price"),
-                                        "Touches": x.get("touches"), "Distance %": x.get("dist_pct"),
-                                        "Distance ATR": x.get("dist_atr")} for x in levels]),
-                         use_container_width=True, hide_index=True)
-        else:
-            st.caption("No clustered levels met the current touch threshold.")
-    with st.expander(f"Trendlines / recent events / candle signals", expanded=False):
-        st.write("Trendlines")
-        st.dataframe(pd.DataFrame(det.get("trendlines", [])) if det.get("trendlines") else pd.DataFrame(columns=["kind","i0","p0","p1","touches"]),
-                     use_container_width=True, hide_index=True)
-        st.write("Recent events")
-        st.dataframe(pd.DataFrame(det.get("events", [])[-12:]) if det.get("events") else pd.DataFrame(columns=["type","date","price"]),
-                     use_container_width=True, hide_index=True)
-        st.write("Candle signals")
-        st.dataframe(pd.DataFrame(det.get("candles", [])[-12:]) if det.get("candles") else pd.DataFrame(columns=["type","date","bias"]),
-                     use_container_width=True, hide_index=True)
-
-    with st.expander("Ask a follow-up about this report", expanded=False):
-        question = st.text_input("Question", placeholder="e.g. What evidence would invalidate the current plan?", key="aa9_followup_question")
-        if st.button("Ask Arka AI", key="aa9_followup_send", type="primary", disabled=not question.strip()):
-            try:
-                with st.spinner("Checking the report and playbook..."):
-                    answer = ask_followup(report, question.strip())
-                st.session_state["aa9_followup_answer"] = answer
-            except Exception as exc:
-                st.session_state["aa9_followup_answer"] = f"Could not answer: {exc}"
-        if st.session_state.get("aa9_followup_answer"):
-            st.markdown(st.session_state["aa9_followup_answer"])
+        st.image(png_for(r, window), use_container_width=True)
+        st.caption("Interactive chart needs plotly (add `plotly` to requirements.txt). Showing the annotated image instead.")
 
 
-def _aa_v9_tab_analyze():
-    st.markdown("#### Analyze a stock or index")
-    st.caption("Daily market structure, weekly context, your active playbook, annotated levels and a risk-defined plan.")
-    with st.form("aa9_analyze_form", clear_on_submit=False):
-        ticker = st.text_input("Ticker", value=st.session_state.get("aa9_ticker", "RELIANCE"),
-                               placeholder="RELIANCE, TCS, NIFTY, BANKNIFTY or ^NSEI").strip().upper()
-        note = st.text_area("Your context (optional)", value=st.session_state.get("aa9_note", ""),
-                            placeholder="What are you watching? Keep the note factual.", height=70)
-        a, b, c = st.columns([1.2, 1, 1])
-        with a:
-            use_ai = st.checkbox("Use Gemini + my playbook", value=True)
-        with b:
-            window = st.select_slider("Chart candles", options=[60, 90, 120, 160, 200], value=120)
-        with c:
-            submitted = st.form_submit_button("RUN ANALYSIS", type="primary", use_container_width=True)
-    if submitted:
-        if not ticker:
-            st.error("Enter a ticker first.")
-        else:
-            st.session_state["aa9_ticker"] = ticker
-            st.session_state["aa9_note"] = note
-            st.session_state.pop("aa9_followup_answer", None)
-            try:
-                with st.spinner(f"Fetching price history and analysing {ticker}..."):
-                    st.session_state["aa9_report"] = run_analysis(ticker, note=note, use_ai=use_ai, window=int(window))
-            except Exception as exc:
-                st.session_state["aa9_report"] = None
-                st.session_state["aa9_error"] = str(exc)
-            else:
-                st.session_state.pop("aa9_error", None)
-    if st.session_state.get("aa9_error"):
-        st.error("Analysis failed. Check the ticker, Yahoo Finance connection, and installed packages.")
-        with st.expander("Technical details"):
-            st.code(st.session_state["aa9_error"])
-    report = st.session_state.get("aa9_report")
-    if report and report.get("ticker") == ticker:
-        _aa_v9_render_analysis(report)
-    elif report:
-        st.info(f"Previous report available for {report.get('ticker')}. Run analysis for {ticker} to replace it.")
-    else:
-        st.markdown('<div class="aa9-panel"><div class="aa9-label">READY FOR ANALYSIS</div>'
-                    '<div class="aa9-value">Enter a ticker and run analysis.</div>'
-                    '<div class="aa9-muted" style="margin-top:8px">Arka first builds deterministic detections. Gemini can then judge those facts against your saved playbook. The engine result remains available if Gemini is disabled.</div></div>',
-                    unsafe_allow_html=True)
-
-
-def _aa_v9_tab_teach():
-    st.markdown("#### Teach your playbook")
-    st.caption("Setups describe testable entry rules. Lessons describe how you read zones and charts. Zone labels help tune the deterministic engine.")
-    subtabs = st.tabs(["PDF SETUP", "QUICK RULE", "CHART LESSON", "LABEL ZONES"])
-
-    with subtabs[0]:
-        pdf = st.file_uploader("Import a strategy PDF", type=["pdf"], key="aa9_setup_pdf")
-        if pdf and st.button("READ PDF & BUILD SETUP", type="primary", key="aa9_pdf_process"):
-            with st.spinner("Reading the strategy and structuring its conditions..."):
-                payload = understand_pdf_setup(pdf, filename=pdf.name)
-            if payload.get("error"):
-                st.error(payload["error"])
-            elif not payload.get("setup_name"):
-                st.error("Gemini returned no setup name. Please try again or use Quick Rule.")
-                with st.expander("Raw response"):
-                    st.json(payload)
-            else:
-                payload["source_name"] = pdf.name
-                try:
-                    source_text = extract_pdf_text(pdf)
-                except Exception:
-                    source_text = ""
-                ok = save_item("setup", payload.get("setup_name", pdf.name), payload, activate=True,
-                               source_name=pdf.name, source_text=source_text[:3000])
-                if ok:
-                    st.success(f'Saved and activated setup: {payload["setup_name"]}')
-                    with st.expander("Review extracted setup", expanded=True):
-                        st.write(payload.get("summary", ""))
-                        st.write("Conditions")
-                        st.dataframe(pd.DataFrame(payload.get("conditions", [])), use_container_width=True, hide_index=True)
-                        st.write("Trigger")
-                        st.json(payload.get("trigger", {}))
-                        st.write("Invalidation")
-                        st.json(payload.get("invalidation", []))
-
-    with subtabs[1]:
-        with st.form("aa9_manual_setup_form", clear_on_submit=True):
-            name = st.text_input("Setup name", placeholder="e.g. Momentum burst")
-            summary = st.text_area("What is this setup looking for?", height=70)
-            conditions = st.text_area("Rules — one per line", height=130, placeholder="Relative strength vs market\nTight consolidation before expansion\nBreakout with meaningful volume")
-            trigger = st.text_area("Entry trigger", height=70)
-            invalidation = st.text_area("Invalidation / when the setup is wrong", height=70)
-            save_manual = st.form_submit_button("SAVE SETUP", type="primary")
-        if save_manual:
-            if not name.strip() or not conditions.strip():
-                st.error("Setup name and at least one rule are required.")
-            else:
-                payload = manual_setup(name, summary, conditions, trigger, invalidation)
-                ok = save_item("setup", name, payload, activate=True, source_name="manual")
-                if ok:
-                    st.success(f"Saved and activated: {name}")
-                    st.rerun()
-
-    with subtabs[2]:
-        lesson_files = st.file_uploader("Upload marked-up chart screenshots", type=["png", "jpg", "jpeg"],
-                                        accept_multiple_files=True, key="aa9_lesson_images")
-        explanation = st.text_area("Explain what you marked and why", height=90,
-                                   placeholder="Describe your supply/demand zone, line, entry, stop, and what makes it valid.")
-        if st.button("LEARN FROM CHARTS", type="primary", key="aa9_learn_charts", disabled=not lesson_files):
-            images = []
-            conversion_error = None
-            for f in lesson_files or []:
-                try:
-                    from PIL import Image as PILImage
-                    with PILImage.open(io.BytesIO(f.getvalue())) as im:
-                        buf = io.BytesIO()
-                        im.convert("RGB").save(buf, format="PNG")
-                        images.append(buf.getvalue())
-                except Exception as exc:
-                    conversion_error = str(exc)
-                    break
-            if conversion_error:
-                st.error(f"Could not prepare the uploaded images. Check Pillow is installed. Details: {conversion_error}")
-            else:
-                with st.spinner("Learning your chart-reading style..."):
-                    payload = learn_from_images(images, explanation)
-                if payload.get("error"):
-                    st.error(payload["error"])
-                else:
-                    title = payload.get("lesson_title") or f"Chart lesson · {datetime.now(IST):%d %b %Y}"
-                    ok = save_item("lesson", title, payload, activate=True,
-                                   source_name=", ".join(f.name for f in lesson_files), source_text=explanation[:3000])
-                    if ok:
-                        st.success(f"Saved lesson: {title}")
-                        with st.expander("Review extracted lesson", expanded=True):
-                            st.json(payload)
-
-    with subtabs[3]:
-        st.caption("Approve/reject example zones to help Arka learn the type of zone you accept. This records labels; it does not change historic trades.")
-        with st.form("aa9_zone_lab_form", clear_on_submit=False):
-            lab_ticker = st.text_input("Ticker for zone labelling", value=st.session_state.get("aa9_lab_ticker", "RELIANCE"),
-                                       key="aa9_lab_ticker_input").strip().upper()
-            lab_go = st.form_submit_button("LOAD DAILY ZONES")
-        if lab_go:
-            try:
-                with st.spinner(f"Detecting zones for {lab_ticker}..."):
-                    lab_df = fetch_ohlc(lab_ticker, "1d", "2y")
-                    lab_det = analyze_market(lab_df, get_style())
-                st.session_state["aa9_lab_df"] = lab_df
-                st.session_state["aa9_lab_det"] = lab_det
-                st.session_state["aa9_lab_ticker"] = lab_ticker
-                st.session_state.pop("aa9_lab_error", None)
-            except Exception as exc:
-                st.session_state["aa9_lab_error"] = str(exc)
-        if st.session_state.get("aa9_lab_error"):
-            st.error(f"Could not load the zone lab: {st.session_state['aa9_lab_error']}")
-        lab_det = st.session_state.get("aa9_lab_det")
-        lab_df = st.session_state.get("aa9_lab_df")
-        if lab_det is not None and lab_df is not None:
-            if HAS_PLOTLY:
-                try:
-                    lab_fig = fig_plotly(lab_df, build_spec(lab_det, None, None), window=100,
-                                         show={"zones": True, "levels": True, "lines": True, "plan": False, "mas": True, "markers": True})
-                    if lab_fig is not None:
-                        st.plotly_chart(lab_fig, use_container_width=True, config={"displaylogo": False})
-                except Exception as exc:
-                    st.caption(f"Zone chart unavailable: {exc}")
-            zones = lab_det.get("zones", [])
-            if not zones:
-                st.info("No zones met the current engine thresholds. Try a different stock or adjust the style.")
-            else:
-                st.markdown(f"**{len(zones)} candidate zones · {st.session_state.get('aa9_lab_ticker','')}**")
-                with st.form("aa9_zone_labels_save_form"):
-                    decisions = {}
-                    for zone in zones:
-                        c1, c2, c3 = st.columns([1, 1.2, 2.3])
-                        with c1:
-                            st.markdown(f"**{zone['id']} · {zone['type'].upper()}**")
-                            st.caption(f"Q{zone['quality']} · {zone['status']}")
-                        with c2:
-                            st.markdown(f'{zone["bottom"]:,.2f} – {zone["top"]:,.2f}')
-                        with c3:
-                            decisions[zone["id"]] = st.selectbox(
-                                f'Label {zone["id"]}', ["UNLABELLED", "APPROVED", "REJECTED"],
-                                key=f'aa9_zone_decision_{st.session_state.get("aa9_lab_ticker","")}_{zone["id"]}')
-                    save_labels = st.form_submit_button("SAVE ZONE FEEDBACK", type="primary")
-                if save_labels:
-                    labels = []
-                    by_id = {z["id"]: z for z in zones}
-                    for zid, decision in decisions.items():
-                        if decision == "UNLABELLED":
-                            continue
-                        z = by_id[zid]
-                        labels.append({"approved": decision == "APPROVED", "symbol": st.session_state.get("aa9_lab_ticker",""),
-                                       "zone": _slim_zone(z), "features": zone_features(z), "labelled_at": datetime.now(IST).isoformat()})
-                    if not labels:
-                        st.warning("Choose APPROVED or REJECTED for at least one zone.")
-                    else:
-                        title = f'Zone labels · {st.session_state.get("aa9_lab_ticker","")}'
-                        if save_item("feedback", title, {"labels": labels}, activate=True, source_name="zone lab"):
-                            st.success(f"Saved {len(labels)} zone label(s) to the playbook.")
-                            st.rerun()
-
-
-def _aa_v9_tab_playbook():
-    st.markdown("#### Your playbook")
-    st.caption("Active setups are evaluated during analysis. Active lessons and zone feedback inform how Arka interprets your trading style.")
-    c1, c2 = st.columns([1, 4])
+def render_report(r: dict, window: int, risk: float):
+    st.markdown(html_hero(r), unsafe_allow_html=True)
+    if r.get("ai_error"):
+        st.warning(f"The AI step failed, so this is the engine-only view. Reason: {r['ai_error']}")
+    render_chart(r, window)
+    c1, c2, c3 = st.columns([1.05, 1.25, 1.0], gap="small")
     with c1:
-        if st.button("REFRESH PLAYBOOK", key="aa9_refresh_playbook"):
-            load_items(force=True)
-            st.rerun()
-    items = load_items()
-    summary = {k: sum(1 for x in items if x.get("kind") == k) for k in KIND_LABEL}
-    sm = st.columns(4)
-    for col, kind in zip(sm, ("setup", "lesson", "feedback", "style")):
-        col.metric(KIND_LABEL.get(kind, kind).title(), summary[kind])
-    if storage_mode() == "SESSION":
-        st.warning("Storage mode is SESSION. Playbook items saved without a working Pinecone connection may be lost when the Streamlit session resets.")
-    if not items:
-        st.info("Your playbook is empty. Use Teach to import a PDF, write a quick rule, or add a chart lesson.")
-        return
-    for item in items:
-        kind = item.get("kind", "unknown")
-        item_id = item.get("item_id", "")
-        status = "ACTIVE" if item.get("active") else "INACTIVE"
-        with st.expander(f'{KIND_LABEL.get(kind, kind.upper())} · {item.get("name","Untitled")} · {status}', expanded=False):
-            st.caption(f'Saved: {item.get("saved_at","—")} · Source: {item.get("source") or "not recorded"} · ID: {item_id}')
-            payload = item.get("payload") or {}
-            if kind == "setup":
-                st.write(payload.get("summary", ""))
-                conditions = payload.get("conditions", [])
-                if conditions:
-                    st.dataframe(pd.DataFrame(conditions), use_container_width=True, hide_index=True)
-                st.write("Trigger")
-                st.json(payload.get("trigger", {}))
-                st.write("Invalidation")
-                st.json(payload.get("invalidation", []))
-            elif kind == "lesson":
-                st.write(payload.get("summary", ""))
-                st.json(payload)
-            elif kind == "feedback":
-                labels = payload.get("labels", [])
-                st.caption(f"{len(labels)} labelled zones · {sum(1 for x in labels if x.get('approved'))} approved · {sum(1 for x in labels if not x.get('approved'))} rejected")
-                if labels:
-                    st.dataframe(pd.DataFrame([{"Ticker": x.get("symbol"), "Approved": x.get("approved"),
-                                                "Pattern": (x.get("features") or {}).get("pattern"),
-                                                "Quality": (x.get("features") or {}).get("quality"),
-                                                "Thickness ATR": (x.get("features") or {}).get("thickness_atr")}
-                                               for x in labels]), use_container_width=True, hide_index=True)
-            elif kind == "style":
-                st.json(payload.get("params", {}))
-            c1, c2, c3 = st.columns([1, 1, 3])
-            with c1:
-                checked = st.checkbox("Active", value=bool(item.get("active")), key=f"aa9_active_{item_id}")
-                if checked != bool(item.get("active")):
-                    if set_item_active(item_id, checked):
-                        st.rerun()
-                    else:
-                        st.error("Could not update active status.")
-            with c2:
-                if st.button("DELETE", key=f"aa9_delete_{item_id}"):
-                    if delete_item(item_id):
-                        st.success("Deleted.")
-                        st.rerun()
-                    else:
-                        st.error("Could not delete this item from the current storage backend.")
-
-
-def _aa_v9_tab_radar():
-    st.markdown("#### Playbook radar")
-    st.caption("Scan a list of stocks against the deterministic zone engine. This scan does not call Gemini.")
-    default_symbols = st.session_state.get("watchlist") or st.session_state.get("admin_watchlist") or []
-    default_text = ", ".join(str(s).upper().replace(".NS", "").replace(".BO", "") for s in default_symbols)
-    with st.form("aa9_radar_form"):
-        raw_symbols = st.text_area("Symbols (comma or newline separated)", value=default_text,
-                                   placeholder="RELIANCE, TCS, HDFCBANK, INFY", height=90)
-        radar_btn = st.form_submit_button("SCAN SYMBOLS", type="primary")
-    if radar_btn:
-        symbols = [x.strip().upper() for x in re.split(r"[\s,;]+", raw_symbols) if x.strip()]
-        symbols = list(dict.fromkeys(x.removesuffix(".NS").removesuffix(".BO") for x in symbols))
-        if not symbols:
-            st.warning("Enter at least one NSE stock symbol.")
-        else:
-            with st.spinner(f"Scanning {len(symbols)} symbol(s)..."):
+        st.markdown(html_plan(r, risk), unsafe_allow_html=True)
+    with c2:
+        st.markdown(html_scorecard(r), unsafe_allow_html=True)
+    with c3:
+        st.markdown(html_read(r.get("ai")), unsafe_allow_html=True)
+    if r.get("ai"):
+        _sec("Scenarios", "what would change the picture")
+        st.markdown(html_scenarios(r["ai"]), unsafe_allow_html=True)
+    _sec("Supply & demand zones found", "every zone the engine detects, with your style applied")
+    st.markdown(html_zones(r), unsafe_allow_html=True)
+    _sec("Support, resistance and trendlines")
+    st.markdown(html_levels(r), unsafe_allow_html=True)
+    ai = r.get("ai")
+    if ai and ai.get("narrative"):
+        with st.expander("FULL ANALYSIS", expanded=False):
+            st.write(ai["narrative"])
+            if ai.get("context"):
+                st.markdown("**Context (not used for the verdict)**")
+                for c in ai["context"]:
+                    st.markdown(f"- {c}")
+    with st.expander("ENGINE EVIDENCE (exact numbers the AI was given)", expanded=False):
+        d = r["det"]
+        st.json({"structure": d["structure"], "ma_state": d["ma_state"], "sma": d["sma"], "volume": d["volume"], "refs": d["refs"], "swings": d["swings"],
+                 "events": d["events"], "candle_signals": d["candles"], "weekly": ({"structure": r["det_w"]["structure"], "ma_state": r["det_w"]["ma_state"]} if r.get("det_w") else None)})
+    if ai:
+        _sec("Ask Arka about this chart", "follow-up questions use the same data")
+        q = st.text_input("Question", key="aa_q", placeholder="e.g. Why is DZ1 better than DZ2? Where would you trail the stop?")
+        if st.button("ASK", key="aa_ask") and q.strip():
+            with st.spinner("Thinking…"):
                 try:
-                    st.session_state["aa9_radar_rows"] = radar_scan(symbols, get_style())
-                    st.session_state.pop("aa9_radar_error", None)
+                    ans = ask_followup(r, q.strip())
                 except Exception as exc:
-                    st.session_state["aa9_radar_error"] = str(exc)
-    if st.session_state.get("aa9_radar_error"):
-        st.error("Radar scan failed.")
-        with st.expander("Technical details"):
-            st.code(st.session_state["aa9_radar_error"])
-    rows = st.session_state.get("aa9_radar_rows")
-    if rows is not None:
-        if rows:
-            df = pd.DataFrame(rows)
-            st.dataframe(df, use_container_width=True, hide_index=True)
-            st.download_button("Download radar CSV", df.to_csv(index=False).encode("utf-8"),
-                               file_name="arka_ai_radar.csv", mime="text/csv", key="aa9_radar_csv")
-        else:
-            st.info("No rows returned. Check symbol spellings or Yahoo Finance availability.")
+                    ans = f"Could not answer: {exc}"
+            st.session_state.setdefault("aa_qa", []).append((r["ticker"], q.strip(), ans))
+        for tk, qq, aa in reversed([x for x in st.session_state.get("aa_qa", []) if x[0] == r["ticker"]][-4:]):
+            st.markdown(f'<div class="aa-lab"><b>YOU</b>{esc(qq)}</div><div class="aa-lab" style="border-left:3px solid #FF9F0A"><b>ARKA</b>{esc(aa)}</div>', unsafe_allow_html=True)
+    _sec("Export")
+    e1, e2, e3, e4 = st.columns(4, gap="small")
+    e1.download_button("⬇ ANNOTATED CHART (PNG)", png_for(r, window), file_name=f"{r['ticker']}_arka_{r['asof']}.png", mime="image/png", use_container_width=True)
+    payload = {k: r[k] for k in ("ticker", "asof", "score", "plan", "ai", "engine_plan")}
+    payload.update({"zones": r["det"]["zones"], "levels": r["det"]["levels"]})
+    report_json = json.dumps(payload, default=str, ensure_ascii=False, indent=2)
+    e2.download_button("⬇ FULL REPORT (JSON)", report_json, file_name=f"{r['ticker']}_arka_{r['asof']}.json", mime="application/json", use_container_width=True)
+    if e3.button("＋ ADD TO WATCHLIST", key="aa_wl", use_container_width=True):
+        try:
+            import user_data as ud
+            added, err = ud.add_symbols(_SB, [r["ticker"]], ud.W_TABLE)
+            if added:
+                st.success(f"{r['ticker']} added to your watchlist")
+            else:
+                st.info(err or "Already in your watchlist")
+        except Exception as exc:
+            st.error(f"Could not add: {exc}")
+    e4.caption("Research tool, not investment advice.")
 
 
-def _aa_v9_tab_style():
-    st.markdown("#### Engine style")
-    st.caption("These parameters control deterministic zone and level detection. A saved style overrides the defaults for your future analyses.")
-    current = get_style()
-    with st.form("aa9_style_form"):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            base_max = st.slider("Maximum candles in a base", 1, 6, int(current["base_max"]))
-            base_range_atr = st.slider("Base max candle range (ATR)", 0.3, 2.5, float(current["base_range_atr"]), 0.1)
-            impulse_atr = st.slider("Minimum impulse (ATR)", 0.5, 4.0, float(current["impulse_atr"]), 0.1)
-            impulse_window = st.slider("Impulse window", 1, 8, int(current["impulse_window"]))
-        with c2:
-            max_zone_atr = st.slider("Maximum zone thickness (ATR)", 0.5, 4.0, float(current["max_zone_atr"]), 0.1)
-            min_quality = st.slider("Minimum zone quality", 0, 100, int(current["min_quality"]), 5)
-            sr_tol_atr = st.slider("Support/resistance tolerance (ATR)", 0.2, 2.0, float(current["sr_tol_atr"]), 0.1)
-            sr_min_touches = st.slider("Touches to confirm a level", 2, 6, int(current["sr_min_touches"]))
-        with c3:
-            pivot_left = st.slider("Pivot left bars", 1, 8, int(current["pivot_left"]))
-            pivot_right = st.slider("Pivot right bars", 1, 8, int(current["pivot_right"]))
-            lookback = st.slider("Detection lookback candles", 60, 500, int(current["lookback"]), 10)
-            fresh_only = st.checkbox("Fresh zones only", bool(current["fresh_only"]))
-        saved_style = st.form_submit_button("SAVE AS ACTIVE STYLE", type="primary")
-    if saved_style:
-        params = {"base_max": base_max, "base_range_atr": base_range_atr, "impulse_atr": impulse_atr,
-                  "impulse_window": impulse_window, "max_zone_atr": max_zone_atr, "min_quality": min_quality,
-                  "sr_tol_atr": sr_tol_atr, "sr_min_touches": sr_min_touches, "pivot_left": pivot_left,
-                  "pivot_right": pivot_right, "lookback": lookback, "fresh_only": fresh_only}
-        if save_item("style", "Custom zone style", {"params": params}, activate=True, source_name="Engine Style"):
-            st.success("Saved and activated. New analyses will use these engine parameters.")
-            st.rerun()
-    st.markdown("**Current parameters**")
-    st.json(current)
+_SB = None          # Supabase client handed over by app.py (used for "add to watchlist")
 
 
-def render_arka_ai():
-    """Public Streamlit entry point expected by app.py; uses V9 functions only."""
-    _aa_v9_css()
+def _set_run(sym: str):
+    st.session_state["aa_ticker"] = sym
+    st.session_state["aa_run_request"] = sym
+    st.session_state["aa_mode"] = "ANALYZE"
+
+
+def render_getting_started():
     st.markdown(
-        '<div class="aa9-hero"><div class="aa9-kicker">ARKA TRADES · RESEARCH WORKSPACE</div>'
-        '<div class="aa9-title">Arka <span style="color:#FF9F0A">AI</span> <span style="font-size:12px;color:#777;font-family:monospace">V9</span></div>'
-        '<div class="aa9-sub">Your playbook · Deterministic market structure · Evidence-first analysis</div></div>',
-        unsafe_allow_html=True,
-    )
-    tabs = st.tabs(["ANALYZE", "TEACH", "PLAYBOOK", "RADAR", "ENGINE STYLE"])
+        '<div class="aa-intro"><b>Teach once. Ask about any stock.</b> Arka learns how <b>you</b> read a chart (your setups, your supply and demand zones, '
+        'your lines) and then analyses any stock the same way, marking everything on the chart.</div>'
+        '<div class="aa-steps">'
+        '<div class="aa-step"><div class="n">STEP 1 · TEACH</div><div class="t">Show Arka your style</div><div class="d">Import your strategy PDF, tick the zones you like and cross the ones you don\'t, or upload charts you marked up.</div></div>'
+        '<div class="aa-step"><div class="n">STEP 2 · ANALYZE</div><div class="t">Type a stock</div><div class="d">Every zone, level and trendline is detected with exact prices, then judged against your playbook.</div></div>'
+        '<div class="aa-step"><div class="n">STEP 3 · ACT</div><div class="t">Get the marked-up chart</div><div class="d">Verdict, scorecard, entry zone, stop, targets, position size and scenarios, ready to download.</div></div></div>',
+        unsafe_allow_html=True)
+
+
+def render_analyze():
+    c1, c2, c3 = st.columns([3.4, 1.2, 1.4], gap="small")
+    ticker = c1.text_input("Stock", key="aa_ticker", placeholder="e.g. RELIANCE · TCS · HDFCBANK · NIFTY50")
+    window = c2.selectbox("Candles shown", [80, 120, 180, 250], index=1, key="aa_window")
+    risk = c3.number_input("Risk per trade (₹)", min_value=0.0, value=1000.0, step=500.0, key="aa_risk")
+    d1, d2, d3 = st.columns([4.4, 1.2, 1.2], gap="small")
+    note = d1.text_input("Note for Arka (optional)", key="aa_note", placeholder="e.g. I'm only interested in long setups from fresh demand zones")
+    ai_online = get_gemini() is not None
+    use_ai = d2.checkbox("Use AI", value=True, key="aa_use_ai", disabled=not ai_online)
+    go_clicked = d3.button("ANALYZE", type="primary", use_container_width=True, key="aa_go")
+    recents = st.session_state.get("aa_recents", [])
+    if recents:
+        cols = st.columns(min(len(recents), 8) + 1, gap="small")
+        cols[0].caption("RECENT")
+        for col, sym in zip(cols[1:], recents[:8]):
+            col.button(sym, key=f"aa_rc_{sym}", use_container_width=True, on_click=_set_run, args=(sym,))
+    req = st.session_state.pop("aa_run_request", None)
+    if go_clicked and ticker.strip():
+        req = ticker.strip().upper()
+    if req:
+        with st.spinner(f"Reading {req}: detecting zones, levels and trendlines" + (", then judging against your playbook…" if (use_ai and ai_online) else "…")):
+            try:
+                st.session_state["aa_report"] = run_analysis(req, note, use_ai and ai_online, window)
+                rec = [req] + [x for x in st.session_state.get("aa_recents", []) if x != req]
+                st.session_state["aa_recents"] = rec[:8]
+            except Exception as exc:
+                st.session_state.pop("aa_report", None)
+                st.error(f"Could not analyse {req}: {exc}")
+    r = st.session_state.get("aa_report")
+    if r:
+        render_report(r, window, risk)
+    elif not (active_items("setup") or active_items("lesson") or active_items("feedback")):
+        render_getting_started()
+    else:
+        st.markdown('<div class="aa-empty">Type a stock above and press ANALYZE.<br>Your playbook is loaded and ready.</div>', unsafe_allow_html=True)
+
+
+# ── RADAR ───────────────────────────────────────────────────
+def _analyze_selected():
+    sym = st.session_state.get("aa_radar_pick")
+    if sym:
+        _set_run(sym)
+
+
+def render_radar():
+    _sec("Radar", "scan a list with the same zone engine: which stocks are sitting at your zones right now")
+    src = st.radio("List to scan", ["My watchlist", "Arka desk list", "Type symbols"], horizontal=True, key="aa_radar_src")
+    if src == "My watchlist":
+        symbols = list(st.session_state.get("watchlist", []))
+    elif src == "Arka desk list":
+        symbols = list(st.session_state.get("admin_watchlist", []))
+    else:
+        txt = st.text_area("Symbols (comma or line separated)", key="aa_radar_txt", height=80, placeholder="RELIANCE, TCS, INFY, HDFCBANK")
+        symbols = [s.strip().upper() for s in re.split(r"[,\n;\s]+", txt) if s.strip()]
+    symbols = list(dict.fromkeys(symbols))
+    if len(symbols) > 40:
+        st.caption(f"Scanning the first 40 of {len(symbols)} symbols.")
+        symbols = symbols[:40]
+    st.caption(f"{len(symbols)} symbol(s) · uses your zone style ({style_source()}) · no AI cost")
+    if st.button("SCAN FOR MY ZONES", type="primary", key="aa_radar_go", disabled=not symbols):
+        with st.spinner(f"Scanning {len(symbols)} stocks…"):
+            try:
+                st.session_state["aa_radar"] = {"rows": radar_scan(symbols, get_style()), "at": datetime.now(IST).strftime("%d %b %H:%M IST")}
+            except Exception as exc:
+                st.error(f"Scan failed: {exc}")
+    res = st.session_state.get("aa_radar")
+    if not res:
+        st.markdown('<div class="aa-empty">Press SCAN to rank your list by how ready each stock is.</div>', unsafe_allow_html=True)
+        return
+    rows = res["rows"]
+    if not rows:
+        st.warning("No usable price history came back for these symbols.")
+        return
+    body = []
+    for x in rows:
+        sc = x["score"]
+        scol = GREEN if sc >= 72 else AMBER if sc >= 50 else T3
+        zc = GREEN if x["ztype"] == "demand" else RED if x["ztype"] == "supply" else T3
+        ch = x["chg"]
+        body.append(f'<tr><td><b>{esc(x["symbol"])}</b></td><td class="n">{_fmt(x["close"])}</td>'
+                    f'<td class="n" style="color:{GREEN if ch >= 0 else RED}">{"▲" if ch >= 0 else "▼"} {abs(ch):.2f}%</td><td>{esc(x["structure"])}</td>'
+                    f'<td class="n">{_fmt(x["rsi"], 0)}</td>'
+                    f'<td>{(_pill(x["ztype"].upper(), zc) + " " + esc(x["zone"])) if x["zone"] else "—"}</td>'
+                    f'<td class="n">{x["quality"] if x["quality"] is not None else "—"}</td><td>{esc(x["status"] or "—")}</td>'
+                    f'<td class="n">{(_fmt(x["dist_pct"]) + "%") if x["dist_pct"] is not None else "—"}</td>'
+                    f'<td>{esc(x["direction"] or "—")}</td><td class="n">{(str(x["rr"]) + " R") if x["rr"] else "—"}</td>'
+                    f'<td><span class="aa-q" style="--c:{scol};--w:{sc}%"><i></i>{sc}</span></td></tr>')
+    head = "".join(f"<th>{h}</th>" for h in ("Symbol", "Price", "1D", "Trend", "RSI", "Nearest zone", "Quality", "Status", "Distance", "Plan", "T1 R:R", "Readiness"))
+    st.markdown(f'<div class="aa-tw"><table class="aa-t"><thead><tr>{head}</tr></thead><tbody>{"".join(body)}</tbody></table></div>', unsafe_allow_html=True)
+    st.caption(f"Scanned {res['at']}. Readiness = zone quality, proximity, trend, weekly confluence and confirmation. Run ANALYZE on a name for the full AI read.")
+    p1, p2 = st.columns([3, 1], gap="small")
+    p1.selectbox("Open in ANALYZE", [x["symbol"] for x in rows], key="aa_radar_pick")
+    p2.write("")
+    p2.button("ANALYZE SELECTED", key="aa_radar_open", use_container_width=True, on_click=_analyze_selected)
+
+
+# ── TEACH ───────────────────────────────────────────────────
+def _setup_summary_html(s: dict) -> str:
+    return (f'<div class="aa-item" style="--c:{AMBER}"><div class="h"><b>{esc(s.get("setup_name", "Unnamed setup"))}</b>'
+            f'{_pill("CONFIDENCE " + str(s.get("confidence", "?")), AMBER)}</div><div class="d">{esc(s.get("summary", ""))}<br>'
+            f'{len(s.get("conditions", []))} conditions · {len(s.get("confirmation", []))} confirmations · {len(s.get("invalidation", []))} invalidations · '
+            f'{len(s.get("zone_definitions", []))} zone definitions · {len(s.get("line_definitions", []))} line definitions · {len(s.get("examples", []))} examples</div></div>')
+
+
+def teach_pdf():
+    st.markdown('<div class="aa-intro">Upload your strategy PDF. Arka reads text, diagrams and marked-up examples, turns them into a structured setup '
+                '(rules, trigger, confirmation, invalidation, how you draw supply / demand zones and lines) and shows you what it understood. '
+                '<b>You approve it before it is used.</b></div>', unsafe_allow_html=True)
+    pdf = st.file_uploader("Strategy PDF", type=["pdf"], key="aa_pdf")
+    if pdf and st.button("READ MY PDF", type="primary", key="aa_pdf_go"):
+        with st.spinner("Arka is reading the whole PDF: text, diagrams, screenshots and examples…"):
+            st.session_state["aa_pending_setup"] = understand_pdf_setup(pdf, pdf.name)
+            st.session_state["aa_pending_text"] = extract_pdf_text(pdf)
+    pend = st.session_state.get("aa_pending_setup")
+    if not pend:
+        return
+    if pend.get("error"):
+        st.error(pend["error"])
+        return
+    st.markdown(_setup_summary_html(pend), unsafe_allow_html=True)
+    if pend.get("ambiguities"):
+        st.warning("Arka was unsure about: " + " | ".join(map(str, pend["ambiguities"][:6])))
+    with st.expander("WHAT ARKA UNDERSTOOD (review before approving)", expanded=True):
+        st.json(pend)
+    if st.button("APPROVE & ACTIVATE THIS SETUP", type="primary", key="aa_pdf_ok"):
+        if save_item("setup", pend.get("setup_name", "PDF setup"), pend, True, pend.get("source_name", ""), st.session_state.get("aa_pending_text", "")):
+            st.session_state.pop("aa_pending_setup", None)
+            st.success("Setup saved and active. ANALYZE will now check stocks against it.")
+            st.rerun()
+
+
+def teach_label():
+    st.markdown('<div class="aa-intro"><b>The fastest way to teach your zones.</b> Arka detects every supply and demand zone on a chart. '
+                'Mark the ones that are <b>your kind of zone</b> and the ones that are not. After a few charts it learns your style: how thick, how fresh, '
+                'how strong the move away. No drawing needed.</div>', unsafe_allow_html=True)
+    c1, c2 = st.columns([4, 1], gap="small")
+    t = c1.text_input("Stock to learn from", key="aa_lab_ticker", placeholder="Choose a chart where you can see both good and bad zones")
+    if c2.button("DETECT ZONES", type="primary", key="aa_lab_go", use_container_width=True) and t.strip():
+        try:
+            df = fetch_ohlc(t.strip().upper(), "1d", "2y")
+            det = analyze_market(df, dict(get_style(), min_quality=20, fresh_only=False))
+            st.session_state["aa_lab"] = {"ticker": t.strip().upper(), "df": df, "det": det}
+        except Exception as exc:
+            st.error(str(exc))
+    lab = st.session_state.get("aa_lab")
+    if not lab:
+        return
+    det, tk = lab["det"], lab["ticker"]
+    zones = sorted(det["zones"], key=lambda z: -z["quality"])[:14]
+    if not zones:
+        st.info("No zones detected on this chart. Try a more volatile stock.")
+        return
+    spec = {"zones": zones, "levels": [], "lines": [], "markers": [], "candles": [], "plan": None}
+    fig = fig_plotly(lab["df"], spec, 160, {"plan": False, "mas": False, "markers": False})
+    if fig is not None:
+        st.plotly_chart(fig, use_container_width=True, key="aa_lab_chart", config={"displaylogo": False, "scrollZoom": True})
+    else:
+        st.image(render_png(lab["df"], spec, window=160, title=f"{tk} · detected zones"), use_container_width=True)
+    _sec("Which of these are YOUR kind of zone?", f"{tk} · strongest {len(zones)} shown")
+    choices = {}
+    for z in zones:
+        col = GREEN if z["type"] == "demand" else RED
+        a, b, c = st.columns([3.2, 2.2, 2.6], gap="small")
+        a.markdown(f'<div class="aa-lab"><b>{z["id"]}</b>{_pill(z["type"].upper(), col)} {z["pattern"]} · {_fmt(z["bottom"])}–{_fmt(z["top"])} · '
+                   f'{z["thickness_atr"]} ATR thick · move away {z["dep_atr"]} ATR · Q{z["quality"]} · {esc(z["status"])}</div>', unsafe_allow_html=True)
+        pick = b.radio("Verdict", ["Skip", "✔ Mine", "✘ Not mine"], horizontal=True, key=f"aa_lab_{tk}_{z['id']}", label_visibility="collapsed")
+        why = c.text_input("Why (optional)", key=f"aa_why_{tk}_{z['id']}", label_visibility="collapsed", placeholder="Why? e.g. too wide, already tested, no real impulse")
+        choices[z["id"]] = (z, pick, why)
+    n_ok = sum(1 for v in choices.values() if v[1] == "✔ Mine")
+    n_no = sum(1 for v in choices.values() if v[1] == "✘ Not mine")
+    if st.button(f"SAVE MY LABELS ({n_ok} mine · {n_no} not mine)", type="primary", key="aa_lab_save", disabled=(n_ok + n_no) == 0):
+        labels = [{"zone_id": zid, "zone_type": z["type"], "approved": pick == "✔ Mine", "reason": why, "features": zone_features(z)}
+                  for zid, (z, pick, why) in choices.items() if pick != "Skip"]
+        payload = {"ticker": tk, "asof": det["asof"], "labels": labels, "summary": f"{n_ok} approved and {n_no} rejected zones on {tk}"}
+        if save_item("feedback", f"{tk} · {n_ok} mine / {n_no} not · {det['asof']}", payload, True):
+            st.success("Saved. Open ZONE STYLE and press LEARN to turn your labels into engine settings.")
+
+
+def teach_screenshot():
+    st.markdown('<div class="aa-intro">Upload charts <b>you</b> marked up (zones, lines, entries, stops, targets) and explain what you did. '
+                'Arka studies the drawings and writes down how you read a chart, which it then applies to every stock you analyse.</div>', unsafe_allow_html=True)
+    files = st.file_uploader("Marked-up charts (PNG / JPG)", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="aa_imgs")
+    why = st.text_area("Explain your markings", height=110, key="aa_img_why",
+                       placeholder="e.g. The green boxes are my demand zones: a tight base of 1-3 candles, then a strong move away. I only buy fresh zones in an uptrend. Stop below the zone, first target at the previous swing high.")
+    if files and st.button("LEARN FROM THESE CHARTS", type="primary", key="aa_img_go"):
+        with st.spinner("Studying your charts…"):
+            st.session_state["aa_pending_lesson"] = learn_from_images([f.getvalue() for f in files[:6]], why)
+    pend = st.session_state.get("aa_pending_lesson")
+    if not pend:
+        return
+    if pend.get("error"):
+        st.error(pend["error"])
+        return
+    st.markdown(f'<div class="aa-item" style="--c:{CYAN}"><div class="h"><b>{esc(pend.get("lesson_title", "Lesson"))}</b>{_pill("NEW LESSON", CYAN)}</div>'
+                f'<div class="d">{esc(pend.get("summary", ""))}</div></div>', unsafe_allow_html=True)
+    with st.expander("WHAT ARKA LEARNED (review)", expanded=True):
+        st.json(pend)
+    if st.button("SAVE LESSON TO MY PLAYBOOK", type="primary", key="aa_img_ok"):
+        if save_item("lesson", pend.get("lesson_title", "Chart lesson"), pend, True, "screenshot"):
+            st.session_state.pop("aa_pending_lesson", None)
+            st.success("Lesson saved and active.")
+            st.rerun()
+
+
+def teach_quick():
+    st.markdown('<div class="aa-intro">Prefer typing? Write a setup as plain rules, or teach a lesson in your own words.</div>', unsafe_allow_html=True)
+    _sec("Write a setup", "one rule per line")
+    name = st.text_input("Setup name", key="aa_m_name", placeholder="Fresh demand pullback")
+    summary = st.text_area("What is this setup?", key="aa_m_sum", height=70)
+    conds = st.text_area("Rules (one per line)", key="aa_m_conds", height=150,
+                         placeholder="Price is in an uptrend (higher highs, higher lows)\nPrice returns to a fresh demand zone\nThe demand zone is thin (base of 1-3 candles)\nA rejection candle forms inside the zone")
+    trig = st.text_input("Trigger", key="aa_m_trig", placeholder="Bullish close back above the zone's proximal line")
+    inv = st.text_input("Invalidation", key="aa_m_inv", placeholder="Close below the zone's distal line")
+    if st.button("SAVE & ACTIVATE SETUP", type="primary", key="aa_m_save"):
+        if not name.strip() or not conds.strip():
+            st.warning("Give the setup a name and at least one rule.")
+        elif save_item("setup", name, manual_setup(name, summary, conds, trig, inv), True, "manual"):
+            st.success("Setup saved and active.")
+            st.rerun()
+    _sec("Teach a lesson", "how you define zones and lines, in your words")
+    lt = st.text_input("Lesson title", key="aa_l_title", placeholder="How I draw demand zones")
+    lx = st.text_area("Lesson", key="aa_l_text", height=130, placeholder="A demand zone starts at the lowest wick of the base and ends at the top of the base bodies. I ignore zones thicker than 2 ATR...")
+    if st.button("SAVE LESSON", key="aa_l_save"):
+        if not lt.strip() or not lx.strip():
+            st.warning("Add a title and the lesson text.")
+        elif save_item("lesson", lt, {"lesson_title": lt.strip(), "summary": lx.strip(), "entry_logic": "", "stop_logic": "", "target_logic": ""}, True, "manual"):
+            st.success("Lesson saved and active.")
+            st.rerun()
+
+
+def _all_labels():
+    ap, rj = [], []
+    for it in active_items("feedback"):
+        for lab in it["payload"].get("labels", []):
+            (ap if lab.get("approved") else rj).append(lab.get("features", {}))
+    return ap, rj
+
+
+def teach_style():
+    style = get_style()
+    ap, rj = _all_labels()
+    st.markdown(f'<div class="aa-intro">Your zone style tells the engine what counts as a zone. Current source: <b>{esc(style_source())}</b>. '
+                f'You have labelled <b>{len(ap)}</b> zone(s) as yours and <b>{len(rj)}</b> as not yours.</div>', unsafe_allow_html=True)
+    _sec("Learn from my labels")
+    if st.button("LEARN MY ZONE STYLE", type="primary", key="aa_learn", disabled=len(ap) < 3):
+        params, notes = calibrate_style(ap, rj)
+        st.session_state["aa_learned"] = {"params": params, "notes": notes}
+    if len(ap) < 3:
+        st.caption("Approve at least 3 zones in LABEL ZONES first.")
+    learned = st.session_state.get("aa_learned")
+    if learned and learned["params"]:
+        for n in learned["notes"]:
+            st.markdown(f"- {n}")
+        st.json(learned["params"])
+        if st.button("SAVE AS MY ZONE STYLE", type="primary", key="aa_learn_save"):
+            if save_item("style", "Learned style · " + datetime.now(IST).strftime("%d %b %Y"), {"params": learned["params"], "notes": learned["notes"], "summary": "Learned from labelled zones"}, True):
+                st.session_state.pop("aa_learned", None)
+                st.success("Saved. Every analysis now uses your style.")
+                st.rerun()
+    _sec("Or set it by hand")
+    c = st.columns(4, gap="small")
+    vals = {
+        "base_max": c[0].number_input("Max base candles", 1, 8, int(style["base_max"]), 1, key="aa_s_base", help=STYLE_HELP["base_max"]),
+        "base_range_atr": c[1].number_input("Base candle range (ATR)", 0.3, 2.5, float(style["base_range_atr"]), 0.1, key="aa_s_brng", help=STYLE_HELP["base_range_atr"]),
+        "impulse_atr": c[2].number_input("Min impulse (ATR)", 0.8, 6.0, float(style["impulse_atr"]), 0.1, key="aa_s_imp", help=STYLE_HELP["impulse_atr"]),
+        "max_zone_atr": c[3].number_input("Max zone thickness (ATR)", 0.5, 5.0, float(style["max_zone_atr"]), 0.1, key="aa_s_thick", help=STYLE_HELP["max_zone_atr"]),
+    }
+    c2 = st.columns(4, gap="small")
+    vals["min_quality"] = int(c2[0].number_input("Min quality", 0, 90, int(style["min_quality"]), 5, key="aa_s_q", help=STYLE_HELP["min_quality"]))
+    vals["sr_tol_atr"] = c2[1].number_input("S/R tolerance (ATR)", 0.2, 2.0, float(style["sr_tol_atr"]), 0.1, key="aa_s_tol", help=STYLE_HELP["sr_tol_atr"])
+    vals["sr_min_touches"] = int(c2[2].number_input("S/R min touches", 2, 6, int(style["sr_min_touches"]), 1, key="aa_s_touch", help=STYLE_HELP["sr_min_touches"]))
+    vals["fresh_only"] = c2[3].checkbox("Fresh zones only", value=bool(style["fresh_only"]), key="aa_s_fresh")
+    vals["base_max"] = int(vals["base_max"])
+    b1, b2 = st.columns(2, gap="small")
+    if b1.button("SAVE THESE SETTINGS", key="aa_s_save", use_container_width=True):
+        if save_item("style", "Manual style · " + datetime.now(IST).strftime("%d %b %Y"), {"params": vals, "summary": "Set by hand"}, True):
+            st.success("Saved.")
+            st.rerun()
+    if b2.button("RESET TO ARKA DEFAULTS", key="aa_s_reset", use_container_width=True):
+        for it in active_items("style"):
+            set_item_active(it["item_id"], False)
+        st.rerun()
+
+
+def render_teach():
+    tabs = st.tabs(["IMPORT PDF", "LABEL ZONES", "FROM SCREENSHOT", "QUICK RULES", "ZONE STYLE"])
     with tabs[0]:
-        _aa_v9_tab_analyze()
+        teach_pdf()
     with tabs[1]:
-        _aa_v9_tab_teach()
+        teach_label()
     with tabs[2]:
-        _aa_v9_tab_playbook()
+        teach_screenshot()
     with tabs[3]:
-        _aa_v9_tab_radar()
+        teach_quick()
     with tabs[4]:
-        _aa_v9_tab_style()
+        teach_style()
+
+
+# ── PLAYBOOK ────────────────────────────────────────────────
+def render_playbook():
+    c1, c2 = st.columns([5, 1], gap="small")
+    c1.markdown('<div class="aa-intro">Everything you have taught Arka. <b>Active</b> items are used in every analysis; switch items off to test a different approach without deleting anything.</div>', unsafe_allow_html=True)
+    if c2.button("↻ RELOAD", key="aa_reload", use_container_width=True):
+        load_items(force=True)
+        st.rerun()
+    items = load_items()
+    if not items:
+        render_getting_started()
+        return
+    colors = {"setup": AMBER, "lesson": CYAN, "feedback": GREEN, "style": PURPLE}
+    for kind in ("setup", "lesson", "feedback", "style"):
+        group = [i for i in items if i["kind"] == kind]
+        if not group:
+            continue
+        _sec(KIND_LABEL[kind] + "S" if kind != "feedback" else "LABELLED ZONES", f"{len(group)} saved")
+        for it in group:
+            p = it["payload"]
+            desc = p.get("summary") or p.get("setup_name") or ""
+            meta = {"setup": f'{len(p.get("conditions", []))} rules · {len(p.get("zone_definitions", []))} zone definitions',
+                    "lesson": f'{len(p.get("zone_definitions", []))} zone definitions · {len(p.get("line_definitions", []))} line definitions',
+                    "feedback": f'{sum(1 for x in p.get("labels", []) if x.get("approved"))} mine · {sum(1 for x in p.get("labels", []) if not x.get("approved"))} not mine',
+                    "style": ", ".join(f"{k} {v}" for k, v in list(p.get("params", {}).items())[:4])}[kind]
+            st.markdown(f'<div class="aa-item" style="--c:{colors[kind] if it["active"] else "#2B2B2B"}"><div class="h"><b>{esc(it["name"])}</b>'
+                        f'{_pill("ACTIVE" if it["active"] else "OFF", GREEN if it["active"] else T3)}</div>'
+                        f'<div class="d">{esc(str(desc)[:260])}<br>{esc(meta)} · saved {esc(it["saved_at"][:10])}</div></div>', unsafe_allow_html=True)
+            a, b, c = st.columns([1.2, 1.4, 4], gap="small")
+            on = a.checkbox("Active", value=it["active"], key=f"aa_act_{it['item_id']}")
+            if on != it["active"]:
+                set_item_active(it["item_id"], on)
+                st.rerun()
+            sure = b.checkbox("Confirm delete", key=f"aa_dok_{it['item_id']}")
+            if c.button("DELETE", key=f"aa_del_{it['item_id']}", disabled=not sure):
+                delete_item(it["item_id"])
+                st.rerun()
+            with st.expander("View details"):
+                st.json(p)
+
+
+# ── ENTRY POINT ─────────────────────────────────────────────
+def _consume_autorun():
+    """Watchlist ANALYSIS button / security page send us here with a symbol."""
+    sym = st.session_state.pop("arka_autorun_v8", None)
+    if sym:
+        st.session_state["aa_ticker"] = str(sym).upper()
+        st.session_state["aa_run_request"] = str(sym).upper()
+        st.session_state["aa_mode"] = "ANALYZE"
+    elif "aa_ticker" not in st.session_state:
+        pre = st.session_state.get("m1_ticker") or st.session_state.get("m1_ticker_v8")
+        if pre:
+            st.session_state["aa_ticker"] = str(pre).upper()
+
+
+def render_arka_ai(supabase=None):
+    global _SB
+    _SB = supabase
+    _inject_css()
+    _consume_autorun()
+    st.markdown(html_status(), unsafe_allow_html=True)
+    st.session_state.setdefault("aa_mode", "ANALYZE")
+    mode = st.radio("Mode", ["ANALYZE", "RADAR", "TEACH", "PLAYBOOK"], horizontal=True, key="aa_mode", label_visibility="collapsed")
+    if mode == "ANALYZE":
+        render_analyze()
+    elif mode == "RADAR":
+        render_radar()
+    elif mode == "TEACH":
+        render_teach()
+    else:
+        render_playbook()
+    st.caption("Arka AI is a research tool. Zones and levels are rule-based approximations of discretionary chart reading; scores measure how well the evidence matches "
+               "your playbook, not the probability of profit. Not investment advice.")
