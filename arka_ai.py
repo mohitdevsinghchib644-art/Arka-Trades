@@ -1,584 +1,142 @@
 """
-arka_ai.py  —  Arka AI Trading Companion (v8 — Setup Intelligence)
-=============================================================
-Brain     : Gemini 2.5 Flash  (vision + text)
-Memory    : Pinecone           (vector database)
-Voice     : Web Speech API     (browser TTS)
-Drawing   : Data-coordinate annotation engine (precise placement)
-PDF Parse : pdfplumber
+arka_ai.py — Arka AI v9 · YOUR playbook, YOUR zones, YOUR trade plan
 
-v7 CHANGES FROM v6 — and WHY each one exists:
+You teach Arka how YOU trade. Then you type a stock and it answers with a complete, marked-up analysis.
 
-  1. RULE RETRIEVAL — FIXED, not tuned.
-     v6's build_rules_context() ran a top_k=8 Pinecone *similarity search*
-     scored against a generic query string ("trading entry setup
-     validation for {ticker}"). That means: if you had saved 15 setups,
-     analysis could silently check against a random-ish 8 of them —
-     whichever happened to score highest against that generic phrase —
-     and drop the rest below the 0.5 threshold with no warning shown to
-     you. For a tool whose entire job is "does this chart match EVERY
-     rule I've saved," that's not an edge case, it's the core promise
-     being broken silently.
-     FIX: get_all_rules() now paginates Pinecone's list+fetch API to
-     retrieve every stored vector's metadata, full stop — no similarity
-     scoring, no top_k cutoff, no silent drops. This is deliberately
-     "accuracy over token cost" per your explicit call — fine at your
-     current rule count; if you ever cross ~100 long rules, the prompt
-     will need chunking, and get_all_rules() returning a plain list
-     makes that a small future change, not a rewrite.
-     search_memory() (similarity search) is KEPT for the Memory Viewer's
-     search box, where similarity search is the right tool — it's just
-     no longer used to decide what the AI checks a chart against.
+HOW IT WORKS (and why it is accurate)
+  TEACH     Four ways to teach, all saved to your playbook (Pinecone, same index as before):
+              · Import a strategy PDF  - Gemini reads text, diagrams and examples into a structured setup
+              · Label zones            - Arka auto-detects supply/demand zones on any chart; you tick the ones that are
+                                         "your kind" and cross the ones that are not. It learns your style from that.
+              · Teach from a screenshot- upload a chart you marked up (zones, lines, entries) and explain it
+              · Quick rules            - type a setup in plain English
+  ANALYZE   Type a stock. A deterministic Python engine finds EVERY supply / demand zone, support / resistance level,
+            trendline, breakout, retest and candle signal with exact candle indices and prices (calibrated to the
+            style you taught). Gemini then judges them against YOUR playbook, picks which ones are "yours", writes
+            the trade plan and explains why. The model never invents coordinates: it can only choose detection IDs,
+            and Python draws them. If Gemini is offline the engine still produces zones, levels and a plan.
+  OUTPUT    Verdict + grade + score, setup scorecard (each of your rules: present / not present / unclear),
+            entry zone / stop / targets / R:R / position size, supports vs contradictions, bull-bear-neutral
+            scenarios, and an interactive annotated chart (plus a PNG you can download and share).
+  RADAR     Scan your whole watchlist with the same engine and see which stocks are sitting at YOUR zones today.
 
-  2. PER-RULE CHECKLIST — structured, not prose.
-     v6 asked Gemini for two loose string lists (rules_matched /
-     rules_violated) with no guarantee every saved rule appears in
-     either. v7's prompt explicitly enumerates every retrieved rule by
-     ID and demands a verdict object for EACH ONE — PRESENT / NOT_PRESENT
-     / UNCLEAR, plus a 0-100 confidence and a one-line reason. The UI
-     renders this as a real checklist (see render_rule_checklist) so you
-     can see at a glance which of your setups fired and which didn't —
-     not just read a paragraph and trust it covered everything.
-
-  3. MULTI-TIMEFRAME CONFLUENCE.
-     v6 sent one chart (daily, 90 candles). v7 fetches BOTH daily and
-     weekly OHLC + screenshots, sends both images plus both OHLC tables
-     to Gemini in one call, and requires the response to state a
-     confluence verdict (do the two timeframes agree). Annotations are
-     still drawn on the daily chart only, since that's the one you trade
-     off — the weekly chart displays alongside as context, unannotated.
-
-  4. JSON ROBUSTNESS — one bounded repair pass, not a retry loop.
-     v6 had a single json.loads() with only a "strip triple-backticks"
-     defense; any malformed output produced a hard ERROR verdict with
-     zero salvaged content. v7 tries strict parsing, then one repair
-     pass (regex-extract the outermost {...} block and retry) before
-     giving up. This is NOT the full schema-enforced auto-retry-with-
-     re-prompt loop you declined — that would re-call Gemini and cost
-     another request/latency round trip. This is a zero-cost local
-     parse fallback: same single API call, just less likely to throw
-     away a good response over a stray character.
-
-  5. LAYOUT — Bloomberg multi-panel, single screen.
-     v6 was a linear top-to-bottom scroll: input → quick picks → chart
-     → notes → button → results below the fold. v7's Mode 1 is a fixed
-     three-column workspace — chart+timeframe strip (left, widest),
-     live rule checklist (center), verdict+detail (right) — all visible
-     without scrolling past the fold on a normal desktop width, per your
-     explicit "single screen, multiple panels side-by-side" call. Mode 2
-     (training) keeps its tab layout since it's a sequential workflow
-     (add rule -> teach chart -> upload PDF -> browse memory), not a
-     dashboard you want all at once.
-
-  UNCHANGED: Gemini client config, Pinecone index setup/embedding
-  pipeline, PDF chunk extraction, voice synthesis, annotation pixel-math
-  (_to_px, draw_annotations), Lightweight Charts JS panel. None of these
-  were the problem.
+Honest limits: zones and levels are rule-based approximations of discretionary chart reading; Yahoo data is delayed and
+may contain gaps; scores measure how well evidence matches your playbook, not the probability of profit.
+This is research tooling, not investment advice.
 """
+from __future__ import annotations
 
-# V8 NOTE: This file intentionally contains ONE implementation of each public
-# function. There is no appended override/shadowing section.
-
+import base64
+import html as _html
+import io
+import json
+import math
+import os
 import re
+import tempfile
+import time
+import traceback
+from datetime import datetime, timedelta, timezone
+
+import numpy as np
+import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-import base64, io, json, time, traceback, tempfile, os, math
-from datetime import datetime, timezone, timedelta
 
 # ── Safe imports ────────────────────────────────────────────
 try:
     import google.generativeai as genai
     HAS_GEMINI = True
-except ImportError:
+except Exception:  # pragma: no cover
+    genai = None
     HAS_GEMINI = False
 
 try:
     from pinecone import Pinecone, ServerlessSpec
     HAS_PINECONE = True
-except ImportError:
+except Exception:  # pragma: no cover
     HAS_PINECONE = False
 
 try:
     import pdfplumber
     HAS_PDF = True
-except ImportError:
+except Exception:  # pragma: no cover
     HAS_PDF = False
 
 try:
-    from PIL import Image, ImageDraw, ImageFont
-    HAS_PIL = True
-except ImportError:
-    HAS_PIL = False
-
-try:
-    from streamlit_image_coordinates import streamlit_image_coordinates
-    HAS_IMG_COORDS = True
-except ImportError:
-    HAS_IMG_COORDS = False
-
-try:
     import yfinance as yf
-    import pandas as pd
     HAS_YFINANCE = True
-except ImportError:
+except Exception:  # pragma: no cover
+    yf = None
     HAS_YFINANCE = False
 
-from io import BytesIO
-
 try:
-    import requests
-    HAS_REQUESTS = True
-except ImportError:
-    HAS_REQUESTS = False
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    HAS_PLOTLY = True
+except Exception:  # pragma: no cover
+    go = None
+    make_subplots = None
+    HAS_PLOTLY = False
 
-# ── Keys from Streamlit Secrets ────────────────────────────
-GEMINI_KEY   = st.secrets.get("GEMINI_KEY",   "")
-PINECONE_KEY = st.secrets.get("PINECONE_KEY", "")
-INDEX_NAME   = "arka-trading-rules"
 
-# ── Colors (Bloomberg-style terminal theme) ────────────────
-# Moved off the blue/purple ChartX palette from v6 toward the
-# amber-on-black terminal identity used elsewhere in the app
-# (research_page.py) so Arka AI reads as the same product, not a
-# differently-branded module bolted on.
-AMBER  = "#FFB000"
-BLUE   = "#4F8DFD"
-GREEN  = "#00C853"
-RED    = "#FF3B30"
-PURPLE = "#8B5CF6"
-DARK   = "#000000"
-DARK2  = "#0A0A0A"
-DARK3  = "#111111"
-BORDER = "#262626"
-T2     = "#A8A8A0"
-T3     = "#6B6B65"
-IVORY  = "#E8E6E0"
-NAVY   = "#101A33"
-FONT   = "'IBM Plex Sans','Inter',sans-serif"
-MONO   = "'IBM Plex Mono','JetBrains Mono',monospace"
-
-# ══════════════════════════════════════════════════════════
-# 1. GEMINI CLIENT
-# ══════════════════════════════════════════════════════════
-
-@st.cache_resource
-
-# ══════════════════════════════════════════════════════════
-# CLEAN V8 CHART / ANNOTATION FOUNDATION
-# (shared deterministic rendering helpers from V7; no duplicate AI/UI functions)
-# ══════════════════════════════════════════════════════════
-
-def get_chart_screenshot(ticker: str, period: str = "3mo", interval: str = "1d"):
-    """
-    Build the candlestick chart AND capture exact axis geometry so that
-    (candle index, price) can be converted to precise pixel positions later.
-    Returns (PIL.Image, meta dict) or (None, None).
-
-    NEW v7: `interval` param added so this can build a weekly chart
-    (interval="1wk") for multi-timeframe confluence, not just daily.
-    """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as mpatches
-    from datetime import datetime, timedelta
-
+def _secret(name: str) -> str:
     try:
-        clean = ticker.upper().strip()
-        if clean in ["NIFTY50", "NIFTY", "^NSEI"]:
-            clean, yf_ticker = "NIFTY", "^NSEI"
-        elif clean in ["BANKNIFTY", "^NSEBANK"]:
-            clean, yf_ticker = "BANKNIFTY", "^NSEBANK"
-        elif clean in ["SENSEX", "^BSESN"]:
-            clean, yf_ticker = "SENSEX", "^BSESN"
-        elif clean.endswith(".NS"):
-            yf_ticker = clean; clean = clean.replace(".NS", "")
-        elif clean.startswith("^"):
-            yf_ticker = clean; clean = clean[1:]
-        else:
-            yf_ticker = clean + ".NS"
-
-        end = datetime.today()
-        lookback_days = 730 if interval == "1wk" else 150
-        start = end - timedelta(days=lookback_days)
-
-        hist = yf.Ticker(yf_ticker).history(
-            start=start.strftime("%Y-%m-%d"),
-            end=(end + timedelta(days=1)).strftime("%Y-%m-%d"),
-            interval=interval, auto_adjust=True, raise_errors=False
-        )
-
-        if hist is None or hist.empty:
-            st.error(f"No data for {ticker} ({interval})")
-            return None, None
-
-        tail_n = 90
-        hist = hist.tail(tail_n).copy()
-        hist = hist[hist.index.notnull()]
-        n    = len(hist)
-
-        DPI   = 110
-        fig_w = max(13, n * 0.16)
-        fig   = plt.figure(figsize=(fig_w, 5), dpi=DPI, facecolor=DARK)
-        ax    = fig.add_subplot(111)
-        ax.set_facecolor(DARK)
-
-        for spine in ax.spines.values():
-            spine.set_color(BORDER)
-        ax.tick_params(colors=T2, labelsize=8)
-
-        candle_w = 0.6
-        for i, (_, row) in enumerate(hist.iterrows()):
-            o, h, l, c = row["Open"], row["High"], row["Low"], row["Close"]
-            color = GREEN if c >= o else RED
-            ax.plot([i, i], [l, h], color=color, linewidth=0.9, zorder=1)
-            rect = mpatches.Rectangle(
-                (i - candle_w/2, min(o, c)), candle_w,
-                max(abs(c - o), (h - l) * 0.01),
-                facecolor=color, edgecolor=color, linewidth=0, zorder=2)
-            ax.add_patch(rect)
-
-        step = max(1, n // 10)
-        positions = list(range(0, n, step))
-        if (n - 1) not in positions:
-            positions.append(n - 1)
-        ax.set_xticks(positions)
-        date_fmt = "%b %Y" if interval == "1wk" else "%d %b"
-        ax.set_xticklabels([hist.index[i].strftime(date_fmt) for i in positions],
-                           rotation=45, ha="right", fontsize=8)
-        ax.set_xlim(-1, n)
-
-        price_min = float(hist["Low"].min())
-        price_max = float(hist["High"].max())
-        pad = (price_max - price_min) * 0.06
-        ax.set_ylim(price_min - pad, price_max + pad)
-
-        last_date = hist.index[-1]
-        date_str  = last_date.strftime("%d %b %Y") if hasattr(last_date, "strftime") else str(last_date)[:10]
-        tf_label = "Weekly" if interval == "1wk" else "Daily"
-        ax.set_title(f"{clean}  ·  NSE {tf_label}  ·  {date_str}",
-                     color=AMBER, fontsize=11, fontweight="bold",
-                     fontfamily="monospace", pad=10)
-        ax.grid(axis="y", color=BORDER, linewidth=0.5, linestyle="--", alpha=0.8)
-        ax.grid(axis="x", color=BORDER, linewidth=0.3, linestyle="--", alpha=0.4)
-        plt.tight_layout(pad=1.2)
-
-        # CRITICAL: draw the canvas, then capture exact axis geometry.
-        # No bbox_inches='tight' — that would invalidate the transform.
-        fig.canvas.draw()
-        bbox = ax.get_window_extent()
-        img_w, img_h = fig.canvas.get_width_height()
-
-        meta = {
-            "xlim": list(ax.get_xlim()),
-            "ylim": list(ax.get_ylim()),
-            "px_left":   float(bbox.x0),
-            "px_right":  float(bbox.x1),
-            "px_top":    float(img_h - bbox.y1),
-            "px_bottom": float(img_h - bbox.y0),
-            "img_w": img_w, "img_h": img_h, "n": n,
-            "interval": interval,
-            "ohlc": [
-                {"i": i,
-                 "date": idx.strftime("%Y-%m-%d"),
-                 "o": round(float(r["Open"]), 2),
-                 "h": round(float(r["High"]), 2),
-                 "l": round(float(r["Low"]), 2),
-                 "c": round(float(r["Close"]), 2),
-                 "v": int(r.get("Volume") or 0)}
-                for i, (idx, r) in enumerate(hist.iterrows())
-            ],
-        }
-
-        buf = BytesIO()
-        fig.savefig(buf, format="png", dpi=DPI, facecolor=DARK)
-        plt.close(fig)
-        buf.seek(0)
-        return Image.open(buf).convert("RGB"), meta
-
-    except Exception as e:
-        st.error(f"Error fetching chart: {e}")
-        traceback.print_exc()
-        return None, None
-
-
-def _to_px(meta: dict, candle_i: float, price: float):
-    """Convert (candle index, price) -> exact pixel coordinates on the chart image."""
-    x0, x1 = meta["xlim"]; y0, y1 = meta["ylim"]
-    px = meta["px_left"] + (candle_i - x0) / (x1 - x0) * (meta["px_right"] - meta["px_left"])
-    py = meta["px_top"]  + (y1 - price)   / (y1 - y0) * (meta["px_bottom"] - meta["px_top"])
-    return px, py
-
-
-def _hex_rgb(color: str, default=(255, 176, 0)):
-    try:
-        c = color.lstrip("#")
-        return int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
+        return str(st.secrets.get(name, "") or "")
     except Exception:
-        return default
+        return ""
 
 
-def draw_annotations(img: Image.Image, meta: dict, analysis: dict) -> Image.Image:
-    """Draw AI annotations (levels, zones, marks) at exact data positions.
-    Applies to the DAILY chart only — see module docstring."""
-    img  = img.copy().convert("RGBA")
-    draw = ImageDraw.Draw(img, "RGBA")
-    ann  = analysis.get("annotations", {}) or {}
+GEMINI_KEY = _secret("GEMINI_KEY")
+PINECONE_KEY = _secret("PINECONE_KEY")
+INDEX_NAME = "arka-trading-rules"          # unchanged: your v8 setups are still readable
+V9_VERSION = "arka-v9"
+IST = timezone(timedelta(hours=5, minutes=30))
 
-    try:
-        font = ImageFont.truetype("DejaVuSans-Bold.ttf", 13)
-    except Exception:
-        font = ImageFont.load_default()
+# ── Theme (matches the terminal) ────────────────────────────
+AMBER, AMBER2 = "#FF9F0A", "#FFB340"
+GREEN, RED, CYAN, PURPLE, YELLOW = "#30D158", "#FF453A", "#5AC8FA", "#BF5AF2", "#FFD60A"
+BG, S1, S2, S3 = "#050505", "#0A0A0A", "#0F0F0F", "#151515"
+LINE, LINE2 = "#1F1F1F", "#2B2B2B"
+IVORY, T2, T3 = "#ECECEC", "#A3A3A3", "#6B6B6B"
+MONO = "'JetBrains Mono',ui-monospace,Menlo,monospace"
+FONT = "'Inter',system-ui,sans-serif"
 
-    L, R = meta["px_left"], meta["px_right"]
+KIND_LABEL = {"setup": "SETUP", "lesson": "LESSON", "feedback": "LABELLED ZONES", "style": "ZONE STYLE"}
 
-    # Horizontal levels (dashed)
-    for lv in ann.get("levels", []):
-        try:
-            price = float(lv["price"])
-            r, g, b = _hex_rgb(lv.get("color", AMBER))
-            _, py = _to_px(meta, 0, price)
-            x = L
-            while x < R:
-                draw.line([x, py, min(x + 9, R), py], fill=(r, g, b, 230), width=2)
-                x += 15
-            label = f'{lv.get("label","Level")}  {price:,.2f}'
-            draw.rectangle([L + 6, py - 20, L + 6 + 8 * len(label), py - 4],
-                           fill=(r, g, b, 60))
-            draw.text((L + 10, py - 19), label, fill=(r, g, b, 255), font=font)
-        except Exception:
-            pass
+# How the engine reads a chart. Learned values (from your labelled zones) override these.
+DEFAULT_STYLE = {
+    "pivot_left": 3, "pivot_right": 3,          # swing high / low confirmation
+    "base_max": 4,                              # most candles allowed in a base
+    "base_range_atr": 1.0,                      # a base candle's range must be <= this x ATR
+    "impulse_atr": 1.6,                         # the move away from the base must be >= this x ATR
+    "impulse_window": 3,                        # ... within this many candles
+    "max_zone_atr": 2.2,                        # zone thickness cap (x ATR)
+    "min_quality": 40,                          # hide zones scoring below this
+    "sr_tol_atr": 0.6,                          # S/R clustering tolerance (x ATR)
+    "sr_min_touches": 2,
+    "lookback": 220,
+    "fresh_only": False,
+}
 
-    # Zones (rectangles in candle/price space)
-    for z in ann.get("zones", []):
-        try:
-            x1p, y1p = _to_px(meta, float(z["candle_from"]) - 0.4, float(z["price_top"]))
-            x2p, y2p = _to_px(meta, float(z["candle_to"]) + 0.4, float(z["price_bottom"]))
-            r, g, b = _hex_rgb(z.get("color", BLUE))
-            draw.rectangle([x1p, y1p, x2p, y2p], outline=(r, g, b, 255),
-                           width=2, fill=(r, g, b, 38))
-            if z.get("label"):
-                draw.text((x1p + 4, y1p - 18), z["label"], fill=(r, g, b, 255), font=font)
-        except Exception:
-            pass
+STYLE_HELP = {
+    "base_max": "Maximum candles in a base (consolidation) before the move",
+    "base_range_atr": "Largest candle range allowed inside a base, in ATR",
+    "impulse_atr": "How far price must leave the base, in ATR, to count as an impulse",
+    "max_zone_atr": "Thickest zone you accept, in ATR (thinner = tighter risk)",
+    "min_quality": "Hide zones scoring below this quality (0-100)",
+    "sr_tol_atr": "Prices within this many ATR are treated as one support/resistance level",
+    "sr_min_touches": "Touches needed before a level is drawn",
+}
 
-    # Marks (triangles pointing at a candle/price)
-    for m in ann.get("marks", []):
-        try:
-            px, py = _to_px(meta, float(m["candle"]), float(m["price"]))
-            r, g, b = _hex_rgb(m.get("color", GREEN))
-            s = 9
-            if str(m.get("direction", "up")).lower() == "up":
-                draw.polygon([(px, py - 4), (px - s, py + s + 4), (px + s, py + s + 4)],
-                             fill=(r, g, b, 235))
-                ty = py + s + 8
-            else:
-                draw.polygon([(px, py + 4), (px - s, py - s - 4), (px + s, py - s - 4)],
-                             fill=(r, g, b, 235))
-                ty = py - s - 24
-            if m.get("label"):
-                draw.text((px + 10, ty), m["label"], fill=(r, g, b, 255), font=font)
-        except Exception:
-            pass
 
-    return img.convert("RGB")
+def esc(x) -> str:
+    return _html.escape("" if x is None else str(x))
 
 
 # ══════════════════════════════════════════════════════════
-# 3b. LIGHTWEIGHT CHARTS (interactive display)
+# 1. PLAYBOOK STORAGE  (Pinecone, with a session fallback)
 # ══════════════════════════════════════════════════════════
-
-def fetch_lw_ohlc(ticker: str, limit: int = 90, interval: str = "1d") -> list:
-    from datetime import datetime, timedelta
-    clean = ticker.upper().strip()
-    sym_map = {"NIFTY50": "^NSEI", "NIFTY": "^NSEI",
-               "BANKNIFTY": "^NSEBANK", "SENSEX": "^BSESN"}
-    if clean in sym_map:
-        yf_sym = sym_map[clean]
-    elif clean.startswith("^") or clean.endswith(".NS"):
-        yf_sym = clean
-    else:
-        yf_sym = clean + ".NS"
-    try:
-        end = datetime.today()
-        lookback_days = 730 if interval == "1wk" else 150
-        start = end - timedelta(days=lookback_days)
-        hist = yf.Ticker(yf_sym).history(
-            start=start.strftime("%Y-%m-%d"),
-            end=(end + timedelta(days=1)).strftime("%Y-%m-%d"),
-            interval=interval, auto_adjust=True)
-        if hist is None or hist.empty:
-            return []
-        data = []
-        for ts, row in hist.iterrows():
-            try:
-                data.append({
-                    "time": ts.strftime("%Y-%m-%d"),
-                    "open": round(float(row["Open"]), 2),
-                    "high": round(float(row["High"]), 2),
-                    "low": round(float(row["Low"]), 2),
-                    "close": round(float(row["Close"]), 2),
-                    "volume": round(float(row.get("Volume") or 0), 0)})
-            except Exception:
-                continue
-        data.sort(key=lambda x: x["time"])
-        return data[-limit:]
-    except Exception:
-        return []
-
-
-def render_lw_chart(ticker: str, interval: str = "1d", height: int = 380):
-    tf_label = "Weekly" if interval == "1wk" else "Daily"
-    with st.spinner(f"Loading {tf_label.lower()} chart for {ticker.upper()}..."):
-        data = fetch_lw_ohlc(ticker, interval=interval)
-    if not data:
-        st.error(f"{tf_label} chart unavailable for {ticker}.")
-        return
-
-    last = data[-1]
-    prev = data[-2] if len(data) > 1 else last
-    chg  = last["close"] - prev["close"]
-    chg_pct   = (chg / prev["close"]) * 100 if prev["close"] else 0
-    chg_color = GREEN if chg >= 0 else RED
-    chg_sign  = "+" if chg >= 0 else ""
-    json_data = json.dumps(data)
-    chart_id  = f"chart_{interval}_{ticker.upper()}"
-
-    html = f"""<!DOCTYPE html>
-<html><head><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-  * {{ margin:0; padding:0; box-sizing:border-box; }}
-  body {{ background:{DARK}; font-family:'JetBrains Mono',monospace; overflow:hidden; }}
-  #hdr {{ padding:8px 14px 4px; display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }}
-  .tk {{ font-size:12px; font-weight:800; color:{AMBER}; letter-spacing:1.5px; }}
-  .pr {{ font-size:18px; font-weight:700; color:{IVORY}; }}
-  .ch {{ font-size:12px; font-weight:600; color:{chg_color}; }}
-  #chart {{ width:100%; }}
-</style></head>
-<body>
-<div id="hdr">
-  <span class="tk">{ticker.upper()} &middot; {tf_label}</span>
-  <span class="pr">&#8377;{last["close"]:,.2f}</span>
-  <span class="ch">{chg_sign}{chg:.2f} ({chg_sign}{chg_pct:.2f}%)</span>
-</div>
-<div id="{chart_id}"></div>
-<script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
-<script>
-const rawData = {json_data};
-const H = {height};
-const chart = LightweightCharts.createChart(document.getElementById('{chart_id}'), {{
-  width: document.documentElement.clientWidth, height: H,
-  layout: {{ background: {{ type:'solid', color:'{DARK}' }}, textColor:'{T2}', fontSize:10 }},
-  grid: {{ vertLines: {{ color:'{BORDER}', style:1 }}, horzLines: {{ color:'{BORDER}', style:1 }} }},
-  crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal,
-    vertLine: {{ color:'{AMBER}55', labelBackgroundColor:'{NAVY}' }},
-    horzLine: {{ color:'{AMBER}55', labelBackgroundColor:'{NAVY}' }} }},
-  rightPriceScale: {{ borderColor:'{BORDER}' }},
-  timeScale: {{ borderColor:'{BORDER}', timeVisible:true, fixLeftEdge:true, fixRightEdge:true }},
-  handleScroll:true, handleScale:true,
-}});
-const volSeries = chart.addHistogramSeries({{ priceScaleId:'vol',
-  scaleMargins: {{ top:0.82, bottom:0 }} }});
-volSeries.priceScale().applyOptions({{ scaleMargins: {{ top:0.82, bottom:0 }} }});
-volSeries.setData(rawData.map(d => ({{ time:d.time, value:d.volume,
-  color: d.close >= d.open ? '{GREEN}2A' : '{RED}2A' }})));
-const candleSeries = chart.addCandlestickSeries({{
-  upColor:'{GREEN}', downColor:'{RED}', borderUpColor:'{GREEN}',
-  borderDownColor:'{RED}', wickUpColor:'{GREEN}', wickDownColor:'{RED}' }});
-candleSeries.setData(rawData);
-chart.timeScale().fitContent();
-new ResizeObserver(() => {{
-  chart.resize(document.documentElement.clientWidth, H);
-}}).observe(document.body);
-</script></body></html>"""
-    st.components.v1.html(html, height=height + 70, scrolling=False)
-
-
-# ══════════════════════════════════════════════════════════
-# 4. ANALYSIS ENGINE
-# ══════════════════════════════════════════════════════════
-
-
-
-def image_to_base64(img: Image.Image) -> str:
-    """Encode a PIL image for the embedded Lightweight Charts component."""
-    buf = BytesIO()
-    img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode("ascii")
-
-
-# ══════════════════════════════════════════════════════════
-# ARKA AI V8 — SINGLE IMPLEMENTATION
-# ══════════════════════════════════════════════════════════
-
-def get_gemini():
-    if not HAS_GEMINI or not GEMINI_KEY:
-        return None
-    try:
-        genai.configure(api_key=GEMINI_KEY)
-        return genai.GenerativeModel(
-            model_name="gemini-2.5-flash",
-            system_instruction="""
-You are Arka AI V8, a setup-analysis engine.
-
-SOURCE OF TRUTH:
-The ACTIVE USER SETUP is the only trading strategy you may evaluate. Do not
-invent a strategy. Do not introduce RSI, MACD, moving averages, patterns,
-volume rules, or other criteria unless the active setup explicitly uses them.
-Contextual observations can be reported separately but MUST NOT change the
-setup verdict.
-
-NUMERICAL TRUTH:
-Python supplies OHLC, derived indicators, swing levels and other market facts.
-Use those supplied values. Never invent prices, dates, candle indices, volumes,
-indicator values or levels. If evidence is missing, return UNCLEAR.
-
-CHART MAPPING:
-Never output pixel coordinates. Return exact candle index/date and exact price.
-Python converts those data coordinates into pixels. This is mandatory.
-
-SETUP UNDERSTANDING:
-When processing a training PDF, inspect text, images, diagrams, tables and
-examples. Extract testable conditions, trigger, confirmations, invalidation,
-exclusions and valid/invalid examples. Preserve the author's terminology.
-Ambiguity must be recorded rather than guessed.
-"""
-        )
-    except Exception:
-        return None
-
-
-def _v8_extract_json(raw):
-    text = (raw or "").strip()
-    if text.startswith("```"):
-        parts = text.split("```")
-        if len(parts) >= 2:
-            text = parts[1]
-        text = text.strip()
-        if text.lower().startswith("json"):
-            text = text[4:].strip()
-    a, b = text.find("{"), text.rfind("}")
-    return text[a:b+1] if a >= 0 and b > a else text
-
-
-def _v8_call_json(prompt, images=None, uploaded_file=None):
-    model = get_gemini()
-    if model is None:
-        raise RuntimeError("Gemini is not configured. Check GEMINI_KEY.")
-    content = [prompt]
-    if uploaded_file is not None:
-        content.append(uploaded_file)
-    for img in (images or []):
-        content.append({"mime_type": "image/png", "data": image_to_base64(img)})
-    response = model.generate_content(content)
-    raw = (getattr(response, "text", "") or "").strip()
-    try:
-        return json.loads(raw)
-    except Exception:
-        return json.loads(_v8_extract_json(raw))
-
-
-# ------------------------- Structured setups ---------------------
 @st.cache_resource
 def get_pinecone_index():
     if not HAS_PINECONE or not PINECONE_KEY:
@@ -587,12 +145,8 @@ def get_pinecone_index():
         pc = Pinecone(api_key=PINECONE_KEY)
         existing = [i.name for i in pc.list_indexes()]
         if INDEX_NAME not in existing:
-            pc.create_index(
-                name=INDEX_NAME,
-                dimension=768,
-                metric="cosine",
-                spec=ServerlessSpec(cloud="aws", region="us-east-1"),
-            )
+            pc.create_index(name=INDEX_NAME, dimension=768, metric="cosine",
+                            spec=ServerlessSpec(cloud="aws", region="us-east-1"))
         return pc.Index(INDEX_NAME)
     except Exception:
         return None
@@ -602,257 +156,1260 @@ def get_embedding(text):
     if not HAS_GEMINI or not GEMINI_KEY or not text or not str(text).strip():
         return None
     try:
-        result = genai.embed_content(
-            model="models/text-embedding-004",
-            content=str(text).strip(),
-        )
-        emb = result.get("embedding", [])
-        if len(emb) != 768 or not any(abs(v) > 1e-7 for v in emb):
-            return None
-        return emb
+        genai.configure(api_key=GEMINI_KEY)
+        r = genai.embed_content(model="models/text-embedding-004", content=str(text).strip()[:8000])
+        emb = r.get("embedding", [])
+        return emb if len(emb) == 768 and any(abs(v) > 1e-7 for v in emb) else None
     except Exception:
         return None
 
 
-def _v8_vector_ids(idx):
+_CONST_VEC = [0.001] * 768     # storage does not need real embeddings: items are read back by id, not by similarity
+
+
+def _invalidate():
+    st.session_state.pop("aa_items_cache", None)
+
+
+def _decode(vector_id, meta: dict):
+    """Pinecone metadata -> playbook item. Reads both v9 items and legacy v8 setups."""
+    kind = meta.get("memory_kind")
     try:
-        ids = []
-        for batch in idx.list(limit=100):
-            ids.extend(batch)
-        return ids
+        if kind == "setup" and "setup_json" in meta:                       # v8 / v9 setup
+            payload = json.loads(meta["setup_json"])
+            name = meta.get("setup_name") or payload.get("setup_name", "Unnamed setup")
+        elif kind in KIND_LABEL and "item_json" in meta:                   # v9 lesson / feedback / style
+            payload = json.loads(meta["item_json"])
+            name = meta.get("name", kind)
+        else:
+            return None
     except Exception:
-        return []
+        return None
+    return {"item_id": meta.get("setup_id") or meta.get("item_id") or vector_id, "kind": kind, "name": name,
+            "active": bool(meta.get("active", False)), "saved_at": meta.get("saved_at", ""),
+            "source": meta.get("source_name", ""), "payload": payload}
 
 
-def _v8_fetch_all_setup_vectors():
+def _local_items():
+    return st.session_state.setdefault("aa_local_items", {})
+
+
+def load_items(force: bool = False) -> list:
+    """Every playbook item, newest first. Cached for the session; writes invalidate the cache."""
+    cache = st.session_state.get("aa_items_cache")
+    if cache is not None and not force:
+        return cache
+    items = []
     idx = get_pinecone_index()
-    if not idx:
-        return []
-    ids = _v8_vector_ids(idx)
-    setups = []
-    for start in range(0, len(ids), 200):
+    if idx is not None:
         try:
-            fetched = idx.fetch(ids=ids[start:start+200])
-            vectors = getattr(
-                fetched,
-                "vectors",
-                fetched.get("vectors", {}) if isinstance(fetched, dict) else {},
-            )
-            for vector_id, vector in vectors.items():
-                meta = vector.metadata if hasattr(vector, "metadata") else vector.get("metadata", {})
-                if meta.get("memory_kind") != "setup":
-                    continue
-                try:
-                    setup = json.loads(meta.get("setup_json", "{}"))
-                except Exception:
-                    continue
-                setup["setup_id"] = meta.get("setup_id", vector_id)
-                setup["active"] = bool(meta.get("active", False))
-                setup["saved_at"] = meta.get("saved_at", "")
-                setup["source_name"] = meta.get("source_name", setup.get("source_name", ""))
-                setups.append(setup)
+            ids = []
+            for batch in idx.list(limit=100):
+                ids.extend(batch)
+            for start in range(0, len(ids), 200):
+                fetched = idx.fetch(ids=ids[start:start + 200])
+                vectors = getattr(fetched, "vectors", None)
+                if vectors is None and isinstance(fetched, dict):
+                    vectors = fetched.get("vectors", {})
+                for vid, vec in (vectors or {}).items():
+                    meta = vec.metadata if hasattr(vec, "metadata") else vec.get("metadata", {})
+                    it = _decode(vid, meta or {})
+                    if it:
+                        items.append(it)
+        except Exception:
+            pass
+    items += list(_local_items().values())
+    items.sort(key=lambda x: x.get("saved_at", ""), reverse=True)
+    st.session_state["aa_items_cache"] = items
+    return items
+
+
+def storage_mode() -> str:
+    return "CLOUD" if get_pinecone_index() is not None else "SESSION"
+
+
+def save_item(kind: str, name: str, payload: dict, activate: bool = True, source_name: str = "", source_text: str = "") -> bool:
+    name = (name or "").strip() or KIND_LABEL.get(kind, kind).title()
+    item_id = f"{kind}_{int(time.time() * 1000)}"
+    saved_at = datetime.now(timezone.utc).isoformat()
+    idx = get_pinecone_index()
+    if idx is None:
+        _local_items()[item_id] = {"item_id": item_id, "kind": kind, "name": name, "active": activate, "saved_at": saved_at,
+                                   "source": source_name, "payload": payload}
+        if activate and kind == "style":
+            for it in _local_items().values():
+                if it["kind"] == "style" and it["item_id"] != item_id:
+                    it["active"] = False
+        _invalidate()
+        return True
+    try:
+        compact = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        if len(compact) > 34000:
+            st.error("This item is too large to store (over 34 KB). Trim it or split the document.")
+            return False
+        emb = get_embedding(name + "\n" + str(payload.get("summary", "")) + "\n" + compact[:4000]) or _CONST_VEC
+        meta = {"memory_kind": kind, "item_id": item_id, "name": name, "active": bool(activate), "saved_at": saved_at,
+                "source_name": source_name, "source_text": str(source_text or "")[:3000], "version": V9_VERSION}
+        if kind == "setup":
+            meta.update({"setup_id": item_id, "setup_name": name, "setup_json": compact})
+        else:
+            meta["item_json"] = compact
+        idx.upsert(vectors=[{"id": item_id, "values": emb, "metadata": meta}])
+        if activate and kind == "style":                           # only one active style at a time
+            for it in load_items(force=True):
+                if it["kind"] == "style" and it["item_id"] != item_id and it["active"]:
+                    set_item_active(it["item_id"], False)
+        _invalidate()
+        return True
+    except Exception as exc:
+        st.error(f"Could not save to your playbook: {exc}")
+        return False
+
+
+def set_item_active(item_id: str, active: bool) -> bool:
+    local = _local_items()
+    if item_id in local:
+        local[item_id]["active"] = active
+        _invalidate()
+        return True
+    idx = get_pinecone_index()
+    if idx is None:
+        return False
+    try:
+        idx.update(id=item_id, set_metadata={"active": bool(active)})
+        _invalidate()
+        return True
+    except Exception:
+        return False
+
+
+def delete_item(item_id: str) -> bool:
+    local = _local_items()
+    if item_id in local:
+        local.pop(item_id)
+        _invalidate()
+        return True
+    idx = get_pinecone_index()
+    if idx is None:
+        return False
+    try:
+        idx.delete(ids=[item_id])
+        _invalidate()
+        return True
+    except Exception:
+        return False
+
+
+def active_items(kind: str) -> list:
+    return [i for i in load_items() if i["kind"] == kind and i["active"]]
+
+
+def get_style() -> dict:
+    """Engine parameters: defaults, overridden by the active learned / saved zone style."""
+    style = dict(DEFAULT_STYLE)
+    for it in active_items("style"):
+        style.update({k: v for k, v in it["payload"].get("params", {}).items() if k in DEFAULT_STYLE})
+        break
+    return style
+
+
+def style_source() -> str:
+    for it in active_items("style"):
+        return it["name"]
+    return "DEFAULT"
+
+
+# ══════════════════════════════════════════════════════════
+# 2. GEMINI
+# ══════════════════════════════════════════════════════════
+SYSTEM_PROMPT = """You are Arka AI, the personal trading analyst of ONE trader. Your only source of strategy is that trader's PLAYBOOK
+(setups, lessons about how they draw supply and demand zones and lines, and zones they approved or rejected).
+
+RULES YOU MUST FOLLOW
+1. Never invent a strategy. Do not use indicators, patterns or criteria the playbook does not use. You may add clearly separated
+   "context" observations, but they must not change the setup verdict.
+2. All numbers come from the DETECTIONS and MARKET FACTS supplied by Python. Never invent prices, dates, candle indices or volumes.
+3. Never output pixel coordinates. To draw something, return the ID of a supplied detection (for example DZ1, SZ2, L3, TL1).
+4. If the evidence cannot decide a rule, say UNCLEAR. Do not guess.
+5. A score is how well the evidence matches the playbook. It is NOT a probability of profit.
+6. Be direct and specific: exact prices, exact dates, exact detection IDs. Plain language, no hype.
+7. Reply with ONE JSON object and nothing else."""
+
+
+def get_gemini():
+    if not HAS_GEMINI or not GEMINI_KEY:
+        return None
+    try:
+        genai.configure(api_key=GEMINI_KEY)
+        return genai.GenerativeModel(model_name="gemini-2.5-flash", system_instruction=SYSTEM_PROMPT)
+    except Exception:
+        return None
+
+
+def _extract_json(raw: str) -> str:
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        parts = text.split("```")
+        if len(parts) >= 2:
+            text = parts[1].strip()
+        if text.lower().startswith("json"):
+            text = text[4:].strip()
+    a, b = text.find("{"), text.rfind("}")
+    return text[a:b + 1] if a >= 0 and b > a else text
+
+
+def parse_json_loose(raw: str) -> dict:
+    """strict parse -> outermost {...} -> trailing-comma repair. One local pass, no extra API call."""
+    for candidate in (raw or "", _extract_json(raw)):
+        try:
+            return json.loads(candidate)
+        except Exception:
+            pass
+    repaired = re.sub(r",\s*([}\]])", r"\1", _extract_json(raw))
+    return json.loads(repaired)
+
+
+def call_json(prompt: str, images=None, uploaded_file=None) -> dict:
+    """images: list of PNG bytes."""
+    model = get_gemini()
+    if model is None:
+        raise RuntimeError("Gemini is not configured (check GEMINI_KEY and the google-generativeai package).")
+    content = [prompt]
+    if uploaded_file is not None:
+        content.append(uploaded_file)
+    for png in images or []:
+        content.append({"mime_type": "image/png", "data": png})
+    try:
+        resp = model.generate_content(content, generation_config={"response_mime_type": "application/json", "temperature": 0.2})
+    except Exception:
+        resp = model.generate_content(content)                      # older SDKs without response_mime_type
+    return parse_json_loose(getattr(resp, "text", "") or "")
+
+
+def call_text(prompt: str) -> str:
+    model = get_gemini()
+    if model is None:
+        raise RuntimeError("Gemini is not configured.")
+    resp = model.generate_content([prompt])
+    return (getattr(resp, "text", "") or "").strip()
+
+
+# ══════════════════════════════════════════════════════════
+# 3. MARKET DATA
+# ══════════════════════════════════════════════════════════
+_SYMBOL_MAP = {"NIFTY50": "^NSEI", "NIFTY": "^NSEI", "BANKNIFTY": "^NSEBANK", "NIFTYBANK": "^NSEBANK",
+               "SENSEX": "^BSESN", "FINNIFTY": "NIFTY_FIN_SERVICE.NS", "NIFTYIT": "^CNXIT"}
+
+
+def yahoo_symbols(ticker: str) -> list:
+    t = (ticker or "").upper().strip().replace(" ", "")
+    if t in _SYMBOL_MAP:
+        return [_SYMBOL_MAP[t]]
+    if t.startswith("^") or t.endswith(".NS") or t.endswith(".BO"):
+        return [t]
+    return [t + ".NS", t + ".BO"]
+
+
+def _clean_ohlc(hist) -> pd.DataFrame:
+    df = hist.rename(columns={c: str(c).lower() for c in hist.columns})
+    need = ["open", "high", "low", "close"]
+    if any(c not in df for c in need):
+        raise ValueError("price columns missing")
+    if "volume" not in df:
+        df["volume"] = 0.0
+    df = df[need + ["volume"]].astype(float)
+    idx = pd.to_datetime(df.index)
+    if getattr(idx, "tz", None) is not None:
+        idx = idx.tz_localize(None)
+    df.index = idx.normalize()
+    df = df[~df.index.duplicated(keep="last")].dropna(subset=need).sort_index()
+    df["volume"] = df["volume"].fillna(0.0)
+    return df
+
+
+@st.cache_data(ttl=300, show_spinner=False, max_entries=64)
+def fetch_ohlc(ticker: str, interval: str = "1d", period: str = "2y") -> pd.DataFrame:
+    """Daily / weekly OHLCV. Raises (so failures are never cached) when nothing usable comes back."""
+    if not HAS_YFINANCE:
+        raise RuntimeError("yfinance is not installed")
+    last_err = None
+    for sym in yahoo_symbols(ticker):
+        try:
+            hist = yf.Ticker(sym).history(period=period, interval=interval, auto_adjust=True)
+            if hist is not None and len(hist) >= 40:
+                return _clean_ohlc(hist)
+        except Exception as exc:
+            last_err = exc
+    raise ValueError(f"No usable {interval} price history for {ticker}" + (f" ({last_err})" if last_err else ""))
+
+
+def _split_download(raw, tickers):
+    out = {}
+    if raw is None or getattr(raw, "empty", True):
+        return out
+    if isinstance(raw.columns, pd.MultiIndex):
+        if "Close" in set(raw.columns.get_level_values(0)):
+            raw = raw.swaplevel(axis=1).sort_index(axis=1)
+        present = set(raw.columns.get_level_values(0))
+        for t in tickers:
+            if t in present:
+                out[t] = raw[t]
+    elif len(tickers) == 1:
+        out[tickers[0]] = raw
+    clean = {}
+    for t, f in out.items():
+        try:
+            df = _clean_ohlc(f)
+            if len(df) >= 60:
+                clean[t] = df
         except Exception:
             continue
-    return sorted(setups, key=lambda x: x.get("saved_at", ""), reverse=True)
+    return clean
 
 
-def get_all_setups():
-    return _v8_fetch_all_setup_vectors()
-
-
-def _v8_deactivate_other_setups(active_id, idx):
-    for setup in _v8_fetch_all_setup_vectors():
-        sid = setup.get("setup_id")
-        if sid and sid != active_id:
-            try:
-                idx.update(id=sid, set_metadata={"active": False})
-            except Exception:
-                pass
-
-
-def activate_setup(setup_id):
-    idx = get_pinecone_index()
-    if not idx or not setup_id:
-        return False
-    _v8_deactivate_other_setups(setup_id, idx)
+@st.cache_data(ttl=600, show_spinner=False, max_entries=8)
+def fetch_many(symbols: tuple) -> dict:
+    """Batched daily download for the radar. {symbol: DataFrame}."""
+    if not HAS_YFINANCE:
+        raise RuntimeError("yfinance is not installed")
+    tick = [s + ".NS" for s in symbols]
+    raw = yf.download(tick, period="1y", interval="1d", group_by="ticker", threads=True, progress=False, auto_adjust=True)
+    frames = _split_download(raw, tick)
+    return {t[:-3]: f for t, f in frames.items()}
+  # ══════════════════════════════════════════════════════════
+# 4. DETERMINISTIC ENGINE  (pure functions: no network, no Streamlit)
+# ══════════════════════════════════════════════════════════
+def _f(x, nd=2):
     try:
-        idx.update(id=setup_id, set_metadata={"active": True})
-        st.session_state["v8_active_setup_id"] = setup_id
-        return True
-    except Exception:
-        return False
+        v = float(x)
+        return round(v, nd) if math.isfinite(v) else None
+    except (TypeError, ValueError):
+        return None
 
 
-def get_active_setup():
-    setups = get_all_setups()
-    selected = st.session_state.get("v8_active_setup_id")
-    if selected:
-        for setup in setups:
-            if setup.get("setup_id") == selected:
-                return setup
-    for setup in setups:
-        if setup.get("active"):
-            st.session_state["v8_active_setup_id"] = setup.get("setup_id")
-            return setup
-    return None
+def atr_series(df: pd.DataFrame, n: int = 14) -> pd.Series:
+    pc = df.close.shift(1)
+    tr = pd.concat([df.high - df.low, (df.high - pc).abs(), (df.low - pc).abs()], axis=1).max(axis=1)
+    return tr.ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
 
 
-def save_setup_to_memory(setup, source_text="", tags=None, activate=True):
-    idx = get_pinecone_index()
-    if not idx:
-        st.error("Pinecone index not available. Check PINECONE_KEY.")
-        return False
-    name = str(setup.get("setup_name", "Unnamed Setup")).strip()
-    if not name:
-        return False
-    try:
-        setup = dict(setup)
-        setup["setup_name"] = name
-        setup_id = "setup_" + str(int(time.time() * 1000))
-        compact = json.dumps(setup, ensure_ascii=False, separators=(",", ":"))
-        embedding = get_embedding(
-            "SETUP " + name + "\n" + str(setup.get("summary", "")) + "\n" + compact
-        )
-        if not embedding:
-            st.error("Embedding failed. Check GEMINI_KEY.")
-            return False
-        if activate:
-            _v8_deactivate_other_setups(setup_id, idx)
-        metadata = {
-            "memory_kind": "setup",
-            "setup_id": setup_id,
-            "setup_name": name,
-            "setup_json": compact,
-            "source_name": str(setup.get("source_name", "")),
-            "source_text": str(source_text or "")[:12000],
-            "tags": json.dumps(tags or []),
-            "active": bool(activate),
-            "saved_at": datetime.now(timezone.utc).isoformat(),
-            "version": V8_VERSION,
-        }
-        idx.upsert(vectors=[{"id": setup_id, "values": embedding, "metadata": metadata}])
-        if activate:
-            st.session_state["v8_active_setup_id"] = setup_id
-        return True
-    except Exception as exc:
-        st.error(f"Setup save error: {exc}")
-        return False
+def rsi_series(close: pd.Series, n: int = 14) -> pd.Series:
+    d = close.diff()
+    up = d.clip(lower=0).ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
+    dn = (-d.clip(upper=0)).ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
+    out = 100 - 100 / (1 + up / dn.replace(0, np.nan))
+    return out.where(~((dn == 0) & up.notna()), 100.0)
 
 
-def save_rule_to_memory(rule_type, rule_name, rule_text, tags=None):
-    # Backward compatibility: V7 manual rule becomes a V8 single-condition setup.
-    setup = {
-        "setup_name": rule_name,
-        "summary": rule_text,
-        "conditions": [{
-            "id": "R01", "name": rule_name, "type": "other", "required": True,
-            "condition": rule_text, "evidence_hint": "Use supplied chart/data evidence."
-        }],
-        "trigger": {"description": rule_text, "type": "manual"},
-        "confirmation": [], "invalidation": [], "exclusions": [], "examples": [],
-        "confidence": "MEDIUM", "source_name": "manual",
+def prepare(df: pd.DataFrame) -> pd.DataFrame:
+    d = df.copy()
+    d["atr"] = atr_series(d)
+    d["rsi"] = rsi_series(d.close)
+    for p in (20, 50, 200):
+        d[f"sma{p}"] = d.close.rolling(p, min_periods=p).mean()
+    d["vavg"] = d.volume.rolling(20, min_periods=5).mean()
+    return d
+
+
+def find_pivots(df: pd.DataFrame, left: int = 3, right: int = 3):
+    h, l, n = df.high.values, df.low.values, len(df)
+    ph, pl = [], []
+    for i in range(left, n - right):
+        wh, wl = h[i - left:i + right + 1], l[i - left:i + right + 1]
+        if h[i] >= wh.max() and int(np.argmax(wh)) == left:
+            ph.append((i, float(h[i])))
+        if l[i] <= wl.min() and int(np.argmin(wl)) == left:
+            pl.append((i, float(l[i])))
+    return ph, pl
+
+
+# ── support / resistance ────────────────────────────────────
+def build_levels(df, ph, pl, atr_now, style):
+    n, price = len(df), float(df.close.iloc[-1])
+    tol = max(style["sr_tol_atr"] * atr_now, price * 0.003)
+    pts = sorted([(p, i, "H") for i, p in ph] + [(p, i, "L") for i, p in pl])
+    clusters = []
+    for p, i, k in pts:
+        if clusters and abs(p - float(np.mean([x[0] for x in clusters[-1]]))) <= tol:
+            clusters[-1].append((p, i, k))
+        else:
+            clusters.append([(p, i, k)])
+    raw = []
+    for cl in clusters:
+        if len(cl) < style["sr_min_touches"]:
+            continue
+        prices, idxs = [x[0] for x in cl], [x[1] for x in cl]
+        lvl = float(np.median(prices))
+        raw.append({"price": round(lvl, 2), "touches": len(cl), "first": int(min(idxs)), "last": int(max(idxs)),
+                    "flip": len({x[2] for x in cl}) == 2,
+                    "score": round(sum(0.5 + 0.5 * (i / max(1, n - 1)) for i in idxs), 2),
+                    "dist_pct": round((lvl - price) / price * 100, 2), "dist_atr": round((lvl - price) / atr_now, 2) if atr_now else None})
+    above = sorted([x for x in raw if x["price"] > price], key=lambda x: x["price"])[:5]
+    below = sorted([x for x in raw if x["price"] <= price], key=lambda x: -x["price"])[:5]
+    for k, x in enumerate(above, 1):
+        x.update({"id": f"R{k}", "kind": "resistance"})
+    for k, x in enumerate(below, 1):
+        x.update({"id": f"S{k}", "kind": "support"})
+    return below + above
+
+
+# ── supply & demand zones ───────────────────────────────────
+def _zone_quality(dep, impa, base_n, thick_atr, tests, vr, bos, aligned):
+    pts = 30 * min(1.0, dep / (impa * 2.5))
+    pts += {1: 15, 2: 12, 3: 8}.get(base_n, 5)
+    pts += 20 if tests == 0 else 10 if tests == 1 else 4 if tests == 2 else 0
+    if vr is not None and np.isfinite(vr):
+        pts += 10 if vr >= 2 else 7 if vr >= 1.5 else 4 if vr >= 1.2 else 0
+    pts += 10 if thick_atr <= 0.8 else 7 if thick_atr <= 1.4 else 4 if thick_atr <= 2.0 else 1
+    pts += 8 if bos else 0
+    pts += 7 if aligned else 0
+    return int(round(min(100, pts)))
+
+
+def detect_zones(df: pd.DataFrame, style: dict) -> list:
+    """Base -> impulse zones. Demand = base followed by a strong up move; supply = base followed by a strong down move.
+    Distal line = far edge of the base (wick), proximal line = near edge (body). Status is evaluated candle by candle."""
+    n = len(df)
+    if n < 40:
+        return []
+    o, h, l, c, v = (df[k].values for k in ("open", "high", "low", "close", "volume"))
+    atr, vavg, sma50, rng = df.atr.values, df.vavg.values, df.sma50.values, df.high.values - df.low.values
+    bmax, brng, impa, W = int(style["base_max"]), float(style["base_range_atr"]), float(style["impulse_atr"]), int(style["impulse_window"])
+    raw = []
+    for k in range(max(5, n - int(style["lookback"]), bmax + 1), n):
+        e = k - 1
+        a = atr[e]
+        if not np.isfinite(a) or a <= 0 or abs(c[k] - o[k]) < 0.55 * a:
+            continue
+        m, j = 0, e
+        while j >= 0 and m < bmax and rng[j] <= brng * a:
+            m += 1
+            j -= 1
+        if m == 0:
+            continue
+        s, w_end, up = e - m + 1, min(n - 1, k + W - 1), c[k] > o[k]
+        if up:
+            dep = (c[k:w_end + 1].max() - h[s:e + 1].max()) / a
+            distal, proximal = float(l[s:e + 1].min()), float(np.maximum(o[s:e + 1], c[s:e + 1]).max())
+            proximal = max(proximal, distal + 0.1 * a)
+            imp_end = k + int(np.argmax(c[k:w_end + 1]))
+        else:
+            dep = (l[s:e + 1].min() - c[k:w_end + 1].min()) / a
+            distal, proximal = float(h[s:e + 1].max()), float(np.minimum(o[s:e + 1], c[s:e + 1]).min())
+            proximal = min(proximal, distal - 0.1 * a)
+            imp_end = k + int(np.argmin(c[k:w_end + 1]))
+        thick = abs(proximal - distal)
+        if dep < impa or thick > float(style["max_zone_atr"]) * a:
+            continue
+        zt = "demand" if up else "supply"
+        lin = (c[s - 1] - c[s - 4]) / a if s >= 4 else 0.0
+        if up:
+            pattern = "RBR" if lin > 0.8 else "DBR" if lin < -0.8 else "BR"
+        else:
+            pattern = "RBD" if lin > 0.8 else "DBD" if lin < -0.8 else "BD"
+        vr = float(v[k:w_end + 1].max() / vavg[e]) if np.isfinite(vavg[e]) and vavg[e] > 0 else None
+        pw = slice(max(0, s - 15), s)
+        bos = bool(s > 0 and ((up and c[imp_end] > h[pw].max()) or ((not up) and c[imp_end] < l[pw].min())))
+        aligned = bool(s > 0 and np.isfinite(sma50[s - 1]) and ((up and c[s - 1] > sma50[s - 1]) or ((not up) and c[s - 1] < sma50[s - 1])))
+        # walk forward: touches and break
+        tests, in_touch, broken = 0, False, False
+        for t in range(imp_end + 1, n):
+            if up:
+                if c[t] < distal:
+                    broken = True
+                    break
+                inside = l[t] <= proximal
+            else:
+                if c[t] > distal:
+                    broken = True
+                    break
+                inside = h[t] >= proximal
+            if inside and not in_touch:
+                tests += 1
+            in_touch = inside
+        if broken:
+            continue
+        tests_prior = tests - 1 if in_touch else tests
+        status = "IN ZONE" if in_touch else "FRESH" if tests == 0 else f"TESTED {tests}x"
+        q = _zone_quality(dep, impa, m, thick / a, tests_prior, vr, bos, aligned)
+        top, bottom = max(proximal, distal), min(proximal, distal)
+        raw.append({"type": zt, "pattern": pattern, "s": int(s), "e": int(e), "imp": int(imp_end), "proximal": round(proximal, 2),
+                    "distal": round(distal, 2), "top": round(top, 2), "bottom": round(bottom, 2), "thickness_atr": round(thick / a, 2),
+                    "base_n": int(m), "dep_atr": round(float(dep), 2), "vol_ratio": _f(vr), "bos": bos, "aligned": aligned,
+                    "tests": int(tests_prior), "status": status, "in_zone": bool(in_touch), "quality": q,
+                    "formed": str(df.index[e])[:10], "age": int(n - 1 - imp_end)})
+    raw = [z for z in raw if z["quality"] >= style["min_quality"] and not (style["fresh_only"] and z["tests"] > 0)]
+    kept = []
+    for z in sorted(raw, key=lambda x: -x["quality"]):                         # drop overlapping duplicates, strongest wins
+        dup = False
+        for k in kept:
+            if k["type"] != z["type"]:
+                continue
+            inter = min(k["top"], z["top"]) - max(k["bottom"], z["bottom"])
+            if inter > 0.5 * min(k["top"] - k["bottom"], z["top"] - z["bottom"]):
+                dup = True
+                break
+        if not dup:
+            kept.append(z)
+    price, a_now = float(c[-1]), float(atr[-1])
+    for z in kept:
+        if z["in_zone"] or z["bottom"] <= price <= z["top"]:
+            d = 0.0
+        elif z["type"] == "demand":
+            d = price - z["top"]
+        else:
+            d = z["bottom"] - price
+        z["dist_pct"] = round(d / price * 100, 2)
+        z["dist_atr"] = round(d / a_now, 2) if a_now else None
+    out = []
+    for zt, prefix in (("demand", "DZ"), ("supply", "SZ")):
+        zs = sorted([z for z in kept if z["type"] == zt], key=lambda x: (x["dist_atr"] if x["dist_atr"] is not None else 99, -x["quality"]))
+        for k, z in enumerate(zs, 1):
+            z["id"] = f"{prefix}{k}"
+            out.append(z)
+    return out
+
+
+# ── trendlines ──────────────────────────────────────────────
+def detect_trendlines(df, ph, pl, atr_now):
+    n = len(df)
+    c = df.close.values
+    tol = 0.45 * atr_now
+    out = []
+    for kind, piv in (("support", pl), ("resistance", ph)):
+        cand, best = piv[-7:], None
+        for a_i in range(len(cand) - 1):
+            for b_i in range(a_i + 1, len(cand)):
+                (i0, p0), (i1, p1) = cand[a_i], cand[b_i]
+                if i1 - i0 < 8:
+                    continue
+                slope = (p1 - p0) / (i1 - i0)
+                if (kind == "support" and slope <= 0) or (kind == "resistance" and slope >= 0):
+                    continue
+                ys = p0 + slope * (np.arange(i0, n) - i0)
+                if (kind == "support" and (c[i0:] < ys - tol).any()) or (kind == "resistance" and (c[i0:] > ys + tol).any()):
+                    continue
+                touches = sum(1 for (i, p) in cand if i >= i0 and abs(p - (p0 + slope * (i - i0))) <= tol)
+                if touches < 3:
+                    continue
+                score = touches * 2 + (i1 / n) * 3
+                if best is None or score > best[0]:
+                    best = (score, i0, p0, slope, touches)
+        if best:
+            _, i0, p0, slope, touches = best
+            now = p0 + slope * (n - 1 - i0)
+            out.append({"kind": kind, "i0": int(i0), "p0": round(p0, 2), "i1": int(n - 1), "p1": round(now, 2),
+                        "touches": int(touches), "slope_pct_per_bar": round(slope / float(c[-1]) * 100, 3),
+                        "dist_pct": round((float(c[-1]) - now) / float(c[-1]) * 100, 2)})
+    for k, t in enumerate(out, 1):
+        t["id"] = f"TL{k}"
+    return out
+
+
+# ── events, candle signals, structure ───────────────────────
+def detect_events(df, levels, zones, atr_now):
+    n = len(df)
+    c, l, v, vavg = df.close.values, df.low.values, df.volume.values, df.vavg.values
+    ev = []
+    for lv in levels:
+        p = lv["price"]
+        for t in range(max(1, n - 6), n):
+            up, dn = c[t - 1] <= p < c[t], c[t - 1] >= p > c[t]
+            if not (up or dn):
+                continue
+            vr = float(v[t] / vavg[t - 1]) if np.isfinite(vavg[t - 1]) and vavg[t - 1] > 0 else None
+            retest = None
+            if up:
+                retest = any(l[u] <= p + 0.5 * atr_now and c[u] >= p for u in range(t + 1, n)) if t < n - 1 else None
+            ev.append({"type": "BREAKOUT" if up else "BREAKDOWN", "level_id": lv["id"], "price": p, "i": int(t),
+                       "date": str(df.index[t])[:10], "vol_ratio": _f(vr), "retest_held": retest if up else None})
+    for z in zones:
+        if z["in_zone"]:
+            ev.append({"type": "PRICE_IN_" + z["type"].upper() + "_ZONE", "zone_id": z["id"], "i": n - 1, "date": str(df.index[-1])[:10]})
+    return ev
+
+
+def candle_signals(df):
+    o, h, l, c = (df[k].values for k in ("open", "high", "low", "close"))
+    n, out = len(df), []
+    for i in range(max(1, n - 3), n):
+        body, rng = abs(c[i] - o[i]), h[i] - l[i]
+        if rng <= 0:
+            continue
+        lw, uw = min(o[i], c[i]) - l[i], h[i] - max(o[i], c[i])
+        if c[i - 1] < o[i - 1] and c[i] > o[i] and o[i] <= c[i - 1] and c[i] >= o[i - 1]:
+            out.append({"type": "BULLISH_ENGULFING", "i": i, "bias": "bull"})
+        if c[i - 1] > o[i - 1] and c[i] < o[i] and o[i] >= c[i - 1] and c[i] <= o[i - 1]:
+            out.append({"type": "BEARISH_ENGULFING", "i": i, "bias": "bear"})
+        if lw >= 2 * max(body, 1e-9) and uw <= 0.35 * rng and body / rng < 0.4:
+            out.append({"type": "HAMMER_REJECTION", "i": i, "bias": "bull"})
+        if uw >= 2 * max(body, 1e-9) and lw <= 0.35 * rng and body / rng < 0.4:
+            out.append({"type": "SHOOTING_STAR_REJECTION", "i": i, "bias": "bear"})
+        if h[i] < h[i - 1] and l[i] > l[i - 1]:
+            out.append({"type": "INSIDE_BAR", "i": i, "bias": "neutral"})
+    for s in out:
+        s["date"] = str(df.index[s["i"]])[:10]
+    return out
+
+
+def market_structure(ph, pl):
+    if len(ph) >= 2 and len(pl) >= 2:
+        hh, hl = ph[-1][1] > ph[-2][1], pl[-1][1] > pl[-2][1]
+        if hh and hl:
+            return "UPTREND (higher highs, higher lows)"
+        if (not hh) and (not hl):
+            return "DOWNTREND (lower highs, lower lows)"
+        return "RANGE / TRANSITION"
+    return "UNDEFINED"
+
+
+def analyze_market(df_raw: pd.DataFrame, style: dict) -> dict:
+    """Everything the engine can say about one timeframe, with exact candle indices and prices."""
+    df = prepare(df_raw)
+    n = len(df)
+    price, atr_now = float(df.close.iloc[-1]), float(df.atr.iloc[-1]) if np.isfinite(df.atr.iloc[-1]) else float(df.close.iloc[-1]) * 0.02
+    ph, pl = find_pivots(df, int(style["pivot_left"]), int(style["pivot_right"]))
+    levels = build_levels(df, ph, pl, atr_now, style)
+    zones = detect_zones(df, style)
+    lines = detect_trendlines(df, ph, pl, atr_now)
+    last = df.iloc[-1]
+    vr20 = float(last.volume / last.vavg) if np.isfinite(last.vavg) and last.vavg > 0 else None
+    sma = {p: _f(last[f"sma{p}"]) for p in (20, 50, 200)}
+    s50, s50p = df.sma50.iloc[-1], df.sma50.iloc[-6] if n > 6 else np.nan
+    det = {
+        "n": n, "asof": str(df.index[-1])[:10], "close": round(price, 2), "atr": round(atr_now, 2), "atr_pct": round(atr_now / price * 100, 2),
+        "day_chg_pct": round((price / float(df.close.iloc[-2]) - 1) * 100, 2) if n > 1 else 0.0,
+        "structure": market_structure(ph, pl), "rsi": _f(last.rsi, 1), "sma": sma,
+        "ma_state": ("ABOVE 20/50" if sma[20] and sma[50] and price > sma[20] and price > sma[50] else
+                     "BELOW 20/50" if sma[20] and sma[50] and price < sma[20] and price < sma[50] else "MIXED"),
+        "sma50_slope_atr": _f((s50 - s50p) / atr_now) if np.isfinite(s50) and np.isfinite(s50p) else None,
+        "volume": {"last": int(last.volume), "ratio20": _f(vr20), "ratio5": _f(df.volume.tail(5).mean() / last.vavg) if np.isfinite(last.vavg) and last.vavg > 0 else None},
+        "roc5_pct": _f((price / float(df.close.iloc[-6]) - 1) * 100) if n > 6 else None,
+        "roc20_pct": _f((price / float(df.close.iloc[-21]) - 1) * 100) if n > 21 else None,
+        "refs": {"pdh": _f(df.high.iloc[-2]) if n > 1 else None, "pdl": _f(df.low.iloc[-2]) if n > 1 else None,
+                 "hi52": _f(df.high.tail(252).max()), "lo52": _f(df.low.tail(252).min()),
+                 "hi20": _f(df.high.tail(20).max()), "lo20": _f(df.low.tail(20).min())},
+        "swings": {"highs": [{"i": i, "date": str(df.index[i])[:10], "price": round(p, 2)} for i, p in ph[-4:]],
+                   "lows": [{"i": i, "date": str(df.index[i])[:10], "price": round(p, 2)} for i, p in pl[-4:]]},
+        "zones": zones, "levels": levels, "trendlines": lines,
+        "events": detect_events(df, levels, zones, atr_now), "candles": candle_signals(df),
     }
-    return save_setup_to_memory(setup, source_text=rule_text, tags=tags, activate=True)
+    return det
 
 
-def search_memory(query, top_k=5):
-    idx = get_pinecone_index()
-    if not idx:
-        return []
+def add_htf_confluence(det_d: dict, det_w: dict | None):
+    """Mark daily zones that sit inside (or overlap) a weekly zone of the same type."""
+    for z in det_d["zones"]:
+        z["htf"] = False
+        if not det_w:
+            continue
+        for w in det_w["zones"]:
+            if w["type"] == z["type"] and min(z["top"], w["top"]) - max(z["bottom"], w["bottom"]) > 0:
+                z["htf"] = True
+                break
+
+
+# ── learning your style from labelled zones ─────────────────
+def zone_features(z: dict) -> dict:
+    keys = ("type", "pattern", "thickness_atr", "base_n", "dep_atr", "vol_ratio", "quality", "tests", "bos", "aligned", "age")
+    return {k: z.get(k) for k in keys}
+
+
+def calibrate_style(approved: list, rejected: list):
+    """Turn zones you approved / rejected into engine parameters. Needs at least 3 approved zones."""
+    if len(approved) < 3:
+        return None, ["Approve at least 3 zones so Arka has something to learn from."]
+    arr = lambda key, src: np.array([x[key] for x in src if x.get(key) is not None], dtype=float)
+    notes, params = [], {}
+    th, bn, dp, ql = arr("thickness_atr", approved), arr("base_n", approved), arr("dep_atr", approved), arr("quality", approved)
+    if len(th):
+        params["max_zone_atr"] = float(np.clip(round(np.percentile(th, 80) * 1.15, 2), 0.8, 3.5))
+        notes.append(f"Your zones are typically {np.median(th):.2f} ATR thick (80th percentile {np.percentile(th, 80):.2f}) -> max zone thickness {params['max_zone_atr']} ATR.")
+    if len(bn):
+        params["base_max"] = int(np.clip(math.ceil(np.percentile(bn, 80)), 1, 6))
+        notes.append(f"Bases of {int(np.median(bn))} candle(s) are typical for you -> allow up to {params['base_max']}.")
+    if len(dp):
+        params["impulse_atr"] = float(np.clip(round(np.percentile(dp, 20) * 0.9, 2), 1.0, 4.0))
+        notes.append(f"You favour moves of {np.median(dp):.1f} ATR away from the base -> minimum impulse {params['impulse_atr']} ATR.")
+    if len(ql):
+        params["min_quality"] = int(np.clip(round(np.percentile(ql, 20)) - 5, 25, 70))
+        notes.append(f"Approved zones scored {int(np.percentile(ql, 20))}-{int(np.percentile(ql, 80))} -> hide anything below {params['min_quality']}.")
+    fresh = np.mean([1.0 if x.get("tests", 0) == 0 else 0.0 for x in approved])
+    if len(approved) >= 5 and fresh >= 0.8:
+        params["fresh_only"] = True
+        notes.append(f"{fresh:.0%} of your approved zones were untested -> showing fresh zones only.")
+    if rejected:
+        rth = arr("thickness_atr", rejected)
+        if len(rth) and len(th) and np.median(rth) > np.median(th) * 1.3:
+            notes.append(f"You rejected thicker zones (median {np.median(rth):.2f} ATR) than you approved ({np.median(th):.2f}).")
+        rq = arr("quality", rejected)
+        if len(rq) and len(ql) and np.median(rq) < np.median(ql) - 10:
+            notes.append("Rejected zones scored clearly lower than approved ones: the quality score matches your taste.")
+    return params, notes
+
+
+# ── deterministic plan + score (works with no AI at all) ────
+def deterministic_plan(det: dict):
+    price, atr = det["close"], det["atr"]
+    zones, levels = det["zones"], det["levels"]
+    trend_up = det["structure"].startswith("UPTREND")
+    trend_dn = det["structure"].startswith("DOWNTREND")
+
+    def pick(zt):
+        c = [z for z in zones if z["type"] == zt and z["dist_atr"] is not None and z["dist_atr"] <= 2.5]
+        if not c:
+            return None
+        bonus = lambda z: z["quality"] - 6 * z["dist_atr"] + (8 if (zt == "demand" and trend_up) or (zt == "supply" and trend_dn) else 0) + (6 if z.get("htf") else 0)
+        return max(c, key=bonus)
+
+    zl, zs = pick("demand"), pick("supply")
+    if not zl and not zs:
+        return None
+    choose_long = zl and (not zs or (zl["quality"] - 6 * zl["dist_atr"] + (8 if trend_up else 0)) >= (zs["quality"] - 6 * zs["dist_atr"] + (8 if trend_dn else 0)))
+    z = zl if choose_long else zs
+    long = bool(choose_long)
+    ref = min(max(price, z["bottom"]), z["top"]) if z["in_zone"] else (z["top"] if long else z["bottom"])
+    stop = round(z["distal"] - 0.25 * atr, 2) if long else round(z["distal"] + 0.25 * atr, 2)
+    risk = abs(ref - stop)
+    if risk <= 0:
+        return None
+    cands = []
+    for lv in levels:
+        if (long and lv["price"] > ref + risk) or ((not long) and lv["price"] < ref - risk):
+            cands.append((lv["price"], lv["id"], "resistance" if long else "support"))
+    for oz in zones:
+        if long and oz["type"] == "supply" and oz["bottom"] > ref + risk:
+            cands.append((oz["bottom"], oz["id"], "supply zone"))
+        if (not long) and oz["type"] == "demand" and oz["top"] < ref - risk:
+            cands.append((oz["top"], oz["id"], "demand zone"))
+    cands.sort(key=lambda x: x[0] if long else -x[0])
+    targets = [{"price": round(p, 2), "ref": r, "reason": f"Next {k}", "rr": round(abs(p - ref) / risk, 2)} for p, r, k in cands[:3]]
+    for mult in (2, 3):
+        if len(targets) < 2:
+            p = ref + mult * risk if long else ref - mult * risk
+            targets.append({"price": round(p, 2), "ref": f"{mult}R", "reason": f"{mult}R projection (no level found)", "rr": float(mult)})
+    return {"direction": "LONG" if long else "SHORT", "ref_zone": z["id"], "entry_low": z["bottom"],
+            "entry_high": z["top"], "entry_ref": round(ref, 2), "stop": stop, "stop_reason": f"Beyond {z['id']} distal line ({z['distal']:.2f}) minus 0.25 ATR",
+            "targets": targets[:3], "counter_trend": bool((long and trend_dn) or ((not long) and trend_up)), "source": "engine"}
+
+
+def engine_score(det: dict, plan: dict | None) -> int:
+    if not plan:
+        return 20 if det["structure"] == "RANGE / TRANSITION" else 28
+    z = next((x for x in det["zones"] if x["id"] == plan["ref_zone"]), None)
+    if not z:
+        return 25
+    long = plan["direction"] == "LONG"
+    proximity = max(0.0, 100 - (z["dist_atr"] or 0) * 35)
+    trend = 15 if plan["counter_trend"] else (100 if det["structure"].startswith("UPTREND" if long else "DOWNTREND") else 55)
+    htf = 100 if z.get("htf") else 40
+    want = "bull" if long else "bear"
+    sig = any(s["bias"] == want and s["i"] >= det["n"] - 2 for s in det["candles"])
+    vol = (det["volume"]["ratio20"] or 0) >= 1.2
+    confirm = 100 if (sig and vol) else 65 if sig else 40 if vol else 20
+    return int(round(0.40 * z["quality"] + 0.20 * proximity + 0.15 * trend + 0.10 * htf + 0.15 * confirm))
+
+
+def grade_for(score: int) -> str:
+    return "A+" if score >= 85 else "A" if score >= 72 else "B" if score >= 58 else "C" if score >= 45 else "D"
+
+
+def position_size(plan: dict | None, risk_amount: float) -> dict:
+    if not plan or risk_amount <= 0:
+        return {}
+    per_share = abs(plan["entry_ref"] - plan["stop"])
+    if per_share <= 0:
+        return {}
+    qty = int(risk_amount // per_share)
+    return {"risk_amount": risk_amount, "risk_per_share": round(per_share, 2), "qty": qty,
+            "capital": round(qty * plan["entry_ref"], 2)}
+  # ══════════════════════════════════════════════════════════
+# 5. WHAT TO DRAW  +  CHARTS
+# ══════════════════════════════════════════════════════════
+def build_spec(det: dict, draw: dict | None, plan: dict | None) -> dict:
+    """Pick which detections go on the chart. `draw` holds IDs chosen by the AI; without it the engine picks the best ones."""
+    zid = set((draw or {}).get("zones", []))
+    lid = set((draw or {}).get("levels", []))
+    tid = set((draw or {}).get("trendlines", []))
+    if plan:
+        zid.add(plan.get("ref_zone"))
+        for t in plan.get("targets", []):
+            (zid if str(t.get("ref", "")).startswith(("DZ", "SZ")) else lid).add(t.get("ref"))
+    if not zid:
+        for zt in ("demand", "supply"):
+            zid |= {z["id"] for z in sorted([z for z in det["zones"] if z["type"] == zt], key=lambda x: (x["dist_atr"] or 99))[:3]}
+    if not lid:
+        near = sorted(det["levels"], key=lambda x: abs(x["dist_atr"] or 99))[:5]
+        lid = {x["id"] for x in near}
+    if not tid:
+        tid = {x["id"] for x in det["trendlines"]}
+    markers = [{"i": e["i"], "price": e["price"], "dir": "up" if e["type"] == "BREAKOUT" else "down", "label": e["type"].title()}
+               for e in det["events"] if e["type"] in ("BREAKOUT", "BREAKDOWN")]
+    return {"zones": [z for z in det["zones"] if z["id"] in zid], "levels": [x for x in det["levels"] if x["id"] in lid],
+            "lines": [x for x in det["trendlines"] if x["id"] in tid], "markers": markers, "candles": det["candles"], "plan": plan}
+
+
+def _rgba(hex_color: str, a: float) -> str:
+    c = hex_color.lstrip("#")
+    return f"rgba({int(c[0:2], 16)},{int(c[2:4], 16)},{int(c[4:6], 16)},{a})"
+
+
+def _date_ticks(index, start, n, count=8):
+    pos = list(range(start, n, max(1, (n - start) // count)))
+    return pos, [str(index[p])[5:10] if (n - start) < 70 else str(index[p])[2:10] for p in pos]
+
+
+def fig_plotly(df: pd.DataFrame, spec: dict, window: int = 120, show: dict | None = None):
+    """Interactive chart: candles, MAs, volume, RSI, zones, levels, trendlines and the trade plan. Zoom, pan, hover."""
+    if not HAS_PLOTLY:
+        return None
+    show = {"zones": True, "levels": True, "lines": True, "plan": True, "mas": True, "markers": True, **(show or {})}
+    d = prepare(df)
+    n = len(d)
+    start = max(0, n - window)
+    w = d.iloc[start:]
+    xs = list(range(start, n))
+    ext = max(8, int(len(w) * 0.14))
+    xr = n + ext
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.018, row_heights=[0.68, 0.13, 0.19])
+    dates = [str(i)[:10] for i in w.index]
+    fig.add_trace(go.Candlestick(x=xs, open=w.open, high=w.high, low=w.low, close=w.close, name="Price", text=dates, hoverinfo="text+y",
+                                 increasing=dict(line=dict(color=GREEN), fillcolor=GREEN), decreasing=dict(line=dict(color=RED), fillcolor=RED),
+                                 showlegend=False), row=1, col=1)
+    if show["mas"]:
+        for col, name, color in (("sma20", "SMA 20", AMBER), ("sma50", "SMA 50", CYAN), ("sma200", "SMA 200", PURPLE)):
+            if w[col].notna().any():
+                fig.add_trace(go.Scatter(x=xs, y=w[col], mode="lines", name=name, line=dict(color=color, width=1.1), opacity=.8), row=1, col=1)
+    fig.add_trace(go.Bar(x=xs, y=w.volume, marker_color=[_rgba(GREEN if c >= o else RED, .45) for o, c in zip(w.open, w.close)],
+                         name="Volume", showlegend=False), row=2, col=1)
+    fig.add_trace(go.Scatter(x=xs, y=w.rsi, mode="lines", name="RSI 14", line=dict(color=AMBER, width=1.3), showlegend=False), row=3, col=1)
+    for lvl in (30, 70):
+        fig.add_shape(type="line", x0=start, x1=xr, y0=lvl, y1=lvl, line=dict(color="#3a3a3a", width=1, dash="dot"), row=3, col=1)
+
+    ys = [float(w.low.min()), float(w.high.max())]
+    if show["zones"]:
+        for z in spec["zones"]:
+            col = GREEN if z["type"] == "demand" else RED
+            x0 = max(z["s"], start)
+            fig.add_shape(type="rect", x0=x0, x1=xr, y0=z["bottom"], y1=z["top"], fillcolor=_rgba(col, .15), line=dict(color=_rgba(col, .9), width=1),
+                          layer="below", row=1, col=1)
+            fig.add_annotation(x=x0, y=z["top"] if z["type"] == "supply" else z["bottom"], xanchor="left", yanchor="bottom" if z["type"] == "supply" else "top",
+                               text=f"<b>{z['id']}</b> {z['pattern']} · Q{z['quality']} · {z['status']}", showarrow=False, font=dict(size=10, color=col), row=1, col=1)
+            if z["top"] >= ys[0] * .8 and z["bottom"] <= ys[1] * 1.2:
+                ys += [z["top"], z["bottom"]]
+    if show["levels"]:
+        for lv in spec["levels"]:
+            col = GREEN if lv["kind"] == "support" else RED
+            fig.add_shape(type="line", x0=start, x1=xr, y0=lv["price"], y1=lv["price"], line=dict(color=_rgba(col, .75), width=1, dash="dot"), row=1, col=1)
+            fig.add_annotation(x=xr, y=lv["price"], xanchor="right", yanchor="bottom", showarrow=False, font=dict(size=9, color=col),
+                               text=f"{lv['id']} {lv['price']:,.2f} ({lv['touches']}x)", row=1, col=1)
+            ys.append(lv["price"])
+    if show["lines"]:
+        for t in spec["lines"]:
+            col = GREEN if t["kind"] == "support" else RED
+            fig.add_trace(go.Scatter(x=[t["i0"], n - 1 + ext // 2], y=[t["p0"], t["p0"] + (t["p1"] - t["p0"]) / max(1, t["i1"] - t["i0"]) * (n - 1 + ext // 2 - t["i0"])],
+                                     mode="lines", name=f"{t['id']} trendline", line=dict(color=col, width=1.6, dash="dash")), row=1, col=1)
+    p = spec.get("plan")
+    if show["plan"] and p:
+        ref, stop = p["entry_ref"], p["stop"]
+        x0, x1 = n - 1, n - 1 + int(ext * .8)
+        fig.add_shape(type="rect", x0=x0, x1=x1, y0=min(ref, stop), y1=max(ref, stop), fillcolor=_rgba(RED, .10), line=dict(width=0), row=1, col=1)
+        t1 = p["targets"][0]["price"] if p["targets"] else ref
+        fig.add_shape(type="rect", x0=x0, x1=x1, y0=min(ref, t1), y1=max(ref, t1), fillcolor=_rgba(GREEN, .10), line=dict(width=0), row=1, col=1)
+        fig.add_shape(type="rect", x0=x0, x1=x1, y0=p["entry_low"], y1=p["entry_high"], fillcolor=_rgba(CYAN, .18), line=dict(color=CYAN, width=1), row=1, col=1)
+        for price, label, col in [(stop, "STOP", RED)] + [(t["price"], f"T{i}", GREEN) for i, t in enumerate(p["targets"], 1)]:
+            fig.add_shape(type="line", x0=x0, x1=x1, y0=price, y1=price, line=dict(color=col, width=1.4), row=1, col=1)
+            fig.add_annotation(x=x1, y=price, xanchor="left", showarrow=False, text=f"<b>{label}</b> {price:,.2f}", font=dict(size=10, color=col), row=1, col=1)
+            ys.append(price)
+        fig.add_annotation(x=x1, y=(p["entry_low"] + p["entry_high"]) / 2, xanchor="left", showarrow=False, font=dict(size=10, color=CYAN),
+                           text=f"<b>ENTRY</b> {p['entry_low']:,.2f}-{p['entry_high']:,.2f}", row=1, col=1)
+    if show["markers"]:
+        mk = [m for m in spec["markers"] if m["i"] >= start]
+        if mk:
+            fig.add_trace(go.Scatter(x=[m["i"] for m in mk], y=[m["price"] for m in mk], mode="markers+text", text=[m["label"] for m in mk],
+                                     textposition="top center", textfont=dict(size=9, color=IVORY), name="Breakouts",
+                                     marker=dict(symbol=["triangle-up" if m["dir"] == "up" else "triangle-down" for m in mk], size=11,
+                                                 color=[GREEN if m["dir"] == "up" else RED for m in mk])), row=1, col=1)
+        cs = [c for c in spec.get("candles", []) if c["i"] >= start and c["type"] != "INSIDE_BAR"]
+        if cs:
+            fig.add_trace(go.Scatter(x=[c["i"] for c in cs], y=[float(d.low.iloc[c["i"]]) * .995 if c["bias"] == "bull" else float(d.high.iloc[c["i"]]) * 1.005 for c in cs],
+                                     mode="markers", name="Candle signals", hovertext=[c["type"].replace("_", " ").title() for c in cs], hoverinfo="text",
+                                     marker=dict(symbol="diamond", size=8, color=[CYAN if c["bias"] == "bull" else AMBER for c in cs])), row=1, col=1)
+    pad = (max(ys) - min(ys)) * 0.06
+    pos, labels = _date_ticks(d.index, start, n)
+    fig.update_layout(height=780, margin=dict(l=10, r=10, t=30, b=10), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                      font=dict(family="Inter, sans-serif", size=11, color=T2), hovermode="x",
+                      legend=dict(orientation="h", y=1.04, x=0, font=dict(size=10)),
+                      hoverlabel=dict(bgcolor=S1, bordercolor=LINE2, font=dict(family="JetBrains Mono, monospace", size=11, color=IVORY)))
+    fig.update_xaxes(showgrid=False, range=[start - 1, xr], rangeslider_visible=False, linecolor=LINE)
+    fig.update_xaxes(tickvals=pos, ticktext=labels, row=3, col=1)
+    fig.update_yaxes(gridcolor="#151515", zeroline=False)
+    fig.update_yaxes(range=[min(ys) - pad, max(ys) + pad], row=1, col=1)
+    fig.update_yaxes(range=[0, 100], row=3, col=1, tickvals=[30, 50, 70])
+    return fig
+
+
+def render_png(df: pd.DataFrame, spec: dict, window: int = 110, title: str = "", dpi: int = 120) -> bytes:
+    """Annotated chart as PNG (download / share, and the image Gemini looks at). Needs only matplotlib."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+    d = prepare(df)
+    n = len(d)
+    start = max(0, n - window)
+    w = d.iloc[start:]
+    m = len(w)
+    ext = max(8, int(m * .16))
+    x = np.arange(m)
+    fig = plt.figure(figsize=(14.5, 7.4), dpi=dpi, facecolor=BG)
+    gs = fig.add_gridspec(2, 1, height_ratios=[4.4, 1], hspace=0.03)
+    ax, axv = fig.add_subplot(gs[0]), fig.add_subplot(gs[1])
+    for a in (ax, axv):
+        a.set_facecolor(BG)
+        for sp in a.spines.values():
+            sp.set_color(LINE2)
+        a.tick_params(colors=T2, labelsize=8)
+    cols = np.where(w.close.values >= w.open.values, GREEN, RED)
+    lo, hi = float(w.low.min()), float(w.high.max())
+    body = np.maximum(np.abs(w.close.values - w.open.values), (hi - lo) * 0.0012)
+    ax.vlines(x, w.low.values, w.high.values, colors=cols, linewidth=1, zorder=2)
+    ax.bar(x, body, bottom=np.minimum(w.open.values, w.close.values), width=.62, color=cols, zorder=3)
+    for col, color in (("sma20", AMBER), ("sma50", CYAN)):
+        if w[col].notna().any():
+            ax.plot(x, w[col].values, color=color, linewidth=1, alpha=.85, zorder=2)
+    ys = [lo, hi]
+    for z in spec["zones"]:
+        col = GREEN if z["type"] == "demand" else RED
+        x0 = max(z["s"], start) - start
+        ax.add_patch(Rectangle((x0, z["bottom"]), m + ext - x0, z["top"] - z["bottom"], facecolor=col, alpha=.16, edgecolor=col, linewidth=1, zorder=1))
+        ax.text(x0 + .3, z["top"] if z["type"] == "supply" else z["bottom"], f"{z['id']} {z['pattern']} Q{z['quality']} {z['status']}", color=col, fontsize=8,
+                fontfamily="monospace", va="bottom" if z["type"] == "supply" else "top", zorder=6)
+        ys += [z["top"], z["bottom"]]
+    for lv in spec["levels"]:
+        col = GREEN if lv["kind"] == "support" else RED
+        ax.hlines(lv["price"], 0, m + ext, colors=col, linestyles=":", linewidth=1, alpha=.8, zorder=1)
+        ax.text(m + ext - .3, lv["price"], f"{lv['id']} {lv['price']:,.2f}", color=col, fontsize=8, ha="right", va="bottom", fontfamily="monospace")
+        ys.append(lv["price"])
+    for t in spec["lines"]:
+        col = GREEN if t["kind"] == "support" else RED
+        slope = (t["p1"] - t["p0"]) / max(1, t["i1"] - t["i0"])
+        xe = n - 1 + ext // 2
+        ax.plot([t["i0"] - start, xe - start], [t["p0"], t["p0"] + slope * (xe - t["i0"])], color=col, linestyle="--", linewidth=1.4, zorder=4)
+    p = spec.get("plan")
+    if p:
+        x0, x1 = m - 1, m - 1 + int(ext * .85)
+        ref, stop = p["entry_ref"], p["stop"]
+        t1 = p["targets"][0]["price"] if p["targets"] else ref
+        ax.add_patch(Rectangle((x0, min(ref, stop)), x1 - x0, abs(ref - stop), facecolor=RED, alpha=.12, linewidth=0, zorder=1))
+        ax.add_patch(Rectangle((x0, min(ref, t1)), x1 - x0, abs(t1 - ref), facecolor=GREEN, alpha=.12, linewidth=0, zorder=1))
+        ax.add_patch(Rectangle((x0, p["entry_low"]), x1 - x0, p["entry_high"] - p["entry_low"], facecolor=CYAN, alpha=.22, edgecolor=CYAN, linewidth=1, zorder=2))
+        ax.text(x1 + .3, (p["entry_low"] + p["entry_high"]) / 2, f"ENTRY {p['entry_low']:,.2f}-{p['entry_high']:,.2f}", color=CYAN, fontsize=8, fontfamily="monospace", va="center")
+        for price, label, col in [(stop, "STOP", RED)] + [(t["price"], f"T{i}", GREEN) for i, t in enumerate(p["targets"], 1)]:
+            ax.hlines(price, x0, x1, colors=col, linewidth=1.4, zorder=3)
+            ax.text(x1 + .3, price, f"{label} {price:,.2f}", color=col, fontsize=8, fontfamily="monospace", va="center")
+            ys.append(price)
+    for mk in spec["markers"]:
+        if mk["i"] >= start:
+            ax.scatter([mk["i"] - start], [mk["price"]], marker="^" if mk["dir"] == "up" else "v", s=70, color=GREEN if mk["dir"] == "up" else RED, zorder=7)
+    pad = (max(ys) - min(ys)) * .06
+    ax.set_ylim(min(ys) - pad, max(ys) + pad)
+    ax.set_xlim(-1, m + ext + 14)
+    ax.grid(axis="y", color="#151515", linewidth=.6)
+    ax.tick_params(labelbottom=False)
+    axv.bar(x, w.volume.values, color=np.where(w.close.values >= w.open.values, GREEN, RED), alpha=.5, width=.62)
+    axv.set_xlim(-1, m + ext + 14)
+    pos = list(range(0, m, max(1, m // 9)))
+    axv.set_xticks(pos)
+    axv.set_xticklabels([str(w.index[i])[2:10] for i in pos], rotation=0, fontsize=8, color=T2)
+    axv.tick_params(labelleft=False)
+    fig.text(0.012, 0.965, title, color=AMBER, fontsize=12, fontweight="bold", fontfamily="monospace")
+    fig.text(0.988, 0.965, "Arka AI · research tool, not advice", color=T3, fontsize=8, ha="right", fontfamily="monospace")
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=dpi, facecolor=BG, bbox_inches=None)
+    plt.close(fig)
+    return buf.getvalue()
+
+
+# ══════════════════════════════════════════════════════════
+# 6. AI: PROMPTS, VALIDATION, ANALYSIS
+# ══════════════════════════════════════════════════════════
+ANALYSIS_SCHEMA = """Return ONLY this JSON object (fill every field; use null / [] when unknown):
+{
+ "verdict": "MATCH | PARTIAL | NO_MATCH | AVOID",
+ "score": 0,
+ "grade": "A+ | A | B | C | D",
+ "bias": "BULLISH | BEARISH | NEUTRAL",
+ "setup_state": "WATCHING | FORMING | READY | TRIGGERED | EXTENDED | INVALIDATED | NOT_APPLICABLE",
+ "headline": "one sentence a trader can act on",
+ "setups": [ {"setup_id": "...", "name": "...", "match_pct": 0, "state": "...",
+              "checks": [ {"rule_id": "R01", "rule_name": "...", "status": "PRESENT | NOT_PRESENT | UNCLEAR",
+                           "confidence": 0, "reason": "exact dates / prices / detection IDs", "refs": ["DZ1"]} ] } ],
+ "my_zones": [ {"id": "DZ1", "role": "ENTRY_ZONE | TARGET | SUPPORT | RESISTANCE | CONTEXT", "matches_my_style": true, "comment": "..."} ],
+ "plan": { "direction": "LONG | SHORT | NONE", "ref_zone": "DZ1", "entry_low": 0, "entry_high": 0, "stop": 0, "stop_reason": "...",
+           "targets": [ {"price": 0, "ref": "SZ1 or R1", "reason": "..."} ], "invalidation": "...", "confirmation_needed": ["..."] },
+ "supports": ["things that agree with MY playbook"],
+ "contradicts": ["things that disagree with MY playbook"],
+ "watch_next": ["what to watch before acting"],
+ "scenarios": { "bull": {"trigger": "...", "path": "...", "level": 0}, "bear": {"trigger": "...", "path": "...", "level": 0},
+                "neutral": {"trigger": "...", "path": "...", "level": 0} },
+ "context": ["optional observations NOT used for the verdict"],
+ "draw": { "zones": ["DZ1"], "levels": ["R1"], "trendlines": ["TL1"] },
+ "narrative": "a clear 150-250 word analysis in plain language"
+}"""
+
+
+def _slim_zone(z):
+    keys = ("id", "type", "pattern", "bottom", "top", "proximal", "distal", "thickness_atr", "base_n", "dep_atr", "vol_ratio", "bos", "aligned",
+            "tests", "status", "quality", "formed", "age", "dist_pct", "dist_atr", "htf", "in_zone")
+    return {k: z.get(k) for k in keys}
+
+
+def _slim_levels(ls):
+    return [{k: x.get(k) for k in ("id", "kind", "price", "touches", "flip", "dist_pct", "dist_atr")} for x in ls]
+
+
+def feedback_summary(items: list) -> dict:
+    ap, rj = [], []
+    for it in items:
+        for lab in it["payload"].get("labels", []):
+            (ap if lab.get("approved") else rj).append(lab.get("features", {}))
+    med = lambda rows, k: _f(np.median([r[k] for r in rows if r.get(k) is not None])) if any(r.get(k) is not None for r in rows) else None
+    return {"approved": len(ap), "rejected": len(rj),
+            "approved_median": {k: med(ap, k) for k in ("thickness_atr", "base_n", "dep_atr", "quality")},
+            "rejected_median": {k: med(rj, k) for k in ("thickness_atr", "base_n", "dep_atr", "quality")},
+            "approved_patterns": sorted({r.get("pattern") for r in ap if r.get("pattern")})}
+
+
+def build_prompt(ticker, det, det_w, style, setups, lessons, feedback, note, df) -> str:
+    setup_json = [{"setup_id": it["item_id"], "name": it["name"], **{k: v for k, v in it["payload"].items() if k not in ("source_name",)}} for it in setups]
+    lesson_json = [{"name": it["name"], **it["payload"]} for it in lessons]
+    market = {k: det[k] for k in ("asof", "close", "atr", "atr_pct", "day_chg_pct", "structure", "rsi", "sma", "ma_state", "sma50_slope_atr", "volume",
+                                  "roc5_pct", "roc20_pct", "refs", "swings")}
+    detections = {"zones": [_slim_zone(z) for z in det["zones"]], "levels": _slim_levels(det["levels"]), "trendlines": det["trendlines"],
+                  "events": det["events"], "candle_signals": det["candles"]}
+    weekly = None
+    if det_w:
+        weekly = {"structure": det_w["structure"], "ma_state": det_w["ma_state"], "rsi": det_w["rsi"], "close": det_w["close"],
+                  "zones": [_slim_zone(z) for z in det_w["zones"][:4]], "levels": _slim_levels(det_w["levels"][:6])}
+    rows = df.tail(70)
+    ohlc = "i,date,o,h,l,c,v\n" + "\n".join(f"{len(df) - len(rows) + k},{str(ix)[:10]},{r.open:.2f},{r.high:.2f},{r.low:.2f},{r.close:.2f},{int(r.volume)}"
+                                            for k, (ix, r) in enumerate(rows.iterrows()))
+    parts = [
+        "TICKER: " + ticker,
+        "== PLAYBOOK: ACTIVE SETUPS (evaluate EACH one separately; rule ids are inside each setup) ==\n" + (json.dumps(setup_json, ensure_ascii=False) if setup_json else "NONE TAUGHT YET"),
+        "== PLAYBOOK: LESSONS (how this trader defines and draws supply / demand zones, lines, entries, stops, targets) ==\n" + (json.dumps(lesson_json, ensure_ascii=False) if lesson_json else "NONE"),
+        "== PLAYBOOK: ZONES THIS TRADER APPROVED OR REJECTED (summary) ==\n" + json.dumps(feedback_summary(feedback), ensure_ascii=False),
+        "== ENGINE STYLE PARAMETERS (how detections below were produced) ==\n" + json.dumps(style),
+        "== MARKET FACTS (daily, computed by Python) ==\n" + json.dumps(market, ensure_ascii=False, default=str),
+        "== DETECTIONS (daily). Choose ONLY from these IDs ==\n" + json.dumps(detections, ensure_ascii=False, default=str),
+        "== WEEKLY CONTEXT ==\n" + (json.dumps(weekly, ensure_ascii=False, default=str) if weekly else "UNAVAILABLE"),
+        "== DAILY OHLC (last 70 candles; i is the candle index used by detections) ==\n" + ohlc,
+        "== TRADER NOTE ==\n" + (note or "None"),
+        ("TASK: Judge this stock ONLY against the trader's playbook. 1) Check every rule of every active setup against the detections and facts. "
+         "2) Say which detected zones are the trader's kind of zone (use the lessons and the approved / rejected summary) and what role each plays. "
+         "3) Build a trade plan using ONLY detected zones and levels (entry zone inside a zone, stop beyond its distal line, targets at the next opposing zone or level); "
+         "use direction NONE if nothing qualifies. 4) List what supports and what contradicts the playbook, and what to watch next. "
+         "5) Give bull / bear / neutral scenarios with exact trigger prices. 6) Choose which detection IDs to draw. The attached image shows the detections. "
+         "If no setup is taught, judge against the lessons and approved zones and say so in the headline."),
+        ANALYSIS_SCHEMA,
+    ]
+    return "\n\n".join(parts)
+
+
+def _clean_list(x, cap=6):
+    return [str(i)[:400] for i in (x if isinstance(x, list) else [])[:cap] if str(i).strip()]
+
+
+def validate_ai(ai: dict, det: dict, price: float):
+    """Coerce the model output to something safe to render and draw. Unknown IDs and impossible plans are dropped."""
+    zid, lid, tid = {z["id"] for z in det["zones"]}, {x["id"] for x in det["levels"]}, {x["id"] for x in det["trendlines"]}
+    out = {}
+    out["verdict"] = ai.get("verdict") if ai.get("verdict") in ("MATCH", "PARTIAL", "NO_MATCH", "AVOID") else "PARTIAL"
     try:
-        emb = get_embedding(query)
-        if not emb:
-            return []
-        result = idx.query(vector=emb, top_k=top_k, include_metadata=True)
-        out = []
-        for match in result.matches:
-            meta = match.metadata or {}
-            out.append({
-                "id": match.id,
-                "score": match.score,
-                "rule_name": meta.get("setup_name", meta.get("rule_name", "")),
-                "rule_text": meta.get("source_text", meta.get("rule_text", "")),
-                "memory_kind": meta.get("memory_kind", "legacy"),
-            })
-        return out
-    except Exception as exc:
-        st.error(f"Search error: {exc}")
-        return []
+        out["score"] = int(max(0, min(100, round(float(ai.get("score", 0))))))
+    except Exception:
+        out["score"] = 0
+    out["grade"] = ai.get("grade") if ai.get("grade") in ("A+", "A", "B", "C", "D") else grade_for(out["score"])
+    out["bias"] = ai.get("bias") if ai.get("bias") in ("BULLISH", "BEARISH", "NEUTRAL") else "NEUTRAL"
+    out["setup_state"] = str(ai.get("setup_state", "WATCHING"))[:30]
+    out["headline"] = str(ai.get("headline", ""))[:400]
+    setups = []
+    for s in ai.get("setups", []) if isinstance(ai.get("setups"), list) else []:
+        checks = []
+        for c in s.get("checks", []) if isinstance(s.get("checks"), list) else []:
+            st_ = c.get("status") if c.get("status") in ("PRESENT", "NOT_PRESENT", "UNCLEAR") else "UNCLEAR"
+            try:
+                conf = int(max(0, min(100, float(c.get("confidence", 0)))))
+            except Exception:
+                conf = 0
+            checks.append({"rule_id": str(c.get("rule_id", ""))[:12], "rule_name": str(c.get("rule_name", ""))[:140], "status": st_, "confidence": conf,
+                           "reason": str(c.get("reason", ""))[:500], "refs": [r for r in c.get("refs", []) if r in zid | lid | tid] if isinstance(c.get("refs"), list) else []})
+        try:
+            mp = int(max(0, min(100, float(s.get("match_pct", 0)))))
+        except Exception:
+            mp = 0
+        setups.append({"setup_id": str(s.get("setup_id", "")), "name": str(s.get("name", "Setup"))[:120], "match_pct": mp, "state": str(s.get("state", ""))[:30], "checks": checks})
+    out["setups"] = setups
+    out["my_zones"] = [{"id": z.get("id"), "role": str(z.get("role", "CONTEXT"))[:20], "matches_my_style": bool(z.get("matches_my_style")), "comment": str(z.get("comment", ""))[:300]}
+                       for z in ai.get("my_zones", []) if isinstance(z, dict) and z.get("id") in zid | lid]
+    for k in ("supports", "contradicts", "watch_next", "context"):
+        out[k] = _clean_list(ai.get(k))
+    sc = ai.get("scenarios") if isinstance(ai.get("scenarios"), dict) else {}
+    out["scenarios"] = {k: {kk: (sc.get(k, {}) or {}).get(kk) for kk in ("trigger", "path", "level")} for k in ("bull", "bear", "neutral")}
+    dr = ai.get("draw") if isinstance(ai.get("draw"), dict) else {}
+    out["draw"] = {"zones": [i for i in dr.get("zones", []) if i in zid], "levels": [i for i in dr.get("levels", []) if i in lid],
+                   "trendlines": [i for i in dr.get("trendlines", []) if i in tid]}
+    out["narrative"] = str(ai.get("narrative", ""))[:3000]
+    # plan
+    p, plan, atr = ai.get("plan") if isinstance(ai.get("plan"), dict) else {}, None, det["atr"]
+    direction = p.get("direction")
+    out["no_trade"] = direction == "NONE"
+    if direction in ("LONG", "SHORT"):
+        try:
+            lo, hi, stop = float(p["entry_low"]), float(p["entry_high"]), float(p["stop"])
+            lo, hi = min(lo, hi), max(lo, hi)
+            ref = min(max(price, lo), hi) if lo <= price <= hi else (hi if direction == "LONG" and price > hi else lo if direction == "SHORT" and price < lo else (hi if price > hi else lo))
+            long = direction == "LONG"
+            targets = []
+            for t in p.get("targets", [])[:3]:
+                tp = float(t["price"])
+                if (long and tp > ref) or ((not long) and tp < ref):
+                    targets.append({"price": round(tp, 2), "ref": str(t.get("ref", ""))[:10], "reason": str(t.get("reason", ""))[:200],
+                                    "rr": round(abs(tp - ref) / abs(ref - stop), 2) if ref != stop else 0.0})
+            sane = (stop < ref if long else stop > ref) and targets and 0.6 * price < lo and hi < 1.6 * price and abs(ref - stop) <= 8 * atr
+            if sane:
+                plan = {"direction": direction, "ref_zone": p.get("ref_zone") if p.get("ref_zone") in zid else None, "entry_low": round(lo, 2), "entry_high": round(hi, 2),
+                        "entry_ref": round(ref, 2), "stop": round(stop, 2), "stop_reason": str(p.get("stop_reason", ""))[:300], "targets": targets,
+                        "invalidation": str(p.get("invalidation", ""))[:400], "confirmation_needed": _clean_list(p.get("confirmation_needed"), 5),
+                        "counter_trend": False, "source": "ai"}
+        except Exception:
+            plan = None
+    out["plan"] = plan
+    return out
 
 
-def build_setup_prompt(setup):
-    return json.dumps(
-        {k: v for k, v in setup.items() if k not in {"active", "saved_at"}},
-        ensure_ascii=False,
-        indent=2,
-    )
+def verdict_text(report: dict):
+    ai = report.get("ai")
+    if ai:
+        v = ai["verdict"]
+        return {"MATCH": ("MATCHES YOUR SETUP", GREEN), "PARTIAL": ("PARTIAL MATCH", AMBER), "NO_MATCH": ("NOT YOUR SETUP", T3), "AVOID": ("AVOID", RED)}[v]
+    s = report["score"]
+    return ("ENGINE: STRONG ZONE SETUP", GREEN) if s >= 72 else ("ENGINE: DEVELOPING", AMBER) if s >= 50 else ("ENGINE: NO CLEAR SETUP", T3)
 
 
-# ------------------------- PDF understanding --------------------
-def extract_pdf_text(pdf_file):
+def run_analysis(ticker: str, note: str = "", use_ai: bool = True, window: int = 120) -> dict:
+    t = ticker.upper().strip()
+    daily = fetch_ohlc(t, "1d", "2y")
+    weekly = None
+    try:
+        weekly = fetch_ohlc(t, "1wk", "5y")
+    except Exception:
+        weekly = None
+    style = get_style()
+    det = analyze_market(daily, style)
+    det_w = None
+    if weekly is not None and len(weekly) >= 60:
+        det_w = analyze_market(weekly, dict(style, pivot_left=2, pivot_right=2, lookback=140, base_max=min(3, int(style["base_max"]))))
+    add_htf_confluence(det, det_w)
+    eplan = deterministic_plan(det)
+    report = {"ticker": t, "asof": det["asof"], "det": det, "det_w": det_w, "style": style, "engine_plan": eplan, "engine_score": engine_score(det, eplan),
+              "ai": None, "ai_error": "", "plan": eplan, "score": engine_score(det, eplan), "note": note, "window": window,
+              "n_setups": len(active_items("setup")), "n_lessons": len(active_items("lesson")), "n_labelled": len(active_items("feedback")),
+              "ran_at": datetime.now(IST).strftime("%d %b %Y %H:%M IST"), "df": daily}
+    if use_ai and get_gemini() is not None:
+        try:
+            preview = render_png(daily, build_spec(det, None, eplan), window=110, title=f"{t} · detections (preview for AI)")
+            prompt = build_prompt(t, det, det_w, style, active_items("setup"), active_items("lesson"), active_items("feedback"), note, daily)
+            ai = validate_ai(call_json(prompt, images=[preview]), det, det["close"])
+            report["ai"] = ai
+            report["score"] = ai["score"]
+            report["plan"] = None if ai["no_trade"] else (ai["plan"] or eplan)
+        except Exception as exc:
+            report["ai_error"] = str(exc)
+    report["spec"] = build_spec(det, (report["ai"] or {}).get("draw"), report["plan"])
+    return report
+
+
+def ask_followup(report: dict, question: str) -> str:
+    det, ai = report["det"], report.get("ai") or {}
+    ctx = {"ticker": report["ticker"], "asof": report["asof"], "close": det["close"], "structure": det["structure"], "plan": report.get("plan"),
+           "zones": [_slim_zone(z) for z in det["zones"]], "levels": _slim_levels(det["levels"]), "headline": ai.get("headline"), "narrative": ai.get("narrative"),
+           "supports": ai.get("supports"), "contradicts": ai.get("contradicts")}
+    prompt = ("You are Arka AI. Answer the trader's follow-up question about this analysis. Use ONLY the supplied data; if it is not there, say so. "
+              "Be concise and specific (prices, IDs). No hype, no guarantees.\n\nANALYSIS DATA:\n" + json.dumps(ctx, ensure_ascii=False, default=str) +
+              "\n\nQUESTION: " + question)
+    return call_text(prompt)
+
+
+# ══════════════════════════════════════════════════════════
+# 7. TEACHING HELPERS
+# ══════════════════════════════════════════════════════════
+PDF_PROMPT = """Read this trading-strategy PDF as a TRAINING document for a personal trading analyst.
+Understand everything: prose, screenshots, diagrams, marked-up charts, tables and examples. Do not merely summarise.
+Convert it into a structured, testable trading setup. Keep the author's own terminology. Do not invent conditions;
+anything ambiguous goes in "ambiguities". Capture how the author defines and draws SUPPLY and DEMAND zones and any lines.
+
+Return ONLY this JSON:
+{
+ "setup_name": "...", "summary": "...", "market_context": "...",
+ "conditions": [ {"id": "R01", "name": "...", "type": "structure|zone|price|volume|indicator|context|other", "required": true,
+                  "condition": "testable condition", "evidence_hint": "what proves it"} ],
+ "trigger": {"description": "...", "type": "..."},
+ "confirmation": [ {"id": "C01", "name": "...", "description": "...", "required": true} ],
+ "invalidation": [ {"id": "I01", "description": "...", "price_logic": "..."} ],
+ "zone_definitions": [ {"type": "demand|supply", "how_identified": "...", "how_drawn": "...", "quality_markers": ["..."], "avoid": ["..."]} ],
+ "line_definitions": [ {"type": "support|resistance|trendline|other", "how_drawn": "...", "use": "..."} ],
+ "entry_logic": "...", "stop_logic": "...", "target_logic": "...",
+ "exclusions": ["..."], "examples": [ {"label": "VALID|INVALID|UNCLEAR", "description": "...", "source_page": 1} ],
+ "ambiguities": ["..."], "confidence": "HIGH|MEDIUM|LOW"
+}
+Prefer atomic, individually testable conditions. A generic indicator is NOT a rule unless the document actually uses it."""
+
+IMAGE_PROMPT = """These images are charts the trader marked up. Study the drawings (boxes, zones, lines, arrows, labels, entries, stops, targets)
+together with the trader's explanation. Learn HOW THIS TRADER reads a chart: what a good supply zone and demand zone look like to them
+(base size, impulse strength, location, freshness), how they draw lines, what they wait for before entering, where the stop and targets go.
+Do not describe the stock. Extract rules of style.
+
+Return ONLY this JSON:
+{
+ "lesson_title": "...", "summary": "...",
+ "zone_definitions": [ {"type": "demand|supply", "how_identified": "...", "how_drawn": "...", "quality_markers": ["..."], "avoid": ["..."]} ],
+ "line_definitions": [ {"type": "support|resistance|trendline|other", "how_drawn": "...", "use": "..."} ],
+ "entry_logic": "...", "stop_logic": "...", "target_logic": "...",
+ "good_setup_signs": ["..."], "bad_setup_signs": ["..."], "ambiguities": ["..."]
+}"""
+
+
+def extract_pdf_text(pdf_file) -> str:
     if not HAS_PDF:
         return ""
     try:
         parts = []
         pdf_file.seek(0)
         with pdfplumber.open(pdf_file) as pdf:
-            for page_number, page in enumerate(pdf.pages, 1):
-                text = page.extract_text() or ""
-                if text.strip():
-                    parts.append(f"[Page {page_number}]\n{text.strip()}")
+            for no, page in enumerate(pdf.pages, 1):
+                txt = page.extract_text() or ""
+                if txt.strip():
+                    parts.append(f"[Page {no}]\n{txt.strip()}")
         pdf_file.seek(0)
         return "\n\n".join(parts)
     except Exception:
         return ""
 
 
-def understand_pdf_setup(pdf_file, filename="setup.pdf"):
+def understand_pdf_setup(pdf_file, filename="setup.pdf") -> dict:
     if not HAS_GEMINI or not GEMINI_KEY:
-        return {"error": "Gemini is not configured. Check GEMINI_KEY."}
+        return {"error": "Gemini is not configured. Check GEMINI_KEY and the google-generativeai package."}
     tmp = None
     try:
-        data = pdf_file.getvalue()
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-        tmp.write(data)
+        tmp.write(pdf_file.getvalue())
         tmp.flush()
         tmp.close()
-        uploaded = genai.upload_file(
-            path=tmp.name,
-            mime_type="application/pdf",
-            display_name=filename,
-        )
-        prompt = """
-Read this trading-strategy PDF as a training document for Arka AI.
-Understand the entire document, including prose, screenshots, diagrams, tables,
-examples, arrows and annotations. Do not merely summarize it.
-
-Convert it into a structured, testable trading setup. Preserve the strategy
-author's terminology. Do not invent conditions. If something is ambiguous,
-put it in ambiguities.
-
-Return ONLY JSON:
-{
-  "setup_name":"...",
-  "summary":"...",
-  "market_context":"...",
-  "conditions":[
-    {"id":"R01","name":"...","type":"structure|price|volume|indicator|context|other","required":true,"condition":"testable condition","evidence_hint":"what proves it"}
-  ],
-  "trigger":{"description":"...","type":"..."},
-  "confirmation":[{"id":"C01","description":"...","required":true}],
-  "invalidation":[{"id":"I01","description":"...","price_logic":"..."}],
-  "exclusions":["..."],
-  "examples":[{"label":"VALID|INVALID|UNCLEAR","description":"...","source_page":1}],
-  "source_pages":[1,2],
-  "ambiguities":["..."],
-  "confidence":"HIGH|MEDIUM|LOW"
-}
-
-Atomic conditions are preferred. Keep entry/trigger logic separate from
-confirmation and invalidation. A generic indicator is NOT a rule unless the
-source actually uses it.
-"""
-        result = _v8_call_json(prompt, uploaded_file=uploaded)
+        genai.configure(api_key=GEMINI_KEY)
+        uploaded = genai.upload_file(path=tmp.name, mime_type="application/pdf", display_name=filename)
+        result = call_json(PDF_PROMPT, uploaded_file=uploaded)
         result["source_name"] = filename
         return result
     except Exception as exc:
@@ -865,603 +1422,39 @@ source actually uses it.
                 pass
 
 
-# ------------------------- V8 deterministic engine ---------------
-def _v8_df(meta):
-    if not HAS_YFINANCE or not meta or not meta.get("ohlc"):
-        return None
+def learn_from_images(images: list, explanation: str) -> dict:
     try:
-        frame = pd.DataFrame(meta["ohlc"])
-        return frame.rename(columns={"o":"open", "h":"high", "l":"low", "c":"close", "v":"volume"})
-    except Exception:
-        return None
-
-
-def calculate_market_state(meta):
-    """Calculate market facts in Python. Gemini only interprets them."""
-    frame = _v8_df(meta)
-    if frame is None or len(frame) < 5:
-        return {"status": "INSUFFICIENT_DATA"}
-    out = {
-        "status": "OK",
-        "latest_date": str(frame.iloc[-1]["date"]),
-        "close": float(frame.iloc[-1]["close"]),
-    }
-    for period in (20, 50, 100, 200):
-        out[f"sma{period}"] = float(frame.close.rolling(period).mean().iloc[-1]) if len(frame) >= period else None
-    delta = frame.close.diff()
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = (-delta.clip(upper=0)).rolling(14).mean()
-    rs = gain / loss.replace(0, float("nan"))
-    rsi = 100 - (100 / (1 + rs))
-    out["rsi14"] = float(rsi.iloc[-1]) if pd.notna(rsi.iloc[-1]) else None
-    tr = pd.concat([
-        frame.high-frame.low,
-        (frame.high-frame.close.shift()).abs(),
-        (frame.low-frame.close.shift()).abs(),
-    ], axis=1).max(axis=1)
-    atr = tr.rolling(14).mean()
-    out["atr14"] = float(atr.iloc[-1]) if pd.notna(atr.iloc[-1]) else None
-    out["atr_pct"] = out["atr14"] / out["close"] * 100 if out.get("atr14") else None
-    avg_volume = frame.volume.rolling(20).mean().iloc[-1]
-    out["volume"] = float(frame.volume.iloc[-1])
-    out["avg_volume20"] = float(avg_volume) if pd.notna(avg_volume) else None
-    out["volume_ratio20"] = out["volume"] / out["avg_volume20"] if out.get("avg_volume20") else None
-    out["pd_high"] = float(frame.high.iloc[-2]) if len(frame) > 1 else None
-    out["pd_low"] = float(frame.low.iloc[-2]) if len(frame) > 1 else None
-    out["recent_high20"] = float(frame.high.tail(20).max())
-    out["recent_low20"] = float(frame.low.tail(20).min())
-    if len(frame) >= 6:
-        out["roc5_pct"] = (float(frame.close.iloc[-1]) / float(frame.close.iloc[-6]) - 1) * 100
-    highs, lows = [], []
-    for i in range(2, len(frame)-2):
-        if frame.high.iloc[i] >= frame.high.iloc[i-2:i+3].max():
-            highs.append(i)
-        if frame.low.iloc[i] <= frame.low.iloc[i-2:i+3].min():
-            lows.append(i)
-    out["swing_highs"] = [{"i":i,"date":str(frame.date.iloc[i]),"price":float(frame.high.iloc[i])} for i in highs[-8:]]
-    out["swing_lows"] = [{"i":i,"date":str(frame.date.iloc[i]),"price":float(frame.low.iloc[i])} for i in lows[-8:]]
-    if out.get("sma20") and out.get("sma50"):
-        out["ma_structure"] = (
-            "BULLISH" if out["close"] > out["sma20"] > out["sma50"]
-            else "BEARISH" if out["close"] < out["sma20"] < out["sma50"]
-            else "MIXED"
-        )
-    return out
-
-
-def _v8_relevant_market_evidence(setup, daily, weekly):
-    joined = json.dumps(setup, ensure_ascii=False).lower()
-    evidence = []
-    # Only expose specialized calculations when the setup actually references them.
-    if "volume" in joined or "turnover" in joined:
-        evidence += [
-            {"claim":"Latest volume","value":daily.get("volume"),"source":"daily"},
-            {"claim":"20D volume ratio","value":daily.get("volume_ratio20"),"source":"daily"},
-        ]
-    if "rsi" in joined:
-        evidence.append({"claim":"RSI14","value":daily.get("rsi14"),"source":"daily"})
-    if any(x in joined for x in ["moving average","dma","sma","ema"]):
-        for p in (20,50,100,200):
-            evidence.append({"claim":f"SMA{p}","value":daily.get(f"sma{p}"),"source":"daily"})
-    if any(x in joined for x in ["support","resistance","breakout","breakdown"]):
-        evidence += [
-            {"claim":"Previous day high","value":daily.get("pd_high"),"source":"daily"},
-            {"claim":"Previous day low","value":daily.get("pd_low"),"source":"daily"},
-            {"claim":"20-bar high","value":daily.get("recent_high20"),"source":"daily"},
-            {"claim":"20-bar low","value":daily.get("recent_low20"),"source":"daily"},
-            {"claim":"Recent swing highs","value":daily.get("swing_highs"),"source":"daily"},
-            {"claim":"Recent swing lows","value":daily.get("swing_lows"),"source":"daily"},
-        ]
-    return evidence
-
-
-def _v8_ohlc_table(meta):
-    rows = (meta or {}).get("ohlc", [])
-    return "i,date,open,high,low,close,volume\n" + "\n".join(
-        f'{r["i"]},{r["date"]},{r["o"]},{r["h"]},{r["l"]},{r["c"]},{r["v"]}' for r in rows
-    )
-
-
-def _v8_valid_mark(mark, meta):
-    try:
-        candle = int(mark["candle"])
-        price = float(mark["price"])
-        n = int(meta.get("n", 0))
-        lo, hi = meta.get("ylim", [-math.inf, math.inf])
-        if candle < 0 or candle >= n or price < lo or price > hi:
-            return None
-        row = meta["ohlc"][candle]
-        # A point must be close to that candle unless it is explicitly a derived level.
-        candle_span = abs(float(row["h"]) - float(row["l"]))
-        tolerance = max(candle_span * 1.5, (hi-lo) * 0.008)
-        near_candle = any(abs(price-float(row[k])) <= tolerance for k in ("h","l","c"))
-        if not near_candle and mark.get("type") not in {"level","breakout","support","resistance","invalidation"}:
-            return None
-        return {
-            "candle": candle,
-            "price": price,
-            "direction": str(mark.get("direction", "up")),
-            "label": str(mark.get("label", ""))[:80],
-            "color": mark.get("color", GREEN),
-        }
-    except Exception:
-        return None
-
-
-def _v8_normalise_annotations(raw, meta):
-    result = {"levels": [], "zones": [], "marks": []}
-    if not isinstance(raw, dict):
-        return result
-    lo, hi = meta.get("ylim", [-math.inf, math.inf])
-    for level in raw.get("levels", []):
-        try:
-            price = float(level["price"])
-            if lo <= price <= hi:
-                result["levels"].append({
-                    "price": price,
-                    "label": str(level.get("label", ""))[:80],
-                    "color": level.get("color", AMBER),
-                })
-        except Exception:
-            pass
-    for mark in raw.get("marks", []):
-        clean = _v8_valid_mark(mark, meta)
-        if clean:
-            result["marks"].append(clean)
-    for zone in raw.get("zones", []):
-        try:
-            cf, ct = int(zone["candle_from"]), int(zone["candle_to"])
-            top, bottom = float(zone["price_top"]), float(zone["price_bottom"])
-            if 0 <= cf < ct < meta.get("n", 0) and lo <= bottom < top <= hi:
-                result["zones"].append({
-                    "candle_from": cf, "candle_to": ct,
-                    "price_top": top, "price_bottom": bottom,
-                    "label": str(zone.get("label", ""))[:80],
-                    "color": zone.get("color", BLUE),
-                })
-        except Exception:
-            pass
-    return result
-
-
-def analyze_chart(daily_img, daily_meta, weekly_img, weekly_meta, setup, user_note="", ticker=""):
-    if not setup:
-        return {
-            "verdict":"ERROR", "score":0, "setup_state":"NO_SETUP",
-            "voice_summary":"No active setup.",
-            "detailed_analysis":"Train and activate a setup in Mode 2 first.",
-            "rule_checks":[], "confluence":{"status":"INSUFFICIENT_DATA","score":0},
-            "annotations":{"levels":[],"zones":[],"marks":[]}, "evidence":[], "invalidation":{}
-        }
-    try:
-        daily_state = calculate_market_state(daily_meta)
-        weekly_state = calculate_market_state(weekly_meta or {})
-        relevant = _v8_relevant_market_evidence(setup, daily_state, weekly_state)
-        prompt = f"""
-ACTIVE SETUP — ONLY STRATEGY TO EVALUATE:
-{build_setup_prompt(setup)}
-
-DETERMINISTIC DAILY STATE:
-{json.dumps(daily_state, ensure_ascii=False, default=str)}
-
-DETERMINISTIC WEEKLY STATE:
-{json.dumps(weekly_state, ensure_ascii=False, default=str)}
-
-RELEVANT SETUP EVIDENCE:
-{json.dumps(relevant, ensure_ascii=False, default=str)}
-
-DAILY OHLC:
-{_v8_ohlc_table(daily_meta)}
-
-WEEKLY OHLC:
-{_v8_ohlc_table(weekly_meta) if weekly_meta else 'UNAVAILABLE'}
-
-USER NOTE: {user_note or 'None'}
-
-TASK:
-Evaluate ticker {ticker} ONLY against the active setup. Return exactly one
-rule_check for every item in setup.conditions and setup.confirmation. Do not
-add rules. PRESENT requires evidence. NOT_PRESENT requires contradictory or
-missing required evidence. UNCLEAR means the supplied evidence cannot decide.
-
-For annotations, use exact daily candle indices and prices from the supplied
-daily table. Never output pixel coordinates. Annotate only evidence that matters
-to the active setup. Prefer the exact breakout/trigger candle, setup zone,
-resistance/support, and invalidation level when the setup defines them.
-
-The confluence score is an EVIDENCE ALIGNMENT score, NOT a probability of
-profit or success.
-
-Return ONLY JSON:
-{
- "verdict":"VALID|INVALID|FLAGGED",
- "score":0,
- "setup_state":"WATCH|FORMING|TRIGGERED|CONFIRMED|EXTENDED|INVALIDATED|READY|NOT_READY",
- "setup_summary":"...",
- "confluence":{
-   "status":"ALIGNED|MIXED|CONFLICT|INSUFFICIENT_DATA",
-   "score":0,
-   "weekly_bias":"BULLISH|BEARISH|MIXED|UNKNOWN",
-   "daily_bias":"BULLISH|BEARISH|MIXED|UNKNOWN",
-   "structure":"ALIGNED|MIXED|CONFLICT|UNKNOWN",
-   "evidence":["..."]
- },
- "market_state":{"trend":"...","momentum":"...","volume":"...","regime":"..."},
- "rule_checks":[
-   {"rule_id":"R01","rule_name":"...","status":"PRESENT|NOT_PRESENT|UNCLEAR","confidence":0,"reason":"exact date/price/data evidence"}
- ],
- "invalidation":{"primary_level":null,"condition":"...","what_changes_view":"..."},
- "evidence":[
-   {"claim":"...","data":"...","calculation":"...","conclusion":"...","date":"..."}
- ],
- "annotations":{
-   "levels":[{"price":0,"label":"..."}],
-   "zones":[{"candle_from":0,"candle_to":0,"price_top":0,"price_bottom":0,"label":"..."}],
-   "marks":[{"candle":0,"price":0,"direction":"up","label":"...","type":"breakout"}]
- },
- "voice_summary":"...",
- "detailed_analysis":"..."
-}
-"""
-        result = _v8_call_json(prompt, images=[daily_img] + ([weekly_img] if weekly_img else []))
-        result["annotations"] = _v8_normalise_annotations(result.get("annotations", {}), daily_meta)
-        result["deterministic"] = {
-            "daily": daily_state,
-            "weekly": weekly_state,
-            "relevant_evidence": relevant,
-        }
-        return result
+        return call_json(IMAGE_PROMPT + "\n\nTRADER'S EXPLANATION:\n" + (explanation or "None given."), images=images)
     except Exception as exc:
-        return {
-            "verdict":"ERROR", "score":0, "setup_state":"ERROR",
-            "voice_summary":"Analysis failed.", "detailed_analysis":str(exc),
-            "rule_checks":[], "confluence":{"status":"INSUFFICIENT_DATA","score":0},
-            "annotations":{"levels":[],"zones":[],"marks":[]}, "evidence":[], "invalidation":{}
-        }
+        return {"error": str(exc)}
 
 
-# ------------------------- V8 PDF compatibility ------------------
-def extract_pdf_rules(pdf_file):
-    # Kept for imports from older code. V8 does NOT learn blind chunks.
-    text = extract_pdf_text(pdf_file)
-    return [text[i:i+1200] for i in range(0, len(text), 1200) if len(text[i:i+1200].strip()) > 50]
+def manual_setup(name: str, summary: str, conditions: str, trigger: str, invalidation: str) -> dict:
+    rows = [{"id": f"R{i:02d}", "name": ln.strip()[:80], "type": "other", "required": True, "condition": ln.strip(), "evidence_hint": "Use the supplied detections and market facts."}
+            for i, ln in enumerate([x for x in conditions.splitlines() if x.strip()], 1)]
+    return {"setup_name": name.strip(), "summary": summary.strip(), "conditions": rows, "trigger": {"description": trigger.strip(), "type": "manual"},
+            "confirmation": [], "invalidation": [{"id": "I01", "description": invalidation.strip()}] if invalidation.strip() else [], "exclusions": [],
+            "examples": [], "confidence": "HIGH", "source_name": "manual"}
 
 
-# ------------------------- V8 UI ---------------------------------
-def _v8_escape(value):
-    return _html.escape(str(value))
-
-
-def verdict_badge(verdict, score, confluence=None, confluence_note=""):
-    colors = {"VALID":GREEN, "INVALID":RED, "FLAGGED":AMBER, "ERROR":T2}
-    color = colors.get(verdict, T2)
-    try:
-        width = max(0, min(100, int(float(score) / 10 * 100)))
-    except Exception:
-        width = 0
-    cf = confluence if isinstance(confluence, dict) else {}
-    status = cf.get("status", "INSUFFICIENT_DATA")
-    cf_color = {"ALIGNED":GREEN, "MIXED":AMBER, "CONFLICT":RED, "INSUFFICIENT_DATA":T3}.get(status, T3)
-    return f"""
-<div style="background:{DARK2};border:1px solid {color};padding:14px;margin-bottom:10px;font-family:{FONT};">
-  <div style="display:flex;align-items:center;gap:10px;">
-    <span style="background:{color};color:{DARK};font-family:{MONO};font-weight:800;font-size:12px;letter-spacing:1.5px;padding:5px 12px;">{_v8_escape(verdict)}</span>
-    <span style="font-family:{MONO};font-size:18px;font-weight:700;color:{color};">{score}/10</span>
-  </div>
-  <div style="height:4px;background:{DARK3};margin-top:9px;"><div style="height:4px;background:{color};width:{width}%;"></div></div>
-  <div style="margin-top:10px;border-top:1px solid {BORDER};padding-top:8px;font-family:{MONO};font-size:10px;">
-    <span style="color:{T3};letter-spacing:1px;">MTF CONFLUENCE</span>
-    <b style="color:{cf_color};margin-left:7px;">{_v8_escape(status)}</b>
-  </div>
-</div>"""
-
-
-def render_confluence_panel(confluence):
-    cf = confluence or {}
-    status = cf.get("status", "INSUFFICIENT_DATA")
-    color = {"ALIGNED":GREEN, "MIXED":AMBER, "CONFLICT":RED, "INSUFFICIENT_DATA":T3}.get(status, T3)
-    rows = [
-        ("WEEKLY", cf.get("weekly_bias", "UNKNOWN")),
-        ("DAILY", cf.get("daily_bias", "UNKNOWN")),
-        ("STRUCTURE", cf.get("structure", "UNKNOWN")),
-        ("ALIGNMENT", f"{cf.get('score', 0)} / 100"),
-    ]
-    cells = "".join(
-        f'<div style="display:flex;justify-content:space-between;border-bottom:1px solid {BORDER};padding:6px 0;font-family:{MONO};font-size:10px;"><span style="color:{T3};">{k}</span><b style="color:{IVORY};">{_v8_escape(v)}</b></div>'
-        for k, v in rows
-    )
-    evidence = " ".join(str(x) for x in cf.get("evidence", [])[:3])
-    return f"""
-<div style="border:1px solid {BORDER};background:{DARK2};padding:11px;margin-bottom:10px;">
-  <div style="font-family:{MONO};font-size:10px;letter-spacing:1px;color:{AMBER};">MULTI-TIMEFRAME CONFLUENCE</div>
-  <div style="font-family:{MONO};font-size:13px;font-weight:800;color:{color};margin:5px 0 7px;">{_v8_escape(status)}</div>
-  {cells}
-  <div style="font-size:10px;color:{T2};line-height:1.5;margin-top:7px;">{_v8_escape(evidence)}</div>
-</div>"""
-
-
-def render_rule_checklist(rule_checks):
-    if not rule_checks:
-        st.markdown(f'<div style="border:1px dashed {BORDER};padding:16px;text-align:center;color:{T3};font-family:{MONO};font-size:10px;">NO RULE CHECKS RETURNED</div>', unsafe_allow_html=True)
-        return
-    styles = {
-        "PRESENT": (GREEN, "✓ PRESENT"),
-        "NOT_PRESENT": (RED, "✕ NOT PRESENT"),
-        "UNCLEAR": (AMBER, "◐ UNCLEAR"),
-    }
+# ══════════════════════════════════════════════════════════
+# 8. RADAR (watchlist scan, engine only: no AI cost)
+# ══════════════════════════════════════════════════════════
+def radar_scan(symbols: list, style: dict) -> list:
+    frames = fetch_many(tuple(symbols))
     rows = []
-    for rule in rule_checks:
-        color, label = styles.get(rule.get("status"), (T3, "UNKNOWN"))
+    for sym, df in frames.items():
         try:
-            confidence = max(0, min(100, int(rule.get("confidence", 0))))
+            det = analyze_market(df, style)
+            plan = deterministic_plan(det)
+            z = next((x for x in det["zones"] if plan and x["id"] == plan["ref_zone"]), None)
+            near = min([x for x in det["zones"] if x["dist_atr"] is not None], key=lambda x: x["dist_atr"], default=None)
+            rows.append({"symbol": sym, "close": det["close"], "chg": det["day_chg_pct"], "structure": det["structure"].split(" ")[0], "rsi": det["rsi"],
+                         "zone": (z or near or {}).get("id"), "ztype": (z or near or {}).get("type"), "quality": (z or near or {}).get("quality"),
+                         "status": (z or near or {}).get("status"), "dist_pct": (z or near or {}).get("dist_pct"), "dist_atr": (z or near or {}).get("dist_atr"),
+                         "direction": plan["direction"] if plan else None, "rr": plan["targets"][0]["rr"] if plan and plan["targets"] else None,
+                         "score": engine_score(det, plan), "n_zones": len(det["zones"])})
         except Exception:
-            confidence = 0
-        rows.append(f"""
-<div style="border:1px solid {BORDER};border-left:3px solid {color};background:{DARK2};padding:9px 11px;margin-bottom:5px;">
- <div style="display:flex;justify-content:space-between;gap:8px;"><b style="font-size:11px;color:{IVORY};">{_v8_escape(rule.get('rule_name','Rule'))}</b><span style="font-family:{MONO};font-size:9px;color:{color};">{label}</span></div>
- <div style="font-size:10px;color:{T2};line-height:1.45;margin-top:5px;">{_v8_escape(rule.get('reason',''))}</div>
- <div style="height:2px;background:{DARK3};margin-top:5px;"><div style="height:2px;background:{color};width:{confidence}%;"></div></div>
-</div>""")
-    st.markdown("".join(rows), unsafe_allow_html=True)
-
-
-def speak(text, rate=0.95, pitch=1.0):
-    payload = json.dumps(str(text or "").replace("\n", " ")[:1200])
-    st.markdown(f"""
-<script>
-(function() {{
- if (!window.speechSynthesis) return;
- window.speechSynthesis.cancel();
- var u=new SpeechSynthesisUtterance({payload});
- u.rate={rate}; u.pitch={pitch}; u.lang='en-IN';
- window.speechSynthesis.speak(u);
-}})();
-</script>""", unsafe_allow_html=True)
-
-
-def _v8_setup_card(setup):
-    color = GREEN if setup.get("active") else BORDER
-    status = "ACTIVE" if setup.get("active") else "STORED"
-    st.markdown(f"""
-<div style="border:1px solid {color};background:{DARK2};padding:10px 12px;margin-bottom:6px;">
- <b style="color:{IVORY};">{_v8_escape(setup.get('setup_name','Unnamed'))}</b>
- <span style="float:right;font-family:{MONO};font-size:9px;color:{GREEN if setup.get('active') else T3};">{status}</span>
- <div style="font-size:10px;color:{T2};margin-top:4px;">{_v8_escape(str(setup.get('summary',''))[:260])}</div>
- <div style="font-family:{MONO};font-size:9px;color:{T3};margin-top:5px;">{len(setup.get('conditions',[]))} conditions · {len(setup.get('confirmation',[]))} confirmations · {len(setup.get('examples',[]))} examples · confidence {_v8_escape(setup.get('confidence',''))}</div>
-</div>""", unsafe_allow_html=True)
-
-
-def render_mode2():
-    st.markdown(f"""
-<div style="background:{DARK2};border:1px solid {BORDER};border-left:3px solid {GREEN};padding:12px 16px;margin-bottom:12px;">
- <div style="font-size:14px;font-weight:800;color:{IVORY};">Train AI — Setup Library</div>
- <div style="font-size:11px;color:{T2};margin-top:3px;">Import a strategy PDF, let Arka understand the complete setup, review the structured interpretation, then approve it. Only the active setup is used by Mode 1.</div>
-</div>""", unsafe_allow_html=True)
-    tabs = st.tabs(["SETUP LIBRARY", "IMPORT PDF", "MANUAL SETUP", "EXAMPLE CHART", "MEMORY"])
-    setups = get_all_setups()
-    active = get_active_setup()
-
-    with tabs[0]:
-        if not setups:
-            st.info("No V8 setup exists yet. Import your strategy PDF first.")
-        for setup in setups:
-            _v8_setup_card(setup)
-            c1, c2 = st.columns([1, 4])
-            with c1:
-                if st.button("ACTIVATE", key=f"v8_activate_{setup.get('setup_id')}"):
-                    if activate_setup(setup.get("setup_id")):
-                        st.success("Setup activated.")
-                        st.rerun()
-            with c2:
-                with st.expander("VIEW STRUCTURED SETUP"):
-                    st.json({k:v for k,v in setup.items() if k not in {"setup_id","active","saved_at"}})
-
-    with tabs[1]:
-        pdf = st.file_uploader("Trading strategy PDF", type=["pdf"], key="v8_pdf_upload")
-        if pdf and st.button("UNDERSTAND PDF", type="primary", use_container_width=True, key="v8_understand_pdf"):
-            with st.spinner("Arka is reading the complete PDF — text, diagrams, screenshots and examples..."):
-                understood = understand_pdf_setup(pdf, pdf.name)
-                source_text = extract_pdf_text(pdf)
-            st.session_state["v8_pending_setup"] = understood
-            st.session_state["v8_pending_source_text"] = source_text
-        pending = st.session_state.get("v8_pending_setup")
-        if pending:
-            if pending.get("error"):
-                st.error(pending["error"])
-            else:
-                st.markdown(f"""
-<div style="border:1px solid {AMBER};background:{DARK2};padding:11px;margin-top:10px;">
- <b style="color:{IVORY};">{_v8_escape(pending.get('setup_name','Unnamed Setup'))}</b>
- <div style="font-size:10px;color:{T2};margin-top:4px;">{_v8_escape(pending.get('summary',''))}</div>
- <div style="font-family:{MONO};font-size:9px;color:{T3};margin-top:5px;">{len(pending.get('conditions',[]))} conditions · {len(pending.get('confirmation',[]))} confirmations · {len(pending.get('invalidation',[]))} invalidations · {len(pending.get('examples',[]))} examples · confidence {_v8_escape(pending.get('confidence',''))}</div>
-</div>""", unsafe_allow_html=True)
-                with st.expander("AI UNDERSTANDING — REVIEW BEFORE ACTIVATION", expanded=True):
-                    st.json(pending)
-                if pending.get("ambiguities"):
-                    st.warning("Arka found ambiguities. Review them before activation: " + " | ".join(map(str, pending["ambiguities"])))
-                if st.button("APPROVE & ACTIVATE SETUP", type="primary", use_container_width=True, key="v8_approve_setup"):
-                    ok = save_setup_to_memory(
-                        pending,
-                        source_text=st.session_state.get("v8_pending_source_text", ""),
-                        tags=["pdf-trained"],
-                        activate=True,
-                    )
-                    if ok:
-                        st.success("Setup approved, saved and activated. Mode 1 will use ONLY this setup.")
-                        st.session_state.pop("v8_pending_setup", None)
-                        st.rerun()
-
-    with tabs[2]:
-        name = st.text_input("Setup name", placeholder="Momentum Burst", key="v8_manual_name")
-        summary = st.text_area("Setup description", height=70, key="v8_manual_summary")
-        conditions = st.text_area("Conditions — one condition per line", height=140, key="v8_manual_conditions", placeholder="Price consolidates below resistance\nBreakout closes above resistance\nVolume expands on breakout")
-        trigger = st.text_input("Trigger", key="v8_manual_trigger", placeholder="Breakout close above resistance")
-        invalidation = st.text_input("Invalidation", key="v8_manual_invalidation", placeholder="Close back below breakout level")
-        if st.button("CREATE & ACTIVATE", type="primary", use_container_width=True, key="v8_create_manual"):
-            if not name.strip() or not conditions.strip():
-                st.warning("Enter a setup name and at least one condition.")
-            else:
-                condition_rows = []
-                for i, line in enumerate(conditions.splitlines(), 1):
-                    if line.strip():
-                        condition_rows.append({"id":f"R{i:02d}","name":line.strip()[:80],"type":"other","required":True,"condition":line.strip(),"evidence_hint":"Use supplied chart/data evidence."})
-                setup = {
-                    "setup_name": name.strip(), "summary": summary.strip(), "conditions": condition_rows,
-                    "trigger":{"description":trigger.strip(),"type":"manual"},
-                    "confirmation":[],
-                    "invalidation":[{"id":"I01","description":invalidation.strip()}] if invalidation.strip() else [],
-                    "exclusions":[],"examples":[],"confidence":"HIGH","source_name":"manual",
-                }
-                if save_setup_to_memory(setup, source_text=summary, tags=["manual"], activate=True):
-                    st.success("Setup created and activated.")
-                    st.rerun()
-
-    with tabs[3]:
-        st.info("V8 accepts visual examples as part of PDF understanding. The next backend phase will persist standalone example images; for now, keep visual examples inside the strategy PDF so the PDF vision pass sees them together with the written rules.")
-
-    with tabs[4]:
-        query = st.text_input("Search memory", placeholder="breakout volume", key="v8_memory_search")
-        if query:
-            for result in search_memory(query, 10):
-                st.markdown(f"""
-<div style="border:1px solid {BORDER};padding:9px;margin-bottom:5px;background:{DARK2};">
- <b style="color:{IVORY};">{_v8_escape(result.get('rule_name',''))}</b>
- <span style="color:{T3};font-family:{MONO};font-size:9px;">{result.get('score',0):.2f}</span>
- <div style="font-size:10px;color:{T2};margin-top:4px;">{_v8_escape(str(result.get('rule_text',''))[:300])}</div>
-</div>""", unsafe_allow_html=True)
-
-
-def render_mode1():
-    active = get_active_setup()
-    st.markdown(f"""
-<div style="background:{DARK2};border:1px solid {BORDER};border-left:3px solid {AMBER};padding:12px 16px;margin-bottom:12px;">
- <div style="font-size:14px;font-weight:800;color:{IVORY};">Setup Analysis</div>
- <div style="font-size:11px;color:{T2};margin-top:3px;">V8 checks the current security ONLY against the active trained setup. Market calculations are deterministic; chart coordinates are mapped from price/time data.</div>
-</div>""", unsafe_allow_html=True)
-    if not active:
-        st.warning("No active trained setup. Go to Mode 2 → Import PDF, review Arka's understanding, and activate the setup.")
-        return
-
-    st.markdown(f"""
-<div style="border:1px solid {GREEN};background:{DARK2};padding:9px 12px;margin-bottom:10px;">
- <span style="font-family:{MONO};font-size:9px;color:{T3};letter-spacing:1px;">ACTIVE SETUP</span>
- <b style="color:{IVORY};margin-left:10px;">{_v8_escape(active.get('setup_name','Unnamed'))}</b>
- <span style="float:right;font-family:{MONO};font-size:9px;color:{GREEN};">ACTIVE</span>
-</div>""", unsafe_allow_html=True)
-
-    if "m1_ticker_v8" not in st.session_state:
-        st.session_state["m1_ticker_v8"] = ""
-    col_input, col_load = st.columns([4, 1])
-    with col_input:
-        ticker = st.text_input("Security", placeholder="RELIANCE, TCS, HDFCBANK, NIFTY50...", key="m1_ticker_v8")
-    with col_load:
-        load = st.button("LOAD", type="primary", use_container_width=True, key="m1_load_v8")
-    if load and ticker.strip():
-        ticker = ticker.strip().upper()
-        st.session_state["m1_loaded_ticker_v8"] = ticker
-        st.session_state["m1_chart_fetched_v8"] = False
-        st.session_state.pop("m1_result_v8", None)
-        st.session_state.pop("m1_annotated_v8", None)
-    loaded = st.session_state.get("m1_loaded_ticker_v8", ticker.strip().upper() if ticker.strip() else "")
-    if not loaded:
-        st.info("Enter a security to begin.")
-        return
-
-    if not st.session_state.get("m1_chart_fetched_v8", False):
-        with st.spinner(f"Preparing {loaded} daily + weekly data..."):
-            daily_img, daily_meta = get_chart_screenshot(loaded, interval="1d")
-            weekly_img, weekly_meta = get_chart_screenshot(loaded, interval="1wk")
-        st.session_state.update(
-            m1_daily_img_v8=daily_img, m1_daily_meta_v8=daily_meta,
-            m1_weekly_img_v8=weekly_img, m1_weekly_meta_v8=weekly_meta,
-            m1_chart_fetched_v8=True,
-        )
-    daily_img = st.session_state.get("m1_daily_img_v8")
-    daily_meta = st.session_state.get("m1_daily_meta_v8")
-    weekly_img = st.session_state.get("m1_weekly_img_v8")
-    weekly_meta = st.session_state.get("m1_weekly_meta_v8")
-    if daily_img is None or daily_meta is None:
-        st.error("Daily chart unavailable.")
-        return
-
-    chart_col, rule_col, result_col = st.columns([3.5, 2.1, 2.4])
-    with chart_col:
-        tab_d, tab_w = st.tabs(["DAILY", "WEEKLY"])
-        with tab_d:
-            render_lw_chart(loaded, interval="1d", height=320)
-        with tab_w:
-            render_lw_chart(loaded, interval="1wk", height=320)
-        note = st.text_area("Context (optional)", placeholder="Ask about this setup only…", height=55, key="m1_note_v8")
-        if st.button("ANALYZE ACTIVE SETUP", type="primary", use_container_width=True, key="m1_analyze_v8"):
-            with st.spinner("Mapping setup → deterministic market evidence → AI reasoning..."):
-                result = analyze_chart(daily_img, daily_meta, weekly_img, weekly_meta, active, note, loaded)
-            st.session_state["m1_result_v8"] = result
-            try:
-                st.session_state["m1_annotated_v8"] = draw_annotations(daily_img, daily_meta, result)
-            except Exception:
-                st.session_state["m1_annotated_v8"] = daily_img
-            st.rerun()
-        if st.session_state.get("m1_annotated_v8") is not None:
-            st.markdown(f'<div style="font-family:{MONO};font-size:9px;color:{AMBER};letter-spacing:1px;margin:8px 0 5px;">DATA-MAPPED ANNOTATIONS</div>', unsafe_allow_html=True)
-            st.image(st.session_state["m1_annotated_v8"], use_container_width=True)
-
-    with rule_col:
-        st.markdown(f'<div style="font-family:{MONO};font-size:10px;color:{AMBER};letter-spacing:1px;margin-bottom:7px;">ACTIVE SETUP RULES</div>', unsafe_allow_html=True)
-        rules = active.get("conditions", []) + active.get("confirmation", [])
-        for rule in rules:
-            st.markdown(f"""
-<div style="border-bottom:1px solid {BORDER};padding:7px 0;">
- <b style="font-family:{MONO};font-size:9px;color:{AMBER};">{_v8_escape(rule.get('id','R'))}</b>
- <span style="font-size:10px;color:{IVORY};margin-left:5px;">{_v8_escape(rule.get('name',rule.get('description','Condition')))}</span>
- <div style="font-size:9px;color:{T3};margin-top:3px;">{_v8_escape(rule.get('condition',rule.get('description','')))}</div>
-</div>""", unsafe_allow_html=True)
-        result = st.session_state.get("m1_result_v8")
-        if result:
-            st.markdown(f'<div style="font-family:{MONO};font-size:10px;color:{AMBER};letter-spacing:1px;margin:12px 0 7px;">RULE CHECKS</div>', unsafe_allow_html=True)
-            render_rule_checklist(result.get("rule_checks", []))
-
-    with result_col:
-        st.markdown(f'<div style="font-family:{MONO};font-size:10px;color:{AMBER};letter-spacing:1px;margin-bottom:7px;">VERDICT</div>', unsafe_allow_html=True)
-        result = st.session_state.get("m1_result_v8")
-        if not result:
-            st.markdown(f'<div style="border:1px dashed {BORDER};padding:22px;text-align:center;color:{T3};font-family:{MONO};font-size:9px;">RUN ANALYSIS TO SEE SETUP VERDICT</div>', unsafe_allow_html=True)
-        else:
-            st.markdown(verdict_badge(result.get("verdict","FLAGGED"), result.get("score",0), result.get("confluence",{})), unsafe_allow_html=True)
-            st.markdown(render_confluence_panel(result.get("confluence",{})), unsafe_allow_html=True)
-            st.markdown(f"""
-<div style="border:1px solid {BORDER};background:{DARK2};padding:10px;margin-bottom:8px;">
- <div style="font-family:{MONO};font-size:10px;color:{AMBER};letter-spacing:1px;">SETUP STATE</div>
- <div style="font-family:{MONO};font-size:14px;font-weight:800;color:{IVORY};margin-top:5px;">{_v8_escape(result.get('setup_state','UNKNOWN'))}</div>
-</div>""", unsafe_allow_html=True)
-            invalidation = result.get("invalidation", {}) or {}
-            st.markdown(f"""
-<div style="border:1px solid {BORDER};background:{DARK2};padding:10px;margin-bottom:8px;">
- <div style="font-family:{MONO};font-size:10px;color:{AMBER};letter-spacing:1px;">INVALIDATION</div>
- <div style="font-size:11px;color:{IVORY};margin-top:5px;">Level: {_v8_escape(invalidation.get('primary_level','N/A'))}</div>
- <div style="font-size:10px;color:{T2};margin-top:4px;">{_v8_escape(invalidation.get('what_changes_view',invalidation.get('condition','')))}</div>
-</div>""", unsafe_allow_html=True)
-            with st.expander("EVIDENCE LEDGER", expanded=True):
-                for item in result.get("evidence", []):
-                    st.markdown(f"**{_v8_escape(item.get('claim',''))}** — {_v8_escape(item.get('data',''))} → {_v8_escape(item.get('conclusion',''))}")
-            with st.expander("FULL ANALYSIS", expanded=False):
-                st.write(result.get("detailed_analysis", ""))
-
-
-def render_arka_ai():
-    with st.expander("API Status", expanded=False):
-        c1,c2,c3,c4 = st.columns(4)
-        c1.metric("GEMINI_KEY", "SET" if GEMINI_KEY else "MISSING")
-        c2.metric("PINECONE_KEY", "SET" if PINECONE_KEY else "MISSING")
-        c3.metric("Gemini lib", "OK" if HAS_GEMINI else "MISSING")
-        c4.metric("Pinecone lib", "OK" if HAS_PINECONE else "MISSING")
-    st.markdown(f"""
-<div style="text-align:center;margin-bottom:12px;font-family:{FONT};">
- <div style="font-size:24px;font-weight:800;color:{IVORY};">Arka <span style="color:{AMBER};">AI</span> <span style="font-family:{MONO};font-size:11px;color:{T3};">V8</span></div>
- <div style="font-size:9px;letter-spacing:2px;color:{T3};text-transform:uppercase;font-family:{MONO};margin-top:3px;">Setup-first · Evidence-first · Coordinate-safe</div>
-</div>""", unsafe_allow_html=True)
-    mode = st.radio("Select Mode", ["Mode 1 — Setup Analysis", "Mode 2 — Train AI"], horizontal=True, key="ai_mode_v8")
-    st.markdown(f'<div style="height:1px;background:{BORDER};margin:10px 0 12px;"></div>', unsafe_allow_html=True)
-    if mode == "Mode 1 — Setup Analysis":
-        render_mode1()
-    else:
-        render_mode2()
+            continue
+    rows.sort(key=lambda r: -r["score"])
+    return rows
