@@ -10,7 +10,7 @@ from pathlib import Path
 from supabase import create_client, Client
 import user_data as ud
 from news_feed import render_news_rail, get_news_dot, _ensure_news_state, refresh_news, _fetch_news_for_stock
-from arka_ai import render_arka_ai
+from arka_ai import render_arka_ai.py
 from research_page import render_research_page, render_research_panel
 from screener_scraper import resolve_symbol
 from data_engine import (get_indices, get_quotes, scan_batch, get_static, get_history,
