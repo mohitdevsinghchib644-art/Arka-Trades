@@ -1195,9 +1195,14 @@ def _ix_cell(label, data):
             f'<span class="c ak-fl">—</span></div>')
 
 
-@st.fragment(run_every=60)
+@st.fragment(run_every=10)
 def _index_strips():
-    """Self-refreshing every 60s. Runs on its own so it never blocks other clicks."""
+    """Refresh the index strip every 10 seconds without rerunning the whole app."""
+    # get_indices is cached in data_engine.py; clear its cache so this is a real refresh.
+    try:
+        get_indices.clear()
+    except Exception:
+        pass
     data = get_indices(INDIA_ITEMS + GLOBAL_ITEMS)
     rows = ""
     for title, items in (("INDIA", INDIA_ITEMS), ("GLOBAL", GLOBAL_ITEMS)):
@@ -1363,8 +1368,9 @@ def _kpi(label, value, sub="", color=None, accent=None):
             f'<div class="v"{vstyle}>{value}</div><div class="s">{sub}</div></div>')
 
 
-def _render_dashboard():
-    """Home monitor: KPI strip, watchlist / holdings / internals panels, workspace launcher."""
+@st.fragment(run_every=10)
+def _render_dashboard_live():
+    """Refresh Home KPIs, watchlist, portfolio and market internals every 10 seconds."""
     if not st.session_state.get("_home_pf_loaded"):          # make sure holdings are loaded once per session
         try:
             ud.load_portfolio(supabase)
@@ -1375,6 +1381,12 @@ def _render_dashboard():
     lots = st.session_state.get("pf_lots", []) or []
     holdings = list(dict.fromkeys(l["symbol"] for l in lots if l.get("symbol")))[:12]
     all_syms = list(dict.fromkeys(st.session_state.get("admin_watchlist", []) + wl + holdings))[:40]
+    # get_quotes is cached in data_engine.py; clear its cache so the 10s fragment
+    # fetches updated values instead of repeatedly showing the old result.
+    try:
+        get_quotes.clear()
+    except Exception:
+        pass
     quotes = get_quotes(tuple(all_syms)) if all_syms else {}
 
     # portfolio roll-up (only lots that currently have a price)
@@ -1457,6 +1469,8 @@ def _render_dashboard():
         f'<div class="ak-panel"><div class="ak-pt"><b>MARKET INTERNALS</b><span>{len(sample)} SYMBOL SAMPLE</span></div>{internals}</div></div>',
         unsafe_allow_html=True)
 
+def _render_workspace_launcher():
+    """Navigation controls stay outside the timed fragment so button clicks work normally."""
     section("WORKSPACES", "jump straight into any module")
     for r in range(0, len(MODULES), 3):
         cols = st.columns(3, gap="small")
@@ -1466,6 +1480,13 @@ def _render_dashboard():
                     st.markdown(f'<div class="ak-mc">{icon_box(ic, AMBER, 38)}<div><div class="t">{label}<em>{tag}</em></div>'
                                 f'<div class="d">{desc}</div></div></div>', unsafe_allow_html=True)
                     st.button("OPEN WORKSPACE  →", key=f"ak_open_{tgt}", use_container_width=True, on_click=_goto, args=(tgt,))
+
+
+
+def _render_dashboard():
+    """Render live price panels plus the non-refreshing workspace launcher."""
+    _render_dashboard_live()
+    _render_workspace_launcher()
 
 
 # ───────────── news rail ─────────────
