@@ -1458,3 +1458,604 @@ def radar_scan(symbols: list, style: dict) -> list:
             continue
     rows.sort(key=lambda r: -r["score"])
     return rows
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 9. V9 USER INTERFACE
+# This UI is written for the V9 engine above. It does not append or override
+# any V8 analysis/storage functions.
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _aa_v9_css():
+    st.markdown("""
+    <style>
+      .aa9-wrap{background:#050505;color:#ECECEC}
+      .aa9-hero{border-bottom:1px solid #272727;padding:8px 0 16px;margin-bottom:14px}
+      .aa9-kicker{font:700 9px 'JetBrains Mono',monospace;letter-spacing:2px;color:#FF9F0A;text-transform:uppercase}
+      .aa9-title{font:800 27px Inter,system-ui,sans-serif;letter-spacing:-.6px;color:#ECECEC;margin-top:5px}
+      .aa9-sub{font:11px Inter,system-ui,sans-serif;color:#777;margin-top:5px}
+      .aa9-panel{background:#0A0A0A;border:1px solid #242424;border-top:2px solid #343434;padding:12px 14px;margin:4px 0 10px}
+      .aa9-label{font:700 9px 'JetBrains Mono',monospace;letter-spacing:1.1px;color:#A3A3A3;text-transform:uppercase}
+      .aa9-value{font:700 20px 'JetBrains Mono',monospace;color:#ECECEC;margin-top:5px}
+      .aa9-muted{font:11px Inter,system-ui,sans-serif;color:#858585;line-height:1.6}
+      .aa9-status{font:700 10px 'JetBrains Mono',monospace;letter-spacing:.8px;padding:4px 7px;border:1px solid #333;display:inline-block}
+      div[data-testid="stTabs"] button{font-size:10px!important;font-weight:700!important;letter-spacing:.7px!important}
+      div[data-testid="stForm"]{border:1px solid #222!important;border-radius:3px!important;background:#080808!important}
+      .stButton>button,.stDownloadButton>button{border-radius:3px!important}
+    </style>
+    """, unsafe_allow_html=True)
+
+
+def _aa_v9_price(value):
+    try:
+        v = float(value)
+        return f"₹{v:,.2f}" if math.isfinite(v) else "—"
+    except Exception:
+        return "—"
+
+
+def _aa_v9_list_block(title, items, empty="None recorded."):
+    st.markdown(f"**{title}**")
+    if items:
+        for item in items:
+            st.markdown(f"- {esc(item)}")
+    else:
+        st.caption(empty)
+
+
+def _aa_v9_plan_panel(plan, current_price):
+    if not plan:
+        st.info("No trade plan qualified from the available detections. That is a valid engine result; it does not mean a trade must be taken.")
+        return
+    direction = plan.get("direction", "—")
+    st.markdown(f"### {esc(direction)} plan")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Entry zone", f"{plan.get('entry_low', 0):,.2f} – {plan.get('entry_high', 0):,.2f}")
+    c2.metric("Reference entry", _aa_v9_price(plan.get("entry_ref")))
+    c3.metric("Stop", _aa_v9_price(plan.get("stop")))
+    targets = plan.get("targets") or []
+    if targets:
+        target_rows = []
+        risk = abs(float(plan.get("entry_ref") or 0) - float(plan.get("stop") or 0))
+        for i, target in enumerate(targets, 1):
+            rr = target.get("rr")
+            if rr is None and risk:
+                rr = abs(float(target.get("price", 0)) - float(plan.get("entry_ref") or 0)) / risk
+            target_rows.append({
+                "Target": f"T{i}",
+                "Price": _aa_v9_price(target.get("price")),
+                "Reference": target.get("ref", "—"),
+                "Reason": target.get("reason", "—"),
+                "R:R": f"{rr:.2f}R" if isinstance(rr, (float, int)) else "—",
+            })
+        st.dataframe(pd.DataFrame(target_rows), use_container_width=True, hide_index=True)
+    if plan.get("stop_reason"):
+        st.caption(f"Stop logic: {plan['stop_reason']}")
+    if plan.get("invalidation"):
+        st.caption(f"Invalidation: {plan['invalidation']}")
+    confirmations = plan.get("confirmation_needed") or []
+    if confirmations:
+        _aa_v9_list_block("CONFIRMATION NEEDED", confirmations)
+
+
+def _aa_v9_render_analysis(report):
+    det = report["det"]
+    ai = report.get("ai") or {}
+    plan = report.get("plan")
+    score = int(report.get("score", 0))
+    verdict, verdict_color = verdict_text(report)
+
+    st.markdown(
+        f'<div class="aa9-hero"><div class="aa9-kicker">ANALYSIS REPORT · {esc(report["asof"])}</div>'
+        f'<div class="aa9-title">{esc(report["ticker"])} <span style="color:#FF9F0A">/</span> '
+        f'<span style="color:{verdict_color}">{esc(verdict)}</span></div>'
+        f'<div class="aa9-sub">{esc(ai.get("headline") or det.get("structure") or "Deterministic market-structure analysis")}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("LAST DAILY CLOSE", _aa_v9_price(det.get("close")))
+    m2.metric("DAY CHANGE", f'{det.get("day_chg_pct", 0):+.2f}%')
+    m3.metric("ENGINE / AI SCORE", f"{score}/100", f"Grade {ai.get('grade') or grade_for(score)}")
+    m4.metric("RSI 14", f'{det.get("rsi"):.1f}' if isinstance(det.get("rsi"), (float, int)) else "—")
+    m5.metric("STRUCTURE", str(det.get("structure", "—")).split(" (")[0])
+
+    if report.get("ai_error"):
+        st.warning("Gemini analysis did not complete. The page is showing the deterministic engine result instead.")
+        with st.expander("AI error details"):
+            st.code(str(report["ai_error"]))
+    elif not ai:
+        st.caption("Engine-only result. Configure GEMINI_KEY and the Gemini package to enable playbook-based AI judgement.")
+
+    if ai:
+        st.markdown(f'<div class="aa9-panel"><div class="aa9-label">SETUP STATE · BIAS</div>'
+                    f'<div class="aa9-value">{esc(ai.get("setup_state","WATCHING"))} · {esc(ai.get("bias","NEUTRAL"))}</div>'
+                    f'<div class="aa9-muted" style="margin-top:6px">Score measures evidence match to your playbook; it is not a probability of profit.</div></div>',
+                    unsafe_allow_html=True)
+
+    # Chart controls and annotated chart
+    st.markdown("### Price structure")
+    cc1, cc2, cc3, cc4, cc5 = st.columns(5)
+    show = {
+        "zones": cc1.checkbox("Supply / demand zones", True, key="aa9_show_zones"),
+        "levels": cc2.checkbox("Support / resistance", True, key="aa9_show_levels"),
+        "lines": cc3.checkbox("Trendlines", True, key="aa9_show_lines"),
+        "plan": cc4.checkbox("Trade plan", True, key="aa9_show_plan"),
+        "mas": cc5.checkbox("Moving averages", True, key="aa9_show_mas"),
+        "markers": True,
+    }
+    if HAS_PLOTLY:
+        try:
+            fig = fig_plotly(report["df"], report["spec"], window=int(report.get("window", 120)), show=show)
+            if fig is not None:
+                st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "scrollZoom": True})
+        except Exception as exc:
+            st.warning(f"Interactive chart could not be drawn: {exc}")
+    else:
+        st.info("Plotly is not installed. Install plotly to display the interactive chart.")
+    try:
+        png = render_png(report["df"], report["spec"], window=int(report.get("window", 120)),
+                         title=f'{report["ticker"]} · {report["asof"]}')
+        st.download_button("Download annotated chart (PNG)", png,
+                           file_name=f'{report["ticker"].replace("^","")}_arka_ai.png',
+                           mime="image/png", key="aa9_download_png")
+    except Exception as exc:
+        st.caption(f"PNG export unavailable: {exc}")
+
+    st.markdown("### Trade plan")
+    _aa_v9_plan_panel(plan, det.get("close"))
+
+    # The two-timeframe context is a separate context panel, not a second strategy.
+    weekly = report.get("det_w")
+    with st.expander("Weekly context", expanded=False):
+        if weekly:
+            wc1, wc2, wc3, wc4 = st.columns(4)
+            wc1.metric("Weekly close", _aa_v9_price(weekly.get("close")))
+            wc2.metric("Weekly structure", str(weekly.get("structure", "—")).split(" (")[0])
+            wc3.metric("Weekly RSI", f'{weekly.get("rsi"):.1f}' if isinstance(weekly.get("rsi"), (float, int)) else "—")
+            wc4.metric("MA state", weekly.get("ma_state", "—"))
+            st.caption("Weekly detections are context only; the marked-up chart and trade plan use daily candles.")
+        else:
+            st.caption("Weekly history was unavailable or insufficient for analysis.")
+
+    if ai:
+        left, right = st.columns(2)
+        with left:
+            _aa_v9_list_block("SUPPORTS", ai.get("supports", []))
+            _aa_v9_list_block("WATCH NEXT", ai.get("watch_next", []))
+        with right:
+            _aa_v9_list_block("CONTRADICTIONS", ai.get("contradicts", []))
+            _aa_v9_list_block("CONTEXT ONLY · NOT USED FOR VERDICT", ai.get("context", []))
+        st.markdown("### Market scenarios")
+        scenario_cols = st.columns(3)
+        for col, key, title in zip(scenario_cols, ("bull", "bear", "neutral"), ("BULL CASE", "BEAR CASE", "NEUTRAL CASE")):
+            scenario = (ai.get("scenarios") or {}).get(key) or {}
+            with col:
+                st.markdown(f'<div class="aa9-panel"><div class="aa9-label">{title}</div>'
+                            f'<div style="font:600 12px Inter;color:#ECECEC;margin-top:8px">{esc(scenario.get("trigger") or "No trigger supplied")}</div>'
+                            f'<div class="aa9-muted" style="margin-top:7px">{esc(scenario.get("path") or "—")}</div>'
+                            f'<div class="aa9-muted" style="margin-top:7px">Level: {esc(scenario.get("level") if scenario.get("level") is not None else "—")}</div></div>',
+                            unsafe_allow_html=True)
+        if ai.get("setups"):
+            st.markdown("### Playbook checklist")
+            for setup in ai["setups"]:
+                with st.expander(f'{setup.get("name","Setup")} · {setup.get("match_pct",0)}% match · {setup.get("state","")}', expanded=False):
+                    checks = setup.get("checks") or []
+                    if checks:
+                        st.dataframe(pd.DataFrame([
+                            {"Rule": c.get("rule_name") or c.get("rule_id"), "Status": c.get("status"),
+                             "Confidence": c.get("confidence"), "Reason": c.get("reason"), "Evidence refs": ", ".join(c.get("refs") or [])}
+                            for c in checks
+                        ]), use_container_width=True, hide_index=True)
+                    else:
+                        st.caption("No individual checks were returned for this setup.")
+        if ai.get("my_zones"):
+            st.markdown("### Zones against your style")
+            st.dataframe(pd.DataFrame([
+                {"Detection": z.get("id"), "Role": z.get("role"), "Style match": "YES" if z.get("matches_my_style") else "NO",
+                 "Comment": z.get("comment", "")}
+                for z in ai["my_zones"]
+            ]), use_container_width=True, hide_index=True)
+        if ai.get("narrative"):
+            with st.expander("Full analysis narrative", expanded=True):
+                st.write(ai["narrative"])
+
+    # Evidence lists from the deterministic engine always remain available.
+    with st.expander(f"Detected zones ({len(det.get('zones', []))})", expanded=False):
+        zones = det.get("zones", [])
+        if zones:
+            st.dataframe(pd.DataFrame([{
+                "ID": z.get("id"), "Type": z.get("type", "").upper(), "Pattern": z.get("pattern"),
+                "Top": z.get("top"), "Bottom": z.get("bottom"), "Quality": z.get("quality"),
+                "Status": z.get("status"), "Distance ATR": z.get("dist_atr"), "Formed": z.get("formed"),
+                "Tests": z.get("tests")
+            } for z in zones]), use_container_width=True, hide_index=True)
+        else:
+            st.caption("No zones met the current engine filters.")
+    with st.expander(f"Support / resistance levels ({len(det.get('levels', []))})", expanded=False):
+        levels = det.get("levels", [])
+        if levels:
+            st.dataframe(pd.DataFrame([{"ID": x.get("id"), "Type": x.get("kind"), "Price": x.get("price"),
+                                        "Touches": x.get("touches"), "Distance %": x.get("dist_pct"),
+                                        "Distance ATR": x.get("dist_atr")} for x in levels]),
+                         use_container_width=True, hide_index=True)
+        else:
+            st.caption("No clustered levels met the current touch threshold.")
+    with st.expander(f"Trendlines / recent events / candle signals", expanded=False):
+        st.write("Trendlines")
+        st.dataframe(pd.DataFrame(det.get("trendlines", [])) if det.get("trendlines") else pd.DataFrame(columns=["kind","i0","p0","p1","touches"]),
+                     use_container_width=True, hide_index=True)
+        st.write("Recent events")
+        st.dataframe(pd.DataFrame(det.get("events", [])[-12:]) if det.get("events") else pd.DataFrame(columns=["type","date","price"]),
+                     use_container_width=True, hide_index=True)
+        st.write("Candle signals")
+        st.dataframe(pd.DataFrame(det.get("candles", [])[-12:]) if det.get("candles") else pd.DataFrame(columns=["type","date","bias"]),
+                     use_container_width=True, hide_index=True)
+
+    with st.expander("Ask a follow-up about this report", expanded=False):
+        question = st.text_input("Question", placeholder="e.g. What evidence would invalidate the current plan?", key="aa9_followup_question")
+        if st.button("Ask Arka AI", key="aa9_followup_send", type="primary", disabled=not question.strip()):
+            try:
+                with st.spinner("Checking the report and playbook..."):
+                    answer = ask_followup(report, question.strip())
+                st.session_state["aa9_followup_answer"] = answer
+            except Exception as exc:
+                st.session_state["aa9_followup_answer"] = f"Could not answer: {exc}"
+        if st.session_state.get("aa9_followup_answer"):
+            st.markdown(st.session_state["aa9_followup_answer"])
+
+
+def _aa_v9_tab_analyze():
+    st.markdown("#### Analyze a stock or index")
+    st.caption("Daily market structure, weekly context, your active playbook, annotated levels and a risk-defined plan.")
+    with st.form("aa9_analyze_form", clear_on_submit=False):
+        ticker = st.text_input("Ticker", value=st.session_state.get("aa9_ticker", "RELIANCE"),
+                               placeholder="RELIANCE, TCS, NIFTY, BANKNIFTY or ^NSEI").strip().upper()
+        note = st.text_area("Your context (optional)", value=st.session_state.get("aa9_note", ""),
+                            placeholder="What are you watching? Keep the note factual.", height=70)
+        a, b, c = st.columns([1.2, 1, 1])
+        with a:
+            use_ai = st.checkbox("Use Gemini + my playbook", value=True)
+        with b:
+            window = st.select_slider("Chart candles", options=[60, 90, 120, 160, 200], value=120)
+        with c:
+            submitted = st.form_submit_button("RUN ANALYSIS", type="primary", use_container_width=True)
+    if submitted:
+        if not ticker:
+            st.error("Enter a ticker first.")
+        else:
+            st.session_state["aa9_ticker"] = ticker
+            st.session_state["aa9_note"] = note
+            st.session_state.pop("aa9_followup_answer", None)
+            try:
+                with st.spinner(f"Fetching price history and analysing {ticker}..."):
+                    st.session_state["aa9_report"] = run_analysis(ticker, note=note, use_ai=use_ai, window=int(window))
+            except Exception as exc:
+                st.session_state["aa9_report"] = None
+                st.session_state["aa9_error"] = str(exc)
+            else:
+                st.session_state.pop("aa9_error", None)
+    if st.session_state.get("aa9_error"):
+        st.error("Analysis failed. Check the ticker, Yahoo Finance connection, and installed packages.")
+        with st.expander("Technical details"):
+            st.code(st.session_state["aa9_error"])
+    report = st.session_state.get("aa9_report")
+    if report and report.get("ticker") == ticker:
+        _aa_v9_render_analysis(report)
+    elif report:
+        st.info(f"Previous report available for {report.get('ticker')}. Run analysis for {ticker} to replace it.")
+    else:
+        st.markdown('<div class="aa9-panel"><div class="aa9-label">READY FOR ANALYSIS</div>'
+                    '<div class="aa9-value">Enter a ticker and run analysis.</div>'
+                    '<div class="aa9-muted" style="margin-top:8px">Arka first builds deterministic detections. Gemini can then judge those facts against your saved playbook. The engine result remains available if Gemini is disabled.</div></div>',
+                    unsafe_allow_html=True)
+
+
+def _aa_v9_tab_teach():
+    st.markdown("#### Teach your playbook")
+    st.caption("Setups describe testable entry rules. Lessons describe how you read zones and charts. Zone labels help tune the deterministic engine.")
+    subtabs = st.tabs(["PDF SETUP", "QUICK RULE", "CHART LESSON", "LABEL ZONES"])
+
+    with subtabs[0]:
+        pdf = st.file_uploader("Import a strategy PDF", type=["pdf"], key="aa9_setup_pdf")
+        if pdf and st.button("READ PDF & BUILD SETUP", type="primary", key="aa9_pdf_process"):
+            with st.spinner("Reading the strategy and structuring its conditions..."):
+                payload = understand_pdf_setup(pdf, filename=pdf.name)
+            if payload.get("error"):
+                st.error(payload["error"])
+            elif not payload.get("setup_name"):
+                st.error("Gemini returned no setup name. Please try again or use Quick Rule.")
+                with st.expander("Raw response"):
+                    st.json(payload)
+            else:
+                payload["source_name"] = pdf.name
+                try:
+                    source_text = extract_pdf_text(pdf)
+                except Exception:
+                    source_text = ""
+                ok = save_item("setup", payload.get("setup_name", pdf.name), payload, activate=True,
+                               source_name=pdf.name, source_text=source_text[:3000])
+                if ok:
+                    st.success(f'Saved and activated setup: {payload["setup_name"]}')
+                    with st.expander("Review extracted setup", expanded=True):
+                        st.write(payload.get("summary", ""))
+                        st.write("Conditions")
+                        st.dataframe(pd.DataFrame(payload.get("conditions", [])), use_container_width=True, hide_index=True)
+                        st.write("Trigger")
+                        st.json(payload.get("trigger", {}))
+                        st.write("Invalidation")
+                        st.json(payload.get("invalidation", []))
+
+    with subtabs[1]:
+        with st.form("aa9_manual_setup_form", clear_on_submit=True):
+            name = st.text_input("Setup name", placeholder="e.g. Momentum burst")
+            summary = st.text_area("What is this setup looking for?", height=70)
+            conditions = st.text_area("Rules — one per line", height=130, placeholder="Relative strength vs market\nTight consolidation before expansion\nBreakout with meaningful volume")
+            trigger = st.text_area("Entry trigger", height=70)
+            invalidation = st.text_area("Invalidation / when the setup is wrong", height=70)
+            save_manual = st.form_submit_button("SAVE SETUP", type="primary")
+        if save_manual:
+            if not name.strip() or not conditions.strip():
+                st.error("Setup name and at least one rule are required.")
+            else:
+                payload = manual_setup(name, summary, conditions, trigger, invalidation)
+                ok = save_item("setup", name, payload, activate=True, source_name="manual")
+                if ok:
+                    st.success(f"Saved and activated: {name}")
+                    st.rerun()
+
+    with subtabs[2]:
+        lesson_files = st.file_uploader("Upload marked-up chart screenshots", type=["png", "jpg", "jpeg"],
+                                        accept_multiple_files=True, key="aa9_lesson_images")
+        explanation = st.text_area("Explain what you marked and why", height=90,
+                                   placeholder="Describe your supply/demand zone, line, entry, stop, and what makes it valid.")
+        if st.button("LEARN FROM CHARTS", type="primary", key="aa9_learn_charts", disabled=not lesson_files):
+            images = []
+            conversion_error = None
+            for f in lesson_files or []:
+                try:
+                    from PIL import Image as PILImage
+                    with PILImage.open(io.BytesIO(f.getvalue())) as im:
+                        buf = io.BytesIO()
+                        im.convert("RGB").save(buf, format="PNG")
+                        images.append(buf.getvalue())
+                except Exception as exc:
+                    conversion_error = str(exc)
+                    break
+            if conversion_error:
+                st.error(f"Could not prepare the uploaded images. Check Pillow is installed. Details: {conversion_error}")
+            else:
+                with st.spinner("Learning your chart-reading style..."):
+                    payload = learn_from_images(images, explanation)
+                if payload.get("error"):
+                    st.error(payload["error"])
+                else:
+                    title = payload.get("lesson_title") or f"Chart lesson · {datetime.now(IST):%d %b %Y}"
+                    ok = save_item("lesson", title, payload, activate=True,
+                                   source_name=", ".join(f.name for f in lesson_files), source_text=explanation[:3000])
+                    if ok:
+                        st.success(f"Saved lesson: {title}")
+                        with st.expander("Review extracted lesson", expanded=True):
+                            st.json(payload)
+
+    with subtabs[3]:
+        st.caption("Approve/reject example zones to help Arka learn the type of zone you accept. This records labels; it does not change historic trades.")
+        with st.form("aa9_zone_lab_form", clear_on_submit=False):
+            lab_ticker = st.text_input("Ticker for zone labelling", value=st.session_state.get("aa9_lab_ticker", "RELIANCE"),
+                                       key="aa9_lab_ticker_input").strip().upper()
+            lab_go = st.form_submit_button("LOAD DAILY ZONES")
+        if lab_go:
+            try:
+                with st.spinner(f"Detecting zones for {lab_ticker}..."):
+                    lab_df = fetch_ohlc(lab_ticker, "1d", "2y")
+                    lab_det = analyze_market(lab_df, get_style())
+                st.session_state["aa9_lab_df"] = lab_df
+                st.session_state["aa9_lab_det"] = lab_det
+                st.session_state["aa9_lab_ticker"] = lab_ticker
+                st.session_state.pop("aa9_lab_error", None)
+            except Exception as exc:
+                st.session_state["aa9_lab_error"] = str(exc)
+        if st.session_state.get("aa9_lab_error"):
+            st.error(f"Could not load the zone lab: {st.session_state['aa9_lab_error']}")
+        lab_det = st.session_state.get("aa9_lab_det")
+        lab_df = st.session_state.get("aa9_lab_df")
+        if lab_det is not None and lab_df is not None:
+            if HAS_PLOTLY:
+                try:
+                    lab_fig = fig_plotly(lab_df, build_spec(lab_det, None, None), window=100,
+                                         show={"zones": True, "levels": True, "lines": True, "plan": False, "mas": True, "markers": True})
+                    if lab_fig is not None:
+                        st.plotly_chart(lab_fig, use_container_width=True, config={"displaylogo": False})
+                except Exception as exc:
+                    st.caption(f"Zone chart unavailable: {exc}")
+            zones = lab_det.get("zones", [])
+            if not zones:
+                st.info("No zones met the current engine thresholds. Try a different stock or adjust the style.")
+            else:
+                st.markdown(f"**{len(zones)} candidate zones · {st.session_state.get('aa9_lab_ticker','')}**")
+                with st.form("aa9_zone_labels_save_form"):
+                    decisions = {}
+                    for zone in zones:
+                        c1, c2, c3 = st.columns([1, 1.2, 2.3])
+                        with c1:
+                            st.markdown(f"**{zone['id']} · {zone['type'].upper()}**")
+                            st.caption(f"Q{zone['quality']} · {zone['status']}")
+                        with c2:
+                            st.markdown(f'{zone["bottom"]:,.2f} – {zone["top"]:,.2f}')
+                        with c3:
+                            decisions[zone["id"]] = st.selectbox(
+                                f'Label {zone["id"]}', ["UNLABELLED", "APPROVED", "REJECTED"],
+                                key=f'aa9_zone_decision_{st.session_state.get("aa9_lab_ticker","")}_{zone["id"]}')
+                    save_labels = st.form_submit_button("SAVE ZONE FEEDBACK", type="primary")
+                if save_labels:
+                    labels = []
+                    by_id = {z["id"]: z for z in zones}
+                    for zid, decision in decisions.items():
+                        if decision == "UNLABELLED":
+                            continue
+                        z = by_id[zid]
+                        labels.append({"approved": decision == "APPROVED", "symbol": st.session_state.get("aa9_lab_ticker",""),
+                                       "zone": _slim_zone(z), "features": zone_features(z), "labelled_at": datetime.now(IST).isoformat()})
+                    if not labels:
+                        st.warning("Choose APPROVED or REJECTED for at least one zone.")
+                    else:
+                        title = f'Zone labels · {st.session_state.get("aa9_lab_ticker","")}'
+                        if save_item("feedback", title, {"labels": labels}, activate=True, source_name="zone lab"):
+                            st.success(f"Saved {len(labels)} zone label(s) to the playbook.")
+                            st.rerun()
+
+
+def _aa_v9_tab_playbook():
+    st.markdown("#### Your playbook")
+    st.caption("Active setups are evaluated during analysis. Active lessons and zone feedback inform how Arka interprets your trading style.")
+    c1, c2 = st.columns([1, 4])
+    with c1:
+        if st.button("REFRESH PLAYBOOK", key="aa9_refresh_playbook"):
+            load_items(force=True)
+            st.rerun()
+    items = load_items()
+    summary = {k: sum(1 for x in items if x.get("kind") == k) for k in KIND_LABEL}
+    sm = st.columns(4)
+    for col, kind in zip(sm, ("setup", "lesson", "feedback", "style")):
+        col.metric(KIND_LABEL.get(kind, kind).title(), summary[kind])
+    if storage_mode() == "SESSION":
+        st.warning("Storage mode is SESSION. Playbook items saved without a working Pinecone connection may be lost when the Streamlit session resets.")
+    if not items:
+        st.info("Your playbook is empty. Use Teach to import a PDF, write a quick rule, or add a chart lesson.")
+        return
+    for item in items:
+        kind = item.get("kind", "unknown")
+        item_id = item.get("item_id", "")
+        status = "ACTIVE" if item.get("active") else "INACTIVE"
+        with st.expander(f'{KIND_LABEL.get(kind, kind.upper())} · {item.get("name","Untitled")} · {status}', expanded=False):
+            st.caption(f'Saved: {item.get("saved_at","—")} · Source: {item.get("source") or "not recorded"} · ID: {item_id}')
+            payload = item.get("payload") or {}
+            if kind == "setup":
+                st.write(payload.get("summary", ""))
+                conditions = payload.get("conditions", [])
+                if conditions:
+                    st.dataframe(pd.DataFrame(conditions), use_container_width=True, hide_index=True)
+                st.write("Trigger")
+                st.json(payload.get("trigger", {}))
+                st.write("Invalidation")
+                st.json(payload.get("invalidation", []))
+            elif kind == "lesson":
+                st.write(payload.get("summary", ""))
+                st.json(payload)
+            elif kind == "feedback":
+                labels = payload.get("labels", [])
+                st.caption(f"{len(labels)} labelled zones · {sum(1 for x in labels if x.get('approved'))} approved · {sum(1 for x in labels if not x.get('approved'))} rejected")
+                if labels:
+                    st.dataframe(pd.DataFrame([{"Ticker": x.get("symbol"), "Approved": x.get("approved"),
+                                                "Pattern": (x.get("features") or {}).get("pattern"),
+                                                "Quality": (x.get("features") or {}).get("quality"),
+                                                "Thickness ATR": (x.get("features") or {}).get("thickness_atr")}
+                                               for x in labels]), use_container_width=True, hide_index=True)
+            elif kind == "style":
+                st.json(payload.get("params", {}))
+            c1, c2, c3 = st.columns([1, 1, 3])
+            with c1:
+                checked = st.checkbox("Active", value=bool(item.get("active")), key=f"aa9_active_{item_id}")
+                if checked != bool(item.get("active")):
+                    if set_item_active(item_id, checked):
+                        st.rerun()
+                    else:
+                        st.error("Could not update active status.")
+            with c2:
+                if st.button("DELETE", key=f"aa9_delete_{item_id}"):
+                    if delete_item(item_id):
+                        st.success("Deleted.")
+                        st.rerun()
+                    else:
+                        st.error("Could not delete this item from the current storage backend.")
+
+
+def _aa_v9_tab_radar():
+    st.markdown("#### Playbook radar")
+    st.caption("Scan a list of stocks against the deterministic zone engine. This scan does not call Gemini.")
+    default_symbols = st.session_state.get("watchlist") or st.session_state.get("admin_watchlist") or []
+    default_text = ", ".join(str(s).upper().replace(".NS", "").replace(".BO", "") for s in default_symbols)
+    with st.form("aa9_radar_form"):
+        raw_symbols = st.text_area("Symbols (comma or newline separated)", value=default_text,
+                                   placeholder="RELIANCE, TCS, HDFCBANK, INFY", height=90)
+        radar_btn = st.form_submit_button("SCAN SYMBOLS", type="primary")
+    if radar_btn:
+        symbols = [x.strip().upper() for x in re.split(r"[\s,;]+", raw_symbols) if x.strip()]
+        symbols = list(dict.fromkeys(x.removesuffix(".NS").removesuffix(".BO") for x in symbols))
+        if not symbols:
+            st.warning("Enter at least one NSE stock symbol.")
+        else:
+            with st.spinner(f"Scanning {len(symbols)} symbol(s)..."):
+                try:
+                    st.session_state["aa9_radar_rows"] = radar_scan(symbols, get_style())
+                    st.session_state.pop("aa9_radar_error", None)
+                except Exception as exc:
+                    st.session_state["aa9_radar_error"] = str(exc)
+    if st.session_state.get("aa9_radar_error"):
+        st.error("Radar scan failed.")
+        with st.expander("Technical details"):
+            st.code(st.session_state["aa9_radar_error"])
+    rows = st.session_state.get("aa9_radar_rows")
+    if rows is not None:
+        if rows:
+            df = pd.DataFrame(rows)
+            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.download_button("Download radar CSV", df.to_csv(index=False).encode("utf-8"),
+                               file_name="arka_ai_radar.csv", mime="text/csv", key="aa9_radar_csv")
+        else:
+            st.info("No rows returned. Check symbol spellings or Yahoo Finance availability.")
+
+
+def _aa_v9_tab_style():
+    st.markdown("#### Engine style")
+    st.caption("These parameters control deterministic zone and level detection. A saved style overrides the defaults for your future analyses.")
+    current = get_style()
+    with st.form("aa9_style_form"):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            base_max = st.slider("Maximum candles in a base", 1, 6, int(current["base_max"]))
+            base_range_atr = st.slider("Base max candle range (ATR)", 0.3, 2.5, float(current["base_range_atr"]), 0.1)
+            impulse_atr = st.slider("Minimum impulse (ATR)", 0.5, 4.0, float(current["impulse_atr"]), 0.1)
+            impulse_window = st.slider("Impulse window", 1, 8, int(current["impulse_window"]))
+        with c2:
+            max_zone_atr = st.slider("Maximum zone thickness (ATR)", 0.5, 4.0, float(current["max_zone_atr"]), 0.1)
+            min_quality = st.slider("Minimum zone quality", 0, 100, int(current["min_quality"]), 5)
+            sr_tol_atr = st.slider("Support/resistance tolerance (ATR)", 0.2, 2.0, float(current["sr_tol_atr"]), 0.1)
+            sr_min_touches = st.slider("Touches to confirm a level", 2, 6, int(current["sr_min_touches"]))
+        with c3:
+            pivot_left = st.slider("Pivot left bars", 1, 8, int(current["pivot_left"]))
+            pivot_right = st.slider("Pivot right bars", 1, 8, int(current["pivot_right"]))
+            lookback = st.slider("Detection lookback candles", 60, 500, int(current["lookback"]), 10)
+            fresh_only = st.checkbox("Fresh zones only", bool(current["fresh_only"]))
+        saved_style = st.form_submit_button("SAVE AS ACTIVE STYLE", type="primary")
+    if saved_style:
+        params = {"base_max": base_max, "base_range_atr": base_range_atr, "impulse_atr": impulse_atr,
+                  "impulse_window": impulse_window, "max_zone_atr": max_zone_atr, "min_quality": min_quality,
+                  "sr_tol_atr": sr_tol_atr, "sr_min_touches": sr_min_touches, "pivot_left": pivot_left,
+                  "pivot_right": pivot_right, "lookback": lookback, "fresh_only": fresh_only}
+        if save_item("style", "Custom zone style", {"params": params}, activate=True, source_name="Engine Style"):
+            st.success("Saved and activated. New analyses will use these engine parameters.")
+            st.rerun()
+    st.markdown("**Current parameters**")
+    st.json(current)
+
+
+def render_arka_ai():
+    """Public Streamlit entry point expected by app.py; uses V9 functions only."""
+    _aa_v9_css()
+    st.markdown(
+        '<div class="aa9-hero"><div class="aa9-kicker">ARKA TRADES · RESEARCH WORKSPACE</div>'
+        '<div class="aa9-title">Arka <span style="color:#FF9F0A">AI</span> <span style="font-size:12px;color:#777;font-family:monospace">V9</span></div>'
+        '<div class="aa9-sub">Your playbook · Deterministic market structure · Evidence-first analysis</div></div>',
+        unsafe_allow_html=True,
+    )
+    tabs = st.tabs(["ANALYZE", "TEACH", "PLAYBOOK", "RADAR", "ENGINE STYLE"])
+    with tabs[0]:
+        _aa_v9_tab_analyze()
+    with tabs[1]:
+        _aa_v9_tab_teach()
+    with tabs[2]:
+        _aa_v9_tab_playbook()
+    with tabs[3]:
+        _aa_v9_tab_radar()
+    with tabs[4]:
+        _aa_v9_tab_style()
