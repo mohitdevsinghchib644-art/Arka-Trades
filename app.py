@@ -13,9 +13,9 @@ from news_feed import render_news_rail, get_news_dot, _ensure_news_state, refres
 from arka_ai import render_arka_ai
 from research_page import render_research_page, render_research_panel
 from screener_scraper import resolve_symbol
-from data_engine import (get_indices, get_quotes, warm_security, to_float)
+from data_engine import (get_indices, get_quotes, scan_batch, get_static, get_history,
+                         warm_security, to_float)
 from chart_engine import render_pro_chart
-from index_hover_charts import INDEX_HOVER_CSS, index_hover_cell
 from money_flow import render_money_flow
 # watchlist_page / portfolio_page are imported lazily inside their page branches
 # so a problem in either file can never stop the rest of the terminal from loading.
@@ -91,6 +91,33 @@ def db_load_watchlist() -> list:
         return list(dict.fromkeys(r["symbol"] for r in res.data)) if res.data else []
     except Exception: return []
 
+def db_save_alert(symbol: str, alert_type: str, price: float):
+    if supabase is None:
+        return True
+    try:
+        supabase.table("alerts").delete().eq("symbol", symbol).execute()
+        supabase.table("alerts").insert({"symbol": symbol, "alert_type": alert_type,
+            "price": price, "active": True}).execute()
+        return True
+    except Exception as e:
+        st.error(f"Alert save error: {e}"); return False
+
+def db_delete_alert(symbol: str):
+    if supabase is None:
+        return True
+    try:
+        supabase.table("alerts").delete().eq("symbol", symbol).execute(); return True
+    except Exception: return False
+
+def db_load_alerts() -> dict:
+    if supabase is None:
+        return {}
+    try:
+        res = supabase.table("alerts").select("*").eq("active", True).execute()
+        return {r["symbol"]: {"type": r["alert_type"], "price": float(r["price"]), "active": True}
+                for r in res.data} if res.data else {}
+    except Exception: return {}
+
 def db_save_admin_watchlist(symbols: list):
     if supabase is None:
         st.session_state.admin_watchlist = symbols
@@ -111,6 +138,22 @@ def db_load_admin_watchlist() -> list:
         res = supabase.table("admin_watchlist").select("symbol").execute()
         return list(dict.fromkeys(r["symbol"] for r in res.data)) if res.data else []
     except Exception: return []
+
+BOT_TOKEN = _secret("BOT_TOKEN", "")
+CHAT_ID   = _secret("CHAT_ID", "")
+
+# Logins: set these in Streamlit Cloud -> Settings -> Secrets, then delete the
+# fallback strings below so no password lives in your GitHub repo.
+_ADMIN_USER  = _secret("ADMIN_USER",  "ADMIN4477MAX")
+_ADMIN_PASS  = _secret("ADMIN_PASS",  "MOHIT1")
+_MEMBER_USER = _secret("MEMBER_USER", "max trades")
+_MEMBER_PASS = _secret("MEMBER_PASS", "max")
+
+def send_telegram(msg):
+    try:
+        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            data={"chat_id":CHAT_ID,"text":msg,"parse_mode":"HTML"}, timeout=5)
+    except Exception: pass
 
 # ════════════════ DESIGN TOKENS ════════════════════
 BG, S1, S2, S3 = "#050505", "#0A0A0A", "#0F0F0F", "#151515"
@@ -185,7 +228,7 @@ def icon_box(name, color=None, size=32):
 
 for k, v in {"logged_in":False,"disclaimer_done":True,"show_login":False,"page":"home",
     "profile":{"name":"Trader","email":"","phone":""},"profile_photo":None,"watchlist":[],
-    "admin_watchlist":[],"db_loaded":False,"is_admin":False,
+    "admin_watchlist":[],"alerts":{},"alert_fired":set(),"db_loaded":False,"is_admin":False,
     "active_news_source":"admin","show_news_rail":True,"active_security":""}.items():
     if k not in st.session_state: st.session_state[k] = v
 
@@ -194,6 +237,8 @@ if not st.session_state.db_loaded:
     if wl: st.session_state.watchlist = wl
     awl = db_load_admin_watchlist()
     if awl: st.session_state.admin_watchlist = awl
+    al = db_load_alerts()
+    if al: st.session_state.alerts = al
     st.session_state.db_loaded = True
 
 name    = st.session_state.profile.get("name","Trader") or "Trader"
@@ -472,7 +517,7 @@ def _navigation_transition():
             const b = el && el.closest ? el.closest('button') : null;
             if (!b) return false;
             const t = (b.innerText || b.getAttribute('aria-label') || '').trim().toUpperCase();
-            return /^(HOME|MONEY FLOW|WATCHLIST|PORTFOLIO|SCREENER|RESEARCH|ARKA AI|SIGN OUT|SIGN IN|GET STARTED →|SIGN IN TO ARKA →|← BACK TO HOME)$/.test(t);
+            return /^(HOME|MONEY FLOW|BREADTH|WATCHLIST|PORTFOLIO|ALERTS|SCANNER|SCREENER|RESEARCH|ARKA AI|SIGN OUT|SIGN IN|GET STARTED →|SIGN IN TO ARKA →|← BACK TO HOME)$/.test(t);
           };
           d.addEventListener('click', function (e) {
             if (isNavigation(e.target)) show();
@@ -524,6 +569,22 @@ INDIA_ITEMS = (("NIFTY 50", ("^NSEI",)), ("BANK NIFTY", ("^NSEBANK",)), ("SENSEX
                ("NIFTY IT", ("^CNXIT",)), ("NIFTY AUTO", ("^CNXAUTO",)), ("MIDCAP 100", tuple(MIDCAP_CANDIDATES)))
 GLOBAL_ITEMS = (("S&P 500", ("^GSPC",)), ("NASDAQ", ("^IXIC",)), ("DOW", ("^DJI",)),
                 ("DAX", ("^GDAXI",)), ("FTSE", ("^FTSE",)), ("NIKKEI", ("^N225",)))
+
+def check_alerts(results):
+    for s in results:
+        sym = s["sym"]
+        if sym not in st.session_state.alerts: continue
+        a = st.session_state.alerts[sym]
+        if not a.get("active"): continue
+        if sym in st.session_state.alert_fired: continue
+        cur=s["cur"]; ap=a["price"]; at=a["type"]
+        fired=False; msg=""
+        if at=="pdh" and cur>=ap: fired=True; msg=f"<b>{sym}</b> crossed PDH!\nPrice: Rs{cur:.2f} | PDH: Rs{ap:.2f}"
+        elif at=="pdl" and cur<=ap: fired=True; msg=f"<b>{sym}</b> broke PDL!\nPrice: Rs{cur:.2f} | PDL: Rs{ap:.2f}"
+        elif at=="custom" and cur>=ap: fired=True; msg=f"<b>{sym}</b> hit target!\nPrice: Rs{cur:.2f} | Target: Rs{ap:.2f}"
+        if fired:
+            send_telegram(msg)
+            st.session_state.alert_fired.add(sym)
 
 def section(title, sub="", accent=None):
     """Section heading used across the app: accent bar · TITLE · muted note · hairline."""
@@ -781,10 +842,10 @@ if not st.session_state.logged_in:
                 st.markdown(f"""<div class="lg-left">
                     <div class="lp-brand"><div class="lp-mark">{icon("trend", 16, "#000")}</div><div class="lp-bn">ARKA TRADES</div></div>
                     <div class="t">Your market terminal,<br>one sign-in away.</div>
-                    <div class="s">Pick up where you left off: your watchlist, portfolio, research and sector radar are synced to the cloud.</div>
+                    <div class="s">Pick up where you left off: your watchlist, portfolio, alerts and sector radar are synced to the cloud.</div>
                     <div class="lg-pt">{icon_box("activity", AMBER, 34)}<div><b>Sector rotation radar</b><span>See which sectors are turning up, with RSI, EMA position and relative strength.</span></div></div>
                     <div class="lg-pt">{icon_box("briefcase", CYAN, 34)}<div><b>Portfolio analytics</b><span>Live P&amp;L, sector exposure, risk and an automatic health check.</span></div></div>
-                    <div class="lg-pt">{icon_box("research", PURPLE, 34)}<div><b>Research workspace</b><span>Company fundamentals, ownership, valuation and market context in one place.</span></div></div>
+                    <div class="lg-pt">{icon_box("bell", GREEN, 34)}<div><b>Alerts on Telegram</b><span>PDH, PDL and price triggers delivered the moment they fire.</span></div></div>
                 </div>""", unsafe_allow_html=True)
             with right:
                 with st.container(key="loginwrap"):
@@ -838,8 +899,8 @@ h1 span{color:#FF9F0A;}
   <div class="content">
     <div class="pill"><i></i>NSE · Live market terminal</div>
     <h1>Trade with context,<br>not <span>guesswork.</span></h1>
-    <p class="sub">Sector rotation radar, portfolio analytics, watchlists, market research and AI chart analysis in one fast, cloud-synced workspace built for Indian traders.</p>
-    <div class="chips"><span>Sector rotation radar</span><span>Portfolio analytics</span><span>AI chart analysis</span><span>Research workspace</span></div>
+    <p class="sub">Sector rotation radar, portfolio analytics, watchlists, scanners and AI chart analysis in one fast, cloud-synced workspace built for Indian traders.</p>
+    <div class="chips"><span>Sector rotation radar</span><span>Portfolio analytics</span><span>AI chart analysis</span><span>Telegram alerts</span></div>
   </div>
 </div>
 <script>
@@ -872,8 +933,9 @@ else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=s;}
         ("activity", AMBER, "Money Flow", "Sector rotation radar with RSI, EMA position and relative strength against the market, mid-caps and small-caps."),
         ("briefcase", CYAN, "Portfolio", "Record buy lots and get live P&amp;L, XIRR, sector exposure, risk metrics and an automatic health check."),
         ("star", AMBER, "Watchlist", "Track NSE stocks with live price, RSI and PDH / PDL status. Saved permanently and synced everywhere."),
-        ("filter", PURPLE, "Smart Screener", "Build rule-based screens across the NSE universe to organise and review potential candidates."),
+        ("filter", PURPLE, "Scanner &amp; Screener", "Scan your own lists or build rule-based screens across the NSE universe to find candidates fast."),
         ("brain", PURPLE, "Arka AI", "Vision-based chart analysis checked against your own trading rules and reference charts."),
+        ("bell", GREEN, "Alerts", "PDH, PDL and custom price alerts pushed to Telegram the moment your level breaks."),
     ]
     st.markdown('<div class="lp-feats">' + "".join(
         f'<div class="lp-card">{icon_box(ic, c, 38)}<div class="t">{t}</div><div class="d">{d}</div></div>' for ic, c, t, d in feats) + '</div>',
@@ -956,12 +1018,12 @@ else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=s;}
         '<div class="lp-steps">'
         '<div class="lp-step"><div class="no">STEP 01 · DAY 1</div><div class="t">Connect and import</div><div class="d">Sign in and upload your TradingView watchlist. Cloud sync is instant.</div></div>'
         '<div class="lp-step"><div class="no">STEP 02 · DAY 7</div><div class="t">Teach your strategy</div><div class="d">Give Arka your setups, rules and reference charts.</div></div>'
-        '<div class="lp-step"><div class="no">STEP 03 · DAY 14</div><div class="t">Automate the routine</div><div class="d">Build a consistent workflow with saved lists, portfolio tracking and research tools.</div></div></div>',
+        '<div class="lp-step"><div class="no">STEP 03 · DAY 14</div><div class="t">Automate the routine</div><div class="d">Full-universe scans and Telegram alerts on your exact conditions.</div></div></div>',
         unsafe_allow_html=True)
 
     # closing CTA
     st.markdown('<div class="lp-cta"><div class="t">Ready to open your terminal?</div>'
-                '<div class="s">Sign in to your workspace. Your lists, portfolio and research workspace are waiting.</div></div>', unsafe_allow_html=True)
+                '<div class="s">Sign in to your workspace. Your lists, portfolio and alerts are waiting.</div></div>', unsafe_allow_html=True)
     if st.button("Sign in to Arka →", type="primary", key="cta_bottom"):
         st.session_state.show_login = True
         st.rerun()
@@ -974,15 +1036,18 @@ else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=s;}
   # ════════════════ APPLICATION SHELL ═══════════════════════════════════
 from html import escape as _esc
 
-NAV = [("HOME", "home"), ("MONEY FLOW", "flow"),
-       ("WATCHLIST", "watchlist"), ("PORTFOLIO", "portfolio"),
-       ("SCREENER", "smart_scan"), ("RESEARCH", "research"), ("ARKA AI", "analysis")]
+NAV = [("HOME", "home"), ("MONEY FLOW", "flow"), ("BREADTH", "breadth"),
+       ("WATCHLIST", "watchlist"), ("PORTFOLIO", "portfolio"), ("ALERTS", "alerts"),
+       ("SCANNER", "scanner"), ("SCREENER", "smart_scan"), ("RESEARCH", "research"), ("ARKA AI", "analysis")]
 
 PAGE_META = {
     "home":       ("TERMINAL", "Market overview, your watchlist and your portfolio at a glance.", "home"),
     "flow":       ("MONEY FLOW", "Sector rotation radar, index breadth and institutional flows.", "activity"),
+    "breadth":    ("MARKET BREADTH", "Advance / decline participation and market internals.", "bars"),
     "watchlist":  ("WATCHLIST", "Your tracked stocks with live price, RSI and PDH / PDL status.", "star"),
     "portfolio":  ("PORTFOLIO", "Holdings, live P&L, sector exposure, risk and an automatic health check.", "briefcase"),
+    "alerts":     ("ALERTS", "Price, PDH and PDL alerts delivered to Telegram.", "bell"),
+    "scanner":    ("WATCHLIST SCANNER", "Scan your lists for PDH / PDL breaks, RSI and volume conditions.", "scan"),
     "smart_scan": ("SMART SCREENER", "Rule-based screens across the NSE universe.", "filter"),
     "research":   ("RESEARCH", "Financials, ownership, peers, valuation, risk and news in one place.", "research"),
     "analysis":   ("ARKA AI", "AI chart analysis against your own trading rules.", "brain"),
@@ -994,7 +1059,10 @@ PAGE_META = {
 MODULES = [
     ("WATCHLIST", "watchlist", "star", "MY BOOK", "Track NSE stocks with live price, RSI and PDH / PDL status."),
     ("PORTFOLIO", "portfolio", "briefcase", "MY BOOK", "Buy lots, live P&amp;L, sector exposure, risk and a health check."),
+    ("ALERTS", "alerts", "bell", "MY BOOK", "Price, PDH and PDL alerts delivered to Telegram."),
     ("MONEY FLOW", "flow", "activity", "MARKETS", "Sector rotation radar, index breadth and FII / DII flows."),
+    ("MARKET BREADTH", "breadth", "bars", "MARKETS", "Advance / decline participation and market internals."),
+    ("WATCHLIST SCANNER", "scanner", "scan", "TOOLS", "Scan your lists for PDH / PDL breaks, RSI and volume."),
     ("SMART SCREENER", "smart_scan", "filter", "TOOLS", "Rule-based screens across the NSE universe."),
     ("RESEARCH", "research", "research", "INTEL", "Financials, ownership, peers, valuation and news."),
     ("ARKA AI", "analysis", "brain", "INTEL", "AI chart analysis against your own trading rules."),
@@ -1114,9 +1182,17 @@ def _render_page_header(pg):
 
 
 # ───────────── market strips + command bar ─────────────
-def _ix_cell(label, data, candidates=()):
-    """One index tile with a cached 1-month chart on hover/focus."""
-    return index_hover_cell(label, data, candidates)
+def _ix_cell(label, data):
+    if data:
+        chg = data["chg"]
+        cls = "ak-up" if chg > 0.005 else "ak-dn" if chg < -0.005 else "ak-fl"
+        arrow = "▲" if chg > 0.005 else "▼" if chg < -0.005 else "●"
+        col = GREEN if chg >= 0 else RED
+        w = min(100.0, abs(chg) / 3 * 100)
+        return (f'<div class="ak-ix"><div class="n">{label}</div><div class="p">{data["price"]:,.2f}</div>'
+                f'<span class="c {cls}">{arrow} {abs(chg):.2f}%</span><i class="m" style="width:{w:.0f}%;background:{col}"></i></div>')
+    return (f'<div class="ak-ix"><div class="n">{label}</div><div class="p" style="color:#444">—</div>'
+            f'<span class="c ak-fl">—</span></div>')
 
 
 @st.fragment(run_every=10)
@@ -1128,10 +1204,9 @@ def _index_strips():
     except Exception:
         pass
     data = get_indices(INDIA_ITEMS + GLOBAL_ITEMS)
-    st.markdown(INDEX_HOVER_CSS, unsafe_allow_html=True)
     rows = ""
     for title, items in (("INDIA", INDIA_ITEMS), ("GLOBAL", GLOBAL_ITEMS)):
-        cells = "".join(_ix_cell(label, data.get(label), candidates) for label, candidates in items)
+        cells = "".join(_ix_cell(label, data.get(label)) for label, _ in items)
         rows += f'<div class="ak-strip"><div class="ak-sl">{title}</div>{cells}</div>'
     st.markdown(f'<div class="ak-strips">{rows}</div>', unsafe_allow_html=True)
 
@@ -1331,6 +1406,7 @@ def _render_dashboard_live():
     sgn = lambda x: GREEN if x >= 0 else RED
     adv = sum(1 for s in wl if quotes.get(s) and quotes[s]["chg"] > 0.05)
     dec = sum(1 for s in wl if quotes.get(s) and quotes[s]["chg"] < -0.05)
+    active_alerts = sum(1 for a in st.session_state.alerts.values() if a.get("active"))
     mmi = get_mmi()
 
     k = []
@@ -1343,6 +1419,7 @@ def _render_dashboard_live():
             k.append(_kpi(lab, "—", "Add holdings in Portfolio", T3, accent=LINE2))
     k.append(_kpi("Watchlist breadth", f'<span style="color:{GREEN}">▲ {adv}</span> <span style="color:{T3}">·</span> <span style="color:{RED}">▼ {dec}</span>',
                   f"{len(wl)} symbols tracked", accent=AMBER))
+    k.append(_kpi("Active alerts", str(active_alerts), f"{len(st.session_state.alert_fired)} triggered this session", accent=PURPLE))
     if mmi.get("status") in ("live", "stale"):
         zc = mmi_zone_color(mmi["zone"])
         k.append(_kpi("Market mood", f'{mmi["score"]:.0f}', f'{mmi["zone"]}{" · cached" if mmi["status"] == "stale" else ""}', zc, accent=zc))
@@ -1457,9 +1534,6 @@ def _render_footer():
 if "active_security" not in st.session_state:
     st.session_state["active_security"] = ""
 
-if st.session_state.get("page") in {"alerts", "scanner", "breadth"}:
-    st.session_state.page = "home"
-
 pg = st.session_state.page
 _render_topbar(pg)
 if pg == "home":
@@ -1510,6 +1584,99 @@ with center:
             except Exception as e:
                 st.error(f"Portfolio module error: {e}")
 
+    elif pg == "scanner":
+        if not st.session_state.admin_watchlist:
+            awl = db_load_admin_watchlist()
+            if awl: st.session_state.admin_watchlist = awl
+        if not st.session_state.watchlist:
+            wl = db_load_watchlist()
+            if wl: st.session_state.watchlist = wl
+        def render_scan_results(syms, key_prefix=""):
+            sc1,sc2,sc3,sc4=st.columns([1,1,1,2])
+            filt=sc1.selectbox("Show",["All","Above PDH","Below PDL","In Range"],key=f"filt_v4_{key_prefix}")
+            fresh=sc2.checkbox("Force fresh data",key=f"fresh_{key_prefix}")
+            sc3.caption("Batched · cached 30s")
+            scanbtn=sc4.button("Run Scan",use_container_width=True,type="primary",key=f"scan_v4_{key_prefix}")
+            if scanbtn:
+                # The news rail only understands "admin" / "yours".
+                st.session_state["active_news_source"]="admin" if key_prefix.startswith("admin") else "yours"
+                if fresh: scan_batch.clear()
+                with st.spinner(f"Scanning {len(syms)} stocks…"):
+                    data = scan_batch(tuple(syms))      # ONE batched download, not 2 calls per stock
+                results,failed=[],[]
+                for sym in syms:
+                    d = data.get(str(sym).upper().strip())
+                    if d:
+                        cur=d["cur"]; chg=d["chg"]
+                        cls="g" if cur>d["pdh"] else "r" if cur<d["pdl"] else "n"
+                        results.append({"sym":sym,"cur":cur,"chg":chg,"pdh":d["pdh"],"pdl":d["pdl"],"rsi":d["rsi"],"cls":cls,"spark":d.get("spark",[])})
+                    else: failed.append(sym)
+                check_alerts(results)
+                st.session_state[f"results_{key_prefix}"]=results; st.session_state[f"failed_{key_prefix}"]=failed
+            results=st.session_state.get(f"results_{key_prefix}",[]); failed=st.session_state.get(f"failed_{key_prefix}",[])
+            if results:
+                filtered=results
+                if filt=="Above PDH": filtered=[r for r in results if r["cls"]=="g"]
+                elif filt=="Below PDL": filtered=[r for r in results if r["cls"]=="r"]
+                elif filt=="In Range": filtered=[r for r in results if r["cls"]=="n"]
+                filtered.sort(key=lambda x:{"g":0,"r":1,"n":2}[x["cls"]])
+                g=sum(r["cls"]=="g" for r in results); rr=sum(r["cls"]=="r" for r in results); n=sum(r["cls"]=="n" for r in results)
+                m1,m2,m3,m4=st.columns(4); m1.metric("Above PDH",g); m2.metric("Below PDL",rr); m3.metric("In Range",n); m4.metric("Total",len(results))
+                cols7=st.columns(4)
+                for i,s in enumerate(filtered):
+                    top=GREEN if s["cls"]=="g" else RED if s["cls"]=="r" else LINE2
+                    rc=GREEN if s["rsi"]<35 else RED if s["rsi"]>65 else T2
+                    with cols7[i%4]:
+                        st.markdown(f'<div class="ak-sc" style="--c:{top}"><b>{_esc(s["sym"])}</b><br>{change_pill(s["chg"])}<div class="px">₹{s["cur"]:,.2f}</div><div class="rs" style="color:{rc}">RSI {s["rsi"]}</div></div>',unsafe_allow_html=True)
+                        if st.button("OPEN",key=f"open_scan_{key_prefix}_{s['sym']}",use_container_width=True): _open_security(s["sym"])
+                if failed: st.caption(f"Skipped (no data returned): {', '.join(failed)}")
+        tab1,tab2=st.tabs(["Arka Watchlist","Your Watchlist"])
+        with tab1:
+            if IS_ADMIN:
+                uploaded_admin=st.file_uploader("Upload Arka Watchlist (replaces the current Arka list)",type=["csv","txt"],key="admin_upload_v4")
+                if uploaded_admin:
+                    syms=parse_csv(uploaded_admin)
+                    if syms and db_save_admin_watchlist(syms): st.success(f"Arka Watchlist updated — {len(syms)} stocks.")
+                st.caption("To add or remove single stocks, use the WATCHLIST module → ARKA DESK LIST tab.")
+            syms=st.session_state.admin_watchlist
+            if syms: render_scan_results(syms,"admin_v4")
+            else: st.info("Arka Watchlist not available yet.")
+        with tab2:
+            uploaded_yours=st.file_uploader("Upload Your Watchlist (CSV or TXT) — replaces your current saved list",type=["csv","txt"],key="your_upload_v4")
+            if uploaded_yours:
+                syms=parse_csv(uploaded_yours)
+                if syms and db_save_watchlist(syms): st.success(f"{len(syms)} stocks loaded and saved.")
+            st.caption("To add or remove single stocks, use the WATCHLIST module.")
+            syms=st.session_state.watchlist
+            if syms: render_scan_results(syms,"yours_v4")
+            else: st.info("Add stocks in the WATCHLIST module (or upload a TradingView file above) to start scanning.")
+    elif pg == "alerts":
+        active_alerts={s:a for s,a in st.session_state.alerts.items() if a.get("active")}
+        a1,a2,a3=st.columns(3); a1.metric("Active Alerts",len(active_alerts)); a2.metric("Triggered Today",len(st.session_state.alert_fired)); a3.metric("Delivery","Telegram")
+        tabs=st.tabs(["Arka Watchlist","Your Watchlist"])
+        def alert_block(watchlist,suffix):
+            for sym in list(dict.fromkeys(watchlist)):
+                a=st.session_state.alerts.get(sym,{}); active=bool(a.get("active"))
+                c1,c2,c3,c4=st.columns([2,1.2,1.4,1])
+                c1.markdown(f"**{sym}**"); c2.write("ACTIVE" if active else "INACTIVE"); c3.write(a.get("type","—").upper() if active else "—")
+                if c4.button("OFF" if active else "SET",key=f"alertact_{suffix}_{sym}"):
+                    if active:
+                        del st.session_state.alerts[sym]; db_delete_alert(sym); st.rerun()
+                    else:
+                        st.session_state[f"alert_open_{suffix}_{sym}"]=True; st.rerun()
+                if st.session_state.get(f"alert_open_{suffix}_{sym}"):
+                    typ=st.radio("Condition",["PDH","PDL","Custom"],horizontal=True,key=f"atype_{suffix}_{sym}")
+                    cp=st.number_input("Trigger price",min_value=0.0,step=0.5,key=f"acp_{suffix}_{sym}") if typ=="Custom" else 0.0
+                    x,y=st.columns(2)
+                    if x.button("Cancel",key=f"acan_{suffix}_{sym}"): st.session_state[f"alert_open_{suffix}_{sym}"]=False; st.rerun()
+                    if y.button("Confirm",key=f"acon_{suffix}_{sym}",type="primary"):
+                        if typ=="Custom" and cp<=0: st.error("Enter a valid price.")
+                        else:
+                            sd=get_static(sym); price=cp if typ=="Custom" else (sd["pdh"] if typ=="PDH" else sd["pdl"]) if sd else None
+                            if price:
+                                at=typ.lower(); st.session_state.alerts[sym]={"type":at,"price":price,"active":True}; db_save_alert(sym,at,price); st.session_state[f"alert_open_{suffix}_{sym}"]=False; st.rerun()
+        with tabs[0]: alert_block(st.session_state.get("admin_watchlist",[]),"admin")
+        with tabs[1]: alert_block(st.session_state.get("watchlist",[]),"yours")
     elif pg == "research":
         if st.session_state.get("active_security"): st.session_state["research_last_query"]=st.session_state["active_security"]
         render_research_page(TERM_TOKENS,news_fetch_fn=_fetch_news_for_stock)
@@ -1519,6 +1686,11 @@ with center:
     elif pg == "smart_scan":
         from smart_scan_page import render_smart_scanner
         render_smart_scanner(supabase)
+    elif pg == "breadth":
+        try:
+            from breadth_page import render_market_breadth
+            render_market_breadth()
+        except Exception as e: st.error(f"Market Breadth module failed to load: {e}")
     elif pg == "flow":
         try:
             render_money_flow(on_open=_open_security)
