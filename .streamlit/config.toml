@@ -1,0 +1,23 @@
+# Arka Trades — native Streamlit theme (dark terminal, amber accent).
+# Place this file at  .streamlit/config.toml  in the root of your repo (next to app.py).
+# It removes the white flash on load and themes every built-in widget, chart and table.
+
+[theme]
+base = "dark"
+primaryColor = "#FF9F0A"
+backgroundColor = "#050505"
+secondaryBackgroundColor = "#0A0A0A"
+textColor = "#ECECEC"
+linkColor = "#FF9F0A"
+borderColor = "#2B2B2B"
+baseRadius = "4px"
+font = "sans serif"
+chartCategoricalColors = ["#FF9F0A", "#5AC8FA", "#BF5AF2", "#30D158", "#FF6482", "#5E8CFF", "#FFD60A", "#AC8E68"]
+dataframeBorderColor = "#1F1F1F"
+dataframeHeaderBackgroundColor = "#0F0F0F"
+
+[client]
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false
