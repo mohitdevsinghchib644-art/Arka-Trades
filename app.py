@@ -889,7 +889,7 @@ if not st.session_state.logged_in:
 
 # ═══════════════════════════════ TERMINAL SHELL ═══════════════════════════════
 NAV = [("HOME", "home"), ("MONEY FLOW", "flow"), ("BREADTH", "breadth"), ("WATCHLIST", "watchlist"),
-       ("PORTFOLIO", "portfolio"), ("SCANNER", "scanner"), ("SCREENER", "smart_scan"),
+       ("PORTFOLIO", "portfolio"), ("NEWS", "news"), ("SCANNER", "scanner"), ("SCREENER", "smart_scan"),
        ("RESEARCH", "research"), ("ARKA AI", "analysis")]
 
 PAGE_META = {
@@ -900,6 +900,7 @@ PAGE_META = {
     "portfolio": ("PORTFOLIO", "Holdings, live P&L, sector exposure, risk and an automatic health check."),
     "scanner": ("WATCHLIST SCANNER", "Scan your saved lists for PDH / PDL breaks, RSI and momentum."),
     "smart_scan": ("SMART SCREENER", "Rule-based screens across the NSE universe."),
+    "news": ("NEWS DESK", "One wire from ET, Business Standard, Mint, Moneycontrol, BusinessLine, NDTV Profit, Google News and BSE filings — tagged to your stocks, scored and clustered."),
     "research": ("RESEARCH", "Financials, ownership, peers, valuation, risk and news in one place."),
     "analysis": ("ARKA AI", "AI chart analysis against your own trading rules."),
     "profile": ("PROFILE", "Your account details."),
@@ -1209,6 +1210,7 @@ MODULES = [
     ("WATCHLIST", "watchlist", "star", "DAILY", "Live price, RSI and PDH / PDL status for your saved stocks.", AMBER),
     ("WATCHLIST SCANNER", "scanner", "scan", "DAILY", "Scan your lists for PDH / PDL breaks, RSI and momentum.", GREEN),
     ("SMART SCREENER", "smart_scan", "filter", "DAILY", "Rule-based screens across the NSE universe.", PURPLE),
+    ("NEWS DESK", "news", "zap", "DAILY", "Tagged, scored news wire with BSE filings, news pulse and sector tone.", RED),
     ("ARKA AI", "analysis", "brain", "ADVANCED", "AI chart analysis against your own trading rules.", PURPLE),
 ]
 
@@ -1486,7 +1488,8 @@ def _news_rail_fragment():
     if not watchlist_for_news:
         st.markdown('<div class="ak-empty">Macro / global news below. Add stocks in the <b>Watchlist</b> workspace for stock-specific news.</div>', unsafe_allow_html=True)
     render_news_rail = _load("news_feed", "render_news_rail")
-    _run("news_feed", render_news_rail, watchlist_for_news, label=rail_label)
+    _run("news_feed", render_news_rail, watchlist_for_news, label=rail_label,
+         current_security=st.session_state.get("active_security") if st.session_state.get("page") == "security" else None)
 
 
 # ═══════════════════════════════ ROUTER ═══════════════════════════════
@@ -1530,6 +1533,10 @@ with center:
         _run("arka_ai", _load("arka_ai", "render_arka_ai"))
     elif pg == "smart_scan":
         _run("smart_scan_page", _load("smart_scan_page", "render_smart_scanner"), supabase)
+    elif pg == "news":
+        _run("news_feed", _load("news_feed", "render_news_terminal"),
+             list(dict.fromkeys(st.session_state.get("watchlist", []) + st.session_state.get("admin_watchlist", []))),
+             on_open=_open_security, current_security=st.session_state.get("active_security") or None)
     elif pg == "breadth":
         _run("breadth_page", _load("breadth_page", "render_market_breadth"))
     elif pg == "flow":
