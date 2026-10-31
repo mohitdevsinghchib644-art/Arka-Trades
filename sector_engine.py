@@ -358,7 +358,15 @@ def analyse_universe(frames: dict, meta: pd.DataFrame, bench: str = "^NSEI", ben
                 bser[k] = s_
     elif frames.get(bench) is not None:
         bser["NIFTY 50"] = norm_series(frames[bench]["Close"])
-    bser[MARKET] = (1 + (ret1.mean(axis=1) / 100).fillna(0)).cumprod() * 100
+        # MARKET AVG uses the SAME weighting as the sector indices (liquidity-weighted, per-stock cap 2%) so that
+    # sector-vs-market comparisons are like-for-like. Equal-weight mode keeps the old plain average.
+    if weighting == "equal":
+        mret = ret1.mean(axis=1)
+    else:
+        wm = turn.rolling(20, min_periods=1).mean().shift(1).clip(lower=1.0).fillna(1.0).where(ret1.notna(), 0.0)
+        wm = wm.clip(upper=wm.sum(axis=1) * 0.02, axis=0)
+        mret = (wm * ret1.fillna(0)).sum(axis=1) / wm.sum(axis=1).replace(0, np.nan)
+    bser[MARKET] = (1 + (mret / 100).fillna(0)).cumprod() * 100
     bench_idx = pd.DataFrame({k: bser[k].reindex(idx.union(bser[k].index)).ffill().reindex(idx)
                               for k in BENCH_ORDER if k in bser}, index=idx)
 
