@@ -1,46 +1,28 @@
 """
-sector_engine.py — Arka stock-universe SECTOR analytics v3 (pure functions, no network).
+sector_engine.py — Arka stock-universe SECTOR analytics v3.1 (pure functions, no network).
 
 Input : {"SYM.NS": OHLCV DataFrame, "^NSEI": benchmark}  +  meta DataFrame[symbol, industry, company]
         optional benches = {"NIFTY 50": Series, "MIDCAP 100": Series, "SMALLCAP 100": Series} (daily closes)
 Output: per-sector table, per-stock table, sector index series, benchmark series, breadth series,
         data-quality report, and helpers for benchmark comparison, rotation detection and AUDIT.
 
-WHAT CHANGED IN v3 (why sector numbers could be wrong in v2)
--------------------------------------------------------------
-1. LATEST-SESSION COVERAGE GUARD.  v2 used the newest date found in ANY ticker. When only part of the
-   universe has published today's bar, every other stock was forward-filled as a 0.00% day, so the sector
-   index barely moved while the real market did (tested: true +2.5% day shown as +0.25%). Sectors that had
-   actually rallied above their 10/20-EMA still printed red. v3 only analyses sessions where at least
-   60% of the usual universe has a real bar, drops the incomplete tail, and reports `quality`.
-2. NO-BAR != 0% RETURN.  A stock with no bar on a date is now EXCLUDED from that day's sector average
-   instead of contributing a fake 0.00%.
-3. BAD-TICK / SPLIT REPAIR.  One bad print in one of 40 stocks moved a v2 sector index by +236% in testing.
-   v3 detects (a) bad ticks that revert next day -> repaired; (b) split/bonus-like persistent steps
-   (x0.5, x1/3, x0.25, x0.2, x0.1, x2/3 and reverse) -> history back-adjusted; (c) any other > 60% jump ->
-   excluded from the average. Remaining daily returns are clipped to +/-25% (NSE circuit scale).
-   Every repair is listed in quality["events"].
-4. LIQUIDITY-WEIGHTED SECTOR INDEX (default).  Official NSE sector indices are cap-weighted, so large names
-   lead them. An equal-weight index of every listed stock (incl. micro-caps) can sit below its 10-EMA while
-   the official index is above it. v3 weights each stock by its prior 20-day average traded value
-   (capped at max(25%, 2/n) per stock) — a close proxy for free-float cap. weighting="equal" restores v2 behaviour.
-5. TRADINGVIEW-PARITY INDICATORS.  EMA and Wilder-RSI are SMA-seeded exactly like TradingView's ta.ema / ta.rsi
-   (v2 seeded with the first value, which biased the EMA-200 by up to ~8% on a 1-year window).
-6. AUDIT TOOLS.  self_check(res) re-derives every flag/distance and reports mismatches;
-   explain_sector(res, sector) returns the raw numbers behind a row (index level, each EMA, last closes,
-   per-stock contribution today) so any value can be checked against a chart in seconds.
+v3.1 (this file)
+  * MARKET AVG is now built with the SAME liquidity weighting as the sector indices (per-stock cap 2%),
+    so sector-vs-market comparisons are like-for-like. v3 compared liquidity-weighted sectors against an
+    equal-weight market, which made large-cap sectors look weak whenever small caps rallied.
+  * The full CMF and turnover-share histories are returned (cmf_series_full / share_series_full) for the
+    Rotation Lab backtest; the 60-session tails used by the UI are unchanged.
 
-Definitions (unchanged)
-  RSI(14) Wilder (daily + weekly) of the sector index · EMA 10/20/50/200 flags + % distance
-  Turnover = close x volume of the latest session (Rs crore, Yahoo volume ≈ NSE value)
-  Share % = sector turnover / universe turnover · Chaikin CMF(20) · % stocks > 20-EMA (breadth)
-  Rotation (RRG-style, simplified): RS-Ratio = 100 x RS / SMA(RS,50); RS-Momentum = 100 x ratio / ratio[10 sessions ago]
-  Lanes LEADING · FADING · WEAK · IMPROVING;  score 0-100 (trend 30, momentum 20, relative 25, breadth 15, flow 10)
-  Stages ROTATING IN · LEADING · EXTENDED · IMPROVING · FADING · WEAK
+v3 (unchanged)
+  1. Latest-session coverage guard (sessions count only when >= 60% of the universe has a real bar).
+  2. No-bar != 0% return (a missing bar is excluded from that day's sector average).
+  3. Bad-tick / split repair, unexplained > 60% jumps excluded, daily returns clipped to +/-25%.
+  4. Liquidity-weighted sector index (prior 20-day traded value, capped at max(25%, 2/n) per stock).
+  5. TradingView-parity EMA and Wilder RSI (SMA-seeded).
+  6. Audit tools: self_check(res) and explain_sector(res, sector).
 
 Honest limits: "sector" = NSE industry classification from the index constituent files; turnover is not
 exchange-reported value; scores and stages are evidence from price, breadth and volume - not forecasts.
-With only ~1 year of history the EMA-200 is approximate (quality["ema200_reliable"] tells you).
 """
 from __future__ import annotations
 
@@ -53,7 +35,7 @@ RS_TREND, RS_MOM = 50, 10
 TRAIL_STEP, TRAIL_LEN = 5, 6
 EXTENDED_PCT = 6.0
 EXTENDED_RSI = 72.0
-MARKET = "MARKET AVG"        # equal-weight average of every stock in the universe: the fair yardstick for sector rotation
+MARKET = "MARKET AVG"        # the whole universe, weighted like the sectors: the fair yardstick for rotation
 BENCH_ORDER = (MARKET, "NIFTY 50", "MIDCAP 100", "SMALLCAP 100")
 COMPARE = ("NIFTY 50", "MIDCAP 100", "SMALLCAP 100")      # benchmarks shown in the comparison charts / tables
 BK = {MARKET: "mkt", "NIFTY 50": "n50", "MIDCAP 100": "m100", "SMALLCAP 100": "s100"}
@@ -61,14 +43,15 @@ STAGES = ("ROTATING IN", "LEADING", "EXTENDED", "IMPROVING", "FADING", "WEAK")
 LANE_VALUE = {"LEADING": 3, "IMPROVING": 2, "FADING": 1, "WEAK": 0}
 
 # data-quality controls
-MIN_COVERAGE = 0.60          # a session counts only if >= 60% of the usual universe has a real bar
-CLIP_PCT = 25.0              # daily-return clip used for index construction
-DROP_PCT = 60.0              # single-day moves beyond this are never treated as real returns
+MIN_COVERAGE = 0.60
+CLIP_PCT = 25.0
+DROP_PCT = 60.0
 SPLIT_RATIOS = (0.5, 1 / 3, 0.25, 0.2, 0.1, 2 / 3, 2.0, 3.0, 4.0, 5.0, 10.0)
 SPLIT_TOL = 0.04
 SPLIT_MIN_MOVE = 30.0
 REVERT_TOL = 0.08
 WEIGHT_CAP_MIN = 0.25
+MARKET_CAP_PER_STOCK = 0.02
 ST_BAD_TICK, ST_CORP, ST_EXCLUDED = "bad tick (repaired)", "split/bonus-like (history adjusted)", "unexplained jump (excluded)"
 
 
@@ -358,13 +341,12 @@ def analyse_universe(frames: dict, meta: pd.DataFrame, bench: str = "^NSEI", ben
                 bser[k] = s_
     elif frames.get(bench) is not None:
         bser["NIFTY 50"] = norm_series(frames[bench]["Close"])
-        # MARKET AVG uses the SAME weighting as the sector indices (liquidity-weighted, per-stock cap 2%) so that
-    # sector-vs-market comparisons are like-for-like. Equal-weight mode keeps the old plain average.
+    # MARKET AVG uses the SAME weighting as the sector indices so comparisons are like-for-like
     if weighting == "equal":
         mret = ret1.mean(axis=1)
     else:
         wm = turn.rolling(20, min_periods=1).mean().shift(1).clip(lower=1.0).fillna(1.0).where(ret1.notna(), 0.0)
-        wm = wm.clip(upper=wm.sum(axis=1) * 0.02, axis=0)
+        wm = wm.clip(upper=wm.sum(axis=1) * MARKET_CAP_PER_STOCK, axis=0)
         mret = (wm * ret1.fillna(0)).sum(axis=1) / wm.sum(axis=1).replace(0, np.nan)
     bser[MARKET] = (1 + (mret / 100).fillna(0)).cumprod() * 100
     bench_idx = pd.DataFrame({k: bser[k].reindex(idx.union(bser[k].index)).ffill().reindex(idx)
@@ -422,7 +404,7 @@ def analyse_universe(frames: dict, meta: pd.DataFrame, bench: str = "^NSEI", ben
 
     quality = {
         "asof": str(last_date)[:10],
-        "coverage": cover_last,                                   # share of the universe with a REAL bar on the last session
+        "coverage": cover_last,
         "coverage_ok": bool(cover_last >= 0.85),
         "dropped_partial_sessions": dropped_tail,
         "no_bar_today": int((~has_bar.iloc[-1]).sum()),
@@ -491,14 +473,12 @@ def explain_sector(res: dict, sector: str, last_n: int = 8) -> dict:
 
 # ───────────────────────── benchmark comparison ─────────────────────────
 def _cmp(res: dict) -> pd.DataFrame:
-    """Benchmarks used for the comparison charts and tables (NIFTY 50 / MIDCAP 100 / SMALLCAP 100)."""
     bi = res["bench_index"]
     return bi[[b for b in COMPARE if b in bi.columns]]
 
 
 def returns_vs_benchmarks(res: dict):
-    """Sector returns (1W/1M/3M) and excess return in pp versus every benchmark.
-    Returns (DataFrame[sector, r1w, r1m, r3m, x1w_n50, x1m_m100 ...], {period: {bench: return}})."""
+    """Sector returns (1W/1M/3M) and excess return in pp versus every benchmark."""
     si, bi = res["sector_index"], _cmp(res)
     out = pd.DataFrame(index=si.columns)
     bench_ret = {}
@@ -515,14 +495,12 @@ def returns_vs_benchmarks(res: dict):
 
 
 def rebased(res: dict, sector: str, sessions: int) -> pd.DataFrame:
-    """Sector + NIFTY 50 / MIDCAP 100 / SMALLCAP 100 rebased to 100 at the start of the window."""
     si, bi = res["sector_index"], _cmp(res)
     df = pd.concat([si[[sector]], bi], axis=1).tail(sessions + 1).ffill().bfill()
     return df / df.iloc[0] * 100
 
 
 def ratios(res: dict, sector: str, sessions: int) -> pd.DataFrame:
-    """sector / benchmark rebased to 100: rising line = sector outperforming that benchmark."""
     si, bi = res["sector_index"], _cmp(res)
     cols = {}
     for b in bi.columns:
@@ -562,23 +540,18 @@ def _score(r: dict, x, y, rs_above, bench: str):
     dist20, cmf = _f(r.get("dist20")), _f(r.get("cmf"))
     a20, a20_5 = _f(r.get("pct_above20")), _f(r.get("pct_above20_5"))
     dsh = _f(r.get("dshare_w"))
-    # trend 30
     if ab20: pts += 10
     if ab50: pts += 10
     if _b(r.get("e10_gt_20")): pts += 5
     if _b(r.get("e20_gt_50")): pts += 5
-    # momentum 20
     if rsi is not None and rsi > 50: pts += 10
     if rsi is not None and rsi5 is not None and rsi > rsi5: pts += 5
     if rsi is not None and rsi <= 75: pts += 5
-    # relative 25
     if x is not None and not np.isnan(x) and x >= 100: pts += 10
     if y is not None and not np.isnan(y) and y >= 100: pts += 10
     if rs_above: pts += 5
-    # breadth 15
     if a20 is not None and a20 >= 50: pts += 8
     if a20 is not None and a20_5 is not None and a20 > a20_5: pts += 7
-    # flow 10
     if cmf is not None and cmf > 0: pts += 5
     if dsh is not None and dsh > 0: pts += 5
 
