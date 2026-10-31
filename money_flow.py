@@ -47,6 +47,7 @@ import flow_engine as fe
 import index_engine as ix
 import mf_ui as ui
 import sector_engine as se
+import rotation_lab as rl
 
 NSE = "https://www.nseindia.com"
 ARCHIVE_BASE = "https://nsearchives.nseindia.com/content/indices/"
