@@ -1,197 +1,206 @@
 """
-news_feed.py — Arka Trades News Intelligence v9.2
+news_feed.py — Arka News Desk v10
 
-A terminal-style news engine for the Arka Trades right rail, the Research > News
-workspace and the Portfolio news light.
+A Bloomberg-style news layer for the terminal: one shared wire, entity tagging, scoring and a full NEWS workspace.
 
-v9.2 fixes (on top of v9.1)
----------------------------
-* TOP / BREAK / CATALYST / RISK now show DIFFERENT stories:
-    TOP       highest-priority stories overall
-    BREAK     everything from the last 3 hours, newest first
-    CATALYST  company-specific positive news / orders / capex / stake / dividend
-    RISK      negative-sentiment or regulatory stories (market-wide included)
-  Root cause: keywords were matched as raw substrings ("up" matched "support",
-  "group", "update"; "ban" matched "bank"; "eps" matched "steps"), so almost
-  every headline was tagged positive/regulatory and every tab got the same
-  list. All keywords now match on word boundaries.
-* _fetch_news_for_stock() accepts company=... (used by the Portfolio page). With a
-  company name the query is more precise and results are filtered so a yellow light
-  only appears for headlines that really name the company or its symbol.
-* Macro headlines are capped so they cannot drown company news.
-* The NEW badge actually shows now (it was being reset before rendering).
-* Refreshes up to 8 symbols per cycle (holdings first), rotating through the rest.
+What changed vs v9.2
+--------------------
+MORE AND BETTER SOURCES
+  * A real wire: Economic Times, Business Standard, Mint, Moneycontrol, BusinessLine and NDTV Profit RSS feeds,
+    plus Google News for macro topics and for each of your stocks, plus BSE corporate filings (exchange
+    announcements, with the PDF link). v9 used Google News only.
+  * Every source has a live health status (OK / FAILED / items), shown on the NEWS page — no silent gaps.
 
-Public API (unchanged): render_news_rail, news_panel, news_box, refresh_news,
-get_news_dot, get_security_news, _fetch_news_for_stock
+SMARTER
+  * Entity tagging: every headline is scanned for your watchlist / portfolio stocks (tickers + company aliases such
+    as "RIL", "L&T", "Tata Consultancy"), sectors (banks, IT, auto, pharma, metals …) and macro themes (RBI, Fed,
+    crude, rupee, FII …). A market-wide wire story that names one of your stocks now lands in MY STOCKS.
+  * Sentiment is a weighted score (−3 … +3) with negation handling ("not upgraded", "fails to beat"), not a
+    first-keyword match. Rupee amounts are extracted ("₹1,200 crore order" → ₹1,200 Cr) and raise importance.
+  * Stories are clustered across sources; source count, HOT (3+ outlets inside 3 h) and BREAKING flags.
+  * NEWS PULSE: per-stock story count, net tone and latest headline. SECTOR TONE and a market NEWS TONE index.
+
+FASTER
+  * Fetches are shared by every user (st.cache_data) instead of per-session caches; one assembled feed is memoised
+    for 5 minutes; slow sources are skipped after a hard 9-second budget instead of blocking the page.
+  * The rail uses a selector instead of st.tabs (tabs built all four lists — with a price download per story —
+    on every click). Price-reaction badges are computed only for the stock you are viewing.
+
+NEW
+  * render_news_terminal(): a full NEWS workspace (wire, breaking tape, pulse, sector tone, source health).
+
+Public API kept: render_news_rail, news_panel, news_box, refresh_news, get_news_dot, get_security_news,
+_fetch_news_for_stock, _ensure_news_state.  Headlines are third-party content; tone tags are automatic and
+can be wrong — not investment advice.
 """
-
 from __future__ import annotations
 
-import difflib
+import hashlib
 import html
 import re
+import threading
 import time
-from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone, timedelta
+from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor, wait
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+from functools import lru_cache
 from urllib.parse import quote_plus, urlparse
 
 import feedparser
 import pandas as pd
 import requests
 import streamlit as st
-import yfinance as yf
+
+try:
+    import yfinance as yf
+except Exception:  # pragma: no cover
+    yf = None
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-# Terminal palette
-GOLD = "#FF9F0A"
-DARK = "#000000"
-DARK2 = "#090909"
-DARK3 = "#111111"
-BORDER = "#242424"
-T2 = "#8E8E8E"
-T3 = "#5C5C5C"
-IVORY = "#E8E8E8"
-GREEN = "#30D158"
-RED = "#FF453A"
-BLUE = "#5AC8FA"
-PURPLE = "#BF5AF2"
-CYAN = "#64D2FF"
+# ── palette (app v7) ──
+AMBER, GREEN, RED, CYAN, PURPLE, YELLOW = "#FF9F0A", "#30D158", "#FF453A", "#5AC8FA", "#BF5AF2", "#FFD60A"
+TX, TX2, TX3, LINE, LINE2, S1, S2 = "#ECECEC", "#A3A3A3", "#6B6B6B", "#1F1F1F", "#2B2B2B", "#0A0A0A", "#0F0F0F"
 MONO = "'JetBrains Mono','Consolas',monospace"
+# legacy names some modules import
+GOLD, DARK, DARK2, DARK3, BORDER, T2, T3, IVORY, BLUE = AMBER, "#000000", "#090909", "#111111", "#242424", "#8E8E8E", "#5C5C5C", "#E8E8E8", CYAN
 
-NEWS_FETCH_TTL = 300
-NEWS_EXPIRE_MIN = 5
-MAX_SECURITY_REFRESH = 8
-MAX_FETCH_WORKERS = 6
-MAX_COMBINED_ITEMS = 80
-MAX_MACRO_ITEMS = 18
-MAX_ARTICLES_PER_FEED = 25
+FEED_TTL = 300              # seconds a source is reused before it is fetched again
+ASSEMBLE_TTL = 300          # assembled feed memo
+FETCH_BUDGET_S = 9.0        # hard wall-clock budget per assembly; slow sources are picked up on the next run
 HTTP_TIMEOUT = 7
-DEFAULT_DAYS = 1
-BREAK_WINDOW_MIN = 180
+MAX_COMPANY_FETCH = 10      # stocks queried on Google News per cycle (pinned stock + rotation)
+MAX_ITEMS_PER_FEED = 40
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 
-_EVENT_RULES = {
-    "EARNINGS": ["earnings", "results", "quarterly result", "profit", "revenue", "ebitda", "eps", "guidance"],
-    "ORDER": ["order", "contract", "bags order", "wins order", "wins contract", "work order", "purchase order", "letter of award"],
-    "STAKE": ["stake", "acquire", "acquisition", "buy stake", "sells stake", "buys stake", "block deal", "open offer"],
-    "PROMOTER": ["promoter", "promoters", "pledge", "pledged", "insider", "insider buying", "insider selling"],
-    "REGULATORY": ["sebi", "rbi", "penalty", "probe", "raid", "regulatory", "show cause", "ban", "banned", "compliance", "notice"],
-    "DIVIDEND": ["dividend", "ex-dividend", "record date", "bonus", "split", "buyback"],
-    "RATING": ["upgrade", "downgrade", "target price", "rating", "outperform", "underperform", "brokerage", "price target"],
-    "CAPEX": ["capex", "capital expenditure", "expansion", "new plant", "capacity", "investment plan", "commissioning"],
-    "MANAGEMENT": ["ceo", "cfo", "management", "md & ceo", "appoints", "resigns", "steps down", "outlook"],
-    "MACRO": ["rbi", "fed", "federal reserve", "inflation", "gdp", "crude", "oil price", "rupee", "dollar", "nifty", "sensex", "fii", "dii", "bond yield", "tariff"],
-}
-
-_STRONG_NEGATIVE = [
-    "crash", "plunge", "collapse", "fraud", "scam", "default", "bankrupt",
-    "insolvency", "probe", "raid", "scandal", "resign", "steps down", "sebi action",
-    "penalty", "banned", "suspended", "downgrade", "slump", "tumble",
-    "loss widens", "profit warning", "recall", "misses estimate", "misses estimates",
+# ═════════════════════════ sources ═════════════════════════
+WIRE_SOURCES = [
+    ("Economic Times", "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms"),
+    ("Economic Times", "https://economictimes.indiatimes.com/markets/stocks/news/rssfeeds/2146842.cms"),
+    ("Business Standard", "https://www.business-standard.com/rss/markets-106.rss"),
+    ("Business Standard", "https://www.business-standard.com/rss/companies-101.rss"),
+    ("Mint", "https://www.livemint.com/rss/markets"),
+    ("Mint", "https://www.livemint.com/rss/companies"),
+    ("Moneycontrol", "https://www.moneycontrol.com/rss/marketreports.xml"),
+    ("Moneycontrol", "https://www.moneycontrol.com/rss/business.xml"),
+    ("BusinessLine", "https://www.thehindubusinessline.com/markets/feeder/default.rss"),
+    ("NDTV Profit", "https://feeds.feedburner.com/ndtvprofit-latest"),
 ]
-_STRONG_POSITIVE = [
-    "record high", "record profit", "surge", "rally", "beats estimate",
-    "beats estimates", "upgrade", "wins order", "wins contract", "stake buy",
-    "acquire", "acquisition", "expansion", "breakthrough", "outperform",
-    "all-time high", "jumps", "soars", "bags order", "profit rises", "raises guidance",
+MACRO_QUERIES = ["RBI monetary policy repo rate", "Nifty Sensex stock market today", "FII DII flows India equities",
+                 "US Federal Reserve rates markets", "crude oil prices India", "rupee dollar forex India",
+                 "India inflation GDP economy", "global markets Wall Street Asia"]
+
+# ═════════════════════════ taxonomy ═════════════════════════
+ALIASES = {
+    "RELIANCE": ["reliance industries", "ril", "reliance jio", "jio platforms", "reliance retail"],
+    "TCS": ["tata consultancy"], "INFY": ["infosys"], "HDFCBANK": ["hdfc bank"], "ICICIBANK": ["icici bank"],
+    "SBIN": ["state bank of india", "sbi"], "AXISBANK": ["axis bank"], "KOTAKBANK": ["kotak mahindra bank", "kotak bank"],
+    "BAJFINANCE": ["bajaj finance"], "BAJAJFINSV": ["bajaj finserv"], "LT": ["larsen & toubro", "larsen and toubro", "l&t"],
+    "HINDUNILVR": ["hindustan unilever", "hul"], "BHARTIARTL": ["bharti airtel", "airtel"], "WIPRO": ["wipro"],
+    "HCLTECH": ["hcltech", "hcl tech", "hcl technologies"], "TECHM": ["tech mahindra"], "LTIM": ["ltimindtree"],
+    "MARUTI": ["maruti suzuki", "maruti"], "TATAMOTORS": ["tata motors", "jaguar land rover", "jlr"],
+    "M&M": ["mahindra & mahindra", "mahindra and mahindra", "m&m"], "BAJAJ-AUTO": ["bajaj auto"],
+    "HEROMOTOCO": ["hero motocorp"], "EICHERMOT": ["eicher motors", "royal enfield"], "SUNPHARMA": ["sun pharma"],
+    "DRREDDY": ["dr reddy", "dr. reddy"], "CIPLA": ["cipla"], "DIVISLAB": ["divi's lab", "divis lab"],
+    "APOLLOHOSP": ["apollo hospitals"], "TATASTEEL": ["tata steel"], "JSWSTEEL": ["jsw steel"], "HINDALCO": ["hindalco"],
+    "VEDL": ["vedanta"], "COALINDIA": ["coal india"], "ONGC": ["oil and natural gas", "ongc"], "NTPC": ["ntpc"],
+    "POWERGRID": ["power grid"], "TATAPOWER": ["tata power"], "IOC": ["indian oil"], "BPCL": ["bharat petroleum", "bpcl"],
+    "ADANIENT": ["adani enterprises"], "ADANIPORTS": ["adani ports"], "ADANIGREEN": ["adani green"],
+    "ASIANPAINT": ["asian paints"], "TITAN": ["titan company"], "NESTLEIND": ["nestle india"], "BRITANNIA": ["britannia"],
+    "ULTRACEMCO": ["ultratech"], "GRASIM": ["grasim"], "HAL": ["hindustan aeronautics"], "BEL": ["bharat electronics"],
+    "BHEL": ["bharat heavy electricals", "bhel"], "IRFC": ["indian railway finance", "irfc"], "RVNL": ["rail vikas nigam", "rvnl"],
+    "ETERNAL": ["zomato", "eternal ltd", "blinkit"], "ZOMATO": ["zomato"], "PAYTM": ["paytm", "one 97"], "NYKAA": ["nykaa", "fsn e-commerce"],
+    "DMART": ["avenue supermarts", "dmart", "d-mart"], "TRENT": ["trent ltd", "zudio"], "DIXON": ["dixon technologies"],
+    "PERSISTENT": ["persistent systems"], "HDFCLIFE": ["hdfc life"], "SBILIFE": ["sbi life"], "ICICIPRULI": ["icici prudential life"],
+    "INDUSINDBK": ["indusind bank"], "BANKBARODA": ["bank of baroda"], "PNB": ["punjab national bank"], "CANBK": ["canara bank"],
+    "IDEA": ["vodafone idea"], "YESBANK": ["yes bank"], "DLF": ["dlf"], "LICI": ["life insurance corporation", "lic"],
+    "ITC": ["itc ltd", "itc hotels"], "JIOFIN": ["jio financial"], "SHRIRAMFIN": ["shriram finance"], "CHOLAFIN": ["cholamandalam"],
+}
+SECTORS = {
+    "BANKS & FIN": r"banks?|banking|lenders?|nbfcs?|insurers?|insurance|fintech|microfinance|credit growth|deposits?",
+    "IT": r"it services|it stocks|it sector|software|tech services|it majors?|outsourcing",
+    "AUTO": r"autos?|automakers?|car sales|two-wheelers?|passenger vehicles?|ev makers?|electric vehicles?|tractors?",
+    "PHARMA": r"pharma|drugmakers?|usfda|drug|hospitals?|healthcare|api makers?",
+    "METALS": r"steel|metals?|aluminium|copper|mining|iron ore|zinc",
+    "ENERGY": r"crude|oil marketing|refiners?|opec|petrol|diesel|lng|natural gas|city gas",
+    "FMCG": r"fmcg|consumer goods|staples|rural demand",
+    "REALTY": r"real estate|realty|housing sales|property market",
+    "POWER": r"power demand|electricity|renewables?|solar|discoms?|power sector|power stocks",
+    "CAP GOODS": r"defence|defense|capital goods|railways?|engineering|order book",
+    "TELECOM": r"telecom|5g|spectrum|arpu",
+    "CEMENT": r"cement",
+    "CHEMICALS": r"chemicals?|agrochemicals?|fertilisers?|fertilizers?",
+}
+MACRO_TAGS = {
+    "RBI": r"rbi|repo rate|monetary policy|mpc", "FED": r"fed|federal reserve|fomc|powell", "INFLATION": r"inflation|cpi|wpi",
+    "CRUDE": r"crude|brent|opec", "RUPEE": r"rupee|forex|inr", "FII": r"fiis?|fpis?|foreign investors|dii", "GDP": r"gdp|growth forecast",
+    "TRADE": r"tariffs?|trade deal|trade war|exports?|imports?", "BUDGET": r"budget|fiscal deficit|gst", "GLOBAL": r"wall street|nasdaq|dow|s&p 500|china|nikkei",
+}
+EVENTS = [  # checked in order
+    ("REGULATORY", r"sebi|penalty|probe|raid|show[- ]cause|banned|ban on|regulatory|compliance|enforcement directorate|\bed\b|cbi|court|tribunal|nclt"),
+    ("FILING", r"regulation 30|intimation|disclosure under"),
+    ("ORDER", r"orders?|contracts?|letter of award|bags|wins .*?(deal|order|contract)|work order|loa"),
+    ("STAKE", r"stake|acqui(re|res|red|sition)|merger|demerger|block deal|bulk deal|open offer|takeover"),
+    ("PROMOTER", r"promoters?|pledge[ds]?|insider"),
+    ("EARNINGS", r"results?|earnings|q[1-4]\b|quarterly|net profit|revenue|ebitda|margins?|guidance|profit (rises|falls|jumps|drops)"),
+    ("CORP ACTION", r"dividend|record date|bonus|stock split|split|buyback|rights issue|qip|fund raise|ncd"),
+    ("IPO", r"\bipo\b|listing|lists at|grey market|gmp|subscribed"),
+    ("RATING", r"upgrades?|downgrades?|target price|price target|rating|outperform|underperform|brokerage|initiates coverage|buy call|sell call"),
+    ("CAPEX", r"capex|expansion|new plant|capacity|commission(s|ed|ing)|greenfield|brownfield"),
+    ("MANAGEMENT", r"\bceo\b|\bcfo\b|\bmd\b|chairman|appoints?|resigns?|steps down|board meeting"),
 ]
-# Ambiguous short words ("up", "down", "cut") were removed on purpose.
-_MILD_NEGATIVE = ["falls", "fall", "declines", "declined", "drops", "dips", "slips", "slides", "weak", "weakens",
-                  "concern", "concerns", "delay", "delayed", "misses", "soft outlook"]
-_MILD_POSITIVE = ["rises", "gains", "climbs", "beats", "growth", "expands", "launch", "launches", "partnership",
-                  "higher outlook", "improves", "strong demand"]
-
-
-def _kw_regex(words) -> re.Pattern:
-    """Word-boundary keyword matcher. Short tokens (<=4 chars) must match the whole word;
-    longer ones may carry a suffix (resign -> resigns, probe -> probes)."""
-    parts = []
-    for w in sorted(set(words), key=len, reverse=True):
-        esc = re.escape(w)
-        parts.append(rf"(?<![a-z0-9]){esc}(?![a-z0-9])" if len(w) <= 4 else rf"(?<![a-z0-9]){esc}")
-    return re.compile("|".join(parts))
-
-
-_EVENT_RE = {k: _kw_regex(v) for k, v in _EVENT_RULES.items()}
-_SENT_RE = {
-    "strong_negative": _kw_regex(_STRONG_NEGATIVE),
-    "strong_positive": _kw_regex(_STRONG_POSITIVE),
-    "mild_negative": _kw_regex(_MILD_NEGATIVE),
-    "mild_positive": _kw_regex(_MILD_POSITIVE),
-}
-
-_EVENT_COLORS = {
-    "EARNINGS": PURPLE, "ORDER": GREEN, "STAKE": GOLD, "PROMOTER": GOLD, "REGULATORY": RED,
-    "DIVIDEND": GREEN, "RATING": BLUE, "CAPEX": CYAN, "MANAGEMENT": "#FFD60A", "MACRO": GOLD, "NEWS": T2,
-}
-_SENTIMENT_LABELS = {"strong_negative": "NEG", "strong_positive": "POS", "mild_negative": "neg", "mild_positive": "pos", "neutral": "—"}
-_SENTIMENT_COLORS = {"strong_negative": RED, "strong_positive": GREEN, "mild_negative": f"{RED}99",
-                     "mild_positive": f"{GREEN}99", "neutral": BORDER}
-_SOURCE_TYPES = {
-    "reuters": "NEWS", "cnbc": "NEWS", "economic times": "NEWS", "times of india": "NEWS", "moneycontrol": "NEWS",
-    "business standard": "NEWS", "businessline": "NEWS", "mint": "NEWS", "ndtv": "NEWS", "bloomberg": "NEWS",
-    "seeking alpha": "NEWS", "nse india": "EXCHANGE", "bse india": "EXCHANGE", "sebi": "REGULATOR", "rbi": "REGULATOR",
-}
-
-_MACRO_QUERIES = [
-    "RBI monetary policy India", "Nifty Sensex Indian market", "FII DII flows India", "US Fed interest rates stocks",
-    "crude oil India markets", "India GDP inflation markets", "US stock market today", "rupee dollar India markets",
+EVENT_COLORS = {"REGULATORY": RED, "FILING": CYAN, "ORDER": GREEN, "STAKE": AMBER, "PROMOTER": AMBER, "EARNINGS": PURPLE,
+                "CORP ACTION": GREEN, "IPO": YELLOW, "RATING": CYAN, "CAPEX": CYAN, "MANAGEMENT": YELLOW, "MACRO": AMBER, "NEWS": TX3}
+EVENT_WEIGHT = {"REGULATORY": 3, "ORDER": 3, "STAKE": 3, "PROMOTER": 2, "EARNINGS": 3, "CORP ACTION": 2, "FILING": 2,
+                "IPO": 1, "RATING": 2, "CAPEX": 2, "MANAGEMENT": 2, "MACRO": 1, "NEWS": 0}
+SENT = [  # (pattern, weight); longer phrases first
+    (r"record (high|profit|revenue|sales)|all[- ]time high|52[- ]week high|upper circuit|multibagger", 2),
+    (r"beats? (estimates?|expectations?|street)|raises? (guidance|outlook|target)|target raised", 2),
+    (r"(wins?|bags?|secures?) (an? )?(\w+ )?(order|contract|deal)", 2),
+    (r"surges?|soars?|skyrockets?|zooms?|rall(y|ies)|profit (jumps|surges|soars|doubles)|upgraded?", 2),
+    (r"rises?|gains?|climbs?|jumps?|higher|growth|expands?|launch(es)?|partnership|approv(al|es|ed)|recover(s|y)|rebounds?|"
+     r"outperforms?|buy rating|strong demand|improves?|robust|tailwinds?", 1),
+    (r"crash(es)?|plung(e|es)|plummets?|collapses?|fraud|scam|defaults?|bankrupt(cy)?|insolvency|raid|scandal|"
+     r"lower circuit|52[- ]week low|profit warning|loss widens|misses (estimates?|expectations?)|downgraded?|resigns?", -2),
+    (r"slumps?|tumbles?|sinks?|penalty|banned|suspended|probe|sell[- ]?off", -2),
+    (r"falls?|declines?|drops?|dips?|slips?|slides?|weak(ens|er)?|concerns?|delay(ed|s)?|misses|lower|cuts?|sell rating|"
+     r"target cut|pressure|outflows?|headwinds?|losses|slowdown", -1),
 ]
-_SECTOR_QUERY_TERMS = {
-    "bank": "Indian banks banking stocks", "financial": "Indian financial services stocks",
-    "information technology": "Indian IT stocks technology", "it": "Indian IT stocks technology",
-    "pharmaceutical": "Indian pharma stocks healthcare", "healthcare": "Indian pharma stocks healthcare",
-    "automobile": "Indian auto stocks automobile", "oil & gas": "Indian oil gas energy stocks",
-    "oil and gas": "Indian oil gas energy stocks", "metals": "Indian metals stocks steel", "power": "Indian power stocks electricity",
-}
-_EVENT_REASON = {
-    "EARNINGS": "Earnings / operating performance headline", "ORDER": "Commercial order or contract headline",
-    "STAKE": "Ownership / acquisition headline", "PROMOTER": "Promoter / insider / pledge headline",
-    "REGULATORY": "Regulatory, compliance or policy action", "DIVIDEND": "Corporate action headline",
-    "RATING": "Brokerage / rating / target-price headline", "CAPEX": "Capacity / investment / expansion headline",
-    "MANAGEMENT": "Management / outlook / leadership headline", "MACRO": "Macro or market-wide headline",
-    "NEWS": "General company / market headline",
-}
+NEGATION = re.compile(r"\b(not|no|never|fails? to|unlikely to|without)\b[\w\s,'-]{0,18}$")
+AMOUNT = re.compile(r"(?:₹|rs\.?|inr)\s?([\d,]+(?:\.\d+)?)\s?(lakh crore|lakh cr|crore|cr\b|billion|bn\b|million|mn\b)", re.I)
+BORING_FILINGS = re.compile(r"trading window|74\s?\(5\)|loss of share|duplicate share|newspaper (publication|advertisement)|"
+                            r"compliance certificate|closure of trading|investor (meet|presentation) intimation|book closure|"
+                            r"change in (address|registrar)|copy of newspaper", re.I)
 
-_POS = {"strong_positive", "mild_positive"}
-_NEG = {"strong_negative", "mild_negative"}
-_NON_COMPANY = {"MACRO", "SECTOR", None, ""}
+_SENT_RX = [(re.compile(rf"(?<![a-z0-9])(?:{p})(?![a-z0-9])"), w) for p, w in SENT]
+_EVENT_RX = [(e, re.compile(rf"(?<![a-z0-9])(?:{p})", re.I)) for e, p in EVENTS]
+_SECTOR_RX = {k: re.compile(rf"(?<![a-z0-9])(?:{p})(?![a-z0-9])") for k, p in SECTORS.items()}
+_MACRO_RX = {k: re.compile(rf"(?<![a-z0-9])(?:{p})(?![a-z0-9])") for k, p in MACRO_TAGS.items()}
+
+# ═════════════════════════ fetching (shared cache + health) ═════════════════════════
+_LOCK = threading.Lock()
+_HEALTH: dict = {}          # url -> {"name", "ok", "n", "t", "err"}
+_LAST_GOOD: dict = {}
+_COOL: dict = {}
+_MEMO: dict = {}
 
 
-def _now_ist() -> datetime:
+def _bucket(ttl=FEED_TTL) -> int:
+    return int(time.time() // ttl)
+
+
+def _now() -> datetime:
     return datetime.now(IST)
 
 
-def _today_ist() -> str:
-    return _now_ist().strftime("%Y-%m-%d")
-
-
-def _format_time(pub_dt: datetime) -> str:
-    now = _now_ist()
-    diff = int((now - pub_dt.astimezone(IST)).total_seconds())
-    if diff < 0 or diff < 60:
-        return "now"
-    if diff < 3600:
-        return f"{diff // 60}m"
-    if diff < 86400:
-        return f"{diff // 3600}h"
-    return pub_dt.astimezone(IST).strftime("%d %b")
-
-
-def _parse_pub(entry) -> datetime | None:
-    raw = entry.get("published", entry.get("updated", ""))
+def _parse_dt(raw, parsed=None):
     if raw:
         try:
             dt = parsedate_to_datetime(raw)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt.astimezone(IST)
+            return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).astimezone(IST)
         except Exception:
             pass
-    parsed = entry.get("published_parsed") or entry.get("updated_parsed")
     if parsed:
         try:
             return datetime(*parsed[:6], tzinfo=timezone.utc).astimezone(IST)
@@ -200,684 +209,703 @@ def _parse_pub(entry) -> datetime | None:
     return None
 
 
-def _classify_sentiment(title: str) -> str:
-    t = (title or "").lower()
-    for label in ("strong_negative", "strong_positive", "mild_negative", "mild_positive"):
-        if _SENT_RE[label].search(t):
-            return label
-    return "neutral"
+def _clean_html(s: str, n=260) -> str:
+    s = re.sub(r"<[^>]+>", " ", s or "")
+    s = html.unescape(re.sub(r"\s+", " ", s)).strip()
+    return s[:n] + ("…" if len(s) > n else "")
 
 
-def _classify_event(title: str, is_macro: bool = False) -> str:
-    t = (title or "").lower()
-    for event in ("REGULATORY", "ORDER", "STAKE", "PROMOTER", "DIVIDEND", "EARNINGS", "CAPEX", "MANAGEMENT", "RATING", "MACRO"):
-        if _EVENT_RE[event].search(t):
-            return event
-    return "MACRO" if is_macro else "NEWS"
+@st.cache_data(ttl=FEED_TTL * 2, show_spinner=False, max_entries=256)
+def _rss_cached(url: str, bucket: int) -> list:
+    r = requests.get(url, timeout=HTTP_TIMEOUT, headers={"User-Agent": UA, "Accept": "application/rss+xml,application/xml,text/xml,*/*"})
+    r.raise_for_status()
+    feed = feedparser.parse(r.content)
+    rows = []
+    for e in feed.entries[:MAX_ITEMS_PER_FEED]:
+        src = e.get("source", {}) or {}
+        rows.append({"title": e.get("title", ""), "link": e.get("link", ""), "summary": _clean_html(e.get("summary", "")),
+                     "dt": _parse_dt(e.get("published") or e.get("updated"), e.get("published_parsed") or e.get("updated_parsed")),
+                     "src": src.get("title") if isinstance(src, dict) else None})
+    if not rows:
+        raise RuntimeError("empty feed")
+    return rows
 
 
-def _importance(title: str, event: str, sentiment: str) -> int:
-    score = 1
-    if event in {"EARNINGS", "ORDER", "STAKE", "PROMOTER", "REGULATORY", "DIVIDEND"}:
-        score += 2
-    elif event in {"CAPEX", "MANAGEMENT", "RATING"}:
-        score += 1
-    if sentiment.startswith("strong"):
-        score += 1
-    t = (title or "").lower()
-    if any(x in t for x in ["breaking", "just in", "exclusive", "flash"]):
-        score += 1
-    return min(score, 5)
-
-
-def _source_type(source: str, link: str = "") -> str:
-    s = (source or "").lower()
-    for key, typ in _SOURCE_TYPES.items():
-        if key in s:
-            return typ
-    host = urlparse(link or "").netloc.lower()
-    if "nseindia" in host or "bseindia" in host:
-        return "EXCHANGE"
-    if "sebi" in host or "rbi" in host:
-        return "REGULATOR"
-    return "NEWS"
-
-
-def _normalise_title(title: str) -> str:
-    t = re.sub(r"\[[^\]]+\]", " ", title or "")
-    t = re.sub(r"\b(live updates?|live blog|breaking|watch)\b", " ", t, flags=re.I)
-    t = re.sub(r"[^a-z0-9 ]+", " ", t.lower())
-    return re.sub(r"\s+", " ", t).strip()
-
-
-def _token_similarity(a: str, b: str) -> float:
-    if not a or not b:
-        return 0.0
-    sa, sb = set(a.split()), set(b.split())
-    jaccard = len(sa & sb) / max(1, len(sa | sb))
-    seq = difflib.SequenceMatcher(None, a, b).ratio()
-    return max(jaccard, seq * 0.9)
-
-
-def _extract_source(entry, title: str) -> tuple[str, str]:
-    source_obj = entry.get("source", {}) or {}
-    source = source_obj.get("title") if isinstance(source_obj, dict) else str(source_obj)
-    clean_title = title.strip()
-    if source:
-        return str(source).strip(), clean_title
-    parts = re.split(r"\s+-\s+", clean_title)
-    if len(parts) >= 2:
-        maybe_source = parts[-1].strip()
-        if 1 < len(maybe_source) <= 60:
-            return maybe_source, " - ".join(parts[:-1]).strip()
-    return "News", clean_title
-
-
-def _build_article(entry, symbol: str, is_macro: bool = False, query_kind: str = "company") -> dict | None:
-    pub_dt = _parse_pub(entry)
-    if not pub_dt:
-        return None
-    raw_title = entry.get("title", "No title") or "No title"
-    source, title = _extract_source(entry, raw_title)
-    link = entry.get("link", "") or ""
-    event = _classify_event(title, is_macro=is_macro)
-    sentiment = _classify_sentiment(title)
-    return {
-        "symbol": symbol, "title": title, "link": link, "source": source or "News", "pub_dt": pub_dt,
-        "time_str": _format_time(pub_dt), "sentiment": sentiment, "sentiment_label": _SENTIMENT_LABELS[sentiment],
-        "event": event, "event_reason": _EVENT_REASON.get(event, "General news headline"),
-        "importance": _importance(title, event, sentiment), "source_type": _source_type(source, link),
-        "query_kind": query_kind, "cluster_key": _normalise_title(title), "is_new": False, "is_breaking": False,
-        "priority": 0, "relevance": 0, "source_count": 1, "sources": [source or "News"],
-    }
-
-
-def _rss_url(query: str, days: int = 1) -> str:
-    q = f"{query} when:{max(1, int(days))}d"
-    return f"https://news.google.com/rss/search?q={quote_plus(q)}&hl=en-IN&gl=IN&ceid=IN:en"
-
-
-@st.cache_data(ttl=NEWS_FETCH_TTL, show_spinner=False)
-def _fetch_rss_cached(url: str) -> list[dict]:
-    """Fetch RSS through requests so the connection has a hard timeout."""
+def _fetch(url: str, name: str, fn=None) -> list:
+    """Cached fetch with health tracking, last-good fallback and a 3-minute cool-down after failures."""
+    now = time.time()
+    if _COOL.get(url, 0) > now:
+        return _LAST_GOOD.get(url, [])
     try:
-        response = requests.get(url, timeout=HTTP_TIMEOUT, headers={"User-Agent": "Mozilla/5.0 Arka-Trades-News/9.2"})
-        response.raise_for_status()
-        feed = feedparser.parse(response.content)
-        rows = []
-        for entry in feed.entries[:MAX_ARTICLES_PER_FEED]:
-            rows.append({
-                "title": entry.get("title", ""), "link": entry.get("link", ""),
-                "published": entry.get("published", ""), "updated": entry.get("updated", ""),
-                "published_parsed": entry.get("published_parsed"), "updated_parsed": entry.get("updated_parsed"),
-                "source": entry.get("source", {}),
-            })
+        rows = (fn or (lambda: _rss_cached(url, _bucket())))()
+        with _LOCK:
+            _LAST_GOOD[url] = rows
+            _HEALTH[url] = {"name": name, "ok": True, "n": len(rows), "t": now, "err": ""}
         return rows
-    except Exception:
-        return []
+    except Exception as e:
+        with _LOCK:
+            _COOL[url] = now + 180
+            _HEALTH[url] = {"name": name, "ok": False, "n": len(_LAST_GOOD.get(url, [])), "t": now, "err": type(e).__name__}
+        return _LAST_GOOD.get(url, [])
 
 
-@st.cache_data(ttl=NEWS_FETCH_TTL, show_spinner=False)
-def _fetch_query_cached(query: str, symbol: str, is_macro: bool = False, query_kind: str = "company", days: int = 1) -> list[dict]:
-    cutoff = _now_ist() - timedelta(days=days)
+def _gnews_url(query: str, days: int) -> str:
+    return f"https://news.google.com/rss/search?q={quote_plus(f'{query} when:{max(1, int(days))}d')}&hl=en-IN&gl=IN&ceid=IN:en"
+
+
+@st.cache_data(ttl=600, show_spinner=False, max_entries=8)
+def _bse_cached(d_from: str, d_to: str, bucket: int) -> list:
+    """BSE corporate announcements (exchange filings), market-wide, newest first."""
+    r = requests.get("https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w",
+                     params={"pageno": 1, "strCat": -1, "strPrevDate": d_from, "strScrip": "", "strSearch": "P",
+                             "strToDate": d_to, "strType": "C", "subcategory": -1},
+                     headers={"User-Agent": UA, "Referer": "https://www.bseindia.com/", "Origin": "https://www.bseindia.com",
+                              "Accept": "application/json, text/plain, */*"}, timeout=HTTP_TIMEOUT)
+    r.raise_for_status()
+    rows = (r.json() or {}).get("Table") or []
     out = []
-    for entry in _fetch_rss_cached(_rss_url(query, days)):
-        article = _build_article(entry, symbol, is_macro=is_macro, query_kind=query_kind)
-        if article and article["pub_dt"] >= cutoff:
-            out.append(article)
+    for x in rows[:200]:
+        name = str(x.get("SLONGNAME") or "").strip()
+        head = str(x.get("HEADLINE") or x.get("NEWSSUB") or "").strip()
+        if not name or not head or BORING_FILINGS.search(head) or BORING_FILINGS.search(str(x.get("SUBCATNAME") or "")):
+            continue
+        raw_dt = str(x.get("DT_TM") or x.get("NEWS_DT") or "")
+        try:
+            dt = pd.Timestamp(raw_dt).to_pydatetime()
+            dt = dt.replace(tzinfo=IST) if dt.tzinfo is None else dt.astimezone(IST)
+        except Exception:
+            continue
+        att = str(x.get("ATTACHMENTNAME") or "").strip()
+        link = f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{att}" if att else "https://www.bseindia.com/corporates/ann.html"
+        out.append({"title": f"{name.title()}: {head}"[:240], "link": link, "summary": str(x.get("CATEGORYNAME") or x.get("SUBCATNAME") or ""),
+                    "dt": dt, "src": "BSE filing", "company": name})
+    if not out:
+        raise RuntimeError("no filings")
     return out
 
 
-def _fetch_query(query: str, symbol: str, is_macro: bool = False, query_kind: str = "company", days: int = 1) -> list[dict]:
-    return _fetch_query_cached(query, symbol, is_macro, query_kind, days)
+# ═════════════════════════ scoring / tagging ═════════════════════════
+def _sentiment(text: str) -> int:
+    t = (text or "").lower()
+    score = 0
+    taken = []
+    for rx, w in _SENT_RX:
+        for m in rx.finditer(t):
+            if any(a <= m.start() < b for a, b in taken):
+                continue
+            taken.append((m.start(), m.end()))
+            score += -w if NEGATION.search(t[max(0, m.start() - 26):m.start()]) else w
+    return max(-3, min(3, score))
 
 
-# ───────────────────────── company relevance ─────────────────────────
-_NAME_STOP = {"limited", "ltd", "the", "of", "and", "co", "company", "corporation", "corp", "inc"}
+def _sent_key(score: int) -> str:
+    return "strong_positive" if score >= 2 else "mild_positive" if score == 1 else "strong_negative" if score <= -2 else "mild_negative" if score == -1 else "neutral"
 
 
-def _company_words(company: str) -> list[str]:
-    cleaned = re.sub(r"[^A-Za-z0-9& ]+", " ", company or "")
-    return [w for w in cleaned.split() if w.lower() not in _NAME_STOP and w != "&"]
+_SENT_LABEL = {"strong_positive": "POS", "mild_positive": "pos", "neutral": "—", "mild_negative": "neg", "strong_negative": "NEG"}
+_SENT_COLOR = {"strong_positive": GREEN, "mild_positive": "#6FD98F", "neutral": TX3, "mild_negative": "#FF8A80", "strong_negative": RED}
 
 
-def _is_relevant(title: str, symbol: str, company: str | None) -> bool:
-    """True when the headline names the company (first two words of its name) or its NSE symbol."""
-    t = (title or "").lower()
-    sym = (symbol or "").lower()
-    if len(sym) >= 3 and re.search(rf"(?<![a-z0-9]){re.escape(sym)}(?![a-z0-9])", t):
-        return True
-    words = _company_words(company or "")
-    if not words:
-        return False
-    key = " ".join(words[:2]).lower()
-    if len(words) == 1 and len(words[0]) < 4:
-        return False
-    return bool(re.search(rf"(?<![a-z0-9]){re.escape(key)}", t))
+def _event(text: str, macro: bool) -> str:
+    for name, rx in _EVENT_RX:
+        if rx.search(text or ""):
+            return name
+    return "MACRO" if macro else "NEWS"
 
 
-def _fetch_news_for_stock(symbol: str, days: int = 1, company: str | None = None) -> list[dict]:
-    """Company headlines. With `company`, the query uses the name and results are filtered to
-    headlines that really mention the company / symbol (so a portfolio light is trustworthy)."""
-    symbol = (symbol or "").strip().upper()
-    if not symbol:
-        return []
-    company = (company or "").strip() or None
-    if company:
-        words = _company_words(company)
-        name = " ".join(words[:3]) if words else symbol
-        query = f'("{name}" OR "{symbol}") (stock OR shares OR results OR order OR stake OR earnings)'
-    else:
-        query = f'"{symbol}" India stock results earnings order promoter stake'
-    items = _fetch_query_cached(query, symbol, query_kind="company", days=days)
-    if company:
-        items = [a for a in items if _is_relevant(a.get("title", ""), symbol, company)]
-    return _dedupe_articles(items)
-
-
-def _fetch_macro_news(days: int = 1) -> list[dict]:
-    results: list[dict] = []
-    with ThreadPoolExecutor(max_workers=MAX_FETCH_WORKERS) as ex:
-        futures = [ex.submit(_fetch_query_cached, q, "MACRO", True, "macro", days) for q in _MACRO_QUERIES]
-        for f in as_completed(futures):
-            try:
-                results.extend(f.result())
-            except Exception:
-                pass
-    return _dedupe_articles(results)
-
-
-@st.cache_data(ttl=NEWS_FETCH_TTL, show_spinner=False)
-def _fetch_sector_news(sector: str, days: int = 1) -> list[dict]:
-    sector = (sector or "").strip()
-    if not sector:
-        return []
-    query = _SECTOR_QUERY_TERMS.get(sector.lower(), f"India {sector} stocks")
-    return _fetch_query_cached(query, "SECTOR", query_kind="sector", days=days)
-
-
-def _dedupe_articles(items: list[dict]) -> list[dict]:
-    """Deduplicate links and cluster highly similar headlines into one story."""
-    by_link: dict[str, dict] = {}
-    for item in items:
-        link = item.get("link") or item.get("title")
-        if link not in by_link:
-            by_link[link] = item
-            continue
-        if item.get("importance", 0) > by_link[link].get("importance", 0):
-            by_link[link] = item
-
-    raw = list(by_link.values())
-    raw.sort(key=lambda x: x.get("pub_dt", datetime.min.replace(tzinfo=IST)), reverse=True)
-    clusters: list[list[dict]] = []
-    representatives: list[str] = []
-    for item in raw:
-        key = item.get("cluster_key") or _normalise_title(item.get("title", ""))
-        found = None
-        for idx, rep in enumerate(representatives[-80:]):
-            if _token_similarity(key, rep) >= 0.88:
-                found = len(representatives) - len(representatives[-80:]) + idx
-                break
-        if found is None:
-            representatives.append(key)
-            clusters.append([item])
-        else:
-            clusters[found].append(item)
-
-    clustered: list[dict] = []
-    for group in clusters:
-        group.sort(key=lambda x: x.get("pub_dt", datetime.min.replace(tzinfo=IST)), reverse=True)
-        lead = dict(group[0])
-        lead["source_count"] = len(group)
-        lead["sources"] = list(dict.fromkeys(str(x.get("source", "News")) for x in group))[:6]
-        clustered.append(lead)
-    clustered.sort(key=lambda x: x.get("pub_dt", datetime.min.replace(tzinfo=IST)), reverse=True)
-    return clustered
-
-
-def _minutes_old(article: dict) -> float:
+def _amount_cr(text: str):
+    m = AMOUNT.search(text or "")
+    if not m:
+        return None
     try:
-        return max(0.0, (_now_ist() - article["pub_dt"].astimezone(IST)).total_seconds() / 60.0)
-    except Exception:
-        return 999999.0
+        v = float(m.group(1).replace(",", ""))
+    except ValueError:
+        return None
+    u = m.group(2).lower().replace(" ", "")
+    mult = {"lakhcrore": 1e5, "lakhcr": 1e5, "crore": 1, "cr": 1, "billion": 100, "bn": 100, "million": 0.1, "mn": 0.1}.get(u, 1)
+    return v * mult
 
 
-def _enrich_priority(items: list[dict], current_security: str | None = None) -> list[dict]:
-    current = (current_security or "").strip().upper()
-    for art in items:
-        age = _minutes_old(art)
-        recency = max(0, 30 - int(age // 20))
-        multi_source = min(15, max(0, int(art.get("source_count", 1)) - 1) * 5)
-        source_bonus = 5 if art.get("source_type") in {"EXCHANGE", "REGULATOR"} else 0
-        context_bonus = 20 if current and art.get("symbol") == current else 0
-        importance = int(art.get("importance", 1)) * 10
-        art["priority"] = min(100, importance + recency + multi_source + source_bonus + context_bonus)
-        art["relevance"] = min(100, 40 + context_bonus + multi_source + recency)
-        art["is_breaking"] = age <= 75 and (art.get("importance", 1) >= 4 or art.get("source_count", 1) > 1)
+@lru_cache(maxsize=64)
+def _tagger(symbols: tuple, names: tuple):
+    """Compiled matchers for the user's universe: ticker (case-sensitive) + aliases / company names (case-insensitive)."""
+    out = []
+    name_map = dict(names)
+    for sym in symbols:
+        pats = [a for a in ALIASES.get(sym, [])]
+        nm = name_map.get(sym)
+        if nm:
+            words = [w for w in re.sub(r"[^A-Za-z0-9& ]", " ", nm).split() if w.lower() not in {"ltd", "limited", "the", "india", "co", "corporation"}]
+            if words and (len(words) > 1 or len(words[0]) >= 5):
+                pats.append(" ".join(words[:2]).lower())
+        alias_rx = re.compile(r"(?<![a-z0-9])(?:" + "|".join(re.escape(p) for p in pats) + r")(?![a-z0-9])") if pats else None
+        tick_rx = re.compile(rf"(?<![A-Za-z0-9]){re.escape(sym)}(?![A-Za-z0-9])") if len(sym) >= 3 else None
+        out.append((sym, tick_rx, alias_rx))
+    return out
+
+
+def _tag(title: str, summary: str, tagger) -> list:
+    low = f"{title} {summary}".lower()
+    found = []
+    for sym, tick_rx, alias_rx in tagger:
+        if (tick_rx and tick_rx.search(title)) or (alias_rx and alias_rx.search(low)):
+            found.append(sym)
+    return found
+
+
+def _norm_title(t: str) -> str:
+    t = re.sub(r"\[[^\]]+\]|\b(live updates?|live blog|breaking|watch|explained)\b", " ", (t or "").lower())
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", " ", t)).strip()
+
+
+def _similar(a: str, b: str) -> bool:
+    sa, sb = set(a.split()), set(b.split())
+    if not sa or not sb:
+        return False
+    return len(sa & sb) / max(1, min(len(sa), len(sb))) >= 0.72 and len(sa & sb) >= 4
+
+
+def _make(row: dict, kind: str, source: str, symbol: str | None, tagger) -> dict | None:
+    dt = row.get("dt")
+    title = (row.get("title") or "").strip()
+    if not dt or not title:
+        return None
+    src = row.get("src") or source
+    if kind in ("company", "macro"):            # Google News appends " - Publisher"
+        parts = re.split(r"\s+-\s+", title)
+        if len(parts) >= 2 and len(parts[-1]) <= 60:
+            src, title = row.get("src") or parts[-1].strip(), " - ".join(parts[:-1]).strip()
+    summary = row.get("summary") or ""
+    text = f"{title}. {summary}"
+    low = text.lower()
+    score = _sentiment(title) if kind == "filing" else _sentiment(title) * 2 + _sentiment(summary)
+    score = max(-3, min(3, round(score / (1 if kind == "filing" else 2)))) if kind != "filing" else score
+    syms = _tag(title, summary if kind != "company" else "", tagger)
+    if symbol and symbol not in syms and kind == "company":
+        syms.insert(0, symbol)
+    sectors = [k for k, rx in _SECTOR_RX.items() if rx.search(low)]
+    macro = [k for k, rx in _MACRO_RX.items() if rx.search(low)]
+    event = _event(title if kind != "filing" else f"{title} {summary}", macro=kind == "macro" or (bool(macro) and not syms))
+    amt = _amount_cr(text)
+    link = row.get("link") or ""
+    return {"id": hashlib.md5((link or title).encode()).hexdigest()[:12], "title": title, "link": link, "url": link,
+            "source": src, "sources": [src], "source_count": 1, "pub_dt": dt, "kind": kind, "summary": summary,
+            "symbols": syms, "symbol": syms[0] if syms else ("MACRO" if kind == "macro" or macro else "MARKET"),
+            "sectors": sectors, "macro": macro, "event": event, "score": score, "sentiment": _sent_key(score),
+            "sentiment_label": _SENT_LABEL[_sent_key(score)], "amount_cr": amt, "company": row.get("company")}
+
+
+def _cluster(items: list) -> list:
+    items = sorted(items, key=lambda a: a["pub_dt"], reverse=True)
+    out, keys = [], []
+    by_link = {}
+    for a in items:
+        if a["link"] and a["link"] in by_link:
+            continue
+        k = _norm_title(a["title"])
+        hit = next((i for i, kk in enumerate(keys[-150:], start=max(0, len(keys) - 150)) if _similar(k, kk)), None)
+        if hit is None:
+            keys.append(k)
+            out.append(dict(a))
+            by_link[a["link"]] = len(out) - 1
+        else:
+            lead = out[hit]
+            lead["sources"] = list(dict.fromkeys(lead["sources"] + a["sources"]))[:8]
+            lead["source_count"] = len(lead["sources"])
+            lead["symbols"] = list(dict.fromkeys(lead["symbols"] + a["symbols"]))
+            lead["sectors"] = list(dict.fromkeys(lead["sectors"] + a["sectors"]))
+            lead["first_dt"] = min(lead.get("first_dt", lead["pub_dt"]), a["pub_dt"])
+            if lead["symbol"] in ("MARKET", "MACRO") and a["symbols"]:
+                lead["symbol"] = a["symbols"][0]
+    return out
+
+
+def _score(items: list, mine: set, current: str) -> list:
+    now = _now()
+    for a in items:
+        age = max(0.0, (now - a["pub_dt"]).total_seconds() / 60)
+        imp = 1 + EVENT_WEIGHT.get(a["event"], 0) // 1
+        imp = min(5, max(1, (1 if a["event"] == "NEWS" else 2 if EVENT_WEIGHT.get(a["event"], 0) <= 1 else 3)
+                         + (1 if abs(a["score"]) >= 2 else 0) + (1 if (a["amount_cr"] or 0) >= 1000 else 0)
+                         + (1 if a["source_count"] >= 3 else 0)))
+        tagged = set(a["symbols"])
+        a["importance"] = imp
+        a["mine"] = bool(tagged & mine)
+        a["priority"] = int(min(100, imp * 12 + max(0, 30 - age / 15) + min(12, (a["source_count"] - 1) * 4)
+                                + (15 if a["mine"] else 0) + (15 if current and current in tagged else 0)))
+        a["is_breaking"] = age <= 60 and (imp >= 4 or a["source_count"] >= 2)
+        a["hot"] = a["source_count"] >= 3 and age <= 180
+        a["age_min"] = age
+        a["time_str"] = _ago(a["pub_dt"])
+        a["event_reason"] = a["event"].title()
     return items
 
 
-def _midnight_cleanup():
-    today = _today_ist()
-    if st.session_state.get("_news_date") != today:
-        st.session_state["_news_cache"] = {}
-        st.session_state["_news_fetched"] = {}
-        st.session_state["_news_seen_keys"] = set()
-        st.session_state["_news_date"] = today
+def _ago(dt) -> str:
+    s = int((_now() - dt).total_seconds())
+    if s < 60:
+        return "now"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h"
+    return dt.strftime("%d %b")
 
 
-def _ensure_news_state():
-    _midnight_cleanup()
-    defaults = {"_news_cache": {}, "_news_fetched": {}, "_news_seen_keys": set(),
-                "_news_days": 1, "_news_category": "ALL", "_news_search": ""}
-    for key, value in defaults.items():
-        if key not in st.session_state:
-            if isinstance(value, dict):
-                st.session_state[key] = dict(value)
-            elif isinstance(value, set):
-                st.session_state[key] = set(value)
-            else:
-                st.session_state[key] = value
-
-
-def _mark_new(items: list[dict]) -> list[dict]:
-    seen = st.session_state.setdefault("_news_seen_keys", set())
-    for item in items:
-        key = item.get("link") or item.get("cluster_key") or item.get("title")
-        item["is_new"] = key not in seen
-    for item in items[:120]:
-        key = item.get("link") or item.get("cluster_key") or item.get("title")
-        if key:
-            seen.add(key)
-    if len(seen) > 2500:
-        st.session_state["_news_seen_keys"] = set(list(seen)[-1200:])
-    return items
-
-
-def _rotating_batch(symbols: list[str], batch_size: int, current: str | None = None) -> list[str]:
-    """Pick up to batch_size symbols to refresh this cycle. The active security is always pinned;
-    the rest rotate on a time epoch so the whole list is covered over a few cycles."""
-    symbols = list(dict.fromkeys(symbols))
-    if not symbols:
-        return []
-    current = (current or "").strip().upper()
-    pinned = [current] if current and current in symbols else []
-    rest = [s for s in symbols if s not in pinned]
-    if not rest:
-        return pinned[:batch_size]
-    slots = max(1, batch_size - len(pinned))
+# ═════════════════════════ assembly ═════════════════════════
+def _rotation(symbols: list, current: str, n: int) -> list:
+    rest = [s for s in symbols if s != current]
+    pinned = [current] if current else []
+    slots = max(0, n - len(pinned))
     if len(rest) <= slots:
         return pinned + rest
-    n_batches = -(-len(rest) // slots)
-    epoch = int(time.time() // (NEWS_EXPIRE_MIN * 60))
-    offset = (epoch % n_batches) * slots
-    batch = rest[offset:offset + slots]
-    if len(batch) < slots:
-        batch += rest[: slots - len(batch)]
-    return pinned + batch
+    k = -(-len(rest) // slots)
+    off = (_bucket() % k) * slots
+    return pinned + (rest[off:off + slots] + rest[:max(0, slots - len(rest[off:off + slots]))])
 
 
-def refresh_news(watchlist: list[str], current_security: str | None = None, sector: str | None = None, days: int = 1):
-    """Refresh a small prioritized news universe; the UI remains responsive."""
-    _ensure_news_state()
+def _company_query(sym: str, name: str | None) -> str:
+    if name:
+        words = [w for w in re.sub(r"[^A-Za-z0-9& ]", " ", name).split() if w.lower() not in {"ltd", "limited"}]
+        nm = " ".join(words[:3])
+        return f'("{nm}" OR "{sym}") (shares OR stock OR results OR order OR stake OR earnings)'
+    alias = (ALIASES.get(sym) or [None])[0]
+    return f'("{alias}" OR "{sym}") (shares OR stock)' if alias else f'"{sym}" share price NSE'
+
+
+def assemble(symbols=(), names=(), current="", days=1, include_filings=True) -> list:
+    """The shared feed for a universe of stocks. Memoised ASSEMBLE_TTL seconds; never blocks longer than FETCH_BUDGET_S."""
+    symbols = tuple(dict.fromkeys(str(s).upper().strip() for s in symbols if str(s).strip()))
+    current = (current or "").upper().strip()
+    if current and current not in symbols:
+        symbols = (current,) + symbols
+    names = tuple(sorted((k, v) for k, v in dict(names).items() if v))
     days = max(1, min(int(days or 1), 30))
-    now = time.time()
-    all_symbols = list(dict.fromkeys([str(s).strip().upper() for s in (watchlist or []) if str(s).strip()]))
-    current = (current_security or "").strip().upper()
-    symbols = _rotating_batch(all_symbols, MAX_SECURITY_REFRESH, current)
+    key = (symbols, names, current, days, include_filings)
+    hit = _MEMO.get(key)
+    if hit and time.time() - hit[0] < (ASSEMBLE_TTL if hit[2] else 20):
+        return hit[1]
+    tagger = _tagger(symbols, names)
+    name_map = dict(names)
+    jobs = [(u, n, "wire", None, None) for n, u in WIRE_SOURCES]
+    jobs += [(_gnews_url(q, days), "Google News · macro", "macro", None, None) for q in MACRO_QUERIES]
+    jobs += [(_gnews_url(_company_query(s, name_map.get(s)), days), f"Google News · {s}", "company", s, None)
+             for s in _rotation(list(symbols), current, MAX_COMPANY_FETCH)]
+    if include_filings:
+        d_to, d_from = _now().strftime("%Y%m%d"), (_now() - timedelta(days=min(days, 7))).strftime("%Y%m%d")
+        jobs.append(("bse://filings", "BSE filings", "filing", None, lambda: _bse_cached(d_from, d_to, _bucket(600))))
+    pool = ThreadPoolExecutor(max_workers=10)
+    futs = {pool.submit(_fetch, u, n, fn): (u, n, kind, sym) for u, n, kind, sym, fn in jobs}
+    done, pending = wait(futs, timeout=FETCH_BUDGET_S)
+    pool.shutdown(wait=False, cancel_futures=True)
+    cutoff = _now() - timedelta(days=days)
+    items = []
+    for f in done:
+        u, n, kind, sym = futs[f]
+        try:
+            rows = f.result()
+        except Exception:
+            continue
+        src = n.split(" · ")[0] if kind != "wire" else n
+        for r in rows:
+            a = _make(r, kind, src, sym, tagger)
+            if a and a["pub_dt"] >= cutoff:
+                if kind == "company" and sym and not (_tag(a["title"], "", tagger) or sym in a["title"].upper()) and name_map.get(sym):
+                    continue                                   # with a known company name, keep only headlines that name it
+                items.append(a)
+    out = _score(_cluster(items), set(symbols), current)
+    out.sort(key=lambda a: (a["priority"], a["pub_dt"]), reverse=True)
+    _MEMO[key] = (time.time(), out, not pending)
+    if len(_MEMO) > 64:
+        _MEMO.pop(next(iter(_MEMO)))
+    return out
 
-    jobs = []
-    for sym in symbols:
-        key = f"SEC:{sym}:{days}"
-        if now - st.session_state["_news_fetched"].get(key, 0) >= NEWS_EXPIRE_MIN * 60:
-            jobs.append((key, sym))
-    if jobs:
-        with ThreadPoolExecutor(max_workers=MAX_FETCH_WORKERS) as ex:
-            future_map = {ex.submit(_fetch_news_for_stock, sym, days): (key, sym) for key, sym in jobs}
-            for future in as_completed(future_map):
-                key, _sym = future_map[future]
-                try:
-                    st.session_state["_news_cache"][key] = future.result()
-                except Exception:
-                    st.session_state["_news_cache"][key] = []
-                st.session_state["_news_fetched"][key] = now
 
-    macro_key = f"MACRO:{days}"
-    if now - st.session_state["_news_fetched"].get(macro_key, 0) >= NEWS_EXPIRE_MIN * 60:
-        st.session_state["_news_cache"][macro_key] = _fetch_macro_news(days)
-        st.session_state["_news_fetched"][macro_key] = now
+# ═════════════════════════ views & metrics ═════════════════════════
+MODES_RAIL = ["TOP", "LIVE", "MINE", "RISK", "MACRO"]
+MODES_FULL = ["TOP", "LIVE", "MY STOCKS", "CATALYSTS", "RISK", "EARNINGS", "CORP ACTIONS", "FILINGS", "MACRO"]
 
-    if sector:
-        sector_key = f"SECTOR:{sector}:{days}"
-        if now - st.session_state["_news_fetched"].get(sector_key, 0) >= NEWS_EXPIRE_MIN * 60:
-            st.session_state["_news_cache"][sector_key] = _fetch_sector_news(sector, days)
-            st.session_state["_news_fetched"][sector_key] = now
+
+def _view(items: list, mode: str, query: str = "", current: str = "") -> list:
+    m = mode.upper()
+    if m == "LIVE":
+        out = sorted(items, key=lambda a: a["pub_dt"], reverse=True)
+    elif m in ("MINE", "MY STOCKS"):
+        out = [a for a in items if a["mine"]]
+    elif m == "CATALYSTS":
+        out = [a for a in items if a["mine"] and (a["score"] > 0 or a["event"] in ("ORDER", "CAPEX", "STAKE", "CORP ACTION")) and a["score"] >= 0]
+    elif m == "RISK":
+        out = [a for a in items if a["score"] < 0 or a["event"] == "REGULATORY"]
+    elif m == "EARNINGS":
+        out = [a for a in items if a["event"] == "EARNINGS"]
+    elif m == "CORP ACTIONS":
+        out = [a for a in items if a["event"] in ("CORP ACTION", "STAKE", "PROMOTER", "MANAGEMENT", "IPO")]
+    elif m == "FILINGS":
+        out = sorted([a for a in items if a["kind"] == "filing"], key=lambda a: (not a["mine"], -a["pub_dt"].timestamp()))
+    elif m == "MACRO":
+        out = [a for a in items if a["kind"] == "macro" or a["macro"]]
+    elif m == "SECURITY":
+        out = [a for a in items if current and current in a["symbols"]]
+    else:
+        out = [a for a in items if a["kind"] != "filing" or a["mine"]]
+    q = (query or "").strip().lower()
+    if q:
+        out = [a for a in out if q in a["title"].lower() or q in a["source"].lower() or q in a["event"].lower()
+               or any(q == s.lower() for s in a["symbols"]) or any(q in s.lower() for s in a["sectors"])]
+    return out
+
+
+def news_tone(items: list) -> int:
+    """−100 … +100 net tone of the headlines (importance-weighted)."""
+    w = [(a["score"], a["importance"]) for a in items if a["kind"] != "filing"]
+    tot = sum(i for _, i in w)
+    return int(round(sum(s * i for s, i in w) / tot / 3 * 100)) if tot else 0
+
+
+def pulse(items: list, symbols) -> pd.DataFrame:
+    rows = []
+    for s in symbols:
+        st_ = [a for a in items if s in a["symbols"]]
+        if not st_:
+            rows.append({"symbol": s, "stories": 0, "tone": 0, "pos": 0, "neg": 0, "latest": "", "age": None, "link": ""})
+            continue
+        latest = max(st_, key=lambda a: a["pub_dt"])
+        rows.append({"symbol": s, "stories": len(st_), "tone": round(sum(a["score"] for a in st_) / len(st_), 2),
+                     "pos": sum(a["score"] > 0 for a in st_), "neg": sum(a["score"] < 0 for a in st_),
+                     "latest": latest["title"], "age": latest["time_str"], "link": latest["link"]})
+    return pd.DataFrame(rows).sort_values(["stories", "tone"], ascending=False) if rows else pd.DataFrame()
+
+
+def sector_tone(items: list) -> list:
+    acc = defaultdict(list)
+    for a in items:
+        for s in a["sectors"]:
+            acc[s].append(a["score"])
+    return sorted(((k, len(v), sum(v) / len(v)) for k, v in acc.items() if len(v) >= 2), key=lambda x: -x[1])
+
+
+def source_health() -> list:
+    with _LOCK:
+        rows = list(_HEALTH.values())
+    agg = {}
+    for r in rows:
+        k = r["name"].split(" · ")[0] if r["name"].startswith("Google News") else r["name"]
+        a = agg.setdefault(k, {"name": k, "ok": 0, "fail": 0, "n": 0, "err": ""})
+        a["ok" if r["ok"] else "fail"] += 1
+        a["n"] += r["n"]
+        if not r["ok"]:
+            a["err"] = r["err"]
+    return sorted(agg.values(), key=lambda a: (a["fail"] > 0 and a["ok"] == 0, a["name"]))
+
+
+# ═════════════════════════ price reaction (current stock only) ═════════════════════════
+@st.cache_data(ttl=300, show_spinner=False, max_entries=16)
+def _intraday(symbol: str):
+    if yf is None:
+        return []
+    df = yf.download(f"{symbol}.NS", period="5d", interval="15m", progress=False, auto_adjust=False, threads=False)
+    if df is None or df.empty:
+        return []
+    c = df["Close"]
+    if isinstance(c, pd.DataFrame):
+        c = c.iloc[:, 0]
+    c = pd.to_numeric(c, errors="coerce").dropna()
+    idx = pd.to_datetime(c.index)
+    idx = idx.tz_localize("UTC").tz_convert(IST) if idx.tz is None else idx.tz_convert(IST)
+    return list(zip(idx.to_pydatetime(), c.to_numpy().astype(float)))
+
+
+def _reaction(symbol: str, dt) -> float | None:
+    try:
+        pts = _intraday(symbol)
+    except Exception:
+        return None
+    after = [p for t, p in pts if t >= dt]
+    if len(after) < 1 or not pts:
+        return None
+    return (pts[-1][1] / after[0] - 1) * 100 if after[0] > 0 else None
+
+
+# ═════════════════════════ rendering ═════════════════════════
+def _css():
+    st.markdown(f"""<style>
+    .nd-s{{display:block;text-decoration:none !important;border-left:2px solid var(--c);padding:8px 8px 8px 10px;margin:0 0 6px;
+           background:linear-gradient(90deg,rgba(255,255,255,.025),transparent 70%);transition:background .12s ease;}}
+    .nd-s:hover{{background:linear-gradient(90deg,rgba(255,159,10,.07),transparent 80%);}}
+    .nd-m{{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font:800 8.5px {MONO};letter-spacing:.7px;color:{TX3};margin-bottom:3px;}}
+    .nd-p{{padding:0 4px;border-radius:2px;color:#000;}}
+    .nd-h{{font:600 12.5px/1.42 Inter,Arial,sans-serif;color:{TX};}}
+    .nd-full .nd-h{{font-size:14px;}}
+    .nd-x{{font:11.5px/1.55 Inter,Arial,sans-serif;color:{TX2};margin-top:4px;}}
+    .nd-f{{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font:9px {MONO};color:{TX3};margin-top:5px;}}
+    .nd-tag{{padding:0 5px;border:1px solid currentColor;border-radius:2px;font-weight:800;letter-spacing:.5px;}}
+    .nd-k{{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;border-top:1px solid {LINE};border-bottom:1px solid {LINE};padding:7px 0;margin:6px 0;text-align:center;}}
+    .nd-k b{{display:block;font:800 8px {MONO};letter-spacing:.8px;}} .nd-k span{{font:700 13px {MONO};color:{TX};}}
+    .nd-tone{{position:relative;height:5px;background:linear-gradient(90deg,{RED}66,#222 50%,{GREEN}66);margin:4px 0 2px;}}
+    .nd-tone i{{position:absolute;top:-3px;width:3px;height:11px;background:{AMBER};transform:translateX(-1px);}}
+    .nd-tape{{overflow:hidden;white-space:nowrap;border:1px solid {LINE};border-left:3px solid {RED};background:{S1};height:34px;margin:4px 0 10px;}}
+    .nd-tape div{{display:inline-block;padding:9px 0;animation:ndtape 70s linear infinite;font:700 11px {MONO};color:{TX2};}}
+    .nd-tape b{{color:{RED};margin:0 6px 0 28px;}} .nd-tape:hover div{{animation-play-state:paused;}}
+    @keyframes ndtape{{from{{transform:translateX(0)}}to{{transform:translateX(-50%)}}}}
+    .nd-kpis{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:4px 0 8px;}}
+    .nd-kp{{background:{S1};border:1px solid {LINE};border-top:2px solid var(--a,{LINE2});padding:10px 12px;}}
+    .nd-kp .l{{font:700 8px {MONO};letter-spacing:1.1px;color:{TX3};}} .nd-kp .v{{font:700 19px {MONO};color:{TX};margin-top:4px;}}
+    .nd-kp .s{{font:10px {MONO};color:{TX3};margin-top:3px;}}
+    .nd-sec{{font:700 10px {MONO};letter-spacing:1.2px;color:{AMBER};border-bottom:1px solid {LINE};padding:8px 0 6px;margin:12px 0 8px;}}
+    .nd-pl{{display:grid;grid-template-columns:76px 34px 1fr;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid #141414;font:10px {MONO};}}
+    .nd-pl b{{color:{TX};}} .nd-pl a{{color:{TX2};text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font:11px Inter,sans-serif;}}
+    .nd-bar{{display:grid;grid-template-columns:92px 1fr 44px;gap:8px;align-items:center;font:10px {MONO};color:{TX2};margin:5px 0;}}
+    .nd-bar .t{{height:6px;background:#161616;position:relative;}} .nd-bar .t i{{position:absolute;top:0;height:100%;}}
+    .nd-src{{display:flex;justify-content:space-between;font:10px {MONO};padding:4px 0;border-bottom:1px solid #141414;color:{TX2};}}
+    .nd-empty{{font:11px {MONO};color:{TX3};padding:14px 2px;line-height:1.6;}}
+    div[class*="st-key-nd_rmode"] [role="radiogroup"],div[class*="st-key-nd_fmode"] [role="radiogroup"]{{gap:3px !important;}}
+    div[class*="st-key-nd_rmode"] label[data-baseweb="radio"]{{padding:3px 7px !important;}}
+    div[class*="st-key-nd_rmode"] label[data-baseweb="radio"] p{{font-size:9px !important;}}
+    </style>""", unsafe_allow_html=True)
+
+
+def _href(u: str) -> str:
+    return html.escape(u, quote=True) if u and urlparse(u).scheme in ("http", "https") else "#"
+
+
+def _story(a: dict, full: bool = False, current: str = "") -> str:
+    sc = _SENT_COLOR[a["sentiment"]]
+    pr = "P1" if a["priority"] >= 70 else "P2" if a["priority"] >= 45 else "P3"
+    pc = RED if pr == "P1" else AMBER if pr == "P2" else "#444"
+    flags = ""
+    if a.get("is_breaking"):
+        flags += f'<span style="color:{RED}">● BREAKING</span>'
+    if a.get("hot"):
+        flags += f'<span style="color:{YELLOW}">▲ HOT</span>'
+    if a.get("is_new"):
+        flags += f'<span style="color:{CYAN}">NEW</span>'
+    ev = a["event"]
+    syms = "".join(f'<span class="nd-tag" style="color:{AMBER if s == current else CYAN}">{html.escape(s)}</span>' for s in a["symbols"][:4])
+    if not syms:
+        syms = f'<span class="nd-tag" style="color:{TX3}">{"MACRO" if a["kind"] == "macro" or a["macro"] else "MARKET"}</span>'
+    extra = "".join(f'<span style="color:{TX3}">{html.escape(s)}</span>' for s in (a["sectors"][:2] + a["macro"][:2]))
+    amt = f'<span style="color:{GREEN if a["score"] >= 0 else RED}">₹{a["amount_cr"]:,.0f} Cr</span>' if a.get("amount_cr") else ""
+    src = html.escape(a["source"]) + (f' +{a["source_count"] - 1}' if a["source_count"] > 1 else "")
+    react = ""
+    if full and current and current in a["symbols"] and a["kind"] != "macro":
+        r = _reaction(current, a["pub_dt"])
+        if r is not None:
+            react = f'<span style="color:{GREEN if r >= 0 else RED}">{current} {r:+.2f}% since</span>'
+    tone = f'<span style="color:{sc}">{"▲" if a["score"] > 0 else "▼" if a["score"] < 0 else "■"} {a["sentiment_label"]}</span>'
+    summ = f'<div class="nd-x">{html.escape(a["summary"])}</div>' if full and a.get("summary") and a["kind"] != "company" else ""
+    return (f'<a class="nd-s{" nd-full" if full else ""}" href="{_href(a["link"])}" target="_blank" style="--c:{sc}">'
+            f'<div class="nd-m"><span class="nd-p" style="background:{pc}">{pr}</span><span style="color:{EVENT_COLORS.get(ev, TX3)}">{html.escape(ev)}</span>'
+            f'<span>{a["time_str"]}</span>{flags}</div><div class="nd-h">{html.escape(a["title"])}</div>{summ}'
+            f'<div class="nd-f">{syms}{tone}{amt}<span>{src}</span>{extra}{react}</div></a>')
+
+
+def _stories(items, full=False, current="", empty="No stories in this view."):
+    if not items:
+        st.markdown(f'<div class="nd-empty">{html.escape(empty)}</div>', unsafe_allow_html=True)
+        return
+    st.markdown("".join(_story(a, full, current) for a in items), unsafe_allow_html=True)
+
+
+def _mark_new(items):
+    seen = st.session_state.setdefault("_news_seen_keys", set())
+    first = not seen
+    for a in items:
+        a["is_new"] = (not first) and a["id"] not in seen
+    seen.update(a["id"] for a in items[:200])
+    if len(seen) > 3000:
+        st.session_state["_news_seen_keys"] = set(list(seen)[-1500:])
+    return items
+
+
+def _names_from_session() -> tuple:
+    """Company names when other modules have put them in session (portfolio lots / research)."""
+    names = {}
+    for lot in st.session_state.get("pf_lots", []) or []:
+        if isinstance(lot, dict) and lot.get("symbol") and lot.get("company"):
+            names[str(lot["symbol"]).upper()] = str(lot["company"])
+    return tuple(names.items())
+
+
+def _universe(watchlist):
+    syms = [str(s).upper().strip() for s in (watchlist or []) if str(s).strip()]
+    for key in ("watchlist", "admin_watchlist"):
+        syms += [str(s).upper() for s in st.session_state.get(key, []) or []]
+    syms += [str(l.get("symbol", "")).upper() for l in st.session_state.get("pf_lots", []) or [] if isinstance(l, dict)]
+    return list(dict.fromkeys(s for s in syms if s))[:120]
+
+
+# ═════════════════════════ public API ═════════════════════════
+def _ensure_news_state():
+    st.session_state.setdefault("_news_seen_keys", set())
+    st.session_state.setdefault("_news_days", 1)
+
+
+def refresh_news(watchlist, current_security=None, sector=None, days=1):
+    """Warm the shared feed (kept for older callers)."""
+    return assemble(tuple(_universe(watchlist)), _names_from_session(), current_security or "", days)
+
+
+def _fetch_news_for_stock(symbol: str, days: int = 1, company: str | None = None) -> list:
+    """Company headlines (Google News query + wire stories that name the company). Used by Portfolio and Research."""
+    sym = (symbol or "").upper().strip()
+    if not sym:
+        return []
+    names = ((sym, company),) if company else ()
+    tagger = _tagger((sym,), names)
+    rows = _fetch(_gnews_url(_company_query(sym, company), days), f"Google News · {sym}")
+    cutoff = _now() - timedelta(days=max(1, int(days)))
+    out = []
+    for r in rows:
+        a = _make(r, "company", "Google News", sym, tagger)
+        if not a or a["pub_dt"] < cutoff:
+            continue
+        if company and not (_tag(a["title"], "", tagger) or sym in a["title"].upper()):
+            continue
+        out.append(a)
+    return _score(_cluster(out), {sym}, sym)
+
+
+def get_security_news(symbol: str, days: int = 7) -> list:
+    """Research > News: company stories plus wire / filing stories that mention the stock."""
+    sym = (symbol or "").upper().strip()
+    if not sym:
+        return []
+    feed = assemble((sym,), _names_from_session(), sym, days)
+    items = [a for a in feed if sym in a["symbols"]]
+    return sorted(items, key=lambda a: a["pub_dt"], reverse=True)
 
 
 def get_news_dot(sym: str) -> str:
-    _ensure_news_state()
-    symbol = (sym or "").strip().upper()
-    for key, items in st.session_state.get("_news_cache", {}).items():
-        if key.startswith(f"SEC:{symbol}:") and items:
+    s = (sym or "").upper().strip()
+    for _, (t, items, _) in list(_MEMO.items()):
+        if any(s in a["symbols"] and a["age_min"] <= 24 * 60 for a in items):
             return "1"
     return ""
 
 
-def _combined_feed(watchlist: list[str], macro_only: bool = False, current_security: str | None = None,
-                   sector: str | None = None, days: int = 1) -> list[dict]:
-    cache = st.session_state.get("_news_cache", {})
-    symbols = list(dict.fromkeys([str(s).strip().upper() for s in (watchlist or []) if str(s).strip()]))
-    current = (current_security or "").strip().upper()
-    if current:
-        symbols = [current] + [s for s in symbols if s != current]
-
-    keys = []
-    if not macro_only:
-        keys.extend(f"SEC:{s}:{days}" for s in symbols)
-        if sector:
-            keys.append(f"SECTOR:{sector}:{days}")
-    keys.append(f"MACRO:{days}")
-
-    combined: list[dict] = []
-    for key in keys:
-        combined.extend(cache.get(key, []))
-    combined = _enrich_priority(_dedupe_articles(combined), current)
-    combined.sort(key=lambda x: (x.get("priority", 0), x.get("pub_dt", datetime.min.replace(tzinfo=IST))), reverse=True)
-
-    if not macro_only:
-        # macro headlines are plentiful; cap them so company news is never drowned out
-        macro = [x for x in combined if x.get("symbol") == "MACRO"][:MAX_MACRO_ITEMS]
-        other = [x for x in combined if x.get("symbol") != "MACRO"]
-        combined = sorted(other + macro, key=lambda x: (x.get("priority", 0), x.get("pub_dt", datetime.min.replace(tzinfo=IST))), reverse=True)
-    return combined[:MAX_COMBINED_ITEMS]
-
-
-def get_security_news(symbol: str, days: int = 7) -> list[dict]:
-    """Public helper for Research > News."""
+def render_news_rail(watchlist, label: str = "WATCHLIST", current_security: str | None = None, sector: str | None = None):
+    """Compact right-rail news: tone, counts, mode selector, top stories."""
     _ensure_news_state()
-    symbol = (symbol or "").strip().upper()
-    if not symbol:
-        return []
-    key = f"SEC:{symbol}:{int(days)}"
-    now = time.time()
-    if now - st.session_state["_news_fetched"].get(key, 0) >= NEWS_EXPIRE_MIN * 60:
-        try:
-            st.session_state["_news_cache"][key] = _fetch_news_for_stock(symbol, int(days))
-        except Exception:
-            st.session_state["_news_cache"][key] = []
-        st.session_state["_news_fetched"][key] = now
-    items = _dedupe_articles(st.session_state["_news_cache"].get(key, []))
-    return _enrich_priority(items, symbol)
-
-
-def _category_filter(items: list[dict], category: str, current_security: str | None = None) -> list[dict]:
-    category = (category or "ALL").upper()
-    current = (current_security or "").strip().upper()
-    if category == "ALL":
-        return items
-    if category == "WATCHLIST":
-        return [x for x in items if x.get("symbol") not in {"MACRO", "SECTOR"}]
-    if category == "SECURITY":
-        return [x for x in items if current and x.get("symbol") == current]
-    if category == "SECTOR":
-        return [x for x in items if x.get("query_kind") == "sector" or x.get("symbol") == "SECTOR"]
-    if category == "MACRO":
-        return [x for x in items if x.get("symbol") == "MACRO" or x.get("event") == "MACRO"]
-    if category == "EARNINGS":
-        return [x for x in items if x.get("event") == "EARNINGS"]
-    if category == "CORPORATE":
-        return [x for x in items if x.get("event") in {"ORDER", "STAKE", "PROMOTER", "DIVIDEND", "CAPEX", "MANAGEMENT"}]
-    if category == "REGULATORY":
-        return [x for x in items if x.get("event") == "REGULATORY"]
-    if category == "RATING":
-        return [x for x in items if x.get("event") == "RATING"]
-    if category == "POSITIVE":
-        return [x for x in items if x.get("sentiment") in _POS]
-    if category == "NEGATIVE":
-        return [x for x in items if x.get("sentiment") in _NEG]
-    return [x for x in items if x.get("event") == category]
-
-
-def _search_filter(items: list[dict], query: str) -> list[dict]:
-    q = (query or "").strip().lower()
-    if not q:
-        return items
-    return [i for i in items if q in i.get("title", "").lower() or q in i.get("source", "").lower()
-            or q in i.get("event", "").lower() or q in i.get("symbol", "").lower()]
-
-
-def _tab_views(items: list[dict]):
-    """The four rail tabs. Each has its own rule, so they show different stories:
-    TOP = ranked by priority · BREAK = last 3h newest-first · CATALYST = company-specific positives
-    · RISK = negative / regulatory (market-wide included)."""
-    top = list(items)
-    brk = sorted([x for x in items if _minutes_old(x) <= BREAK_WINDOW_MIN],
-                 key=lambda x: x.get("pub_dt", datetime.min.replace(tzinfo=IST)), reverse=True)
-    cat = [x for x in items if x.get("symbol") not in _NON_COMPANY and (
-        x.get("sentiment") in _POS or (x.get("event") in {"ORDER", "CAPEX", "STAKE", "DIVIDEND"} and x.get("sentiment") not in _NEG))]
-    risk = [x for x in items if x.get("sentiment") in _NEG or x.get("event") == "REGULATORY"]
-    return top, brk, cat, risk
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def _intraday_closes(symbol: str):
-    """Fetch one compact intraday series per active security."""
-    try:
-        sym = (symbol or "").strip().upper()
-        if not sym or sym in {"MACRO", "SECTOR"}:
-            return []
-        ticker = sym if "." in sym else f"{sym}.NS"
-        df = yf.download(ticker, period="1d", interval="5m", progress=False, auto_adjust=False, threads=False)
-        if df is None or df.empty:
-            return []
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        if "Close" not in df.columns:
-            return []
-        series = pd.to_numeric(df["Close"], errors="coerce").dropna()
-        if series.empty:
-            return []
-        idx = pd.to_datetime(series.index)
-        idx = idx.tz_localize("UTC").tz_convert(IST) if getattr(idx, "tz", None) is None else idx.tz_convert(IST)
-        return [(ts.isoformat(), float(v)) for ts, v in zip(idx, series.to_numpy())]
-    except Exception:
-        return []
-
-
-def _intraday_price_impact(symbol: str, pub_dt_iso: str):
-    try:
-        points = _intraday_closes(symbol)
-        if not points:
-            return None
-        dt = datetime.fromisoformat(pub_dt_iso)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=IST)
-        target = dt.astimezone(IST)
-        after = [(datetime.fromisoformat(ts), price) for ts, price in points if datetime.fromisoformat(ts) >= target]
-        if not after:
-            return None
-        start, end = float(after[0][1]), float(points[-1][1])
-        if start <= 0:
-            return None
-        return {"pct": (end / start - 1) * 100, "start": start, "end": end}
-    except Exception:
-        return None
-
-
-def _impact_badge(article: dict) -> str:
-    symbol = article.get("symbol")
-    if symbol in {"MACRO", "SECTOR", None, ""}:
-        return ""
-    impact = _intraday_price_impact(symbol, article["pub_dt"].isoformat())
-    if not impact:
-        return ""
-    pct = float(impact["pct"])
-    c = GREEN if pct >= 0 else RED
-    return f'<span style="color:{c};">{"+" if pct >= 0 else ""}{pct:.2f}% since headline</span>'
-
-
-def _safe_href(url: str) -> str:
-    if not url:
-        return "#"
-    if urlparse(url).scheme in {"http", "https"}:
-        return html.escape(url, quote=True)
-    return "#"
-
-
-def _priority_badge(priority: int) -> tuple[str, str]:
-    if priority >= 70:
-        return "P1", RED
-    if priority >= 45:
-        return "P2", GOLD
-    return "P3", T2
-
-
-def _render_story(art: dict, show_impact: bool = False):
-    sentiment = art.get("sentiment", "neutral")
-    accent = _SENTIMENT_COLORS.get(sentiment, BORDER)
-    event = str(art.get("event", "NEWS"))
-    event_color = _EVENT_COLORS.get(event, T2)
-    source = html.escape(str(art.get("source", "News")))
-    title = html.escape(str(art.get("title", "No title")))
-    href = _safe_href(art.get("link", ""))
-    symbol = art.get("symbol", "NEWS")
-    tag = "MACRO" if symbol == "MACRO" else ("SECTOR" if symbol == "SECTOR" else str(symbol))
-    tag_color = GOLD if symbol in {"MACRO", "SECTOR"} else BLUE
-    ptxt, pcolor = _priority_badge(int(art.get("priority", 0)))
-    source_count = int(art.get("source_count", 1) or 1)
-    sources_html = f" · {source_count} sources" if source_count > 1 else ""
-    new_html = '<span style="color:#FF453A;font-weight:800;">NEW</span> · ' if art.get("is_new") else ""
-    impact_html = _impact_badge(art) if show_impact else ""
-    impact_block = f'<span style="margin-left:8px;">{impact_html}</span>' if impact_html else ""
-    breaking_html = '<span style="color:#FF453A;font-weight:800;">BREAK</span> · ' if art.get("is_breaking") else ""
-    reason = html.escape(str(art.get("event_reason", "General headline")))
-    return f'''
-<a href="{href}" target="_blank" style="text-decoration:none;">
-  <div style="border-left:2px solid {accent};padding:8px 0 8px 10px;margin-bottom:7px;background:linear-gradient(90deg,#0b0b0b,transparent);">
-    <div style="font:800 9px {MONO};letter-spacing:.7px;margin-bottom:3px;">
-      <span style="color:{pcolor};">{ptxt}</span> ·
-      <span style="color:{event_color};">{html.escape(event)}</span> ·
-      <span style="color:{T3};">IMP {art.get('importance', 1)}/5</span>
-    </div>
-    <div style="font:600 12px/1.4 Inter,Arial,sans-serif;color:{IVORY};">{title}</div>
-    <div style="font:700 8.5px {MONO};color:{T3};margin-top:4px;">{reason}</div>
-    <div style="font:9px {MONO};color:{T2};margin-top:4px;">
-      {new_html}{breaking_html}<span style="color:{tag_color};font-weight:700;">{html.escape(tag)}</span> · {source}{sources_html} · {art.get('time_str','—')} ·
-      <span style="color:{accent};">{html.escape(art.get('sentiment_label','—'))}</span>{impact_block}
-    </div>
-  </div>
-</a>'''
-
-
-def _render_rows(items: list[dict], empty_msg: str = "No matching news in the selected window.",
-                 show_impact: bool = False, impact_symbols: set[str] | None = None):
-    if not items:
-        st.markdown(f'<div style="font:11px {MONO};color:{T2};padding:14px 2px;line-height:1.5;">{html.escape(empty_msg)}</div>',
-                    unsafe_allow_html=True)
-        return
-    # is_new is set once on the combined feed (render_news_rail); do NOT re-mark here, that reset the badge.
-    active = impact_symbols or set()
-    st.markdown("".join(_render_story(a, show_impact=show_impact and bool(active) and a.get("symbol") in active) for a in items),
-                unsafe_allow_html=True)
-
-
-def _tab_note(text: str):
-    st.markdown(f'<div style="font:8px {MONO};color:{T3};margin:2px 0 6px;">{html.escape(text)}</div>', unsafe_allow_html=True)
-
-
-def _render_controls():
-    c1, c2 = st.columns([1.0, 1.0])
-    with c1:
-        days_label = st.selectbox("WINDOW", ["24H", "7D", "30D"],
-                                  index={1: 0, 7: 1, 30: 2}.get(int(st.session_state.get("_news_days", 1) or 1), 0),
-                                  key="news_window_v91", label_visibility="collapsed")
-    with c2:
-        search = st.text_input("NEWS SEARCH", value=st.session_state.get("_news_search", ""), placeholder="search…",
-                               key="news_search_v91", label_visibility="collapsed")
-    st.session_state["_news_days"] = {"24H": 1, "7D": 7, "30D": 30}[days_label]
-    st.session_state["_news_search"] = search
-
-
-def _coverage_note(watchlist: list[str], current: str, days: int) -> str:
-    symbols = list(dict.fromkeys([str(s).strip().upper() for s in (watchlist or []) if str(s).strip()]))
-    if not symbols:
-        return ""
-    fetched = st.session_state.get("_news_fetched", {})
-    covered = sum(1 for s in symbols if fetched.get(f"SEC:{s}:{days}", 0) > 0)
-    if covered >= len(symbols):
-        return ""
-    return (f'<div style="font:8px {MONO};color:{T3};margin:2px 0 6px;">COVERAGE · {covered} of {len(symbols)} symbols refreshed so far'
-            f' · rotates {MAX_SECURITY_REFRESH} at a time every {NEWS_EXPIRE_MIN} min'
-            f'{" · " + current + " always included" if current else ""}</div>')
-
-
-def render_news_rail(watchlist: list[str], label: str = "WATCHLIST", current_security: str | None = None, sector: str | None = None):
-    """Right rail: prioritized, context-aware market news."""
-    _ensure_news_state()
-    _render_controls()          # controls first so a 7D/30D click is honoured on this run
-    days = int(st.session_state.get("_news_days", 1) or 1)
-
-    refresh_news(watchlist, current_security=current_security, sector=sector, days=days)
-    combined = _mark_new(_combined_feed(watchlist, current_security=current_security, sector=sector, days=days))
-
-    current = (current_security or "").strip().upper()
-    search_query = st.session_state.get("_news_search", "")
-
-    coverage_html = _coverage_note(watchlist, current, days)
-    if coverage_html:
-        st.markdown(coverage_html, unsafe_allow_html=True)
-
-    options = ["ALL", "WATCHLIST"]
-    if current:
-        options.insert(1, "SECURITY")
-    if sector:
-        options.append("SECTOR")
-    options += ["MACRO", "EARNINGS", "CORPORATE", "REGULATORY", "RATING", "POSITIVE", "NEGATIVE"]
-    options = list(dict.fromkeys(options))
-    default = st.session_state.get("_news_category", "ALL")
-    if default not in options:
-        default = "ALL"
-    category = st.selectbox("FILTER", options, index=options.index(default), key="news_category_v91", label_visibility="collapsed")
-    st.session_state["_news_category"] = category
-
-    base = _search_filter(_category_filter(combined, category, current), search_query)
-    top, brk, cat, risk = _tab_views(base)
-    _, _, all_cat, _ = _tab_views(combined)
-
-    story_count = len(combined)
-    source_count = len({str(x.get("source", "News")) for x in combined})
-    new_count = sum(bool(x.get("is_new")) for x in combined)
-    event_counts = Counter(x.get("event", "NEWS") for x in combined)
+    _css()
+    current = (current_security or st.session_state.get("active_security") or "").upper().strip()
+    if st.session_state.get("page") != "security":
+        current = (current_security or "").upper().strip()
+    c1, c2 = st.columns([1, 1.4])
+    days = {"24H": 1, "3D": 3, "7D": 7}[c1.selectbox("Window", ["24H", "3D", "7D"], key="nd_rwin", label_visibility="collapsed")]
+    query = c2.text_input("Search news", key="nd_rq", placeholder="search…", label_visibility="collapsed")
+    with st.spinner("Loading news…"):
+        items = _mark_new(assemble(tuple(_universe(watchlist)), _names_from_session(), current, days))
+    tone = news_tone(items)
+    mine = sum(a["mine"] for a in items)
     st.markdown(
-        f'''<div style="border-top:1px solid {BORDER};border-bottom:1px solid {BORDER};padding:7px 0;margin:8px 0 6px;">
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px;text-align:center;font:8px {MONO};">
-          <div><div style="color:{GOLD};font-weight:800;">STORIES</div><div style="color:{IVORY};font-size:12px;">{story_count}</div></div>
-          <div><div style="color:{RED};font-weight:800;">NEW</div><div style="color:{IVORY};font-size:12px;">{new_count}</div></div>
-          <div><div style="color:{GREEN};font-weight:800;">CATALYST</div><div style="color:{IVORY};font-size:12px;">{len(all_cat)}</div></div>
-          <div><div style="color:{BLUE};font-weight:800;">SOURCES</div><div style="color:{IVORY};font-size:12px;">{source_count}</div></div>
-        </div></div>''', unsafe_allow_html=True)
-    tape = " · ".join(f"{k} {v}" for k, v in event_counts.most_common(4))
-    if tape:
-        st.markdown(f'<div style="font:8px {MONO};color:{T3};margin:3px 0 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">TAPE · {html.escape(tape)}</div>',
-                    unsafe_allow_html=True)
-
-    impact_symbols = {current} if current else set()
-    t_top, t_brk, t_cat, t_risk = st.tabs(["TOP", "BREAK", "CATALYST", "RISK"])
-    with t_top:
-        _tab_note(f"{len(top)} stories · highest priority first (importance, recency, sources)")
-        _render_rows(top[:24], show_impact=True, impact_symbols=impact_symbols)
-    with t_brk:
-        _tab_note(f"{len(brk)} stories in the last {BREAK_WINDOW_MIN // 60}h · newest first")
-        _render_rows(brk[:20], empty_msg=f"Nothing new in the last {BREAK_WINDOW_MIN // 60} hours.",
-                     show_impact=True, impact_symbols=impact_symbols)
-    with t_cat:
-        _tab_note(f"{len(cat)} company stories · positive tone, orders, capex, stakes, dividends")
-        _render_rows(cat[:20], empty_msg="No company-specific positive catalysts right now. Add stocks to your Watchlist or Portfolio to see them here.",
-                     show_impact=True, impact_symbols=impact_symbols)
-    with t_risk:
-        _tab_note(f"{len(risk)} stories · negative tone or regulatory action (market-wide included)")
-        _render_rows(risk[:20], empty_msg="No risk headlines in this window.", show_impact=True, impact_symbols=impact_symbols)
+        f'<div class="nd-k"><div><b style="color:{AMBER}">STORIES</b><span>{len(items)}</span></div>'
+        f'<div><b style="color:{CYAN}">MINE</b><span>{mine}</span></div>'
+        f'<div><b style="color:{RED}">BREAKING</b><span>{sum(a["is_breaking"] for a in items)}</span></div>'
+        f'<div><b style="color:{GREEN if tone >= 0 else RED}">TONE</b><span style="color:{GREEN if tone >= 0 else RED}">{tone:+d}</span></div></div>'
+        f'<div class="nd-tone"><i style="left:{(tone + 100) / 2:.0f}%"></i></div>', unsafe_allow_html=True)
+    modes = (["SECURITY"] if current else []) + MODES_RAIL
+    with st.container(key="nd_rmode"):
+        mode = st.radio("News view", modes, horizontal=True, key="nd_rmode_v", label_visibility="collapsed")
+    shown = _view(items, mode, query, current)
+    _stories(shown[:18], False, current, "No stories in this view yet. Add stocks to your watchlist or portfolio for company news.")
+    if st.button("OPEN NEWS DESK ▸", key="nd_open_desk", use_container_width=True):
+        st.session_state["page"] = "news"
+        st.rerun()
 
 
 news_panel = render_news_rail
 news_box = render_news_rail
+
+
+def render_news_terminal(watchlist=None, on_open=None, current_security: str | None = None):
+    """Full NEWS workspace: breaking tape, KPIs, wire with filters, my-stocks pulse, sector tone, source health."""
+    _ensure_news_state()
+    _css()
+    current = (current_security or st.session_state.get("active_security") or "").upper().strip()
+    universe = _universe(watchlist)
+    c1, c2, c3, c4 = st.columns([1, 2.4, 1.2, 0.8], gap="small")
+    days = {"24 HOURS": 1, "3 DAYS": 3, "7 DAYS": 7, "30 DAYS": 30}[c1.selectbox("Window", ["24 HOURS", "3 DAYS", "7 DAYS", "30 DAYS"], key="nd_fwin", label_visibility="collapsed")]
+    query = c2.text_input("Search", key="nd_fq", placeholder="Search headlines, stocks, sectors, sources…  e.g. RBI, order, HDFCBANK, pharma", label_visibility="collapsed")
+    sort = c3.selectbox("Sort", ["Priority", "Newest"], key="nd_fsort", label_visibility="collapsed")
+    if c4.button("↻ REFRESH", key="nd_refresh", use_container_width=True):
+        _MEMO.clear()
+        _rss_cached.clear()
+        _COOL.clear()
+    with st.spinner("Assembling the wire…"):
+        items = _mark_new(assemble(tuple(universe), _names_from_session(), current, days))
+    if not items:
+        st.markdown('<div class="nd-empty">No stories returned yet — sources may be slow. Press REFRESH in a few seconds.</div>', unsafe_allow_html=True)
+        return
+
+    tone = news_tone(items)
+    pos, neg = sum(a["score"] > 0 for a in items), sum(a["score"] < 0 for a in items)
+    health = source_health()
+    live = sum(1 for h in health if h["ok"])
+    breaking = [a for a in items if a["is_breaking"] or (a["priority"] >= 70 and a["age_min"] <= 180)][:12]
+    if breaking:
+        tape = "".join(f'<b>{html.escape(", ".join(a["symbols"][:2]) or a["event"])}</b>{html.escape(a["title"])}' for a in breaking)
+        st.markdown(f'<div class="nd-tape"><div>{tape}{tape}</div></div>', unsafe_allow_html=True)
+    kp = lambda l, v, s, a: f'<div class="nd-kp" style="--a:{a}"><div class="l">{l}</div><div class="v">{v}</div><div class="s">{s}</div></div>'
+    st.markdown('<div class="nd-kpis">'
+                + kp("STORIES", len(items), f"{sum(a['is_new'] for a in items)} new since last look", AMBER)
+                + kp("MY STOCKS", sum(a["mine"] for a in items), f"across {len(universe)} tracked stocks", CYAN)
+                + kp("NEWS TONE", f'<span style="color:{GREEN if tone >= 0 else RED}">{tone:+d}</span>',
+                     f'<span style="color:{GREEN}">{pos} positive</span> · <span style="color:{RED}">{neg} negative</span>', GREEN if tone >= 0 else RED)
+                + kp("BREAKING · HOT", f'{sum(a["is_breaking"] for a in items)} · {sum(a["hot"] for a in items)}', "last hour · 3+ outlets in 3 h", RED)
+                + kp("FILINGS", sum(a["kind"] == "filing" for a in items), "BSE exchange announcements", PURPLE)
+                + kp("SOURCES LIVE", f"{live}/{len(health)}", "see SOURCE HEALTH", GREEN if live == len(health) else AMBER)
+                + '</div>', unsafe_allow_html=True)
+
+    left, right = st.columns([2.35, 1], gap="medium")
+    with left:
+        modes = (["SECURITY"] if current else []) + MODES_FULL
+        with st.container(key="nd_fmode"):
+            mode = st.radio("Desk view", modes, horizontal=True, key="nd_fmode_v", label_visibility="collapsed")
+        shown = _view(items, mode, query, current)
+        if sort == "Newest":
+            shown = sorted(shown, key=lambda a: a["pub_dt"], reverse=True)
+        st.markdown(f'<div class="nd-sec">{html.escape(mode)} · {len(shown)} STORIES</div>', unsafe_allow_html=True)
+        _stories(shown[:45], True, current, "Nothing in this view for the selected window.")
+        tagged = list(dict.fromkeys(s for a in shown[:45] for s in a["symbols"]))
+        if on_open and tagged:
+            o1, o2 = st.columns([3, 1])
+            pick = o1.selectbox("Open a stock from these stories", tagged, key="nd_open_pick", label_visibility="collapsed")
+            if o2.button("OPEN STOCK ▸", key="nd_open_btn", use_container_width=True, type="primary"):
+                on_open(pick)
+    with right:
+        st.markdown('<div class="nd-sec">NEWS PULSE · YOUR STOCKS</div>', unsafe_allow_html=True)
+        pdf = pulse(items, universe)
+        if pdf.empty or pdf["stories"].sum() == 0:
+            st.markdown('<div class="nd-empty">No stories naming your stocks in this window.</div>', unsafe_allow_html=True)
+        else:
+            rows = []
+            for r in pdf[pdf["stories"] > 0].head(16).to_dict("records"):
+                c = GREEN if r["tone"] > 0.2 else RED if r["tone"] < -0.2 else TX3
+                rows.append(f'<div class="nd-pl"><b>{html.escape(r["symbol"])}</b><span style="color:{c}">{r["stories"]}{"▲" if r["tone"] > 0.2 else "▼" if r["tone"] < -0.2 else "·"}</span>'
+                            f'<a href="{_href(r["link"])}" target="_blank" title="{html.escape(r["latest"])}">{html.escape(r["age"] or "")} · {html.escape(r["latest"])}</a></div>')
+            quiet = int((pdf["stories"] == 0).sum())
+            st.markdown("".join(rows) + (f'<div class="nd-empty" style="padding:6px 0">{quiet} tracked stocks with no news in this window.</div>' if quiet else ""),
+                        unsafe_allow_html=True)
+        st.markdown('<div class="nd-sec">SECTOR TONE</div>', unsafe_allow_html=True)
+        stn = sector_tone(items)
+        if stn:
+            bars = []
+            for name, n, t in stn[:12]:
+                w = min(50, abs(t) / 3 * 50)
+                c = GREEN if t >= 0 else RED
+                pos_css = f"left:50%;width:{w:.0f}%" if t >= 0 else f"left:{50 - w:.0f}%;width:{w:.0f}%"
+                bars.append(f'<div class="nd-bar"><span>{html.escape(name)}</span><div class="t"><i style="{pos_css};background:{c}"></i>'
+                            f'<i style="left:50%;width:1px;background:#444"></i></div><span style="color:{c};text-align:right">{n} · {t:+.1f}</span></div>')
+            st.markdown("".join(bars), unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="nd-empty">Not enough sector-tagged stories yet.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="nd-sec">MACRO THEMES</div>', unsafe_allow_html=True)
+        mc = Counter(t for a in items for t in a["macro"]).most_common(8)
+        st.markdown(" ".join(f'<span class="nd-tag" style="color:{AMBER};font:800 9px {MONO};margin:2px;display:inline-block">{html.escape(k)} {v}</span>' for k, v in mc)
+                    or '<div class="nd-empty">—</div>', unsafe_allow_html=True)
+        st.markdown('<div class="nd-sec">SOURCE HEALTH</div>', unsafe_allow_html=True)
+        st.markdown("".join(
+            f'<div class="nd-src"><span>{html.escape(h["name"])}</span><span style="color:{GREEN if h["ok"] else RED}">'
+            f'{"● " + str(h["n"]) + " items" if h["ok"] else "✕ " + html.escape(h["err"] or "failed")}'
+            f'{" · " + str(h["fail"]) + " failed" if h["ok"] and h["fail"] else ""}</span></div>' for h in health), unsafe_allow_html=True)
+        st.caption("Tone and event tags are automatic keyword scoring of headlines — a reading aid, not a recommendation. Click any story to read the source.")
