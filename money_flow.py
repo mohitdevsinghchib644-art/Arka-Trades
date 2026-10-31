@@ -1466,11 +1466,13 @@ def render_money_flow(on_open=None):
     st.caption(f"Latest returned snapshot · {stamp} · {len(indices)} NSE index records in total (all listed in MARKET BREADTH). "
                "Index rows overlap and do not represent unique stocks.")
 
-    sector_rk, nifty_ix, rotation, overview, breadth, explorer, flows, stocks = st.tabs(
-        ["SECTOR RANKING", "NIFTY INDICES", "SECTOR ROTATION", "OVERVIEW", "MARKET BREADTH", "INDEX EXPLORER", "MONEY FLOW / FII-DII", "INDEX CONSTITUENTS"])
+      sector_rk, lab, nifty_ix, rotation, overview, breadth, explorer, flows, stocks = st.tabs(
+        ["SECTOR RANKING", "ROTATION LAB", "NIFTY INDICES", "SECTOR ROTATION", "OVERVIEW", "MARKET BREADTH", "INDEX EXPLORER", "MONEY FLOW / FII-DII", "INDEX CONSTITUENTS"])
 
     with sector_rk:
         _render_sector_ranking(on_open)
+    with lab:
+        rl.render_rotation_lab(on_open)
     with nifty_ix:
         _render_nifty_indices(indices)
 
