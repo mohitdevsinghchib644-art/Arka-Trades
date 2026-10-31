@@ -1428,9 +1428,11 @@ def render_money_flow(on_open=None):
                    "archive CSVs and prices from Yahoo Finance.")
         if st.button("RETRY LIVE FEED", key="mf_retry_live"):
             fetch_all_indices.clear(); fetch_constituents.clear(); fetch_fii_dii.clear(); _session.clear(); st.rerun()
-        t_sr, t_ex = st.tabs(["SECTOR RANKING", "INDEX EXPLORER"])
+                t_sr, t_lab, t_ex = st.tabs(["SECTOR RANKING", "ROTATION LAB", "INDEX EXPLORER"])
         with t_sr:
             _render_sector_ranking(on_open)
+        with t_lab:
+            rl.render_rotation_lab(on_open)
         with t_ex:
             _render_explorer(pd.DataFrame({"index": list(ARCHIVE_SLUGS)}), on_open)
         return
