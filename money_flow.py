@@ -1298,6 +1298,7 @@ def _render_sector_ranking(on_open=None):
         except Exception as exc:
             st.error(f"Sector data unavailable right now: {exc}. Yahoo may be rate-limiting; try again in a minute.")
             return
+        st.session_state["mf_sr_res"] = res          # reused by ROTATION LAB (stock-built sectors + FPI cross-check)
     benches = list(res["bench_index"].columns)
     if not benches:
         st.error("No benchmark series could be built, so relative strength cannot be computed.")
