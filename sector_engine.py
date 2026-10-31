@@ -436,6 +436,7 @@ def analyse_universe(frames: dict, meta: pd.DataFrame, bench: str = "^NSEI", ben
     return {"sectors": sectors, "stocks": stocks, "sparks": sparks,
             "sector_index": sec_idx, "sector_index_equal": sec_idx_eq, "bench_index": bench_idx, "ab20_series": ab20_ser,
             "cmf_series": cmf_sec.tail(60), "share_series": share.tail(60),
+            "cmf_series_full": cmf_sec, "share_series_full": share,
             "contrib_last": contrib, "quality": quality,
             "asof": str(last_date)[:10], "n_stocks": len(syms), "stale": stale,
             "unmapped": sorted(set(meta["symbol"]) - set(usable))}
