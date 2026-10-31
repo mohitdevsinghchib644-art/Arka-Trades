@@ -1,18 +1,20 @@
 """
-data_engine.py — Arka Trades fast data layer (v1)
+data_engine.py — Arka Trades fast data layer (v2)
 
-Why this file exists
---------------------
-The old app fetched everything one symbol at a time, on every rerun:
-  * 12 index quotes, one after another
-  * 2 yfinance calls per watchlist symbol (1m + daily)
-  * Screener page parsed 5-6 times per security
-This module replaces all of that with:
-  * parallel / batched downloads (one HTTP call for a whole watchlist)
-  * st.cache_data on everything, but failures are NEVER cached
-    (inner cached function raises -> outer wrapper catches)
-  * ONE Screener fetch + ONE table parse per security, cached for an hour
-  * lazy helpers for yfinance extras (only fetched when a tab needs them)
+What changed vs v1 (all about speed and resilience; the public API is unchanged)
+-------------------------------------------------------------------------------
+1. ONE price download per symbol.  get_history(sym, "1y" / "2y" / "3mo" / "5y") used to download each
+   period separately (the Security page alone pulled the same stock 3-4 times). Now one 5-year download
+   is cached and every shorter period is a slice of it.
+2. MARKET-AWARE CACHING.  Cache keys include a time bucket: quotes refresh every 30 s while NSE is open
+   and every 15 min when it is closed; history every 2 min open / 1 h closed. Evenings and weekends no
+   longer re-download anything on each click.
+3. STALE-WHILE-ERROR + COOL-DOWN.  When Yahoo rate-limits or fails, the last good value is served and the
+   failing call is not retried for 45 s. Before, every rerun retried and waited for timeouts (the main
+   source of "freezing" when Yahoo is slow). Failures are still never written into st.cache_data.
+4. INDEX STRIP IN ONE CALL.  All primary index tickers are fetched in a single batched download; only
+   the ones that fail fall back (in parallel) to their alternates.
+5. Fundamentals (Screener) cached 6 h, Yahoo statements 6 h, Yahoo news 15 min.
 
 Nothing here renders UI. It only returns data.
 """
@@ -21,7 +23,10 @@ from __future__ import annotations
 import io
 import math
 import re
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -30,6 +35,8 @@ import streamlit as st
 import yfinance as yf
 
 import screener_scraper as ss
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 # ════════════════════════════════════════════════════════════════
@@ -49,6 +56,47 @@ def to_float(x):
         return v if math.isfinite(v) else None
     except Exception:
         return None
+
+
+def market_open(now: datetime | None = None) -> bool:
+    """NSE cash session incl. pre-open, Mon-Fri 09:00-15:40 IST (exchange holidays not modelled)."""
+    now = now or datetime.now(IST)
+    t = now.hour * 60 + now.minute
+    return now.weekday() < 5 and 9 * 60 <= t <= 15 * 60 + 40
+
+
+def _bucket(live_s: int, closed_s: int) -> int:
+    """Cache-key time bucket: short while the market is open, long when it is closed."""
+    s = live_s if market_open() else closed_s
+    return int(time.time() // s)
+
+
+# ── stale-while-error store ─────────────────────────────────────
+_LOCK = threading.Lock()
+_LAST_GOOD: dict = {}
+_FAIL_UNTIL: dict = {}
+_COOLDOWN_S = 45
+_MAX_KEEP = 400
+
+
+def _guarded(key, fn, fallback):
+    """Run fn(); on success remember the value. On failure serve the last good value (or fallback) and
+    skip new attempts for _COOLDOWN_S seconds so a slow provider cannot freeze every rerun."""
+    now = time.time()
+    if _FAIL_UNTIL.get(key, 0) > now:
+        return _LAST_GOOD.get(key, fallback)
+    try:
+        v = fn()
+    except Exception:
+        with _LOCK:
+            _FAIL_UNTIL[key] = now + _COOLDOWN_S
+        return _LAST_GOOD.get(key, fallback)
+    with _LOCK:
+        _LAST_GOOD[key] = v
+        _FAIL_UNTIL.pop(key, None)
+        while len(_LAST_GOOD) > _MAX_KEEP:
+            _LAST_GOOD.pop(next(iter(_LAST_GOOD)))
+    return v
 
 
 def _parse_download(df, tickers):
@@ -109,21 +157,28 @@ def rsi_wilder(close: pd.Series, n: int = 14) -> pd.Series:
 
 
 # ════════════════════════════════════════════════════════════════
-# Price history (one cached 5y download serves chart + technicals + PDH/PDL)
+# Price history — ONE cached 5-year download per symbol; shorter periods are slices
 # ════════════════════════════════════════════════════════════════
-@st.cache_data(ttl=120, show_spinner=False, max_entries=64)
-def _history_cached(symbol: str, period: str) -> pd.DataFrame:
-    h = yf.Ticker(symbol + ".NS").history(period=period, interval="1d", auto_adjust=False)
+_PERIOD_DAYS = {"5d": 8, "1mo": 32, "3mo": 95, "6mo": 186, "1y": 368, "2y": 733, "3y": 1098, "5y": 1830}
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False, max_entries=96)
+def _history_cached(symbol: str, bucket: int) -> pd.DataFrame:
+    h = yf.Ticker(symbol + ".NS").history(period="5y", interval="1d", auto_adjust=False)
     if h is None or h.empty:
         raise ValueError("empty history")          # raising = not cached
     return h[~h.index.duplicated(keep="last")].sort_index()
 
 
 def get_history(symbol: str, period: str = "5y") -> pd.DataFrame:
-    try:
-        return _history_cached(str(symbol).upper().strip(), period)
-    except Exception:
+    sym = str(symbol).upper().strip()
+    if not sym:
         return pd.DataFrame()
+    h = _guarded(("hist", sym), lambda: _history_cached(sym, _bucket(120, 3600)), pd.DataFrame())
+    if h is None or h.empty or period not in _PERIOD_DAYS:
+        return h if h is not None else pd.DataFrame()
+    cutoff = h.index[-1] - pd.Timedelta(days=_PERIOD_DAYS[period])
+    return h[h.index >= cutoff]
 
 
 def get_static(sym: str):
@@ -147,13 +202,12 @@ def get_static(sym: str):
 # ════════════════════════════════════════════════════════════════
 # Batched quotes (watchlist monitor) and scanner
 # ════════════════════════════════════════════════════════════════
-@st.cache_data(ttl=20, show_spinner=False, max_entries=32)
-def _get_quotes_cached(symbols: tuple) -> dict:
+@st.cache_data(ttl=3600, show_spinner=False, max_entries=48)
+def _get_quotes_cached(symbols: tuple, bucket: int) -> dict:
     """Cached quote snapshot. Raises on total provider failure so failures aren't cached."""
-    syms = list(dict.fromkeys(str(x).upper().strip() for x in (symbols or ()) if x))
+    syms = list(symbols)
     out = {s: None for s in syms}
-    attempted = 0
-    provider_errors = 0
+    attempted = provider_errors = 0
     for chunk in _chunks(syms, 60):
         tick = [s + ".NS" for s in chunk]
         attempted += 1
@@ -176,30 +230,26 @@ def _get_quotes_cached(symbols: tuple) -> dict:
                 out[s] = {"price": cur, "chg": (cur - pc) / pc * 100, "prev_close": pc}
     if syms and attempted and provider_errors == attempted:
         raise RuntimeError("All quote-provider requests failed")
+    if syms and not any(out.values()):
+        raise RuntimeError("Quote provider returned no prices")
     return out
 
 
 def get_quotes(symbols: tuple) -> dict:
-    """Safe public quote API; provider failures return placeholders but aren't cached."""
-    syms = list(dict.fromkeys(str(x).upper().strip() for x in (symbols or ()) if x))
-    try:
-        return _get_quotes_cached(tuple(syms))
-    except Exception:
-        return {s: None for s in syms}
+    """Safe public quote API: sorted key (better cache hits), last good value on failure."""
+    syms = tuple(sorted(dict.fromkeys(str(x).upper().strip() for x in (symbols or ()) if x)))
+    if not syms:
+        return {}
+    return _guarded(("quotes", syms), lambda: _get_quotes_cached(syms, _bucket(30, 900)), {s: None for s in syms})
 
 
 get_prices_batch = get_quotes   # backwards-compatible name
 
 
-@st.cache_data(ttl=30, show_spinner=False, max_entries=16)
-def scan_batch(symbols: tuple) -> dict:
-    """
-    Whole-watchlist scan in one or two HTTP calls.
-    Returns {SYM: {cur, chg, prev_close, pdh, pdl, rsi, spark}} (missing = no data).
-    """
-    syms = list(dict.fromkeys(str(x).upper().strip() for x in (symbols or ()) if x))
+@st.cache_data(ttl=3600, show_spinner=False, max_entries=24)
+def _scan_cached(symbols: tuple, bucket: int) -> dict:
     out = {}
-    for chunk in _chunks(syms, 50):
+    for chunk in _chunks(list(symbols), 50):
         tick = [s + ".NS" for s in chunk]
         try:
             df = yf.download(tick, period="3mo", interval="1d", group_by="ticker",
@@ -227,25 +277,43 @@ def scan_batch(symbols: tuple) -> dict:
                 }
             except Exception:
                 continue
+    if symbols and not out:
+        raise RuntimeError("scan returned nothing")
     return out
 
 
+def scan_batch(symbols: tuple) -> dict:
+    """Whole-watchlist scan in one or two HTTP calls -> {SYM: {cur, chg, prev_close, pdh, pdl, rsi, spark}}."""
+    syms = tuple(dict.fromkeys(str(x).upper().strip() for x in (symbols or ()) if x))
+    if not syms:
+        return {}
+    return _guarded(("scan", syms), lambda: _scan_cached(syms, _bucket(30, 900)), {})
+
+
+scan_batch.clear = _scan_cached.clear      # keeps app.py's "Force fresh data" working
+
+
 # ════════════════════════════════════════════════════════════════
-# Index strip — all 12 indices fetched in parallel, cached 60s
+# Index strip — one batched download, parallel fallbacks for the misses
 # ════════════════════════════════════════════════════════════════
+def _from_frame(h):
+    if h is None or h.empty or "Close" not in h:
+        return None
+    close = h["Close"].dropna()
+    if len(close) < 2:
+        return None
+    cur, pc = float(close.iloc[-1]), float(close.iloc[-2])
+    if not (math.isfinite(cur) and math.isfinite(pc)) or cur <= 0 or pc <= 0:
+        return None
+    return {"price": cur, "chg": (cur - pc) / pc * 100, "pts": cur - pc, "spark": [float(x) for x in close.tolist()]}
+
+
 def _index_one(sym):
     try:
-        h = yf.Ticker(sym).history(period="5d", interval="1d")
-        if h is None or h.empty:
-            return None
-        close = h["Close"].dropna()
-        if len(close) < 2:
-            return None
-        cur, pc = float(close.iloc[-1]), float(close.iloc[-2])
-        if not (math.isfinite(cur) and math.isfinite(pc)) or cur <= 0 or pc <= 0:
-            return None
-        return {"price": cur, "chg": (cur - pc) / pc * 100, "pts": cur - pc,
-                "spark": [float(x) for x in close.tolist()], "ticker_used": sym}
+        r = _from_frame(yf.Ticker(sym).history(period="5d", interval="1d"))
+        if r:
+            r["ticker_used"] = sym
+        return r
     except Exception:
         return None
 
@@ -258,34 +326,47 @@ def _index_chain(chain):
     return None
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def _get_indices_cached(items: tuple) -> dict:
-    """Cached index snapshot; raise if every index lookup fails to avoid caching outages."""
+@st.cache_data(ttl=3600, show_spinner=False, max_entries=8)
+def _get_indices_cached(items: tuple, bucket: int) -> dict:
     out = {}
     if not items:
         return out
-    with ThreadPoolExecutor(max_workers=min(12, len(items))) as ex:
-        futs = {ex.submit(_index_chain, chain): label for label, chain in items}
-        for f in as_completed(futs):
-            try:
-                out[futs[f]] = f.result()
-            except Exception:
-                out[futs[f]] = None
-    if out and not any(value for value in out.values()):
+    primaries = list(dict.fromkeys(chain[0] for _, chain in items))
+    try:
+        raw = yf.download(primaries, period="5d", interval="1d", group_by="ticker",
+                          progress=False, threads=True, auto_adjust=False)
+        parsed = _parse_download(raw, primaries)
+    except Exception:
+        parsed = {}
+    missing = []
+    for label, chain in items:
+        r = _from_frame(parsed.get(chain[0]))
+        if r:
+            r["ticker_used"] = chain[0]
+            out[label] = r
+        else:
+            missing.append((label, chain[1:] or chain))
+    if missing:
+        with ThreadPoolExecutor(max_workers=min(8, len(missing))) as ex:
+            futs = {ex.submit(_index_chain, chain): label for label, chain in missing}
+            for f in as_completed(futs):
+                try:
+                    out[futs[f]] = f.result()
+                except Exception:
+                    out[futs[f]] = None
+    if not any(out.values()):
         raise RuntimeError("All index-provider lookups failed")
     return out
 
 
 def get_indices(items: tuple) -> dict:
-    """Safe API: preserve labels with None values during outages; retry on next rerun."""
-    try:
-        return _get_indices_cached(tuple(items or ()))
-    except Exception:
-        return {label: None for label, _chain in (items or ())}
+    items = tuple(items or ())
+    return _guarded(("indices", items), lambda: _get_indices_cached(items, _bucket(60, 900)),
+                    {label: None for label, _chain in items})
 
 
 # ════════════════════════════════════════════════════════════════
-# Screener bundle — ONE fetch, ONE table parse, cached an hour
+# Screener bundle — ONE fetch, ONE table parse, cached 6 hours
 # ════════════════════════════════════════════════════════════════
 _M_PL = [("sales", "revenue", "interest", "financing margin"), ("net profit", "profit for the period")]
 _M_SH = ["promoters", ("fiis", "fii"), ("diis", "dii")]
@@ -341,9 +422,7 @@ def _screener_raw(symbol: str) -> dict:
     sym = symbol.upper().strip()
     res = ss.resolve_symbol(sym)
     if not res:
-        # resolve_symbol caches misses for the whole process lifetime — clear it
-        # so one transient Screener hiccup doesn't poison the symbol until reboot.
-        ss._RESOLVE_CACHE.pop(sym, None)
+        ss._RESOLVE_CACHE.pop(sym, None)   # a transient miss must not poison the symbol until reboot
         raise RuntimeError("symbol not resolved on Screener")
     url = res["url"]
     html = ss._fetch_html(url)
@@ -356,12 +435,8 @@ def _screener_raw(symbol: str) -> dict:
     except Exception:
         tables = []
 
-    pl = _match(tables, _M_PL)
-    sh = _match(tables, _M_SH)
-    bs = _match(tables, _M_BS)
-    cf = _match(tables, _M_CF)
-    rat = _match(tables, _M_RAT)
-
+    pl, sh, bs = _match(tables, _M_PL), _match(tables, _M_SH), _match(tables, _M_BS)
+    cf, rat = _match(tables, _M_CF), _match(tables, _M_RAT)
     summary = (ss.get_summary(sym, url=url, html_override=html) or {}).get("data") or {}
     sector = (ss.get_sector_info(sym, url=url, html_override=html) or {}).get("data") or {}
 
@@ -401,21 +476,19 @@ def _screener_raw(symbol: str) -> dict:
     return bundle
 
 
-@st.cache_data(ttl=3600, show_spinner=False, max_entries=48)
+@st.cache_data(ttl=6 * 3600, show_spinner=False, max_entries=64)
 def _screener_cached(symbol: str) -> dict:
     return _screener_raw(symbol)
 
 
 def get_screener_bundle(symbol: str) -> dict:
-    try:
-        return _screener_cached(str(symbol).upper().strip())
-    except Exception as e:
-        return {"resolved": False, "symbol": str(symbol).upper().strip(), "reason": str(e),
-                "summary": {}, "sector": {}, "growth": {}, "pros": [], "cons": [], "about": "",
-                "peer_urls": []}
+    sym = str(symbol).upper().strip()
+    empty = {"resolved": False, "symbol": sym, "reason": "Screener unavailable right now",
+             "summary": {}, "sector": {}, "growth": {}, "pros": [], "cons": [], "about": "", "peer_urls": []}
+    return _guarded(("screener", sym), lambda: _screener_cached(sym), empty)
 
 
-@st.cache_data(ttl=3600, show_spinner=False, max_entries=48)
+@st.cache_data(ttl=6 * 3600, show_spinner=False, max_entries=64)
 def _peers_cached(symbol: str, peer_urls: tuple) -> dict:
     hdr = {**ss._HEADERS, "X-Requested-With": "XMLHttpRequest", "Referer": ss._BASE + "/"}
     for path in peer_urls:
@@ -438,17 +511,15 @@ def _peers_cached(symbol: str, peer_urls: tuple) -> dict:
 
 
 def get_peers_table(symbol: str, peer_urls=()):
-    try:
-        return _peers_cached(str(symbol).upper().strip(), tuple(peer_urls or ()))
-    except Exception:
-        return None
+    sym = str(symbol).upper().strip()
+    return _guarded(("peers", sym), lambda: _peers_cached(sym, tuple(peer_urls or ())), None)
 
 
 # ════════════════════════════════════════════════════════════════
-# yfinance extras — lazy, each cached 15 min, failures not cached
+# yfinance extras — lazy; statements 6 h, news 15 min; failures not cached
 # ════════════════════════════════════════════════════════════════
-@st.cache_data(ttl=900, show_spinner=False, max_entries=64)
-def _yf_attr_cached(symbol: str, attr: str):
+@st.cache_data(ttl=6 * 3600, show_spinner=False, max_entries=128)
+def _yf_attr_cached(symbol: str, attr: str, bucket: int):
     obj = getattr(yf.Ticker(symbol + ".NS"), attr)
     if obj is None:
         raise ValueError("none")
@@ -460,17 +531,16 @@ def _yf_attr_cached(symbol: str, attr: str):
 
 
 def yf_attr(symbol: str, attr: str):
-    """attr in: info, quarterly_income_stmt, income_stmt, balance_sheet, cashflow,
-    major_holders, institutional_holders, mutualfund_holders, dividends, splits,
-    recommendations, upgrades_downgrades, analyst_price_targets, news"""
-    try:
-        return _yf_attr_cached(str(symbol).upper().strip(), attr)
-    except Exception:
-        return None
+    """attr in: info, quarterly_income_stmt, income_stmt, balance_sheet, cashflow, major_holders,
+    institutional_holders, mutualfund_holders, dividends, splits, recommendations,
+    upgrades_downgrades, analyst_price_targets, news"""
+    sym = str(symbol).upper().strip()
+    bucket = int(time.time() // (900 if attr == "news" else 6 * 3600))
+    return _guarded(("yf", sym, attr), lambda: _yf_attr_cached(sym, attr, bucket), None)
 
 
 # ════════════════════════════════════════════════════════════════
-# ScanX (optional, lazy) — only called when the user opens those tabs
+# ScanX (optional, lazy) — only called when the user opens those sections
 # ════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=1800, show_spinner=False, max_entries=16)
 def _scanx_cached(symbol: str, name: str):
@@ -483,17 +553,15 @@ def _scanx_cached(symbol: str, name: str):
 
 
 def get_scanx(symbol: str, name: str = ""):
-    try:
-        return _scanx_cached(str(symbol).upper().strip(), name or "")
-    except Exception:
-        return None
+    sym = str(symbol).upper().strip()
+    return _guarded(("scanx", sym), lambda: _scanx_cached(sym, name or ""), None)
 
 
 # ════════════════════════════════════════════════════════════════
 # One call that warms everything the Security workspace needs, in parallel
 # ════════════════════════════════════════════════════════════════
 def warm_security(symbol: str):
-    """Returns (screener_bundle, history_df). Both fetched concurrently."""
+    """Returns (screener_bundle, 5-year history). Both fetched concurrently."""
     sym = str(symbol).upper().strip()
     with ThreadPoolExecutor(max_workers=2) as ex:
         f_b = ex.submit(get_screener_bundle, sym)
