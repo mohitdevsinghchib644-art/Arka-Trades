@@ -95,6 +95,35 @@ YF_INDEX = {
 }
 _HISTORY_ALIASES = {"NIFTY FINANCIAL SERVICES": "NIFTY FIN SERVICE", "NIFTY HEALTHCARE INDEX": "NIFTY HEALTHCARE"}
 
+# Constituent CSV mirrors (tried in order) + where copies are kept so a blocked NSE never empties the screen.
+ARCHIVE_MIRRORS = ("https://nsearchives.nseindia.com/content/indices/", "https://archives.nseindia.com/content/indices/",
+                   "https://www.niftyindices.com/IndexConstituent/")
+LOCAL_DATA = Path("data")                 # optional: commit NSE constituent CSVs here (see the in-app message)
+DISK_CACHE = Path(".cache") / "nse"       # last good download, written automatically
+NSE_COOLDOWN_S = 600                      # after NSE refuses us, stop asking for 10 min (each attempt cost up to ~40 s)
+_NSE_STATE = {"down_until": 0.0, "archive_down": {}}
+
+# Yahoo fallback for the index snapshot when NSE's live API blocks the server: (category, ticker candidates)
+YF_SNAPSHOT = {
+    "NIFTY 50": ("BROAD MARKET INDICES", ("^NSEI",)), "NIFTY NEXT 50": ("BROAD MARKET INDICES", ("^NSMIDCP",)),
+    "NIFTY 500": ("BROAD MARKET INDICES", ("^CRSLDX",)), "NIFTY MIDCAP 100": ("BROAD MARKET INDICES", ("^CRSMID", "NIFTY_MIDCAP_100.NS")),
+    "NIFTY BANK": ("SECTORAL INDICES", ("^NSEBANK",)), "NIFTY IT": ("SECTORAL INDICES", ("^CNXIT",)),
+    "NIFTY AUTO": ("SECTORAL INDICES", ("^CNXAUTO",)), "NIFTY FMCG": ("SECTORAL INDICES", ("^CNXFMCG",)),
+    "NIFTY PHARMA": ("SECTORAL INDICES", ("^CNXPHARMA",)), "NIFTY METAL": ("SECTORAL INDICES", ("^CNXMETAL",)),
+    "NIFTY REALTY": ("SECTORAL INDICES", ("^CNXREALTY",)), "NIFTY MEDIA": ("SECTORAL INDICES", ("^CNXMEDIA",)),
+    "NIFTY PSU BANK": ("SECTORAL INDICES", ("^CNXPSUBANK",)),
+    "NIFTY FINANCIAL SERVICES": ("SECTORAL INDICES", ("NIFTY_FIN_SERVICE.NS", "^CNXFIN")),
+    "NIFTY PRIVATE BANK": ("SECTORAL INDICES", ("NIFTY_PVT_BANK.NS",)),
+    "NIFTY HEALTHCARE INDEX": ("SECTORAL INDICES", ("NIFTY_HEALTHCARE.NS",)),
+    "NIFTY OIL & GAS": ("SECTORAL INDICES", ("NIFTY_OIL_AND_GAS.NS",)),
+    "NIFTY CONSUMER DURABLES": ("SECTORAL INDICES", ("NIFTY_CONSR_DURBL.NS",)),
+    "NIFTY ENERGY": ("THEMATIC INDICES", ("^CNXENERGY",)), "NIFTY INFRASTRUCTURE": ("THEMATIC INDICES", ("^CNXINFRA",)),
+    "NIFTY PSE": ("THEMATIC INDICES", ("^CNXPSE",)), "NIFTY MNC": ("THEMATIC INDICES", ("^CNXMNC",)),
+    "NIFTY SERVICES SECTOR": ("THEMATIC INDICES", ("^CNXSERVICE",)), "NIFTY COMMODITIES": ("THEMATIC INDICES", ("^CNXCMDT",)),
+    "NIFTY CONSUMPTION": ("THEMATIC INDICES", ("^CNXCONSUM",)),
+}
+YAHOO_VIEWS = ["SECTOR RANKING", "ROTATION LAB", "NIFTY INDICES", "SECTOR ROTATION", "OVERVIEW", "INDEX EXPLORER"]
+
 BENCH_YF = {"MIDCAP 100": ["^CRSMID", "NIFTY_MIDCAP_100.NS", "NIFTYMDCP100.NS"],
             "SMALLCAP 100": ["^CNXSC", "NIFTYSMLCAP100.NS", "NIFTY_SMLCAP_100.NS"]}
 BENCH_ARCHIVE = {"MIDCAP 100": "NIFTY MIDCAP 100", "SMALLCAP 100": "NIFTY SMALLCAP 100"}
@@ -124,17 +153,24 @@ def _session():
     session = requests.Session()
     session.headers.update(HEADERS)
     try:
-        session.get(NSE, timeout=8)
-        session.get(NSE + "/market-data/live-market-indices", timeout=8)
+        session.get(NSE, timeout=5)
+        session.get(NSE + "/market-data/live-market-indices", timeout=5)
     except requests.RequestException:
         pass
     return session
 
 
+def nse_blocked() -> bool:
+    """True while NSE is in cool-down after refusing this server (cloud IPs are often blocked)."""
+    return time.time() < _NSE_STATE["down_until"]
+
+
 def _get(path):
+    if nse_blocked():
+        return None                     # fail instantly instead of waiting on timeouts every click
     for attempt in range(2):
         try:
-            response = _session().get(NSE + path, timeout=12)
+            response = _session().get(NSE + path, timeout=8)
             if response.status_code == 200:
                 return response.json()
         except (requests.RequestException, ValueError):
@@ -142,6 +178,7 @@ def _get(path):
         if attempt == 0:
             _session.clear()
             time.sleep(.4)
+    _NSE_STATE["down_until"] = time.time() + NSE_COOLDOWN_S
     return None
 
 
@@ -198,6 +235,11 @@ def fetch_all_indices():
         return None
     df["index"] = df["index"].astype(str).str.strip()
     df = df[df["index"].ne("") & df["index"].str.lower().ne("nan")].copy()
+    return _derive_snapshot(df)
+
+
+def _derive_snapshot(df: pd.DataFrame) -> pd.DataFrame:
+    """Common columns for an index snapshot (NSE live feed or the Yahoo fallback)."""
     if "key" not in df:
         df["key"] = "OTHER"
     df["key"] = df["key"].fillna("OTHER").astype(str).str.upper().str.strip()
@@ -264,6 +306,8 @@ def _parse_nse_history(rows) -> pd.DataFrame:
 
 def _fetch_nse_ohlc(index_name: str, days: int = 400) -> pd.DataFrame:
     """~400 days of daily OHLC from NSE (two requests of ~200 days). Tries NSE's short name first."""
+    if nse_blocked():
+        raise RuntimeError("NSE unreachable from this server")
     key = str(index_name).strip()
     cands = []
     for c in (_HISTORY_ALIASES.get(key.upper()), key):
@@ -394,18 +438,56 @@ def fetch_constituents(index_name):
     return df.reset_index(drop=True)
 
 
-@st.cache_data(ttl=3600, show_spinner=False, max_entries=24)
+def _parse_archive(text: str):
+    df = pd.read_csv(StringIO(text))
+    df.columns = [str(c).strip() for c in df.columns]
+    return df if "Symbol" in df and len(df) else None
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False, max_entries=48)
+def _archive_net(slug: str) -> pd.DataFrame:
+    """Download a constituent CSV from the first mirror that answers. Raises on failure (so failures are never cached)."""
+    hdr = {"User-Agent": HEADERS["User-Agent"], "Accept": "text/csv,text/plain,*/*", "Accept-Language": "en-US,en;q=0.9"}
+    last = "unreachable"
+    for base in ARCHIVE_MIRRORS:
+        try:
+            r = requests.get(f"{base}{slug}.csv", headers=hdr, timeout=8)
+            if r.status_code == 200:
+                df = _parse_archive(r.text)
+                if df is not None:
+                    try:
+                        DISK_CACHE.mkdir(parents=True, exist_ok=True)
+                        (DISK_CACHE / f"{slug}.csv").write_text(r.text)
+                    except Exception:
+                        pass
+                    return df
+            last = f"HTTP {r.status_code}"
+        except Exception as exc:
+            last = type(exc).__name__
+    raise RuntimeError(last)
+
+
 def _read_archive(slug: str):
-    """Raw NSE archive constituent CSV (Company Name, Industry, Symbol, ...) or None."""
-    try:
-        r = requests.get(f"{ARCHIVE_BASE}{slug}.csv", headers={"User-Agent": HEADERS["User-Agent"]}, timeout=12)
-        if r.status_code != 200:
-            return None
-        df = pd.read_csv(StringIO(r.text))
-        df.columns = [c.strip() for c in df.columns]
-        return df if "Symbol" in df else None
-    except Exception:
-        return None
+    """Constituent CSV (Company Name, Industry, Symbol, ...): repo copy in data/ → NSE mirrors → last good disk copy."""
+    local = LOCAL_DATA / f"{slug}.csv"
+    if local.exists():
+        try:
+            return _parse_archive(local.read_text())
+        except Exception:
+            pass
+    down = _NSE_STATE["archive_down"]
+    if time.time() >= down.get(slug, 0):
+        try:
+            return _archive_net(slug)
+        except Exception:
+            down[slug] = time.time() + NSE_COOLDOWN_S
+    disk = DISK_CACHE / f"{slug}.csv"
+    if disk.exists():
+        try:
+            return _parse_archive(disk.read_text())
+        except Exception:
+            pass
+    return None
 
 
 def archive_constituents(index_name):
@@ -420,9 +502,16 @@ def archive_constituents(index_name):
     return out.drop_duplicates("symbol").reset_index(drop=True)
 
 
-@st.cache_data(ttl=86400, show_spinner=False, max_entries=2)
 def universe_meta():
-    """Stock universe + NSE industry classification (Nifty Total Market, else Nifty 500 + Microcap 250)."""
+    """Stock universe + NSE industry classification, or None. A failure is NOT cached (it used to stick for 24 h)."""
+    try:
+        return _universe_cached()
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=86400, show_spinner=False, max_entries=2)
+def _universe_cached():
     df = None
     for slugs in (["ind_niftytotalmarket_list"], ["ind_nifty500list", "ind_niftymicrocap250_list"], ["ind_nifty500list"]):
         parts = [p for p in (_read_archive(s) for s in slugs) if p is not None]
@@ -430,7 +519,7 @@ def universe_meta():
             df = pd.concat(parts, ignore_index=True)
             break
     if df is None:
-        return None
+        raise RuntimeError("stock universe unavailable")
     out = pd.DataFrame({
         "symbol": df["Symbol"].astype(str).str.upper().str.strip(),
         "industry": df["Industry"].astype(str).str.strip() if "Industry" in df else "Unclassified",
@@ -477,6 +566,51 @@ def get_constituent_symbols(index_name):
     if cons is not None and not cons.empty:
         return cons, "local index_constituents.csv"
     return None, ""
+
+
+@st.cache_data(ttl=1800, show_spinner=False, max_entries=2)
+def _yahoo_snapshot_cached():
+    """Index snapshot + 2y daily history from Yahoo for the NSE indices in YF_SNAPSHOT. Raises on failure."""
+    tickers = sorted({t for _, cands in YF_SNAPSHOT.values() for t in cands})
+    raw = yf.download(tickers, period="2y", interval="1d", group_by="ticker", progress=False, auto_adjust=False, threads=True)
+    frames = fe._split_download(raw, tickers)
+    today = pd.Timestamp.now().normalize()
+    rows, hist = [], {}
+    for name, (cat, cands) in YF_SNAPSHOT.items():
+        f = next((frames[t] for t in cands if t in frames and len(frames[t]) >= 60), None)
+        if f is None:
+            continue
+        g = f[["Open", "High", "Low", "Close"]].copy()
+        idx = pd.to_datetime(g.index)
+        if getattr(idx, "tz", None) is not None:
+            idx = idx.tz_localize(None)
+        g.index = idx.normalize()
+        g = g[~g.index.duplicated(keep="last")].dropna(subset=["Close"])
+        c = g["Close"]
+        if len(c) < 30 or (today - c.index[-1]).days > 10:
+            continue                                    # stale Yahoo ticker: leave it out rather than show old numbers
+        at = lambda k: float(c.iloc[-1 - k]) if len(c) > k else np.nan
+        rows.append({"index": name, "key": cat, "last": float(c.iloc[-1]),
+                     "percentChange": (float(c.iloc[-1]) / at(1) - 1) * 100 if len(c) > 1 else np.nan,
+                     "oneWeekAgo": at(5), "oneMonthAgo": at(21), "oneYearAgo": at(252),
+                     "yearHigh": float(g["High"].tail(252).max()), "yearLow": float(g["Low"].tail(252).min())})
+        hist[name] = g
+    if len(rows) < 5 or "NIFTY 50" not in hist:
+        raise RuntimeError("Yahoo index snapshot incomplete")
+    return _derive_snapshot(pd.DataFrame(rows)), hist
+
+
+def yahoo_index_snapshot():
+    """Fallback snapshot when NSE blocks the server. Also fills the index-history store, so RSI / EMA / pivots work at once."""
+    try:
+        snap, hist = _yahoo_snapshot_cached()
+    except Exception:
+        return None
+    store, now = _hist_store(), time.time()
+    for n, g in hist.items():
+        if n not in store:
+            store[n] = (now, g)
+    return snap
 
 
 @st.cache_data(ttl=300, show_spinner=False, max_entries=4)
@@ -1284,8 +1418,19 @@ def _render_sector_ranking(on_open=None):
     st.markdown('<div class="arka-mf-section">SECTOR RANKING · WHERE MONEY IS ROTATING ACROSS THE STOCK UNIVERSE</div>', unsafe_allow_html=True)
     meta = universe_meta()
     if meta is None:
-        st.warning("Could not load the stock universe (NSE archive constituent files were unreachable). Sector Ranking needs the "
-                   "Nifty Total Market / Nifty 500 constituent CSVs with their Industry column.")
+        st.warning("The stock universe could not be downloaded: NSE and niftyindices.com are refusing this cloud server right now. "
+                   "The app retries automatically every 10 minutes and keeps a copy once one download succeeds.")
+        st.markdown('<div class="arka-mf-note"><b>Permanent fix (2 minutes):</b> download these two files on your computer from '
+                    '<a href="https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv" target="_blank">ind_nifty500list.csv</a> and '
+                    '<a href="https://www.niftyindices.com/IndexConstituent/ind_niftymicrocap250_list.csv" target="_blank">ind_niftymicrocap250_list.csv</a>, '
+                    'then upload them to a folder named <code>data</code> in your GitHub repo (Add file → Upload files, type <code>data/</code> before the name). '
+                    'Arka reads them first, so Sector Ranking and Index Explorer work even when NSE blocks the server. '
+                    'Refresh them every few months, when NSE rebalances its indices. Other index files (e.g. <code>ind_niftybanklist.csv</code>) can go in the same folder.</div>',
+                    unsafe_allow_html=True)
+        if st.button("RETRY NOW", key="mf_sr_retry"):
+            _NSE_STATE["archive_down"].clear()
+            _universe_cached.clear()
+            st.rerun()
         return
     c1, c2 = st.columns([1.7, 5])
     with c1:
@@ -1657,15 +1802,20 @@ def _sources_footer():
 def render_money_flow(on_open=None):
     """Arka Money Flow workspace."""
     _style()
-    with st.spinner("Loading NSE index snapshot…"):
+    with st.spinner("Loading index snapshot…"):
         indices = fetch_all_indices()
+    source = "NSE"
+    if indices is None or indices.empty:
+        indices = yahoo_index_snapshot()
+        source = "YAHOO"
 
-    # ---------- offline mode: NSE live API blocked / down ----------
+    # ---------- fully offline: neither NSE nor Yahoo returned an index snapshot ----------
     if indices is None or indices.empty:
         st.warning("NSE's live index feed is unreachable from this server (NSE often blocks cloud IPs). Index tables, A/D and FII/DII "
                    "need that feed and are hidden rather than faked. SECTOR RANKING, ROTATION LAB and INDEX EXPLORER still work: "
                    "constituent lists come from NSE archive CSVs and prices from Yahoo Finance.")
         if st.button("RETRY LIVE FEED", key="mf_retry_live"):
+            _NSE_STATE["down_until"] = 0.0
             fetch_all_indices.clear()
             fetch_constituents.clear()
             fetch_fii_dii.clear()
@@ -1681,6 +1831,17 @@ def render_money_flow(on_open=None):
         _sources_footer()
         return
 
+    if source == "YAHOO":
+        n1, n2 = st.columns([6, 1])
+        n1.markdown('<div class="arka-mf-note"><b>NSE live feed blocked on this server</b> (NSE refuses most cloud servers) — index data comes from '
+                    'Yahoo Finance instead: end-of-day / delayed closes, 1W / 1M returns, RSI, EMAs and pivots work; advance / decline counts, '
+                    'FII / DII and live constituents need NSE and are hidden. Sector-wise foreign money is in ROTATION LAB → FPI SECTOR FLOWS.</div>',
+                    unsafe_allow_html=True)
+        if n2.button("RETRY NSE", key="mf_retry_nse", use_container_width=True):
+            _NSE_STATE["down_until"] = 0.0
+            fetch_all_indices.clear()
+            _session.clear()
+            st.rerun()
     indices = _apply_history_returns(indices)
     equity = _equity_index_rows(indices)
     changes = equity.r1d.dropna()
@@ -1691,11 +1852,11 @@ def render_money_flow(on_open=None):
         ("Indices up", up, "today", ui.GREEN),
         ("Indices down", down, "today", ui.RED),
         ("Index A/D", f"{up / down:.2f}" if down else (str(up) if up else "—"), "up ÷ down", ui.AMBER),
-        ("Snapshot", stamp.split(" · ")[1], stamp.split(" · ")[0], ui.CYAN)]), unsafe_allow_html=True)
+        ("Source", source, stamp, ui.CYAN if source == "NSE" else ui.AMBER)]), unsafe_allow_html=True)
 
-    view = _view_selector(VIEWS)
+    view = _view_selector(VIEWS if source == "NSE" else YAHOO_VIEWS)
 
-    if view in ("NIFTY INDICES", "SECTOR ROTATION", "OVERVIEW"):
+    if source == "NSE" and view in ("NIFTY INDICES", "SECTOR ROTATION", "OVERVIEW"):
         hcol, hdesc = st.columns([1.6, 5.0])
         with hcol:
             load_history = st.button("LOAD INDEX HISTORY", key="mf_load_history", use_container_width=True, type="primary")
