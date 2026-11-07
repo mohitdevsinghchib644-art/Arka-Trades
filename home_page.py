@@ -1,5 +1,5 @@
 """
-home_page.py — Arka Trades · Market Monitor (the HOME page), v1
+home_page.py — Arka Trades · Market Monitor (the HOME page), v1.1
 
 A Bloomberg Launchpad-style monitor for Indian markets. Every block is plain HTML / SVG (no Plotly, no
 per-row widgets), so the whole page is built in milliseconds once data is cached.
@@ -18,6 +18,16 @@ per-row widgets), so the whole page is built in milliseconds once data is cached
   ROT    sector rotation snapshot from Money Flow (when it has been loaded this session)
   WCLK   world market clock (open / closed by local exchange hours)
   FUNC   function launcher (the same codes work in the command line: MF, RES, PORT, WL, NEWS, EQS, AI)
+
+What changed in v1.1 (readability)
+  * Larger type everywhere: table text 11 -> 12.5 px, labels 8-9 -> 10-11 px, NIFTY price 30 -> 40 px.
+  * More room: 14 px gaps between panels, roomier panel padding and table rows, taller tape and chart.
+  * Layout follows the width actually available to the page (CSS container queries), not the browser
+    width. The four top panels sit 2 x 2 unless the page is very wide, and the two big quote tables stack
+    instead of squeezing their columns (the cross-asset DATE column was being cut off).
+  * Panel titles no longer truncate ("MARKET …", "NSE SES…"): the right-hand note shrinks instead.
+  * Bigger heatmap tiles, sparklines and function cards.
+  * Fix: a heatmap tile with no price could raise a format error.
 
 Data: Yahoo Finance (delayed). Two batched downloads for ~60 instruments: last 5 days every 90 s while NSE
 is open (15 min when closed) and 1 year of history every 6 h. Stale-while-error via data_engine._guarded.
@@ -219,112 +229,140 @@ FUNCS = [("MF", "MONEY FLOW", "flow", "Sector rotation radar, Rotation Lab backt
 
 
 # ═════════════════════════ CSS ═════════════════════════
+# Layout rules use container queries (@container) so the grid reacts to the width the HOME column really has
+# (news rail open or closed), not to the browser window. Browsers without support fall back to one column.
 _CSS = """<style>
-.hm-head{display:flex;justify-content:space-between;align-items:center;gap:14px;padding:10px 2px 9px;border-bottom:1px solid var(--line);margin-top:4px;}
-.hm-head .t{font:800 14px var(--mono);letter-spacing:2.4px;color:var(--tx);white-space:nowrap;}
-.hm-head .t em{font-style:normal;color:#000;background:var(--amber);padding:2px 7px;margin-right:10px;border-radius:2px;font-size:10px;letter-spacing:1.4px;}
-.hm-head .t small{font:600 10px var(--sans);letter-spacing:0;color:var(--tx3);margin-left:12px;}
-.hm-head .m{display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end;}
-.hm-tag{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border:1px solid var(--line2);border-radius:2px;font:700 9px var(--mono);letter-spacing:.8px;color:var(--tx2);white-space:nowrap;}
-.hm-tag i{width:6px;height:6px;border-radius:50%;background:currentColor;display:inline-block;}
+.hm-cq{container-type:inline-size;width:100%;}
+.hm-head{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;padding:14px 2px 12px;border-bottom:1px solid var(--line);margin-top:6px;}
+.hm-head .t{font:800 17px var(--mono);letter-spacing:2.4px;color:var(--tx);white-space:nowrap;}
+.hm-head .t em{font-style:normal;color:#000;background:var(--amber);padding:3px 9px;margin-right:12px;border-radius:2px;font-size:12px;letter-spacing:1.4px;}
+.hm-head .t small{font:500 13px var(--sans);letter-spacing:0;color:var(--tx3);margin-left:14px;}
+.hm-head .m{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end;}
+.hm-tag{display:inline-flex;align-items:center;gap:7px;padding:5px 11px;border:1px solid var(--line2);border-radius:3px;font:700 10.5px var(--mono);letter-spacing:.8px;color:var(--tx2);white-space:nowrap;}
+.hm-tag i{width:7px;height:7px;border-radius:50%;background:currentColor;display:inline-block;}
 .hm-tag.live{color:var(--green);border-color:rgba(48,209,88,.4);background:rgba(48,209,88,.07);} .hm-tag.live i{box-shadow:0 0 8px var(--green);animation:hmpulse 2s infinite;}
 .hm-tag.pre{color:var(--amber);border-color:rgba(255,159,10,.4);background:rgba(255,159,10,.07);}
 @keyframes hmpulse{0%,100%{opacity:1}50%{opacity:.3}}
-.hm-tape{position:relative;overflow:hidden;height:30px;border:1px solid var(--line);border-left:3px solid var(--amber);background:#000;margin-top:8px;}
-.hm-tape .tr{display:inline-flex;white-space:nowrap;padding:8px 0;animation:hmtape 140s linear infinite;will-change:transform;}
+.hm-tape{position:relative;overflow:hidden;height:40px;border:1px solid var(--line);border-left:3px solid var(--amber);background:#000;margin-top:12px;}
+.hm-tape .tr{display:inline-flex;white-space:nowrap;padding:11px 0;animation:hmtape 150s linear infinite;will-change:transform;}
 .hm-tape:hover .tr{animation-play-state:paused;}
-.hm-tape span{font:600 11px var(--mono);font-variant-numeric:tabular-nums;color:var(--tx);margin-right:30px;}
-.hm-tape span b{font-weight:700;color:var(--amber);margin-right:7px;letter-spacing:.4px;}
-.hm-tape span em{font-style:normal;margin-left:7px;}
+.hm-tape span{font:600 13px var(--mono);font-variant-numeric:tabular-nums;color:var(--tx);margin-right:38px;}
+.hm-tape span b{font-weight:700;color:var(--amber);margin-right:8px;letter-spacing:.4px;}
+.hm-tape span em{font-style:normal;margin-left:8px;}
 @keyframes hmtape{from{transform:translateX(0)}to{transform:translateX(-50%)}}
-.hm-row{display:grid;gap:8px;margin-top:8px;align-items:stretch;}
-.hm-r1{grid-template-columns:1.55fr 1fr 1fr 1fr;}
-.hm-r2{grid-template-columns:1.18fr 1fr;}
-.hm-r3{grid-template-columns:1.32fr 1fr;}
-.hm-r4{grid-template-columns:1fr 1.25fr 1fr;}
-@media(max-width:1500px){.hm-r1{grid-template-columns:1fr 1fr;}.hm-r4{grid-template-columns:1fr 1fr;}.hm-r4>.hm-p:last-child{grid-column:1/-1;}}
-@media(max-width:1150px){.hm-r2,.hm-r3,.hm-r4{grid-template-columns:1fr;}.hm-r4>.hm-p:last-child{grid-column:auto;}}
-@media(max-width:720px){.hm-r1{grid-template-columns:1fr;}.hm-head{flex-direction:column;align-items:flex-start;}}
-.hm-p{background:var(--s1);border:1px solid var(--line);min-width:0;display:flex;flex-direction:column;}
-.hm-pt{height:30px;flex-shrink:0;padding:0 10px;display:flex;align-items:center;justify-content:space-between;gap:8px;border-bottom:1px solid var(--line);background:var(--s2);}
-.hm-pt b{font:700 9px var(--mono);letter-spacing:1.3px;color:var(--tx);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.hm-pt b i{font-style:normal;color:#000;background:var(--amber);padding:1px 5px;margin-right:8px;border-radius:2px;font-size:8px;letter-spacing:.8px;}
-.hm-pt span{font:600 8.5px var(--mono);letter-spacing:.6px;color:var(--tx3);white-space:nowrap;}
-.hm-pb{padding:10px 12px;flex:1;min-width:0;}
+@media (prefers-reduced-motion:reduce){.hm-tape .tr{animation:none;}}
+
+/* grid: one column by default, more columns only when the HOME column is wide enough */
+.hm-row{display:grid;gap:14px;margin-top:14px;align-items:stretch;grid-template-columns:minmax(0,1fr);}
+@container (min-width:980px){
+  .hm-r1{grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);}
+  .hm-r4{grid-template-columns:minmax(0,1fr) minmax(0,1fr);}
+  .hm-r4>.hm-p:last-child{grid-column:1/-1;}
+}
+@container (min-width:1450px){
+  .hm-r3{grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);}
+  .hm-r4{grid-template-columns:minmax(0,1fr) minmax(0,1.25fr) minmax(0,1fr);}
+  .hm-r4>.hm-p:last-child{grid-column:auto;}
+}
+@container (min-width:1750px){ .hm-r2{grid-template-columns:minmax(0,1.12fr) minmax(0,1fr);} }
+@container (min-width:2050px){ .hm-r1{grid-template-columns:minmax(0,1.5fr) repeat(3,minmax(0,1fr));} }
+@media(max-width:720px){.hm-head{flex-direction:column;align-items:flex-start;}.hm-head .m{justify-content:flex-start;}}
+
+/* panels */
+.hm-p{background:var(--s1);border:1px solid var(--line);border-radius:3px;min-width:0;display:flex;flex-direction:column;overflow:hidden;}
+.hm-pt{height:42px;flex-shrink:0;padding:0 16px;display:flex;align-items:center;justify-content:space-between;gap:14px;border-bottom:1px solid var(--line);background:var(--s2);}
+.hm-pt b{font:700 11.5px var(--mono);letter-spacing:1.3px;color:var(--tx);white-space:nowrap;flex-shrink:0;}
+.hm-pt b i{font-style:normal;color:#000;background:var(--amber);padding:2px 7px;margin-right:10px;border-radius:2px;font-size:10px;letter-spacing:.8px;}
+.hm-pt span{font:600 10.5px var(--mono);letter-spacing:.6px;color:var(--tx3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;text-align:right;}
+.hm-pb{padding:16px 18px 14px;flex:1;min-width:0;}
 .hm-pb.np{padding:0;}
-.hm-sub{font:700 8px var(--mono);letter-spacing:1.3px;color:var(--tx3);padding:9px 0 5px;text-transform:uppercase;}
+.hm-sub{font:700 10.5px var(--mono);letter-spacing:1.3px;color:var(--tx3);padding:18px 0 8px;text-transform:uppercase;}
 .hm-up{color:var(--green) !important;} .hm-dn{color:var(--red) !important;} .hm-fl{color:var(--tx3) !important;}
-.hm-t{width:100%;border-collapse:collapse;font:11px var(--mono);font-variant-numeric:tabular-nums;}
-.hm-t th{font:700 8px var(--mono);letter-spacing:.8px;color:var(--tx3);text-align:right;padding:6px 8px;border-bottom:1px solid var(--line2);text-transform:uppercase;white-space:nowrap;background:#0c0c0c;position:sticky;top:0;}
+
+/* tables */
+.hm-t{width:100%;border-collapse:collapse;font:12.5px var(--mono);font-variant-numeric:tabular-nums;}
+.hm-t th{font:700 10px var(--mono);letter-spacing:.8px;color:var(--tx3);text-align:right;padding:11px 14px;border-bottom:1px solid var(--line2);text-transform:uppercase;white-space:nowrap;background:#0c0c0c;position:sticky;top:0;}
 .hm-t th:first-child,.hm-t td:first-child{text-align:left;}
-.hm-t td{padding:4px 8px;line-height:1.35;border-bottom:1px solid #121212;text-align:right;color:var(--tx2);white-space:nowrap;}
+.hm-t td{padding:8px 14px;line-height:1.4;border-bottom:1px solid #141414;text-align:right;color:var(--tx2);white-space:nowrap;}
 .hm-t td.n{color:var(--tx);font-weight:600;font-family:var(--mono);}
 .hm-t td.l{color:var(--tx);font-weight:700;}
 .hm-t td.st{opacity:.45;}
-.hm-t tr.g td{font:700 8px var(--mono);letter-spacing:1.3px;color:var(--amber);background:#0b0b0b;padding:6px 8px 4px;text-align:left;border-bottom:1px solid var(--line);}
-.hm-t tbody tr:not(.g):hover td{background:rgba(255,159,10,.045);}
+.hm-t tr.g td{font:700 10px var(--mono);letter-spacing:1.3px;color:var(--amber);background:#0b0b0b;padding:13px 14px 7px;text-align:left;border-bottom:1px solid var(--line);}
+.hm-t tbody tr:not(.g):hover td{background:rgba(255,159,10,.05);}
 .hm-t svg{vertical-align:middle;}
-.hm-hv{font:700 30px var(--mono);font-variant-numeric:tabular-nums;color:var(--tx);letter-spacing:-.5px;line-height:1.05;}
-.hm-hc{font:700 13px var(--mono);font-variant-numeric:tabular-nums;margin-top:4px;}
-.hm-hrow{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;}
-.hm-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:4px 12px;margin-top:8px;}
-.hm-stats div{display:flex;justify-content:space-between;font:10px var(--mono);color:var(--tx3);border-bottom:1px dotted #1f1f1f;padding:3px 0;}
+.hm-t+.hm-t{margin-top:12px;}
+
+/* NIFTY hero */
+.hm-hv{font:700 40px var(--mono);font-variant-numeric:tabular-nums;color:var(--tx);letter-spacing:-.5px;line-height:1.05;}
+.hm-hc{font:700 15px var(--mono);font-variant-numeric:tabular-nums;margin-top:7px;}
+.hm-hrow{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;}
+.hm-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px 20px;margin-top:14px;}
+.hm-stats div{display:flex;justify-content:space-between;gap:8px;font:12px var(--mono);color:var(--tx3);border-bottom:1px dotted #242424;padding:7px 0;}
 .hm-stats b{color:var(--tx);font-weight:600;font-variant-numeric:tabular-nums;}
-.hm-rng{margin-top:9px;}
-.hm-rng .t{display:flex;justify-content:space-between;font:600 8.5px var(--mono);letter-spacing:.5px;color:var(--tx3);margin-bottom:4px;}
-.hm-rng .b{position:relative;height:4px;background:linear-gradient(90deg,rgba(255,69,58,.45),#2a2a2a 50%,rgba(48,209,88,.45));border-radius:2px;}
-.hm-rng .b i{position:absolute;top:-4px;width:3px;height:12px;background:var(--amber);border-radius:1px;transform:translateX(-1px);box-shadow:0 0 6px rgba(255,159,10,.7);}
-.hm-big{font:800 22px var(--mono);letter-spacing:.5px;line-height:1.1;}
-.hm-cap{font:10px var(--sans);color:var(--tx3);margin-top:3px;line-height:1.5;}
-.hm-chk{display:flex;justify-content:space-between;gap:8px;font:10.5px var(--sans);color:var(--tx2);padding:4px 0;border-bottom:1px solid #141414;}
+.hm-rng{margin-top:16px;}
+.hm-rng .t{display:flex;justify-content:space-between;gap:10px;font:600 10.5px var(--mono);letter-spacing:.5px;color:var(--tx3);margin-bottom:7px;}
+.hm-rng .b{position:relative;height:6px;background:linear-gradient(90deg,rgba(255,69,58,.45),#2a2a2a 50%,rgba(48,209,88,.45));border-radius:3px;}
+.hm-rng .b i{position:absolute;top:-4px;width:4px;height:14px;background:var(--amber);border-radius:1px;transform:translateX(-2px);box-shadow:0 0 6px rgba(255,159,10,.7);}
+
+/* regime, session, mood */
+.hm-big{font:800 28px var(--mono);letter-spacing:.5px;line-height:1.1;}
+.hm-cap{font:13px var(--sans);color:var(--tx3);margin-top:6px;line-height:1.55;}
+.hm-chk{display:flex;justify-content:space-between;align-items:center;gap:14px;font:13px var(--sans);color:var(--tx2);padding:9px 0;border-bottom:1px solid #161616;line-height:1.45;}
 .hm-chk:last-child{border-bottom:0;}
-.hm-chk b{font:700 10px var(--mono);white-space:nowrap;}
-.hm-meter{display:flex;gap:3px;margin:8px 0 6px;} .hm-meter i{flex:1;height:5px;background:#1d1d1d;border-radius:1px;}
-.hm-prog{position:relative;height:6px;background:#161616;margin:12px 0 4px;border-radius:1px;}
-.hm-prog i{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,rgba(48,209,88,.5),var(--green));}
-.hm-prog s{position:absolute;top:-3px;width:1px;height:12px;background:#3a3a3a;}
-.hm-ticks{display:flex;justify-content:space-between;font:600 8px var(--mono);color:var(--tx3);}
-.hm-kv{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid #141414;font:10.5px var(--sans);color:var(--tx3);}
+.hm-chk b{font:700 12px var(--mono);white-space:nowrap;}
+.hm-meter{display:flex;gap:4px;margin:14px 0 8px;} .hm-meter i{flex:1;height:7px;background:#1d1d1d;border-radius:1px;}
+.hm-prog{position:relative;height:8px;background:#161616;margin:16px 0 6px;border-radius:2px;}
+.hm-prog i{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,rgba(48,209,88,.5),var(--green));border-radius:2px;}
+.hm-prog s{position:absolute;top:-3px;width:1px;height:14px;background:#3a3a3a;}
+.hm-ticks{display:flex;justify-content:space-between;font:600 10px var(--mono);color:var(--tx3);}
+.hm-kv{display:flex;justify-content:space-between;align-items:center;gap:14px;padding:8px 0;border-bottom:1px solid #161616;font:13px var(--sans);color:var(--tx3);line-height:1.45;}
 .hm-kv:last-child{border-bottom:0;}
-.hm-kv b{font:600 10.5px var(--mono);color:var(--tx);font-variant-numeric:tabular-nums;white-space:nowrap;}
-.hm-gauge{position:relative;height:8px;border-radius:2px;margin:10px 0 3px;background:linear-gradient(90deg,#FF453A 0%,#FF9F0A 30%,#FF9F0A 50%,#84CC16 50%,#30D158 70%,#30D158 100%);opacity:.85;}
-.hm-gauge i{position:absolute;top:-4px;width:4px;height:16px;background:#fff;border-radius:1px;transform:translateX(-2px);box-shadow:0 0 6px #000;}
-.hm-gl{display:flex;justify-content:space-between;font:600 7.5px var(--mono);color:var(--tx3);letter-spacing:.5px;}
-.hm-imap{display:flex;flex-wrap:wrap;gap:8px 10px;padding:10px 12px 8px;}
-.hm-leg{display:flex;align-items:center;gap:8px;padding:2px 12px 12px;font:600 8px var(--mono);color:var(--tx3);letter-spacing:.5px;}
-.hm-leg i{width:160px;height:6px;border-radius:1px;background:linear-gradient(90deg,rgba(255,69,58,.78),rgba(255,69,58,.16) 48%,#262626 50%,rgba(48,209,88,.16) 52%,rgba(48,209,88,.78));}
-.hm-grp{display:flex;flex-direction:column;gap:3px;}
-.hm-grp>small{font:700 7.5px var(--mono);letter-spacing:1px;color:var(--tx3);white-space:nowrap;}
-.hm-tiles{display:flex;flex-wrap:wrap;gap:2px;max-width:456px;}
-.hm-tile{width:74px;height:54px;display:flex;flex-direction:column;justify-content:center;align-items:center;border-radius:2px;color:#fff;overflow:hidden;}
-.hm-tile b{font:700 10px var(--mono);letter-spacing:.2px;max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.hm-tile span{font:600 9.5px var(--mono);opacity:.92;margin-top:2px;font-variant-numeric:tabular-nums;}
-.hm-ad{display:flex;height:6px;margin:0 12px;background:#151515;}
+.hm-kv b{font:600 13px var(--mono);color:var(--tx);font-variant-numeric:tabular-nums;white-space:nowrap;}
+.hm-gauge{position:relative;height:10px;border-radius:3px;margin:14px 0 6px;background:linear-gradient(90deg,#FF453A 0%,#FF9F0A 30%,#FF9F0A 50%,#84CC16 50%,#30D158 70%,#30D158 100%);opacity:.85;}
+.hm-gauge i{position:absolute;top:-4px;width:5px;height:18px;background:#fff;border-radius:1px;transform:translateX(-2px);box-shadow:0 0 6px #000;}
+.hm-gl{display:flex;justify-content:space-between;font:600 9.5px var(--mono);color:var(--tx3);letter-spacing:.5px;}
+
+/* NIFTY 50 heatmap */
+.hm-imap{display:flex;flex-wrap:wrap;gap:16px 18px;padding:16px 18px 12px;}
+.hm-leg{display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:4px 18px 16px;font:600 10px var(--mono);color:var(--tx3);letter-spacing:.5px;}
+.hm-leg i{width:180px;height:7px;border-radius:2px;background:linear-gradient(90deg,rgba(255,69,58,.78),rgba(255,69,58,.16) 48%,#262626 50%,rgba(48,209,88,.16) 52%,rgba(48,209,88,.78));}
+.hm-grp{display:flex;flex-direction:column;gap:5px;}
+.hm-grp>small{font:700 9.5px var(--mono);letter-spacing:1px;color:var(--tx3);white-space:nowrap;}
+.hm-tiles{display:flex;flex-wrap:wrap;gap:3px;max-width:546px;}
+.hm-tile{width:88px;height:62px;display:flex;flex-direction:column;justify-content:center;align-items:center;border-radius:3px;color:#fff;overflow:hidden;}
+.hm-tile b{font:700 11.5px var(--mono);letter-spacing:.2px;max-width:82px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.hm-tile span{font:600 11px var(--mono);opacity:.92;margin-top:3px;font-variant-numeric:tabular-nums;}
+.hm-ad{display:flex;height:8px;margin:0 18px;background:#151515;border-radius:2px;overflow:hidden;}
 .hm-ad i{display:block;height:100%;}
-.hm-adl{display:flex;justify-content:space-between;font:700 9px var(--mono);padding:10px 12px 5px;color:var(--tx3);letter-spacing:.6px;}
-.hm-hm td.c{font-weight:700;color:#fff !important;text-align:center !important;min-width:58px;}
+.hm-adl{display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px 14px;font:700 11px var(--mono);padding:14px 18px 8px;color:var(--tx3);letter-spacing:.6px;}
+.hm-hm td.c{font-weight:700;color:#fff !important;text-align:center !important;min-width:72px;}
+
+/* your book */
 .hm-kp{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line);border-bottom:1px solid var(--line);}
-.hm-kp div{background:var(--s1);padding:8px 11px;}
-.hm-kp small{display:block;font:700 7.5px var(--mono);letter-spacing:1px;color:var(--tx3);}
-.hm-kp b{display:block;font:700 15px var(--mono);font-variant-numeric:tabular-nums;color:var(--tx);margin-top:3px;white-space:nowrap;}
-.hm-kp em{font:600 9px var(--mono);font-style:normal;}
-.hm-empty{font:11px var(--sans);color:var(--tx3);line-height:1.7;padding:12px;}
+.hm-kp div{background:var(--s1);padding:13px 16px;}
+.hm-kp small{display:block;font:700 9.5px var(--mono);letter-spacing:1px;color:var(--tx3);}
+.hm-kp b{display:block;font:700 19px var(--mono);font-variant-numeric:tabular-nums;color:var(--tx);margin-top:5px;white-space:nowrap;}
+.hm-kp em{font:600 11px var(--mono);font-style:normal;}
+.hm-empty{font:13px var(--sans);color:var(--tx3);line-height:1.7;padding:18px;}
+.hm-pb .hm-empty{padding:4px 0;}
 .hm-empty b{color:var(--tx2);}
-.hm-pill{display:inline-block;padding:1px 7px;border-radius:999px;font:800 7.5px var(--mono);letter-spacing:.7px;border:1px solid currentColor;white-space:nowrap;}
-.hm-clk{display:grid;grid-template-columns:1fr auto auto;gap:4px 10px;align-items:center;font:10.5px var(--mono);padding:4px 0;border-bottom:1px solid #141414;}
+.hm-pill{display:inline-block;padding:2px 9px;border-radius:999px;font:800 9.5px var(--mono);letter-spacing:.7px;border:1px solid currentColor;white-space:nowrap;}
+.hm-clk{display:grid;grid-template-columns:1fr auto auto;gap:6px 14px;align-items:center;font:12.5px var(--mono);padding:8px 0;border-bottom:1px solid #161616;}
 .hm-clk:last-child{border-bottom:0;}
 .hm-clk span{color:var(--tx2);} .hm-clk b{color:var(--tx);font-weight:600;font-variant-numeric:tabular-nums;}
-.hm-foot{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;font:600 8.5px var(--mono);letter-spacing:.5px;color:var(--tx3);padding:8px 2px 0;}
-.hm-fhead{display:flex;align-items:center;gap:10px;margin:16px 0 8px;}
-.hm-fhead b{font:700 10px var(--mono);letter-spacing:1.6px;color:var(--tx);} .hm-fhead i{flex:1;height:1px;background:var(--line);}
-.hm-fhead span{font:9px var(--mono);color:var(--tx3);letter-spacing:.5px;}
-div[class*="st-key-hm_fn_"]{background:var(--s1);border:1px solid var(--line);border-top:2px solid var(--line2);padding:10px 11px 2px;gap:.15rem;transition:border-color .12s ease,background .12s ease;min-height:132px;}
+
+/* footer + function launcher */
+.hm-foot{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;font:600 10.5px var(--mono);letter-spacing:.5px;color:var(--tx3);padding:16px 2px 0;line-height:1.6;}
+.hm-fhead{display:flex;align-items:center;gap:12px;margin:28px 0 12px;}
+.hm-fhead b{font:700 12px var(--mono);letter-spacing:1.6px;color:var(--tx);} .hm-fhead i{flex:1;height:1px;background:var(--line);}
+.hm-fhead span{font:11px var(--mono);color:var(--tx3);letter-spacing:.5px;}
+div[class*="st-key-hm_fn_"]{background:var(--s1);border:1px solid var(--line);border-top:2px solid var(--line2);border-radius:3px;padding:14px 16px 4px;gap:.2rem;transition:border-color .12s ease,background .12s ease;min-height:168px;}
 div[class*="st-key-hm_fn_"]:hover{border-top-color:var(--amber);background:var(--s2);}
 div[class*="st-key-hm_fn_"] .stButton>button{background:transparent !important;border:0 !important;border-top:1px solid var(--line) !important;border-radius:0 !important;
-  color:var(--amber) !important;justify-content:flex-start !important;padding:7px 0 4px !important;font:700 9px var(--mono) !important;letter-spacing:1px;min-height:30px !important;}
-.hm-fn .c{display:inline-block;font:800 9px var(--mono);letter-spacing:.8px;color:#000;background:var(--amber);padding:1px 6px;border-radius:2px;}
-.hm-fn .t{font:700 11px var(--mono);letter-spacing:1px;color:var(--tx);margin-top:7px;}
-.hm-fn .d{font:10.5px var(--sans);color:var(--tx3);line-height:1.5;margin-top:4px;min-height:32px;}
+  color:var(--amber) !important;justify-content:flex-start !important;padding:9px 0 6px !important;font:700 10.5px var(--mono) !important;letter-spacing:1px;min-height:38px !important;}
+.hm-fn .c{display:inline-block;font:800 10.5px var(--mono);letter-spacing:.8px;color:#000;background:var(--amber);padding:2px 7px;border-radius:2px;}
+.hm-fn .t{font:700 13px var(--mono);letter-spacing:1px;color:var(--tx);margin-top:9px;}
+.hm-fn .d{font:12.5px var(--sans);color:var(--tx3);line-height:1.55;margin-top:6px;min-height:40px;}
 </style>"""
 
 
@@ -405,7 +443,7 @@ def _heat(v, lim=3.0):
     return f"rgba(255,69,58,{0.16 + 0.62 * k:.2f})"
 
 
-def _spark(values, w=74, h=18, color=None):
+def _spark(values, w=92, h=24, color=None):
     vals = [float(v) for v in (values or []) if _ok(v)]
     if len(vals) < 3:
         return ""
@@ -414,10 +452,10 @@ def _spark(values, w=74, h=18, color=None):
     rng = (hi - lo) or 1.0
     pts = " ".join(f"{i / (len(vals) - 1) * w:.1f},{h - 2 - (v - lo) / rng * (h - 4):.1f}" for i, v in enumerate(vals))
     return (f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}"><polyline points="{pts}" fill="none" stroke="{color}" '
-            f'stroke-width="1.3" stroke-linejoin="round" stroke-linecap="round"/></svg>')
+            f'stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/></svg>')
 
 
-def _area(values, uid, h=92):
+def _area(values, uid, h=150):
     vals = [float(v) for v in (values or []) if _ok(v)]
     if len(vals) < 3:
         return ""
@@ -429,17 +467,22 @@ def _area(values, uid, h=92):
     xy = [(i / (len(vals) - 1) * w, h - (v - lo) / (hi - lo) * h) for i, v in enumerate(vals)]
     line = "M" + " L".join(f"{x:.1f},{y:.1f}" for x, y in xy)
     base = h - (vals[0] - lo) / (hi - lo) * h
-    return (f'<svg width="100%" height="{h}" viewBox="0 0 {w} {h}" preserveAspectRatio="none" style="display:block;margin-top:8px">'
+    return (f'<svg width="100%" height="{h}" viewBox="0 0 {w} {h}" preserveAspectRatio="none" style="display:block;margin-top:14px">'
             f'<defs><linearGradient id="hmg{uid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="{color}" stop-opacity=".28"/>'
             f'<stop offset="100%" stop-color="{color}" stop-opacity="0"/></linearGradient></defs>'
             f'<line x1="0" y1="{base:.1f}" x2="{w}" y2="{base:.1f}" stroke="#3a3a3a" stroke-dasharray="3 4" stroke-width="1" vector-effect="non-scaling-stroke"/>'
             f'<path d="{line} L{w},{h} L0,{h} Z" fill="url(#hmg{uid})"/>'
-            f'<path d="{line}" fill="none" stroke="{color}" stroke-width="1.6" vector-effect="non-scaling-stroke"/></svg>')
+            f'<path d="{line}" fill="none" stroke="{color}" stroke-width="1.8" vector-effect="non-scaling-stroke"/></svg>')
 
 
 def _panel(code, title, right, body, cls="hm-pb"):
-    return (f'<div class="hm-p"><div class="hm-pt"><b><i>{_e(code)}</i>{title}</b><span>{right}</span></div>'
+    return (f'<div class="hm-p"><div class="hm-pt"><b><i>{_e(code)}</i>{title}</b><span title="{_e(re.sub(r"<[^>]+>", "", right))}">{right}</span></div>'
             f'<div class="{cls}">{body}</div></div>')
+
+
+def _row(cls, inner):
+    """One grid row inside a size container, so its columns follow the HOME column width."""
+    return f'<div class="hm-cq"><div class="hm-row {cls}">{inner}</div></div>'
 
 
 # ═════════════════════════ market data ═════════════════════════
@@ -750,7 +793,7 @@ def _hero(M):
     chart = _area(s.tail(66).tolist() if s is not None else [], "nifty")
     body = (f'<div class="hm-hrow"><div><div class="hm-hv">{m["price"]:,.2f}</div>'
             f'<div class="hm-hc {_cls(m["chg"])}">{_arrow(m["chg"])} {m["pts"]:+,.2f} ({_pct(m["chg"])})</div></div>'
-            f'<div style="text-align:right;font:600 9px var(--mono);color:var(--tx3);line-height:1.7">3-MONTH TREND<br>'
+            f'<div style="text-align:right;font:600 11px var(--mono);color:var(--tx3);line-height:1.8">3-MONTH TREND<br>'
             f'<span class="{_cls(m["m1"])}">1M {_pct(m["m1"], 1)}</span></div></div>'
             f'{chart}<div class="hm-stats">{stats}</div>{rng_html}')
     return _panel("NIFTY", "NIFTY 50 · NSE", f'{m["date"]:%d %b %Y} · DELAYED', body)
@@ -797,6 +840,7 @@ def _session_block(S):
     special = SPECIAL_SESSIONS.get(now.date())
     hol = "".join(f'<div class="hm-kv"><span>{d:%a %d %b}</span><b style="color:{AMBER if k == "SPECIAL" else T2};font-family:var(--sans);font-weight:600">'
                   f'{_e(nm.split(" · ")[0])}</b></div>' for d, nm, k in upcoming_holidays(3, now.date()))
+
     def dd(d):
         k = (d - now.date()).days
         return f'{d:%a %d %b}' + (" · today" if k == 0 else " · tomorrow" if k == 1 else f" · in {k}d")
@@ -805,7 +849,7 @@ def _session_block(S):
            f'<div class="hm-kv"><span>SENSEX weekly · Thu</span><b>{dd(next_expiry(now, 3))}</b></div>'
            f'<div class="hm-kv"><span>Trading days left in {now.year}</span><b>{trading_days_left(now.date())}</b></div>')
     body = (f'<div class="hm-big" style="color:{col}">{_e(S["short"])}</div><div class="hm-cap">{_e(S["detail"])}</div>{prog}'
-            + (f'<div class="hm-cap" style="color:{AMBER};margin-top:6px">{_e(special)}</div>' if special else "")
+            + (f'<div class="hm-cap" style="color:{AMBER};margin-top:8px">{_e(special)}</div>' if special else "")
             + f'<div class="hm-sub">Derivatives &amp; calendar</div>{exp}'
             + f'<div class="hm-sub">Upcoming exchange calendar</div>{hol or "<div class=hm-cap>No more holidays listed this year.</div>"}')
     return _panel("SESS", "NSE SESSION", now.strftime("%a %d %b · %H:%M IST"), body)
@@ -896,7 +940,9 @@ def _imap(groups, nq, B):
         for s in syms:
             q = nq.get(s) or {}
             c = q.get("chg")
-            tiles.append(f'<div class="hm-tile" style="background:{_heat(c)}" title="{_e(s)} · ₹{q.get("price", 0):,.2f}">'
+            px = q.get("price")
+            tip = f"{s} · ₹{px:,.2f}" if _ok(px) else f"{s} · no price"
+            tiles.append(f'<div class="hm-tile" style="background:{_heat(c)}" title="{_e(tip)}">'
                          f'<b>{_e(s)}</b><span>{_pct(c, 1)}</span></div>')
         blocks.append(f'<div class="hm-grp"><small>{_e(g)}</small><div class="hm-tiles">{"".join(tiles)}</div></div>')
     tot = max(B["n"], 1)
@@ -921,7 +967,7 @@ def _sector_matrix(M):
         f'<tr><td class="l">{_e(l)}</td><td class="n">{m["price"]:,.0f}</td>'
         + "".join(f'<td class="c" style="background:{_heat(v, lim)}">{_pct(v, 1)}</td>' for v, lim in
                   ((m["chg"], 2.5), (m["w1"], 5), (m["m1"], 9), (m["ytd"], 25)))
-        + f'<td>{_spark(m["spark"], 64)}</td></tr>' for l, m in rows)
+        + f'<td>{_spark(m["spark"], 84)}</td></tr>' for l, m in rows)
     return ('<div style="overflow-x:auto"><table class="hm-t hm-hm"><thead><tr><th>Sector index</th><th>Last</th><th>1D</th><th>1W</th>'
             f'<th>1M</th><th>YTD</th><th>1M trend</th></tr></thead><tbody>{body}</tbody></table></div>')
 
@@ -970,7 +1016,7 @@ def _book(holds, realised, wl, wl_label, quotes):
             rows.append(f'<tr><td class="l">{_e(s)}</td><td class="n">{"₹" + format(q["price"], ",.2f") if _ok(q.get("price")) else "—"}</td>'
                         f'<td class="{_cls(q.get("chg"))}">{_arrow(q.get("chg"))} {_pct(abs(q["chg"]) if _ok(q.get("chg")) else None, 2, False)}</td></tr>')
         more = f'<tr><td colspan="3" style="color:var(--tx3);text-align:left">+ {len(wl) - 8} more · open WL</td></tr>' if len(wl) > 8 else ""
-        out.append(f'<table class="hm-t" style="margin-top:6px"><thead><tr><th>{_e(wl_label)}</th><th>LTP</th><th>Day</th></tr></thead>'
+        out.append(f'<table class="hm-t" style="margin-top:12px"><thead><tr><th>{_e(wl_label)}</th><th>LTP</th><th>Day</th></tr></thead>'
                    f'<tbody>{"".join(rows)}{more}</tbody></table>')
     return "".join(out)
 
@@ -1002,7 +1048,7 @@ def _rotation():
         rows.append(f'<tr><td class="l">{_e(str(r["sector"])[:22])}</td><td><span class="hm-pill" style="color:{colors.get(r.get("stage"), T2)}">'
                     f'{_e(r.get("stage") or "—")}</span></td><td class="n">{(f"{sc:.0f}" if _ok(sc) else "—")}</td>'
                     f'<td class="{_cls(w)}">{_pct(w, 1)}</td></tr>')
-    return (f'<div style="padding:8px 0 6px;line-height:2">{chips}</div><table class="hm-t"><thead><tr><th>Top sectors</th><th>Stage</th>'
+    return (f'<div style="padding:2px 0 12px;line-height:2.3">{chips}</div><table class="hm-t"><thead><tr><th>Top sectors</th><th>Stage</th>'
             f'<th>Score</th><th>1W</th></tr></thead><tbody>{"".join(rows)}</tbody></table>')
 
 
@@ -1063,26 +1109,29 @@ def _body(supabase):
                 f'<span class="hm-tag">LAST CLOSE · {asof}</span><span class="hm-tag">YAHOO · DELAYED</span></div></div>', unsafe_allow_html=True)
     st.markdown(_tape(M), unsafe_allow_html=True)
 
-    # row 1 — NIFTY hero · regime · session · mood
-    st.markdown(f'<div class="hm-row hm-r1">{_hero(M)}{_regime(M, B)}{_session_block(S)}{_mood(M, mmi, B)}</div>', unsafe_allow_html=True)
+    # row 1 — NIFTY hero · regime · session · mood (2 x 2 unless the page is very wide)
+    st.markdown(_row("hm-r1", f"{_hero(M)}{_regime(M, B)}{_session_block(S)}{_mood(M, mmi, B)}"), unsafe_allow_html=True)
 
-    # row 2 — world equity indices · cross-asset
+    # row 2 — world equity indices · cross-asset (stacked unless there is room for both tables in full)
     wei = _table(WEI, M, ["Index", "Last", "Chg", "1D", "1W", "1M", "YTD", "1M trend", "Date"])
     xa = _table(XASSET, M, ["Instrument", "Last", "Chg", "1D", "1M", "YTD", "1M trend", "Date"])
-    st.markdown(f'<div class="hm-row hm-r2">{_panel("WEI", "WORLD EQUITY INDICES", "LOCAL CURRENCY · CLOSE-TO-CLOSE", wei, "hm-pb np")}'
-                f'{_panel("XA", "CROSS-ASSET MONITOR", "COMMODITIES · FX · RATES · VOL · CRYPTO", xa, "hm-pb np")}</div>', unsafe_allow_html=True)
+    st.markdown(_row("hm-r2", f'{_panel("WEI", "WORLD EQUITY INDICES", "LOCAL CURRENCY · CLOSE-TO-CLOSE", wei, "hm-pb np")}'
+                              f'{_panel("XA", "CROSS-ASSET MONITOR", "COMMODITIES · FX · RATES · VOL · CRYPTO", xa, "hm-pb np")}'),
+                unsafe_allow_html=True)
 
     # row 3 — NIFTY 50 heatmap · sectors
     imap_note = f"{B['n']} PRICED · COLOUR = 1-DAY % (±3%)"
-    st.markdown(f'<div class="hm-row hm-r3">{_panel("IMAP", "NIFTY 50 HEATMAP · BY SECTOR", imap_note, _imap(groups, nq, B), "hm-pb np")}'
-                f'{_panel("SECT", "NSE SECTOR PERFORMANCE", "SORTED BY 1-DAY MOVE", _sector_matrix(M), "hm-pb np")}</div>', unsafe_allow_html=True)
+    st.markdown(_row("hm-r3", f'{_panel("IMAP", "NIFTY 50 HEATMAP · BY SECTOR", imap_note, _imap(groups, nq, B), "hm-pb np")}'
+                              f'{_panel("SECT", "NSE SECTOR PERFORMANCE", "SORTED BY 1-DAY MOVE", _sector_matrix(M), "hm-pb np")}'),
+                unsafe_allow_html=True)
 
     # row 4 — movers · your book · rotation + world clock
     holds, realised = _book_holdings(base, quotes)
-    rot_clock = _rotation() + '<div class="hm-sub" style="padding:12px 0 4px">World markets · local time</div>' + _world_clock()
-    st.markdown(f'<div class="hm-row hm-r4">{_panel("MOV", "NIFTY 50 MOVERS", "1-DAY", _movers(nq), "hm-pb np")}'
-                f'{_panel("BOOK", "YOUR BOOK", "SPLIT-ADJUSTED · FIFO", _book(holds, realised, wl, wl_label, quotes), "hm-pb np")}'
-                f'{_panel("ROT", "SECTOR ROTATION · MONEY FLOW", "LIVE WHEN MF IS LOADED", rot_clock)}</div>', unsafe_allow_html=True)
+    rot_clock = _rotation() + '<div class="hm-sub">World markets · local time</div>' + _world_clock()
+    st.markdown(_row("hm-r4", f'{_panel("MOV", "NIFTY 50 MOVERS", "1-DAY", _movers(nq), "hm-pb np")}'
+                              f'{_panel("BOOK", "YOUR BOOK", "SPLIT-ADJUSTED · FIFO", _book(holds, realised, wl, wl_label, quotes), "hm-pb np")}'
+                              f'{_panel("ROT", "SECTOR ROTATION · MONEY FLOW", "LIVE WHEN MF IS LOADED", rot_clock)}'),
+                unsafe_allow_html=True)
 
 
 def _body_live(supabase):
