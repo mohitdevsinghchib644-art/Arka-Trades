@@ -1096,7 +1096,7 @@ def _news_rail_fragment():
     toggle_label = "HIDE NEWS ▸" if st.session_state.show_news_rail else "◂ SHOW NEWS"
     if st.button(toggle_label, key="toggle_news_rail_fast", use_container_width=True):
         st.session_state.show_news_rail = not st.session_state.show_news_rail
-        st.rerun(scope="fragment")
+        st.rerun()
     if not st.session_state.show_news_rail:
         st.markdown('<div class="news-rail-collapsed">MARKET NEWS <span>HIDDEN</span></div>', unsafe_allow_html=True)
         return
