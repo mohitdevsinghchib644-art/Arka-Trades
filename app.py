@@ -875,7 +875,7 @@ def _render_topbar():
                            f'<span class="ak-chip">{clock}</span></div>', unsafe_allow_html=True)
                 with b:
                     if hasattr(st, "popover"):
-                        with st.popover(f"{initial} · {role[:5]}", use_container_width=True):
+                        with st.popover(f"{initial} · {role}", use_container_width=True):
                             st.markdown(f'<div class="ak-menu-h">{_esc(name)}</div><div class="ak-menu-s">{role} ACCOUNT</div>', unsafe_allow_html=True)
                             st.button("Profile", key="menu_profile", use_container_width=True, on_click=_nav_cb, args=("profile",))
                             st.button("Settings", key="menu_settings", use_container_width=True, on_click=_nav_cb, args=("settings",))
