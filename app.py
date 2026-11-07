@@ -201,7 +201,7 @@ html,body,.stApp,[data-testid="stAppViewContainer"],[data-testid="stMain"]{backg
 header[data-testid="stHeader"],[data-testid="stToolbar"],[data-testid="stDecoration"],#MainMenu,footer,.stDeployButton,
 [data-testid="stSidebar"],[data-testid="stSidebarCollapsedControl"]{display:none !important;}
 .block-container{padding:0 18px 40px !important;max-width:100% !important;}
-[data-testid="stVerticalBlock"]{gap:.55rem;}
+[data-testid="stVerticalBlock"]{gap:.8rem;}
 
 h1,h2,h3,h4,h5{font-family:var(--sans) !important;letter-spacing:-.01em;color:var(--tx) !important;}
 a{color:var(--amber);text-decoration:none;} a:hover{color:var(--amber2);}
