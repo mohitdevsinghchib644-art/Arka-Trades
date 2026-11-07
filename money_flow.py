@@ -1,459 +1,210 @@
-"""Arka Money Flow (v5): sector rotation radar, Rotation Lab (backtests + FPI flows), sector ranking, index breadth,
-Index Explorer, constituents, FII/DII.
+"""
+money_flow.py — Arka MONEY FLOW v6 · Sector Rotation Desk
 
-v5 (this file)
---------------
-* SPEED: the workspace used st.tabs, which builds EVERY tab on every rerun (Streamlit renders hidden tabs too).
-  Nine tabs meant nine screens of NSE requests and tables per click. Views are now chosen with a selector and
-  only the open view is built.
-* NEW VIEW: ROTATION LAB (rotation_lab.py) — rotation lenses, NSDL sector-wise FPI flows and a full backtest
-  (walk-forward, random baseline, signal tests). It is imported lazily, so a problem there can never stop the
-  rest of Money Flow from loading.
-* The SECTOR RANKING result is shared with the Lab through st.session_state["mf_sr_res"].
+Rebuilt around one question: WHERE IS MONEY MOVING, AND IS IT EARLY OR LATE TO FOLLOW IT?
 
-What each view does
--------------------
-* SECTOR RANKING   - the stock universe grouped by NSE industry: ROTATION RADAR, RANKING, TREND, VS BENCHMARKS,
-                     TURNOVER A/D, SECTOR TURNOVER, CHAIKIN MONEY FLOW and a stock drill-down.
-* ROTATION LAB     - which way money is rotating, real FPI sector flows, and whether following it has paid.
-* NIFTY INDICES    - every sectoral / thematic index with RSI, EMA chips, EMA distance and pivots.
-* SECTOR ROTATION  - NSE sectoral indices ranked by relative performance vs NIFTY 50 + rotation lanes.
-* OVERVIEW / MARKET BREADTH / INDEX EXPLORER / FII-DII / CONSTITUENTS - as before.
+Views (only the open view is built)
+  ROTATION DESK    action board (buy zone / hold / avoid), weekly Relative Rotation Graph with tails,
+                   rotation-score history, weekly rank race, sector detail with its strongest stocks
+  SECTOR RANKING   every sector, sortable (click a header), four column sets: overview / performance / money / breadth
+  MONEY FLOW       turnover share and its change, up- vs down-turnover, ₹-weighted Chaikin Money Flow heat-map
+  BREADTH          % of stocks above 20 / 50 / 200-EMA, breakouts, new highs, A/D, whole-market breadth
+  STOCKS           drill into one sector: every stock with RS rating, trend, distance from highs, volume
+  NSE INDICES      official NSE sector indices on the same rotation map (Yahoo history; works when NSE blocks)
+  FPI FLOWS        NSDL fortnightly sector-wise foreign investment — real recorded money
 
-Data sources: NSE public endpoints, NSE archive constituent CSVs, Yahoo Finance, NSDL. Missing data stays missing.
-Pressure / turnover / rotation signals are price + volume + breadth evidence, NOT institutional order flow and
-NOT investment advice.
+What changed vs v5
+  * ~50 granular sectors (sector_map.py) instead of NSE's 22 broad ones: PSU Banks, Private Banks, NBFC,
+    Capital Markets, Electrical Equipment, Cables, Defence, Railways … are now separate.
+  * Equal-weight sector indices measured against an equal-weight MARKET (like-for-like); money flow is
+    ₹-weighted; illiquid stocks are excluded; weekly JdK-style RRG.
+  * Every sector gets one action label with the reasons behind it.
+  * Removed: the backtest lab, broad index snapshot tables, constituent explorer and the NSE-live-only
+    views that failed on Streamlit Cloud. FPI flows moved here from the lab.
+
+Data: NSE index constituent CSVs (data/ folder or NSE archives) for the universe, Yahoo Finance daily prices,
+NSDL for FPI flows. Evidence from price, volume and breadth: not order-flow data, not investment advice.
 """
 from __future__ import annotations
 
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, timedelta
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
-from urllib.parse import quote
 
 import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
-import yfinance as yf
 
-import flow_engine as fe
-import index_engine as ix
 import mf_ui as ui
-import sector_engine as se
+import rotation_engine as rot
+import sector_map as smap
 
-NSE = "https://www.nseindia.com"
-ARCHIVE_BASE = "https://nsearchives.nseindia.com/content/indices/"
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": NSE + "/market-data/live-market-indices",
-    "X-Requested-With": "XMLHttpRequest",
-}
-NUM_INDEX = ["last", "percentChange", "pe", "pb", "dy", "advances", "declines", "unchanged",
-             "oneWeekAgo", "oneMonthAgo", "oneYearAgo", "yearHigh", "yearLow"]
-SCOPES = {
-    "SECTORAL": ("SECTORAL",), "THEMATIC": ("THEMATIC",),
-    "SECTORAL + THEMATIC": ("SECTORAL", "THEMATIC"),
-    "BROAD MARKET": ("BROAD MARKET", "BROADMARKET"), "ALL INDICES": (),
-}
-QUAD = {"LEADING": "#32d296", "FADING": "#f7b84b", "WEAK": "#ff6969", "IMPROVING": "#57b8ff"}
-SIGNAL_COLOR = {"BROAD PARTICIPATION": "#32d296", "NARROW LEADERSHIP": "#f7b84b",
-                "HEAVYWEIGHTS DRAGGING": "#f7b84b", "BROAD SELLING": "#ff6969",
-                "MIXED": "#9ca3af", "UNAVAILABLE": "#9ca3af"}
+try:
+    import yfinance as yf
+except Exception:  # pragma: no cover
+    yf = None
+try:
+    import plotly.graph_objects as go
+except Exception:  # pragma: no cover
+    go = None
 
-ARCHIVE_SLUGS = {
-    "NIFTY 50": "ind_nifty50list", "NIFTY NEXT 50": "ind_niftynext50list", "NIFTY 100": "ind_nifty100list",
-    "NIFTY 200": "ind_nifty200list", "NIFTY 500": "ind_nifty500list",
-    "NIFTY MIDCAP 50": "ind_niftymidcap50list", "NIFTY MIDCAP 100": "ind_niftymidcap100list",
-    "NIFTY MIDCAP 150": "ind_niftymidcap150list", "NIFTY SMALLCAP 50": "ind_niftysmallcap50list",
-    "NIFTY SMALLCAP 100": "ind_niftysmallcap100list", "NIFTY SMALLCAP 250": "ind_niftysmallcap250list",
-    "NIFTY MIDSMALLCAP 400": "ind_niftymidsmallcap400list", "NIFTY LARGEMIDCAP 250": "ind_niftylargemidcap250list",
-    "NIFTY BANK": "ind_niftybanklist", "NIFTY AUTO": "ind_niftyautolist",
-    "NIFTY FINANCIAL SERVICES": "ind_niftyfinancelist", "NIFTY FMCG": "ind_niftyfmcglist",
-    "NIFTY IT": "ind_niftyitlist", "NIFTY MEDIA": "ind_niftymedialist", "NIFTY METAL": "ind_niftymetallist",
-    "NIFTY PHARMA": "ind_niftypharmalist", "NIFTY PSU BANK": "ind_niftypsubanklist",
-    "NIFTY PRIVATE BANK": "ind_nifty_privatebanklist", "NIFTY REALTY": "ind_niftyrealtylist",
-    "NIFTY HEALTHCARE INDEX": "ind_niftyhealthcarelist", "NIFTY CONSUMER DURABLES": "ind_niftyconsumerdurableslist",
-    "NIFTY OIL & GAS": "ind_niftyoilgaslist", "NIFTY ENERGY": "ind_niftyenergylist",
-    "NIFTY INFRASTRUCTURE": "ind_niftyinfralist", "NIFTY COMMODITIES": "ind_niftycommoditieslist",
-    "NIFTY CONSUMPTION": "ind_niftyconsumptionlist", "NIFTY MNC": "ind_niftymnclist",
-    "NIFTY PSE": "ind_niftypselist", "NIFTY SERVICES SECTOR": "ind_niftyservicelist",
-    "NIFTY TOTAL MARKET": "ind_niftytotalmarket_list", "NIFTY MICROCAP 250": "ind_niftymicrocap250_list",
-}
-
-YF_INDEX = {
-    "NIFTY 50": "^NSEI", "NIFTY NEXT 50": "^NSMIDCP", "NIFTY 500": "^CRSLDX", "NIFTY BANK": "^NSEBANK",
-    "NIFTY IT": "^CNXIT", "NIFTY AUTO": "^CNXAUTO", "NIFTY FMCG": "^CNXFMCG", "NIFTY PHARMA": "^CNXPHARMA",
-    "NIFTY METAL": "^CNXMETAL", "NIFTY REALTY": "^CNXREALTY", "NIFTY ENERGY": "^CNXENERGY",
-    "NIFTY MEDIA": "^CNXMEDIA", "NIFTY PSU BANK": "^CNXPSUBANK", "NIFTY FINANCIAL SERVICES": "^CNXFIN",
-    "NIFTY INFRASTRUCTURE": "^CNXINFRA", "NIFTY PSE": "^CNXPSE", "NIFTY MNC": "^CNXMNC",
-    "NIFTY SERVICES SECTOR": "^CNXSERVICE", "NIFTY COMMODITIES": "^CNXCMDT", "NIFTY CONSUMPTION": "^CNXCONSUM",
-}
-_HISTORY_ALIASES = {"NIFTY FINANCIAL SERVICES": "NIFTY FIN SERVICE", "NIFTY HEALTHCARE INDEX": "NIFTY HEALTHCARE"}
-
-# Constituent CSV mirrors (tried in order) + where copies are kept so a blocked NSE never empties the screen.
+IST = timezone(timedelta(hours=5, minutes=30))
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+LOCAL_DATA = Path("data")
+DISK_CACHE = Path(".cache") / "nse"
+SECTOR_MAP_FILE = LOCAL_DATA / "sector_map.csv"
 ARCHIVE_MIRRORS = ("https://nsearchives.nseindia.com/content/indices/", "https://archives.nseindia.com/content/indices/",
                    "https://www.niftyindices.com/IndexConstituent/")
-LOCAL_DATA = Path("data")                 # optional: commit NSE constituent CSVs here (see the in-app message)
-DISK_CACHE = Path(".cache") / "nse"       # last good download, written automatically
-NSE_COOLDOWN_S = 600                      # after NSE refuses us, stop asking for 10 min (each attempt cost up to ~40 s)
-_NSE_STATE = {"down_until": 0.0, "archive_down": {}}
+UNIVERSE_SETS = (("ind_niftytotalmarket_list",), ("ind_nifty500list", "ind_niftymicrocap250_list"), ("ind_nifty500list",))
+MAX_SYMBOLS = 1500
+BENCH_TICKERS = {"NIFTY 50": "^NSEI", "NIFTY 500": "^CRSLDX"}
+BENCH_HELP = ("MARKET = every stock in the universe, equal-weighted exactly like the sectors: the fair yardstick. "
+              "NIFTY 50 / NIFTY 500 are cap-weighted, so small and mid-cap sectors look weak whenever large caps lead.")
+OFFICIAL = {"NIFTY BANK": "^NSEBANK", "NIFTY PVT BANK": "NIFTY_PVT_BANK.NS", "NIFTY PSU BANK": "^CNXPSUBANK",
+            "NIFTY FIN SERVICE": "NIFTY_FIN_SERVICE.NS", "NIFTY IT": "^CNXIT", "NIFTY AUTO": "^CNXAUTO",
+            "NIFTY FMCG": "^CNXFMCG", "NIFTY PHARMA": "^CNXPHARMA", "NIFTY HEALTHCARE": "NIFTY_HEALTHCARE.NS",
+            "NIFTY METAL": "^CNXMETAL", "NIFTY REALTY": "^CNXREALTY", "NIFTY ENERGY": "^CNXENERGY",
+            "NIFTY OIL & GAS": "NIFTY_OIL_AND_GAS.NS", "NIFTY MEDIA": "^CNXMEDIA", "NIFTY INFRA": "^CNXINFRA",
+            "NIFTY CONSUMER DURABLES": "NIFTY_CONSR_DURBL.NS", "NIFTY PSE": "^CNXPSE", "NIFTY MNC": "^CNXMNC",
+            "NIFTY SERVICES": "^CNXSERVICE", "NIFTY COMMODITIES": "^CNXCMDT", "NIFTY CONSUMPTION": "^CNXCONSUM"}
+VIEWS = ["ROTATION DESK", "SECTOR RANKING", "MONEY FLOW", "BREADTH", "STOCKS", "NSE INDICES", "FPI FLOWS"]
 
-# Yahoo fallback for the index snapshot when NSE's live API blocks the server: (category, ticker candidates)
-YF_SNAPSHOT = {
-    "NIFTY 50": ("BROAD MARKET INDICES", ("^NSEI",)), "NIFTY NEXT 50": ("BROAD MARKET INDICES", ("^NSMIDCP",)),
-    "NIFTY 500": ("BROAD MARKET INDICES", ("^CRSLDX",)), "NIFTY MIDCAP 100": ("BROAD MARKET INDICES", ("^CRSMID", "NIFTY_MIDCAP_100.NS")),
-    "NIFTY BANK": ("SECTORAL INDICES", ("^NSEBANK",)), "NIFTY IT": ("SECTORAL INDICES", ("^CNXIT",)),
-    "NIFTY AUTO": ("SECTORAL INDICES", ("^CNXAUTO",)), "NIFTY FMCG": ("SECTORAL INDICES", ("^CNXFMCG",)),
-    "NIFTY PHARMA": ("SECTORAL INDICES", ("^CNXPHARMA",)), "NIFTY METAL": ("SECTORAL INDICES", ("^CNXMETAL",)),
-    "NIFTY REALTY": ("SECTORAL INDICES", ("^CNXREALTY",)), "NIFTY MEDIA": ("SECTORAL INDICES", ("^CNXMEDIA",)),
-    "NIFTY PSU BANK": ("SECTORAL INDICES", ("^CNXPSUBANK",)),
-    "NIFTY FINANCIAL SERVICES": ("SECTORAL INDICES", ("NIFTY_FIN_SERVICE.NS", "^CNXFIN")),
-    "NIFTY PRIVATE BANK": ("SECTORAL INDICES", ("NIFTY_PVT_BANK.NS",)),
-    "NIFTY HEALTHCARE INDEX": ("SECTORAL INDICES", ("NIFTY_HEALTHCARE.NS",)),
-    "NIFTY OIL & GAS": ("SECTORAL INDICES", ("NIFTY_OIL_AND_GAS.NS",)),
-    "NIFTY CONSUMER DURABLES": ("SECTORAL INDICES", ("NIFTY_CONSR_DURBL.NS",)),
-    "NIFTY ENERGY": ("THEMATIC INDICES", ("^CNXENERGY",)), "NIFTY INFRASTRUCTURE": ("THEMATIC INDICES", ("^CNXINFRA",)),
-    "NIFTY PSE": ("THEMATIC INDICES", ("^CNXPSE",)), "NIFTY MNC": ("THEMATIC INDICES", ("^CNXMNC",)),
-    "NIFTY SERVICES SECTOR": ("THEMATIC INDICES", ("^CNXSERVICE",)), "NIFTY COMMODITIES": ("THEMATIC INDICES", ("^CNXCMDT",)),
-    "NIFTY CONSUMPTION": ("THEMATIC INDICES", ("^CNXCONSUM",)),
-}
-YAHOO_VIEWS = ["SECTOR RANKING", "ROTATION LAB", "NIFTY INDICES", "SECTOR ROTATION", "OVERVIEW", "INDEX EXPLORER"]
-
-BENCH_YF = {"MIDCAP 100": ["^CRSMID", "NIFTY_MIDCAP_100.NS", "NIFTYMDCP100.NS"],
-            "SMALLCAP 100": ["^CNXSC", "NIFTYSMLCAP100.NS", "NIFTY_SMLCAP_100.NS"]}
-BENCH_ARCHIVE = {"MIDCAP 100": "NIFTY MIDCAP 100", "SMALLCAP 100": "NIFTY SMALLCAP 100"}
-
-VIEWS = ["SECTOR RANKING", "ROTATION LAB", "NIFTY INDICES", "SECTOR ROTATION", "OVERVIEW", "MARKET BREADTH",
-         "INDEX EXPLORER", "FII / DII FLOWS", "CONSTITUENTS"]
-OFFLINE_VIEWS = ["SECTOR RANKING", "ROTATION LAB", "INDEX EXPLORER"]
+GREEN, RED, AMBER, CYAN, YELLOW, PURPLE, T2, T3 = ui.GREEN, ui.RED, ui.AMBER, ui.CYAN, ui.YELLOW, ui.PURPLE, ui.T2, ui.T3
+PHASE_C = {"LEADING": GREEN, "WEAKENING": AMBER, "LAGGING": RED, "IMPROVING": CYAN, "—": T3}
+ACTION_C = {"ROTATING IN": GREEN, "LEADING": "#8AD66B", "STRETCHED": YELLOW, "WATCH": CYAN, "WEAKENING": AMBER, "LAGGING": RED}
+MONEY_C = {"BUYING ON VOLUME": GREEN, "QUIET BUYING": CYAN, "MIXED": T2, "QUIET SELLING": AMBER, "SELLING ON VOLUME": RED, "—": T3}
+CMF_C = {"ACCUMULATING": GREEN, "IMPROVING": CYAN, "NEUTRAL": T2, "WEAKENING": AMBER, "DISTRIBUTING": RED, "—": T3}
+_LAST_RES: dict = {}
+_ARCH_DOWN: dict = {}
 
 
-# ═════════════════════════ styling / network ═════════════════════════
+# ═════════════════════════ style + small helpers ═════════════════════════
 def _style():
-    st.markdown("""<style>
-    .arka-mf-kicker{font:700 10px monospace;letter-spacing:1.5px;color:#9ca3af;text-transform:uppercase}
-    .arka-mf-title{font-size:24px;font-weight:800;color:#f4f6f8;margin:2px 0}
-    .arka-mf-sub{font-size:12px;color:#8b929d;margin:0 0 16px}
-    .arka-mf-section{font:700 11px monospace;letter-spacing:1px;color:#d1d7e0;margin:17px 0 8px;padding-bottom:7px;border-bottom:1px solid #292e36}
-    .arka-mf-note{font-size:11px;color:#929aa6;border-left:2px solid #5a6472;padding:7px 10px;background:rgba(255,255,255,.025);margin:7px 0 12px}
-    .arka-mf-banner{font:700 12px monospace;letter-spacing:.8px;padding:10px 14px;border:1px solid;margin:8px 0 12px;background:rgba(255,255,255,.02)}
-    div[class*="st-key-mf_viewbar"] [role="radiogroup"]{gap:4px !important}
-    div[class*="st-key-mf_viewbar"] label[data-baseweb="radio"]{padding:7px 13px !important}
-    </style>""", unsafe_allow_html=True)
     ui.inject()
+    st.markdown("""<style>
+    .arka-mf-section{font:700 11px 'JetBrains Mono',monospace;letter-spacing:1.2px;color:#d6d6d6;margin:24px 0 10px;padding-bottom:8px;border-bottom:1px solid #262626;text-transform:uppercase}
+    .arka-mf-note{font:12px/1.75 'Inter',sans-serif;color:#9a9a9a;border-left:2px solid #3a3a3a;padding:8px 12px;background:rgba(255,255,255,.02);margin:8px 0 14px}
+    .arka-mf-note b{color:#e2e2e2}
+    div[class*="st-key-mf_viewbar"] [role="radiogroup"]{gap:6px !important}
+    div[class*="st-key-mf_viewbar"] label[data-baseweb="radio"]{padding:8px 14px !important}
+    div[class*="st-key-mf_viewbar"] label[data-baseweb="radio"] p{font-size:11px !important}
+    .rd-status{display:flex;flex-wrap:wrap;gap:6px 18px;font:600 11px 'JetBrains Mono',monospace;color:#8a8a8a;padding:8px 2px;border-bottom:1px solid #1f1f1f;margin-bottom:6px}
+    .rd-status b{color:#e6e6e6}
+    .rd-board{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:6px 0 10px}
+    @media(max-width:1150px){.rd-board{grid-template-columns:1fr}}
+    .rd-col{background:#080808;border:1px solid #1f1f1f;border-top:3px solid var(--c);padding:12px 12px 4px;min-width:0}
+    .rd-ch{display:flex;flex-direction:column;gap:3px;margin-bottom:2px}
+    .rd-ch b{font:800 13px 'JetBrains Mono',monospace;letter-spacing:1.3px;color:var(--c)}
+    .rd-ch span{font:12px 'Inter',sans-serif;color:#8a8a8a}
+    .rd-sub{font:700 10px 'JetBrains Mono',monospace;letter-spacing:1px;color:#777;margin:14px 0 7px;text-transform:uppercase}
+    .rd-card{border:1px solid #242424;border-left:3px solid var(--c);background:rgba(255,255,255,.02);padding:10px 12px;margin-bottom:9px;border-radius:3px}
+    .rd-card .h{display:flex;justify-content:space-between;align-items:center;gap:8px}
+    .rd-card .n{font:700 14px 'Inter',sans-serif;color:#f2f2f2}
+    .rd-card .m{font:11.5px/1.65 'JetBrains Mono',monospace;color:#a0a0a0;margin-top:5px}
+    .rd-card ul{margin:7px 0 0 16px;padding:0;font:12px/1.6 'Inter',sans-serif;color:#c4c4c4}
+    .rd-card ul.w{color:#e0ad4c}
+    .rd-card .l{font:11px 'JetBrains Mono',monospace;color:#7a7a7a;margin-top:7px}
+    .rd-card .l b{color:#FF9F0A}
+    .rd-pill{display:inline-block;padding:2px 9px;border-radius:999px;font:800 9.5px 'JetBrains Mono',monospace;letter-spacing:.7px;border:1px solid currentColor;white-space:nowrap}
+    .rd-sc{display:inline-flex;align-items:center;gap:7px;font:700 13px 'JetBrains Mono',monospace}
+    .rd-sc i{display:inline-block;width:48px;height:5px;background:#1c1c1c}
+    .rd-sc i b{display:block;height:100%}
+    .rd-empty{font:12px 'Inter',sans-serif;color:#666;padding:2px 0 10px}
+    .rd-moves{font:12.5px/1.9 'Inter',sans-serif;color:#bbb;margin:4px 0 8px}
+    .rd-hw{overflow:auto;max-height:760px;border:1px solid #1f1f1f;background:#070707;margin:6px 0 12px}
+    .rd-ht{width:100%;border-collapse:separate;border-spacing:2px;font:12px 'JetBrains Mono',monospace}
+    .rd-ht th{position:sticky;top:0;background:#0c0c0c;font:700 10px 'JetBrains Mono',monospace;color:#7a7a7a;letter-spacing:.8px;text-transform:uppercase;padding:8px;text-align:center;white-space:nowrap;z-index:2}
+    .rd-ht th:first-child{text-align:left}
+    .rd-ht td{padding:7px 9px;text-align:center;color:#f0f0f0;white-space:nowrap;border-radius:2px;font-variant-numeric:tabular-nums}
+    .rd-ht td.s{text-align:left;background:transparent;color:#e6e6e6;font:600 12.5px 'Inter',sans-serif}
+    </style>""", unsafe_allow_html=True)
 
 
-@st.cache_resource(ttl=600, show_spinner=False)
-def _session():
-    session = requests.Session()
-    session.headers.update(HEADERS)
-    try:
-        session.get(NSE, timeout=5)
-        session.get(NSE + "/market-data/live-market-indices", timeout=5)
-    except requests.RequestException:
-        pass
-    return session
+def _h(t):
+    st.markdown(f'<div class="arka-mf-section">{t}</div>', unsafe_allow_html=True)
 
 
-def nse_blocked() -> bool:
-    """True while NSE is in cool-down after refusing this server (cloud IPs are often blocked)."""
-    return time.time() < _NSE_STATE["down_until"]
+def _note(t):
+    st.markdown(f'<div class="arka-mf-note">{t}</div>', unsafe_allow_html=True)
 
 
-def _get(path):
-    if nse_blocked():
-        return None                     # fail instantly instead of waiting on timeouts every click
-    for attempt in range(2):
-        try:
-            response = _session().get(NSE + path, timeout=8)
-            if response.status_code == 200:
-                return response.json()
-        except (requests.RequestException, ValueError):
-            pass
-        if attempt == 0:
-            _session.clear()
-            time.sleep(.4)
-    _NSE_STATE["down_until"] = time.time() + NSE_COOLDOWN_S
-    return None
+_e, _f = ui.esc, rot._f
 
 
-def _rename(df, target, aliases):
-    if target not in df.columns:
-        for name in aliases:
-            if name in df.columns:
-                df.rename(columns={name: target}, inplace=True)
-                return
+def _isna(v) -> bool:
+    return v is None or (not isinstance(v, str) and bool(pd.isna(v)))
 
 
-def _numeric(df, columns):
-    for col in columns:
-        if col not in df:
-            df[col] = np.nan
-        df[col] = pd.to_numeric(df[col].astype(str).str.replace(",", "", regex=False), errors="coerce")
-
-
-def _num(v, decimals=2):
-    try:
-        return "—" if pd.isna(v) else f"{float(v):,.{decimals}f}"
-    except (ValueError, TypeError):
+def _num(v, d=1, suf="", sign=False) -> str:
+    v = _f(v)
+    if v is None:
         return "—"
+    return f"{v:+,.{d}f}{suf}" if sign else f"{v:,.{d}f}{suf}"
 
 
-def _pct(v):
+def _sg(v, d=2, suf="") -> str:
+    v = _f(v)
+    if v is None:
+        return '<span class="mf-na">—</span>'
+    c = GREEN if v > 0 else RED if v < 0 else T2
+    return f'<span style="color:{c};font:600 11px JetBrains Mono,monospace">{v:+.{d}f}{suf}</span>'
+
+
+def _pill(text, color) -> str:
+    return f'<span class="rd-pill" style="color:{color}">{_e(text)}</span>'
+
+
+def _score(v) -> str:
+    v = _f(v)
+    if v is None:
+        return '<span class="rd-sc">—</span>'
+    c = GREEN if v >= 65 else AMBER if v >= 45 else RED
+    return f'<span class="rd-sc" style="color:{c}"><i><b style="width:{v:.0f}%;background:{c}"></b></i>{v:.0f}</span>'
+
+
+def _heat_bg(d) -> str:
+    if d is None:
+        return "#121212"
+    d = max(-1.0, min(1.0, d))
+    if abs(d) < 0.04:
+        return "#1b1b1b"
+    a = 0.14 + 0.56 * abs(d)
+    return f"rgba(48,209,88,{a:.2f})" if d > 0 else f"rgba(255,69,58,{a:.2f})"
+
+
+def _market_live() -> bool:
     try:
-        return "—" if pd.isna(v) else f"{float(v):+.2f}%"
-    except (ValueError, TypeError):
-        return "—"
-
-
-def _fmt_ret(df, cols):
-    """Display-only: signed % strings, '—' for missing (no literal None/NaN in tables)."""
-    for c in cols:
-        if c in df:
-            df[c] = df[c].map(lambda v: f"{float(v):+.2f}%" if pd.notna(v) else "—")
-    return df
-
-
-# ═════════════════════════ NSE data ═════════════════════════
-@st.cache_data(ttl=60, show_spinner=False, max_entries=4)
-def fetch_all_indices():
-    """Latest NSE index snapshot incl. advances/declines/unchanged for EVERY index."""
-    payload = _get("/api/allIndices")
-    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list) or not payload["data"]:
-        return None
-    df = pd.DataFrame(payload["data"])
-    for target, aliases in {"index": ("indexName", "name"), "last": ("lastPrice",),
-                            "percentChange": ("percChange", "pChange", "changePercent"),
-                            "key": ("category", "indexCategory")}.items():
-        _rename(df, target, aliases)
-    if "index" not in df:
-        return None
-    df["index"] = df["index"].astype(str).str.strip()
-    df = df[df["index"].ne("") & df["index"].str.lower().ne("nan")].copy()
-    return _derive_snapshot(df)
-
-
-def _derive_snapshot(df: pd.DataFrame) -> pd.DataFrame:
-    """Common columns for an index snapshot (NSE live feed or the Yahoo fallback)."""
-    if "key" not in df:
-        df["key"] = "OTHER"
-    df["key"] = df["key"].fillna("OTHER").astype(str).str.upper().str.strip()
-    _numeric(df, NUM_INDEX)
-    df["r1d"] = df["percentChange"]
-    for period, field in (("r1w", "oneWeekAgo"), ("r1m", "oneMonthAgo"), ("r1y", "oneYearAgo")):
-        ref = df[field].where(df[field] > 0)
-        df[period] = (df["last"] / ref - 1) * 100
-    total = df[["advances", "declines", "unchanged"]].fillna(0).sum(axis=1).replace(0, np.nan)
-    df["adv_pct"] = df["advances"] / total * 100
-    df["ad_ratio"] = df["advances"] / df["declines"].where(df["declines"] > 0)
-    df["net_adv"] = df["advances"] - df["declines"]
-    df["breadth_pct"] = df["net_adv"] / total * 100
-    return df.replace([np.inf, -np.inf], np.nan).sort_values("index").reset_index(drop=True)
-
-
-def _equity_index_rows(indices):
-    """Broad-market, sectoral and thematic equity indices (drops VIX / inverse / G-Sec style rows)."""
-    key = indices["key"].fillna("").astype(str).str.upper()
-    keep = key.str.contains(r"BROAD MARKET|SECTORAL|THEMATIC", regex=True)
-    names = indices["index"].astype(str).str.upper()
-    keep &= ~names.str.contains(r"\bVIX\b|INVERSE|G-SEC|GSEC|TREASURY|TR 1X|PR 1X", regex=True)
-    return indices[keep].copy()
-
-
-@st.cache_resource(ttl=3600, show_spinner=False)
-def _hist_store() -> dict:
-    """Shared in-memory store {index name: (timestamp, OHLC DataFrame)}; safe to fill from worker threads."""
-    return {}
-
-
-def _parse_nse_history(rows) -> pd.DataFrame:
-    """NSE index-history rows -> OHLC DataFrame (daily). Raises on unrecognised shapes."""
-    if isinstance(rows, dict):
-        rows = rows.get("indexCloseOnlineRecords") or next((v for v in rows.values() if isinstance(v, list)), [])
-    if not isinstance(rows, list) or len(rows) < 2:
-        raise RuntimeError("insufficient history rows")
-    h = pd.DataFrame(rows)
-    pick = lambda opts: next((c for c in opts if c in h), None)
-    dcol = pick(("EOD_TIMESTAMP", "CH_TIMESTAMP", "HistoricalDate", "date", "Date"))
-    ccol = pick(("EOD_CLOSE_INDEX_VAL", "EOD_CLOSE_INDEX_VALUE", "CLOSE_INDEX_VAL", "CLOSE", "close", "Close"))
-    if dcol is None or ccol is None:
-        raise RuntimeError("unrecognised history columns")
-    num = lambda c: (pd.to_numeric(h[c].astype(str).str.replace(",", "", regex=False), errors="coerce")
-                     if c else pd.Series(np.nan, index=h.index))
-    out = pd.DataFrame({"Open": num(pick(("EOD_OPEN_INDEX_VAL", "OPEN_INDEX_VAL", "OPEN", "open", "Open"))),
-                        "High": num(pick(("EOD_HIGH_INDEX_VAL", "HIGH_INDEX_VAL", "HIGH", "high", "High"))),
-                        "Low": num(pick(("EOD_LOW_INDEX_VAL", "LOW_INDEX_VAL", "LOW", "low", "Low"))),
-                        "Close": num(ccol)})
-    out.index = pd.to_datetime(h[dcol], errors="coerce", dayfirst=True)
-    out = out[out.index.notna()]
-    if getattr(out.index, "tz", None) is not None:
-        out.index = out.index.tz_localize(None)
-    out.index = out.index.normalize()
-    out = out.dropna(subset=["Close"])
-    out = out[out["Close"] > 0]
-    for c in ("Open", "High", "Low"):
-        out[c] = out[c].fillna(out["Close"])
-    out = out[~out.index.duplicated(keep="last")].sort_index()
-    if len(out) < 2:
-        raise RuntimeError("no usable closes")
-    return out[["Open", "High", "Low", "Close"]]
-
-
-def _fetch_nse_ohlc(index_name: str, days: int = 400) -> pd.DataFrame:
-    """~400 days of daily OHLC from NSE (two requests of ~200 days). Tries NSE's short name first."""
-    if nse_blocked():
-        raise RuntimeError("NSE unreachable from this server")
-    key = str(index_name).strip()
-    cands = []
-    for c in (_HISTORY_ALIASES.get(key.upper()), key):
-        if c and c not in cands:
-            cands.append(c)
-    end = date.today()
-    mid = end - timedelta(days=days // 2)
-    spans = [(end - timedelta(days=days), mid - timedelta(days=1)), (mid, end)]
-    last_err = None
-    for req in cands:
-        try:
-            parts = []
-            for a, b in spans:
-                r = _session().get(NSE + "/api/historicalOR/indicesHistory",
-                                   params={"indexType": req, "from": a.strftime("%d-%m-%Y"),
-                                           "to": b.strftime("%d-%m-%Y")}, timeout=12)
-                if r.status_code != 200:
-                    raise RuntimeError(f"HTTP {r.status_code}")
-                payload = r.json()
-                parts.append(_parse_nse_history(payload.get("data", []) if isinstance(payload, dict) else payload))
-            df = pd.concat(parts)
-            df = df[~df.index.duplicated(keep="last")].sort_index()
-            if len(df) >= 30:
-                return df
-            raise RuntimeError("too few rows")
-        except Exception as exc:
-            last_err = exc
-    raise RuntimeError(str(last_err))
-
-
-@st.cache_data(ttl=1800, show_spinner=False, max_entries=8)
-def yahoo_index_ohlc(names: tuple) -> dict:
-    """Fallback OHLC from Yahoo for the major indices listed in YF_INDEX (coverage is partial)."""
-    pairs = {n: YF_INDEX[n] for n in names if n in YF_INDEX}
-    if not pairs:
-        return {}
-    tickers = sorted(set(pairs.values()))
-    try:
-        raw = yf.download(tickers, period="2y", interval="1d", group_by="ticker",
-                          progress=False, auto_adjust=False, threads=True)
+        from home_page import nse_session
+        return nse_session()["cls"] in ("live", "pre")
     except Exception:
-        return {}
-    frames = fe._split_download(raw, tickers)
-    out = {}
-    for n, t in pairs.items():
-        f = frames.get(t)
-        if f is not None and len(f) >= 30:
-            g = f[["Open", "High", "Low", "Close"]].copy()
-            idx = pd.to_datetime(g.index)
-            if getattr(idx, "tz", None) is not None:
-                idx = idx.tz_localize(None)
-            g.index = idx.normalize()
-            out[n] = g
-    return out
+        n = datetime.now(IST)
+        t = n.hour * 60 + n.minute
+        return n.weekday() < 5 and 9 * 60 <= t <= 15 * 60 + 40
 
 
-def load_index_histories(names, progress=None) -> tuple[int, int]:
-    """Fill the shared store: NSE history first (3 workers), Yahoo fallback. Returns (loaded, attempted)."""
-    store, now = _hist_store(), time.time()
-    names = list(dict.fromkeys(names))
-    todo = [n for n in names if n not in store or now - store[n][0] > 3600]
-    if not todo:
-        return len(names), len(names)
-    failed = []
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = {pool.submit(_fetch_nse_ohlc, n): n for n in todo}
-        for i, fut in enumerate(as_completed(futures), start=1):
-            n = futures[fut]
-            try:
-                store[n] = (time.time(), fut.result())
-            except Exception:
-                failed.append(n)
-            if progress:
-                progress(i / len(todo), f"Loading index history · {i} / {len(todo)}")
-    if failed:
-        for n, df in yahoo_index_ohlc(tuple(failed)).items():
-            store[n] = (time.time(), df)
-    return sum(1 for n in names if n in store), len(names)
+def _bucket() -> int:
+    return int(time.time() // (1800 if _market_live() else 3 * 3600))
 
 
-def index_histories(names) -> dict:
-    store = _hist_store()
-    return {n: store[n][1] for n in names if n in store}
-
-
-def _apply_history_returns(indices):
-    """Fill 1W / 1M returns from stored EOD closes wherever the live snapshot lacks them."""
-    out = indices.copy()
-    store = _hist_store()
-    if not store:
-        return out
-    for i, row in out.iterrows():
-        ent = store.get(str(row.get("index", "")))
-        if not ent:
-            continue
-        c = ent[1]["Close"].dropna()
-        if len(c) >= 6 and pd.isna(row.get("r1w")):
-            out.at[i, "r1w"] = (c.iloc[-1] / c.iloc[-6] - 1) * 100
-        if len(c) >= 22 and pd.isna(row.get("r1m")):
-            out.at[i, "r1m"] = (c.iloc[-1] / c.iloc[-22] - 1) * 100
-    return out
-
-
-@st.cache_data(ttl=120, show_spinner=False, max_entries=96)
-def fetch_constituents(index_name):
-    """Live constituents + prices for one index (NSE API). Value/volume units are not converted."""
-    payload = _get(f"/api/equity-stockIndices?index={quote(str(index_name), safe='')}")
-    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list) or not payload["data"]:
-        return None
-    df = pd.DataFrame(payload["data"])
-    for target, aliases in {"symbol": ("SYMBOL", "stockSymbol"), "lastPrice": ("last", "closePrice", "price"),
-                            "pChange": ("percentChange", "changePercent"),
-                            "totalTradedValue": ("tradedValue", "value"),
-                            "totalTradedVolume": ("tradedVolume", "volume")}.items():
-        _rename(df, target, aliases)
-    if "symbol" not in df:
-        return None
-    df["symbol"] = df["symbol"].astype(str).str.upper().str.strip()
-    df = df[df["symbol"].ne("") & df["symbol"].str.lower().ne("nan")].copy()
-    df = df[~df["symbol"].str.replace(" ", "", regex=False).eq(str(index_name).upper().replace(" ", ""))]
-    if "priority" in df:
-        priority = pd.to_numeric(df["priority"], errors="coerce")
-        if priority.notna().any() and (priority == 0).any():
-            df = df[priority.eq(0)]
-    _numeric(df, ["lastPrice", "pChange", "totalTradedVolume", "totalTradedValue", "ffmc",
-                  "yearHigh", "yearLow", "nearWKH", "nearWKL"])
-    df["value_raw"] = df["totalTradedValue"]
-    return df.reset_index(drop=True)
-
-
-def _parse_archive(text: str):
+# ═════════════════════════ universe ═════════════════════════
+def _parse_csv(text: str):
     df = pd.read_csv(StringIO(text))
     df.columns = [str(c).strip() for c in df.columns]
     return df if "Symbol" in df and len(df) else None
 
 
-@st.cache_data(ttl=6 * 3600, show_spinner=False, max_entries=48)
+@st.cache_data(ttl=6 * 3600, show_spinner=False, max_entries=16)
 def _archive_net(slug: str) -> pd.DataFrame:
-    """Download a constituent CSV from the first mirror that answers. Raises on failure (so failures are never cached)."""
-    hdr = {"User-Agent": HEADERS["User-Agent"], "Accept": "text/csv,text/plain,*/*", "Accept-Language": "en-US,en;q=0.9"}
+    hdr = {"User-Agent": UA, "Accept": "text/csv,text/plain,*/*", "Accept-Language": "en-US,en;q=0.9"}
     last = "unreachable"
     for base in ARCHIVE_MIRRORS:
         try:
             r = requests.get(f"{base}{slug}.csv", headers=hdr, timeout=8)
             if r.status_code == 200:
-                df = _parse_archive(r.text)
+                df = _parse_csv(r.text)
                 if df is not None:
                     try:
                         DISK_CACHE.mkdir(parents=True, exist_ok=True)
@@ -468,1431 +219,908 @@ def _archive_net(slug: str) -> pd.DataFrame:
 
 
 def _read_archive(slug: str):
-    """Constituent CSV (Company Name, Industry, Symbol, ...): repo copy in data/ → NSE mirrors → last good disk copy."""
+    """Constituent CSV: repo copy in data/ -> NSE mirrors (10-min cool-down after a failure) -> last good disk copy."""
     local = LOCAL_DATA / f"{slug}.csv"
     if local.exists():
         try:
-            return _parse_archive(local.read_text())
+            return _parse_csv(local.read_text(encoding="utf-8", errors="ignore"))
         except Exception:
             pass
-    down = _NSE_STATE["archive_down"]
-    if time.time() >= down.get(slug, 0):
+    if time.time() >= _ARCH_DOWN.get(slug, 0):
         try:
             return _archive_net(slug)
         except Exception:
-            down[slug] = time.time() + NSE_COOLDOWN_S
+            _ARCH_DOWN[slug] = time.time() + 600
     disk = DISK_CACHE / f"{slug}.csv"
     if disk.exists():
         try:
-            return _parse_archive(disk.read_text())
+            return _parse_csv(disk.read_text(encoding="utf-8", errors="ignore"))
         except Exception:
             pass
     return None
 
 
-def archive_constituents(index_name):
-    """Symbols (+industry) from NSE's archive CSV. Works when the live API is blocked."""
-    slug = ARCHIVE_SLUGS.get(str(index_name).strip().upper())
-    df = _read_archive(slug) if slug else None
-    if df is None:
+def _read_map():
+    """Optional data/sector_map.csv: symbol + any of company, group, basic_industry, industry, sector."""
+    if not SECTOR_MAP_FILE.exists():
         return None
-    out = pd.DataFrame({"symbol": df["Symbol"].astype(str).str.upper().str.strip()})
-    if "Industry" in df:
-        out["industry"] = df["Industry"].astype(str).str.strip()
-    return out.drop_duplicates("symbol").reset_index(drop=True)
-
-
-def universe_meta():
-    """Stock universe + NSE industry classification, or None. A failure is NOT cached (it used to stick for 24 h)."""
     try:
-        return _universe_cached()
+        mp = pd.read_csv(SECTOR_MAP_FILE)
+        mp.columns = [str(c).strip().lower().replace(" ", "_") for c in mp.columns]
+        if "symbol" not in mp:
+            return None
+        mp["symbol"] = mp["symbol"].astype(str).str.upper().str.strip()
+        return mp.drop_duplicates("symbol").fillna("")
     except Exception:
         return None
 
 
 @st.cache_data(ttl=86400, show_spinner=False, max_entries=2)
 def _universe_cached():
-    df = None
-    for slugs in (["ind_niftytotalmarket_list"], ["ind_nifty500list", "ind_niftymicrocap250_list"], ["ind_nifty500list"]):
+    df, source = None, ""
+    for slugs in UNIVERSE_SETS:
         parts = [p for p in (_read_archive(s) for s in slugs) if p is not None]
         if parts and sum(len(p) for p in parts) >= 300:
-            df = pd.concat(parts, ignore_index=True)
+            df, source = pd.concat(parts, ignore_index=True), " + ".join(slugs)
             break
     if df is None:
         raise RuntimeError("stock universe unavailable")
-    out = pd.DataFrame({
-        "symbol": df["Symbol"].astype(str).str.upper().str.strip(),
-        "industry": df["Industry"].astype(str).str.strip() if "Industry" in df else "Unclassified",
-        "company": df["Company Name"].astype(str).str.strip() if "Company Name" in df else ""})
-    return out.drop_duplicates("symbol").reset_index(drop=True)
+    if "Series" in df:
+        df = df[~df["Series"].astype(str).str.strip().str.upper().isin(["RR", "IV"])]      # REITs / InvITs are not stocks
+    out = pd.DataFrame({"symbol": df["Symbol"].astype(str).str.upper().str.strip(),
+                        "company": df["Company Name"].astype(str).str.strip() if "Company Name" in df else "",
+                        "nse_sector": df["Industry"].astype(str).str.strip() if "Industry" in df else ""})
+    out = out[~out["symbol"].str.startswith("DUMMY")].drop_duplicates("symbol")
+    mp = _read_map()
+    blank = lambda: pd.Series("", index=out.index)
+    basic, industry, group = blank(), blank(), blank()
+    if mp is not None and len(mp):
+        mpi = mp.set_index("symbol")
+        extra = mpi.loc[~mpi.index.isin(out["symbol"])]
+        if len(extra):
+            add = pd.DataFrame({"symbol": extra.index, "company": extra["company"].values if "company" in extra else "",
+                                "nse_sector": extra["sector"].values if "sector" in extra else ""})
+            out = pd.concat([out, add], ignore_index=True).head(MAX_SYMBOLS)
+            source += f" + {len(add)} from sector_map.csv"
+        col = lambda c: out["symbol"].map(mpi[c]).fillna("").astype(str) if c in mpi else pd.Series("", index=out.index)
+        basic, industry, group = col("basic_industry"), col("industry"), col("group")
+    out["group"] = [smap.classify(s, c, n, b, i, g) for s, c, n, b, i, g in
+                    zip(out["symbol"], out["company"], out["nse_sector"], basic, industry, group)]
+    out["family"] = [smap.family(g) for g in out["group"]]
+    return out.reset_index(drop=True), source
 
 
-@st.cache_data(ttl=900, show_spinner=False, max_entries=2)
-def load_universe_frames(symbols: tuple) -> dict:
-    """~2 years of daily OHLCV for the whole stock universe + NIFTY 50 (batched Yahoo download)."""
-    frames = fe._download_frames([f"{s}.NS" for s in symbols] + ["^NSEI"], "2y")
-    if len(frames) < 30:
-        raise ValueError(f"Yahoo returned history for only {len(frames)} tickers")
-    return frames
-
-
-def local_constituents(index_name):
-    """Optional: index_constituents.csv (columns: index,symbol[,weight]) in the repo root."""
-    p = Path("index_constituents.csv")
-    if not p.exists():
-        return None
-    try:
-        df = pd.read_csv(p)
-        df.columns = [c.strip().lower() for c in df.columns]
-        sub = df[df["index"].astype(str).str.upper().str.strip().eq(str(index_name).upper().strip())]
-        if sub.empty:
-            return None
-        out = pd.DataFrame({"symbol": sub["symbol"].astype(str).str.upper().str.strip()})
-        out["ffmc"] = pd.to_numeric(sub["weight"], errors="coerce") if "weight" in sub else np.nan
-        return out.drop_duplicates("symbol").reset_index(drop=True)
-    except Exception:
-        return None
-
-
-def get_constituent_symbols(index_name):
-    """NSE live API -> NSE archive CSV -> local CSV. Returns (DataFrame|None, source label)."""
-    cons = fetch_constituents(index_name)
-    if cons is not None and not cons.empty:
-        return cons, "NSE live constituents"
-    cons = archive_constituents(index_name)
-    if cons is not None and not cons.empty:
-        return cons, "NSE archive CSV (equal-weight)"
-    cons = local_constituents(index_name)
-    if cons is not None and not cons.empty:
-        return cons, "local index_constituents.csv"
-    return None, ""
-
-
-@st.cache_data(ttl=1800, show_spinner=False, max_entries=2)
-def _yahoo_snapshot_cached():
-    """Index snapshot + 2y daily history from Yahoo for the NSE indices in YF_SNAPSHOT. Raises on failure."""
-    tickers = sorted({t for _, cands in YF_SNAPSHOT.values() for t in cands})
-    raw = yf.download(tickers, period="2y", interval="1d", group_by="ticker", progress=False, auto_adjust=False, threads=True)
-    frames = fe._split_download(raw, tickers)
-    today = pd.Timestamp.now().normalize()
-    rows, hist = [], {}
-    for name, (cat, cands) in YF_SNAPSHOT.items():
-        f = next((frames[t] for t in cands if t in frames and len(frames[t]) >= 60), None)
-        if f is None:
-            continue
-        g = f[["Open", "High", "Low", "Close"]].copy()
-        idx = pd.to_datetime(g.index)
-        if getattr(idx, "tz", None) is not None:
-            idx = idx.tz_localize(None)
-        g.index = idx.normalize()
-        g = g[~g.index.duplicated(keep="last")].dropna(subset=["Close"])
-        c = g["Close"]
-        if len(c) < 30 or (today - c.index[-1]).days > 10:
-            continue                                    # stale Yahoo ticker: leave it out rather than show old numbers
-        at = lambda k: float(c.iloc[-1 - k]) if len(c) > k else np.nan
-        rows.append({"index": name, "key": cat, "last": float(c.iloc[-1]),
-                     "percentChange": (float(c.iloc[-1]) / at(1) - 1) * 100 if len(c) > 1 else np.nan,
-                     "oneWeekAgo": at(5), "oneMonthAgo": at(21), "oneYearAgo": at(252),
-                     "yearHigh": float(g["High"].tail(252).max()), "yearLow": float(g["Low"].tail(252).min())})
-        hist[name] = g
-    if len(rows) < 5 or "NIFTY 50" not in hist:
-        raise RuntimeError("Yahoo index snapshot incomplete")
-    return _derive_snapshot(pd.DataFrame(rows)), hist
-
-
-def yahoo_index_snapshot():
-    """Fallback snapshot when NSE blocks the server. Also fills the index-history store, so RSI / EMA / pivots work at once."""
-    try:
-        snap, hist = _yahoo_snapshot_cached()
-    except Exception:
-        return None
-    store, now = _hist_store(), time.time()
-    for n, g in hist.items():
-        if n not in store:
-            store[n] = (now, g)
-    return snap
-
-
-@st.cache_data(ttl=300, show_spinner=False, max_entries=4)
-def fetch_fii_dii():
-    payload = _get("/api/fiidiiTradeReact")
-    rows = payload.get("data", payload.get("records", [])) if isinstance(payload, dict) else payload
-    if not isinstance(rows, list) or not rows:
-        return None
-    df = pd.DataFrame(rows)
-    for target, aliases in {"category": ("investorType", "clientType", "categoryName"),
-                            "buyValue": ("buy", "buy_value"), "sellValue": ("sell", "sell_value"),
-                            "netValue": ("net", "net_value"), "date": ("tradingDate", "tradeDate", "timestamp")}.items():
-        _rename(df, target, aliases)
-    _numeric(df, ["buyValue", "sellValue", "netValue"])
-    if "category" not in df:
-        df["category"] = "Investor"
-    return df
-
-
-# ═════════════════════════ benchmarks for the sector charts ═════════════════════════
-def _yf_close(ticker: str):
-    df = yf.download(ticker, period="2y", interval="1d", progress=False, auto_adjust=False, threads=False)
-    if df is None or df.empty or "Close" not in df.columns:
-        return None
-    s = df["Close"]
-    if isinstance(s, pd.DataFrame):
-        s = s.iloc[:, 0]
-    s = se.norm_series(s)
-    return s if len(s) >= 200 else None
-
-
-@st.cache_data(ttl=1800, show_spinner=False, max_entries=2)
-def _yahoo_candidates():
-    """{benchmark: [(ticker, close Series), ...]} for every candidate ticker that returned data."""
+# ═════════════════════════ prices + analysis ═════════════════════════
+def _split(raw, tickers) -> dict:
     out = {}
-    for name, cands in BENCH_YF.items():
-        found = []
-        for t in cands:
-            try:
-                s = _yf_close(t)
-            except Exception:
-                continue
-            if s is not None and (pd.Timestamp.now().normalize() - s.index[-1]).days <= 7:
-                found.append((t, s))
-        out[name] = found
-    if not any(out.values()):
-        raise ValueError("no benchmark candidate returned data")          # exceptions are never cached
+    if raw is None or getattr(raw, "empty", True):
+        return out
+    if isinstance(raw.columns, pd.MultiIndex):
+        lv0 = set(raw.columns.get_level_values(0))
+        if "Close" in lv0 and not (set(tickers) & lv0):
+            raw = raw.swaplevel(axis=1).sort_index(axis=1)
+        top = set(raw.columns.get_level_values(0))
+        for t in tickers:
+            if t in top:
+                f = raw[t].dropna(how="all")
+                if "Close" in f and f["Close"].notna().sum() >= 60:
+                    out[t] = f
+    elif len(tickers) == 1 and "Close" in raw:
+        out[tickers[0]] = raw.dropna(how="all")
     return out
 
 
-def _proxy_benchmark(frames: dict, index_name: str):
-    """Equal-weight, daily-rebalanced index of an index's constituents (built from the universe frames)."""
-    cons = archive_constituents(index_name)
-    if cons is None:
-        return None
-    cols = {s: frames[f"{s}.NS"]["Close"] for s in cons["symbol"] if f"{s}.NS" in frames}
-    if len(cols) < 20:
-        return None
-    px = pd.DataFrame(cols).sort_index().ffill()
-    r = (px / px.shift(1) - 1).mean(axis=1)
-    return se.norm_series((1 + r.fillna(0)).cumprod() * 100)
+def _yf_batch(tickers, period="2y", chunk=100) -> dict:
+    out = {}
+    for i in range(0, len(tickers), chunk):
+        part = tickers[i:i + chunk]
+        try:
+            raw = yf.download(part, period=period, interval="1d", group_by="ticker", auto_adjust=True,
+                              progress=False, threads=True)
+        except Exception:
+            continue
+        out.update(_split(raw, part))
+        time.sleep(0.4)
+    return out
 
 
-def _matches_proxy(candidate: pd.Series, proxy) -> bool:
-    """A candidate ticker must move like the index it claims to be (correlation of daily returns > 0.9)."""
-    if proxy is None:
-        return True
-    a = candidate / candidate.shift(1) - 1
-    b = proxy / proxy.shift(1) - 1
-    j = pd.concat([a, b], axis=1, join="inner").dropna().tail(120)
-    return len(j) >= 40 and float(j.corr().iloc[0, 1]) > 0.9
+@st.cache_data(ttl=3 * 3600, show_spinner=False, max_entries=2)
+def _prices(symbols: tuple, bucket: int) -> dict:
+    if yf is None:
+        raise RuntimeError("yfinance is not installed")
+    frames = _yf_batch([f"{s}.NS" for s in symbols] + list(BENCH_TICKERS.values()))
+    n = sum(1 for t in frames if t.endswith(".NS"))
+    if n < 50:
+        raise RuntimeError(f"Yahoo returned history for only {n} stocks")
+    return frames
 
 
-def _build_benchmarks(frames: dict):
-    """({name: close Series}, {name: source label}) for NIFTY 50, MIDCAP 100, SMALLCAP 100."""
-    benches, sources = {}, {}
-    n50 = frames.get("^NSEI")
-    if n50 is not None and len(n50) > 60:
-        benches["NIFTY 50"] = se.norm_series(n50["Close"])
-        sources["NIFTY 50"] = "Yahoo ^NSEI"
-    try:
-        cands = _yahoo_candidates()
-    except Exception:
-        cands = {}
-    for name in ("MIDCAP 100", "SMALLCAP 100"):
-        proxy = _proxy_benchmark(frames, BENCH_ARCHIVE[name])
-        chosen = next(((t, s) for t, s in cands.get(name, []) if _matches_proxy(s, proxy)), None)
-        if chosen:
-            benches[name], sources[name] = chosen[1], f"Yahoo {chosen[0]}"
-        elif proxy is not None:
-            benches[name], sources[name] = proxy, f"proxy · equal-weight {BENCH_ARCHIVE[name]} stocks"
-    return benches, sources
-
-
-@st.cache_data(ttl=900, show_spinner=False, max_entries=2)
-def _sector_analysis(symbols: tuple):
-    """Heavy part of SECTOR RANKING, cached 15 min: frames -> benchmarks -> sector analytics."""
-    meta = universe_meta()
-    if meta is None:
-        raise ValueError("stock universe unavailable")
-    frames = load_universe_frames(symbols)
-    benches, sources = _build_benchmarks(frames)
-    res = se.analyse_universe(frames, meta, "^NSEI", benches or None)
-    res["bench_sources"] = sources
+@st.cache_data(ttl=3 * 3600, show_spinner=False, max_entries=8)
+def _analysis(symbols: tuple, bench: str, weighting: str, min_turn: float, bucket: int) -> dict:
+    meta, _ = _universe_cached()
+    frames = _prices(symbols, bucket)
+    pan = rot.build_panels(frames, meta, min_turn)
+    benches = {k: frames[t]["Close"] for k, t in BENCH_TICKERS.items() if t in frames}
+    res = rot.analyse(pan, benches, bench, weighting)
+    nse = meta.set_index("symbol")["nse_sector"]
+    s = res["stocks"].assign(nse_sector=lambda d: d["symbol"].map(nse))
+    res["broad_rs"] = s.groupby("nse_sector")["ex1m"].median().to_dict()       # used by FPI FLOWS
     return res
 
 
-# ═════════════════════════ analytics ═════════════════════════
-def rank_sectors(indices, scope="SECTORAL"):
-    """RS rank vs NIFTY 50, LEADER/EMERGING/FADING/LAGGARD label, rotation quadrant."""
-    if indices is None or indices.empty or "NIFTY 50" not in indices["index"].values:
-        return pd.DataFrame()
-    keys = SCOPES.get(scope, ("SECTORAL",))
-    if keys:
-        cats = indices["key"].astype(str).str.upper().str.replace("_", " ", regex=False)
-        sector = indices[cats.apply(lambda x: any(k in x for k in keys))].copy()
-    else:
-        sector = indices.copy()
-    sector = sector[sector["index"].ne("NIFTY 50")].copy()
-    if sector.empty:
-        return sector
-    base = indices.loc[indices["index"].eq("NIFTY 50")].iloc[0]
-    for p in ("1d", "1w", "1m"):
-        sector[f"rs_{p}"] = sector[f"r{p}"] - base[f"r{p}"]
-    num = pd.Series(0.0, index=sector.index)
-    den = pd.Series(0.0, index=sector.index)
-    for col, wt in (("rs_1d", .2), ("rs_1w", .3), ("rs_1m", .5)):
-        ok = sector[col].notna()
-        num.loc[ok] += sector.loc[ok, col] * wt
-        den.loc[ok] += wt
-    sector["score"] = num / den.replace(0, np.nan)
-    sector["rank"] = sector["score"].rank(ascending=False, method="min").astype("Int64")
-    b1w, b1m = base.get("r1w"), base.get("r1m")
-    sector["rot_x"] = (1 + sector["r1m"] / 100) / (1 + b1m / 100) * 100 if pd.notna(b1m) else np.nan
-    sector["rot_y"] = (1 + sector["r1w"] / 100) / (1 + b1w / 100) * 100 if pd.notna(b1w) else np.nan
-
-    def quadrant(r):
-        if pd.isna(r.rot_x) or pd.isna(r.rot_y):
-            return "UNAVAILABLE"
-        return ("LEADING" if r.rot_y >= 100 else "FADING") if r.rot_x >= 100 else ("IMPROVING" if r.rot_y >= 100 else "WEAK")
-
-    def leadership(r):
-        if pd.isna(r.rs_1w) or pd.isna(r.rs_1m):
-            return "—"
-        if r.rs_1w > 0 and r.rs_1m > 0:
-            return "LEADER"
-        if r.rs_1w > 0:
-            return "EMERGING"
-        if r.rs_1m > 0:
-            return "FADING"
-        return "LAGGARD"
-
-    sector["quadrant"] = sector.apply(quadrant, axis=1)
-    sector["leadership"] = sector.apply(leadership, axis=1)
-    return sector.sort_values(["rank", "index"], na_position="last").reset_index(drop=True)
-
-
-def flow_stats(cons):
-    """Price-signed turnover proxy; reported turnover units are intentionally preserved."""
-    if cons is None or cons.empty or not {"pChange", "totalTradedValue"}.issubset(cons.columns):
-        return None
-    data = cons.dropna(subset=["pChange", "totalTradedValue"])
-    up = float(data.loc[data.pChange > 0, "totalTradedValue"].sum())
-    down = float(data.loc[data.pChange < 0, "totalTradedValue"].sum())
-    total = up + down
-    return {"up_value": up, "down_value": down, "net_value": up - down,
-            "net_pct": (up - down) / total * 100 if total else np.nan,
-            "up": int((data.pChange > 0).sum()), "down": int((data.pChange < 0).sum()),
-            "flat": int((data.pChange == 0).sum()), "stocks": len(data)}
-
-
-def stock_breadth(cons):
-    if cons is None or cons.empty or "pChange" not in cons:
-        return None, pd.DataFrame()
-    data = cons.copy()
-    data["pChange"] = pd.to_numeric(data["pChange"], errors="coerce")
-    data = data.dropna(subset=["pChange"])
-    up, down, flat = int((data.pChange > 0).sum()), int((data.pChange < 0).sum()), int((data.pChange == 0).sum())
-    total = len(data)
-    ratio = up / down if down else (float(up) if up else np.nan)
-    for c in ("nearWKH", "nearWKL"):
-        if c in data:
-            data[c] = pd.to_numeric(data[c], errors="coerce")
-    high = int(data.nearWKH.between(0, 1).sum()) if "nearWKH" in data else None
-    low = int(data.nearWKL.between(0, 1).sum()) if "nearWKL" in data else None
-    stats = {"total": total, "up": up, "down": down, "flat": flat, "net": up - down, "ratio": ratio,
-             "up_pct": up / total * 100 if total else np.nan,
-             "median": data.pChange.median() if total else np.nan, "near_high": high, "near_low": low}
-    return stats, data
-
-
-# ═════════════════════════ charts / tables ═════════════════════════
-def _rotation_chart(data):
-    """matplotlib fallback for the NSE-index rotation map (columns: index, rot_x, rot_y, quadrant)."""
-    data = data.dropna(subset=["rot_x", "rot_y"])
-    if data.empty:
-        st.info("Rotation plot unavailable: press LOAD INDEX HISTORY above to fetch the reference returns.")
-        return
+def _get_analysis(symbols, bench, weighting, min_turn):
+    key = (bench, weighting, min_turn)
     try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except ImportError:
-        st.info("Install matplotlib for the rotation plot; the table remains available.")
-        return
-    fig, ax = plt.subplots(figsize=(9, 5))
-    fig.patch.set_facecolor("#090b0f")
-    ax.set_facecolor("#090b0f")
-    dx = max(float((data.rot_x - 100).abs().max()) * 1.2, .6)
-    dy = max(float((data.rot_y - 100).abs().max()) * 1.2, .6)
-    ax.set(xlim=(100 - dx, 100 + dx), ylim=(100 - dy, 100 + dy))
-    ax.axhline(100, color="#39404b", lw=1)
-    ax.axvline(100, color="#39404b", lw=1)
-    for _, r in data.iterrows():
-        ax.scatter(r.rot_x, r.rot_y, s=32, color=QUAD.get(r.quadrant, "#9ca3af"))
-        ax.annotate(str(r["index"]).replace("NIFTY ", ""), (r.rot_x, r.rot_y), xytext=(4, 3),
-                    textcoords="offset points", fontsize=6.5, color="#d7dce2")
-    ax.set_xlabel("Relative trend · 1 month (100 = in line)", color="#9ca3af")
-    ax.set_ylabel("Relative momentum · 1 week (100 = in line)", color="#9ca3af")
-    ax.tick_params(colors="#9ca3af", labelsize=8)
-    for spine in ax.spines.values():
-        spine.set_color("#303640")
-    st.pyplot(fig, use_container_width=True)
-    plt.close(fig)
-
-
-def _index_table(df, key):
-    cols = [c for c in ["index", "key", "last", "r1d", "r1w", "r1m", "advances", "declines", "unchanged",
-                        "net_adv", "adv_pct", "ad_ratio", "pe", "pb", "dy"] if c in df]
-    view = df[cols].rename(columns={"index": "Index", "key": "Category", "last": "Last", "r1d": "1D %", "r1w": "1W %",
-                                    "r1m": "1M %", "advances": "Adv", "declines": "Dec", "unchanged": "Flat",
-                                    "net_adv": "Net Adv", "adv_pct": "Advancing %", "ad_ratio": "A/D",
-                                    "pe": "P/E", "pb": "P/B", "dy": "Div Yield"}).copy()
-    _fmt_ret(view, ["1D %", "1W %", "1M %"])
-    st.dataframe(view, hide_index=True, use_container_width=True, key=key, column_config={
-        "Advancing %": st.column_config.ProgressColumn("Advancing %", min_value=0, max_value=100, format="%.0f%%")})
-
-
-def _quad_pill(name: str) -> str:
-    c = QUAD.get(name, "#9ca3af")
-    return f'<span class="mf-stage" style="--sc:{c}">{ui.esc(name)}</span>'
-
-
-# ═════════════════════════ INDEX EXPLORER ═════════════════════════
-_EX_RENAME = {"symbol": "Symbol", "price": "Price", "weight": "Weight %", "r1d": "1D %", "r1w": "1W %",
-              "r1m": "1M %", "r3m": "3M %", "rs_1w": "RS 1W", "rs_1m": "RS 1M", "rs_3m": "RS 3M",
-              "relvol": "Rel Vol ×", "tv_ratio": "Value ×", "close_loc": "Close Loc",
-              "buy_score": "Buy Score", "sell_score": "Sell Score", "pressure": "Pressure",
-              "contrib": "Contrib (pp)"}
-
-
-def _ex_cfg():
-    cfg = {c: st.column_config.NumberColumn(c, format="%+.2f") for c in
-           ["1D %", "1W %", "1M %", "3M %", "RS 1W", "RS 1M", "RS 3M", "Contrib (pp)"]}
-    cfg["Weight %"] = st.column_config.NumberColumn("Weight %", format="%.2f")
-    cfg["Rel Vol ×"] = st.column_config.NumberColumn("Rel Vol ×", format="%.2f")
-    cfg["Value ×"] = st.column_config.NumberColumn("Value ×", format="%.2f")
-    cfg["Close Loc"] = st.column_config.NumberColumn("Close Loc", format="%.2f", help="0 = closed at the day's low, 1 = at the day's high")
-    cfg["Buy Score"] = st.column_config.ProgressColumn("Buy Score", min_value=0, max_value=100, format="%d")
-    cfg["Sell Score"] = st.column_config.ProgressColumn("Sell Score", min_value=0, max_value=100, format="%d")
-    return cfg
-
-
-def _ex_view(df, cols, n=None):
-    out = df[[c for c in cols if c in df]]
-    if n:
-        out = out.head(n)
-    return out.rename(columns=_EX_RENAME).reset_index(drop=True)
-
-
-def _render_explorer(indices, on_open=None):
-    st.markdown('<div class="arka-mf-section">INDEX EXPLORER · CONSTITUENT BREADTH, STRENGTH, VOLUME AND PRESSURE</div>', unsafe_allow_html=True)
-    names = indices["index"].dropna().astype(str).tolist()
-    pref = next((i for i, n in enumerate(names) if n.upper() == "NIFTY BANK"), 0)
-    c1, c2, c3 = st.columns([3, 1.4, 1.1])
-    with c1:
-        index_name = st.selectbox("Index", names, index=pref, key="mf_ex_index")
-    with c2:
-        bench = st.selectbox("Benchmark for RS", list(fe.BENCHMARKS), key="mf_ex_bench")
-    with c3:
-        st.write("")
-        st.write("")
-        if st.button("ANALYSE INDEX", type="primary", use_container_width=True, key="mf_ex_run"):
-            st.session_state["mf_ex_target"] = (index_name, bench)
-
-    target = st.session_state.get("mf_ex_target")
-    if not target:
-        st.info("Choose an index and press ANALYSE INDEX. Arka downloads every constituent's price history in one batch "
-                "(large indices such as NIFTY 500 can take a minute the first time; results are cached for 10 minutes).")
-        return
-    if target != (index_name, bench):
-        st.caption(f"Showing results for {target[0]} vs {target[1]} — press ANALYSE INDEX to update.")
-    name, bench_name = target
-
-    cons, source = get_constituent_symbols(name)
-    if cons is None:
-        st.warning(f"No constituent list available for {name}: NSE live API and the NSE archive CSV both returned nothing. "
-                   "Add an index_constituents.csv (columns: index,symbol[,weight]) to the repo root as a manual fallback.")
-        return
-    symbols = cons["symbol"].tolist()
-    weights = dict(zip(cons["symbol"], cons["ffmc"])) if "ffmc" in cons else {}
-    with st.spinner(f"Analysing {len(symbols)} constituents of {name}…"):
-        res = fe.analyse_index(symbols, weights, bench_name)
-    if res is None or "error" in res:
-        st.error("Could not analyse this index: " + (res or {}).get("error", "unknown error") +
-                 ". Yahoo may be rate-limiting; try again in a minute.")
-        return
-    t, s, series = res["table"], res["summary"], res["series"]
-
-    color = SIGNAL_COLOR.get(s["signal"], "#9ca3af")
-    st.markdown(f'<div class="arka-mf-banner" style="color:{color};border-color:{color}55">{name} · {s["signal"]} · '
-                f'index proxy {_pct(s["idx_1d"])} today with {_num(s["adv_pct"], 0)}% of stocks advancing</div>', unsafe_allow_html=True)
-    if s["deterioration"]:
-        st.warning("BREADTH DETERIORATION: the index proxy is within 2% of its 60-day high, but the share of stocks above their "
-                   "50-DMA has fallen 10+ points over the last 10 sessions. Fewer stocks are supporting the move.")
-
-    m = st.columns(6)
-    m[0].metric("Stocks analysed", s["stocks"], help=f"Constituents: {source}. Missing: {', '.join(s['missing'][:8]) or 'none'}")
-    m[1].metric("Advancing today", f'{_num(s["adv_pct"], 0)}%')
-    m[2].metric("Above 20 DMA", f'{_num(s["above20"], 0)}%')
-    m[3].metric("Above 50 DMA", f'{_num(s["above50"], 0)}%')
-    m[4].metric("Above 200 DMA", f'{_num(s["above200"], 0)}%')
-    m[5].metric("Proxy 1M", _pct(s["idx_1m"]), help=f"Weighted by {s['weight_basis']}. An approximation of the index, not the official index value.")
-    st.caption(f"As of {s['asof']} close · benchmark {bench_name} · weights: {s['weight_basis']} · "
-               f"{len(s['missing'])} symbol(s) had no Yahoo data.")
-
-    st.markdown('<div class="arka-mf-section">PARTICIPATION OVER TIME · % OF STOCKS ABOVE MOVING AVERAGES</div>', unsafe_allow_html=True)
-    plot = series.dropna(subset=["above50"]).set_index("date")[["above20", "above50", "above200"]].rename(
-        columns={"above20": "Above 20 DMA %", "above50": "Above 50 DMA %", "above200": "Above 200 DMA %"})
-    if not plot.empty:
-        st.line_chart(plot)
-
-    a, b = st.columns(2)
-    with a:
-        st.markdown('<div class="arka-mf-section">TOP CONTRIBUTORS TO TODAY\'S MOVE</div>', unsafe_allow_html=True)
-        st.dataframe(_ex_view(t.sort_values("contrib", ascending=False), ["symbol", "weight", "r1d", "contrib"], 8),
-                     hide_index=True, use_container_width=True, column_config=_ex_cfg())
-    with b:
-        st.markdown('<div class="arka-mf-section">BIGGEST DRAGS ON TODAY\'S MOVE</div>', unsafe_allow_html=True)
-        st.dataframe(_ex_view(t.sort_values("contrib"), ["symbol", "weight", "r1d", "contrib"], 8),
-                     hide_index=True, use_container_width=True, column_config=_ex_cfg())
-    st.markdown('<div class="arka-mf-note">Contribution = weight × 1-day return, in percentage points of the index move. '
-                'It shows when a few heavyweights are carrying (or dragging) the index.</div>', unsafe_allow_html=True)
-
-    a, b = st.columns(2)
-    with a:
-        st.markdown(f'<div class="arka-mf-section">RELATIVE-STRENGTH LEADERS · 1M VS {bench_name}</div>', unsafe_allow_html=True)
-        st.dataframe(_ex_view(t.sort_values("rs_1m", ascending=False), ["symbol", "r1m", "rs_1w", "rs_1m", "rs_3m"], 10),
-                     hide_index=True, use_container_width=True, column_config=_ex_cfg())
-    with b:
-        st.markdown(f'<div class="arka-mf-section">RELATIVE-STRENGTH LAGGARDS · 1M VS {bench_name}</div>', unsafe_allow_html=True)
-        st.dataframe(_ex_view(t.sort_values("rs_1m"), ["symbol", "r1m", "rs_1w", "rs_1m", "rs_3m"], 10),
-                     hide_index=True, use_container_width=True, column_config=_ex_cfg())
-
-    st.markdown('<div class="arka-mf-section">VOLUME WATCH · RELATIVE VOLUME ≥ 1.5× (20-DAY AVERAGE)</div>', unsafe_allow_html=True)
-    vw = t[t.relvol >= 1.5].sort_values("relvol", ascending=False)
-    if vw.empty:
-        st.info("No constituent is trading at 1.5× its 20-day average volume. (During market hours today's volume is still building.)")
-    else:
-        st.dataframe(_ex_view(vw, ["symbol", "price", "r1d", "relvol", "tv_ratio", "close_loc", "rs_1m"], 20),
-                     hide_index=True, use_container_width=True, column_config=_ex_cfg())
-
-    a, b = st.columns(2)
-    with a:
-        st.markdown('<div class="arka-mf-section">BUYING-PRESSURE CANDIDATES</div>', unsafe_allow_html=True)
-        bp = t[t.pressure.eq("BUYING PRESSURE")].sort_values(["buy_score", "relvol"], ascending=False)
-        if bp.empty:
-            st.info("None meet the buying-pressure threshold today.")
-        else:
-            st.dataframe(_ex_view(bp, ["symbol", "r1d", "relvol", "close_loc", "buy_score"], 15), hide_index=True, use_container_width=True, column_config=_ex_cfg())
-    with b:
-        st.markdown('<div class="arka-mf-section">SELLING-PRESSURE WATCH</div>', unsafe_allow_html=True)
-        sp = t[t.pressure.eq("SELLING PRESSURE")].sort_values(["sell_score", "relvol"], ascending=False)
-        if sp.empty:
-            st.info("None meet the selling-pressure threshold today.")
-        else:
-            st.dataframe(_ex_view(sp, ["symbol", "r1d", "relvol", "close_loc", "sell_score"], 15), hide_index=True, use_container_width=True, column_config=_ex_cfg())
-    st.markdown('<div class="arka-mf-note">Pressure score (0-100) = price direction 20 + volume expansion 25 + close location 20 + 1W relative strength 15 '
-                '+ 1M relative strength 10 + trend vs 50-DMA 10. It is evidence from price and volume, NOT proof that institutions bought or sold: '
-                'every trade has a buyer and a seller. Use it to shortlist, then verify on the chart.</div>', unsafe_allow_html=True)
-
-    st.markdown('<div class="arka-mf-section">ALL CONSTITUENTS · SELECT A ROW TO OPEN THE STOCK</div>', unsafe_allow_html=True)
-    q = st.text_input("Find stock", key="mf_ex_search").strip().upper()
-    full = t.sort_values("rs_1m", ascending=False)
-    if q:
-        full = full[full.symbol.str.contains(q, na=False)]
-    cols = ["symbol", "price", "weight", "r1d", "r1w", "r1m", "r3m", "rs_1m", "relvol", "close_loc", "buy_score", "sell_score", "pressure"]
-    view = _ex_view(full, cols)
-    event = st.dataframe(view, hide_index=True, use_container_width=True, column_config=_ex_cfg(),
-                         on_select="rerun" if on_open else "ignore",
-                         selection_mode="single-row" if on_open else "multi-row", key="mf_ex_table")
-    selected = getattr(getattr(event, "selection", None), "rows", []) if event is not None else []
-    if selected and on_open:
-        on_open(str(view.iloc[int(selected[0])]["Symbol"]))
-
-
-# ═════════════════════════ NIFTY INDICES (sectoral / thematic) ═════════════════════════
-def _scope_rows(indices, scope):
-    keys = SCOPES.get(scope, ())
-    cats = indices["key"].astype(str).str.upper().str.replace("_", " ", regex=False)
-    sub = indices[cats.apply(lambda x: any(k in x for k in keys))] if keys else indices
-    return _equity_index_rows(sub)
-
-
-def _render_nifty_indices(indices):
-    st.markdown('<div class="arka-mf-section">NIFTY INDICES · RSI, EMA POSITION, DISTANCE FROM EMAs AND PIVOTS</div>', unsafe_allow_html=True)
-    scope = st.radio("Universe", ["SECTORAL + THEMATIC", "SECTORAL", "THEMATIC", "BROAD MARKET"], horizontal=True, key="mf_ni_scope")
-    mode = st.radio("Change columns", ["Daily", "Weekly", "Both"], horizontal=True, key="mf_ni_mode", index=2)
-    sub = _scope_rows(indices, scope)
-    names = sub["index"].astype(str).tolist()
-    st.caption(f"{len(names)} NSE {scope.lower()} indices in the live feed. History-based columns need LOAD INDEX HISTORY (top of page).")
-    hists = index_histories(names + ["NIFTY 50"])
-    have = [n for n in names if n in hists]
-    live = sub.set_index("index")
-
-    if not have:
-        st.info("History not loaded yet — showing the live snapshot only. Press LOAD INDEX HISTORY above to add RSI, EMA chips, EMA distance and pivots.")
-        cols = [ui.C("#", t="rank"), ui.C("Index", "index", "sector"), ui.C("Price", "last", "num"),
-                ui.C("1D", "r1d", "pct"), ui.C("Adv", "advances", "int"), ui.C("Dec", "declines", "int")]
-        rows = sub.sort_values("r1d", ascending=False, na_position="last").to_dict("records")
-        ui.show_table(cols, rows)
-        return
-    try:
-        res = ix.analyse_histories({n: hists[n] for n in have}, "NIFTY 50")
+        res = _analysis(symbols, bench, weighting, min_turn, _bucket())
+        _LAST_RES[key] = res
+        return res, None
     except Exception as exc:
-        st.error(f"Could not analyse index history: {exc}")
-        return
-    res = res[res["index"].isin(names)].copy()
-    res["price"] = res["index"].map(live["last"]).fillna(res["price"])
-    res["r1d"] = res["index"].map(live["percentChange"]).fillna(res["r1d"])
-
-    sorts = {"1D %": ("r1d", False), "1W %": ("r1w", False), "RSI (daily)": ("d_rsi", False), "RSI (weekly)": ("w_rsi", False),
-             "Distance from 20-EMA": ("dist20", False), "Distance from 10-EMA": ("dist10", False), "Name": ("index", True)}
-    label = st.selectbox("Sort by", list(sorts), key="mf_ni_sort")
-    col, asc = sorts[label]
-    res = res.sort_values(col, ascending=asc, na_position="last")
-
-    cols = [ui.C("#", t="rank"), ui.C("Index", "index", "sector"), ui.C("Price", "price", "num")]
-    if mode in ("Daily", "Both"):
-        cols.append(ui.C("1D", "r1d", "pct", scale=2.0))
-    if mode in ("Weekly", "Both"):
-        cols.append(ui.C("1W", "r1w", "pct", scale=4.0))
-    cols += [ui.C("RSI D", "d_rsi", "rsi", tip="Daily RSI(14)"), ui.C("RSI W", "w_rsi", "rsi", tip="Weekly RSI(14)"),
-             ui.C("EMA 10·20·50·200", t="ema", tip="Green = price above that daily EMA, red = below"),
-             ui.C("vs 10", "dist10", "dist", scale=5.0, tip="% distance of price from the 10-EMA"),
-             ui.C("vs 20", "dist20", "dist", scale=8.0, tip="% distance of price from the 20-EMA"),
-             ui.C("vs 50", "dist50", "dist", scale=12.0),
-             ui.C("D-Pivot", "d_pivot", "text"), ui.C("W-Pivot", "w_pivot", "text")]
-    ui.show_table(cols, res.to_dict("records"), max_height=720)
-    miss = [n for n in names if n not in hists]
-    asof = res["asof"].max() if "asof" in res else ""
-    st.markdown(f'<div class="arka-mf-note">History as of {asof} close · {len(have)} of {len(names)} indices have history'
-                f'{(" (missing: " + ", ".join(miss[:6]) + ("…" if len(miss) > 6 else "") + ")") if miss else ""}. '
-                'EMA chips use DAILY EMAs: green = price above, red = below, grey = fewer bars than that EMA needs. '
-                '"vs 10 / vs 20" = % distance of price from the EMA (amber = stretched more than 6% above the 20-EMA). '
-                'RSI: 70+ hot, 50-70 bullish, below 40 weak. Pivots: classic levels from the previous completed day / week.</div>', unsafe_allow_html=True)
+        if key in _LAST_RES:
+            return _LAST_RES[key], f"{type(exc).__name__}: {exc}"
+        raise
 
 
-# ═════════════════════════ SECTOR RANKING (stock universe) ═════════════════════════
-_BSHORT = {"MARKET AVG": "MKT", "NIFTY 50": "N50", "MIDCAP 100": "MID100", "SMALLCAP 100": "SML100"}
-_SR_VIEWS = ["ROTATION RADAR", "SECTOR RANKING", "TREND · RSI & EMA", "VS BENCHMARKS", "TURNOVER A/D", "SECTOR TURNOVER", "CHAIKIN MONEY FLOW"]
+def _publish(res):
+    """Snapshot for HOME's rotation panel and the FPI view."""
+    t = res["table"]
+    st.session_state["mf_rot"] = {"asof": res["asof"], "bench": res["bench_name"],
+                                  "table": t[["sector", "action", "phase", "score", "ex1m", "r1w"]].copy()}
+    st.session_state["mf_broad_rs"] = res.get("broad_rs", {})
 
 
-def _sorted_records(df: pd.DataFrame, key: str, options: dict, default: str):
-    label = st.selectbox("Sort by", list(options), index=list(options).index(default), key=f"mf_sr_sort_{key}")
-    col, asc = options[label]
-    if col in df:
-        df = df.sort_values(col, ascending=asc, na_position="last")
-    return df.to_dict("records")
+# ═════════════════════════ shared blocks ═════════════════════════
+def _card(r: dict, bench: str, full: bool = False) -> str:
+    c = ACTION_C.get(r.get("action"), T3)
+    ph = r.get("phase") or "—"
+    why = list(r.get("why") or [])
+    warn = list(r.get("warn") or [])
+    n_why, n_warn = (len(why), len(warn)) if full else (3, 2)
+    stocks = _f(r.get("stocks"))
+    meta = (f'{_pill(r.get("action"), c)} <span style="color:{PHASE_C.get(ph, T3)}">{rot.compass(r.get("heading"))} '
+            f'{_e(ph.title())} {int(_f(r.get("in_phase")) or 0)} wk</span>' + (f" · {int(stocks)} stocks" if stocks else ""))
+    nums = (f'RS 1M {_num(r.get("ex1m"), 1, " pp", True)} · 3M {_num(r.get("ex3m"), 1, " pp", True)} · '
+            f'1W {_num(r.get("r1w"), 1, "%", True)}<br>{_num(r.get("pct20"), 0, "%")} above 20-EMA · '
+            f'{_num(r.get("up_pct5"), 0, "%")} up-turnover · CMF {_num(r.get("cmf"), 2, "", True)}')
+    lead = f'<div class="l">LEADERS · <b>{_e(r.get("leaders"))}</b></div>' if r.get("leaders") else ""
+    ul = "".join(f"<li>{_e(x)}</li>" for x in why[:n_why])
+    wl = "".join(f"<li>{_e(x)}</li>" for x in warn[:n_warn])
+    return (f'<div class="rd-card" style="--c:{c}"><div class="h"><span class="n">{_e(r.get("sector"))}</span>{_score(r.get("score"))}</div>'
+            f'<div class="m">{meta}</div><div class="m">{nums}</div><ul>{ul}</ul>'
+            + (f'<ul class="w">{wl}</ul>' if wl else "") + lead + "</div>")
 
 
-def _plot(fig, key, fallback_df=None):
+def _board(tbl: pd.DataFrame, bench: str) -> str:
+    recs = tbl.to_dict("records")
+    by = lambda a: [r for r in recs if r.get("action") == a]
+    sc = lambda r: _f(r.get("score")) or 0.0
+    drop = lambda r: (_f(r.get("score_2w")) or 0.0) - sc(r)
+    cols = [("BUY ZONE", GREEN, "Money arriving, trend confirmed, not stretched yet.",
+             [("★ Rotating in", by("ROTATING IN")[:6]), ("Watch next · turning up, not confirmed", by("WATCH")[:4])]),
+            ("HOLD", "#8AD66B", "Current leaders. Keep; add only on pullbacks to the 20-EMA.",
+             [("Leading", by("LEADING")[:6]), ("Stretched · wait for a pullback", by("STRETCHED")[:4])]),
+            ("AVOID / EXIT", RED, "Leadership fading or money leaving. No fresh buying.",
+             [("Weakening · biggest deterioration first", sorted(by("WEAKENING"), key=drop, reverse=True)[:5]),
+              ("Lagging · weakest first", sorted(by("LAGGING"), key=sc)[:5])])]
+    html = ""
+    for title, c, sub, parts in cols:
+        body = ""
+        for lab, rows in parts:
+            body += f'<div class="rd-sub">{_e(lab)}</div>'
+            body += "".join(_card(r, bench) for r in rows) or '<div class="rd-empty">None right now.</div>'
+        html += f'<div class="rd-col" style="--c:{c}"><div class="rd-ch"><b>{title}</b><span>{_e(sub)}</span></div>{body}</div>'
+    return f'<div class="rd-board">{html}</div>'
+
+
+def _heat_table(df: pd.DataFrame, kind: str, extra: dict | None = None) -> str:
+    """df: sectors (index) x period columns -> coloured HTML grid. extra: {header: fn(sector) -> html}."""
+    n = max(len(df), 2)
+    cols = list(df.columns)
+    head = "<th>Sector</th>" + "".join(f"<th>{_e(c)}</th>" for c in cols) + "".join(f"<th>{_e(k)}</th>" for k in (extra or {}))
+    body = []
+    for s, r in df.iterrows():
+        tds = []
+        for c in cols:
+            v = _f(r[c])
+            if v is None:
+                tds.append('<td style="background:#121212;color:#555">—</td>')
+                continue
+            if kind == "score":
+                d, txt = (v - 50) / 50, f"{v:.0f}"
+            elif kind == "pct":
+                d, txt = (v - 50) / 50, f"{v:.0f}%"
+            elif kind == "cmf":
+                d, txt = v / 0.15, f"{v:+.2f}"
+            elif kind == "rank":
+                d, txt = ((n + 1) / 2 - v) / ((n - 1) / 2), f"{v:.0f}"
+            else:
+                d, txt = 0.0, f"{v:.2f}"
+            tds.append(f'<td style="background:{_heat_bg(d)}">{txt}</td>')
+        for fn in (extra or {}).values():
+            tds.append(f"<td>{fn(s)}</td>")
+        body.append(f'<tr><td class="s">{_e(s)}</td>{"".join(tds)}</tr>')
+    return f'<div class="rd-hw"><table class="rd-ht"><thead><tr>{head}</tr></thead><tbody>{"".join(body)}</tbody></table></div>'
+
+
+def _rrg_fig(tbl: pd.DataFrame, tails: dict, highlight: list, label_mode: str, bench: str, unit: str = "weeks"):
+    """Relative Rotation Graph: dot = today, tail = path over the last periods, bigger dot = higher score."""
+    if go is None:
+        return None
+    recs = tbl.set_index("sector").to_dict("index")
+    cur = {s: t[-1] for s, t in tails.items() if t and s in recs}
+    if not cur:
+        return None
+    xs, ys = [p[0] for p in cur.values()], [p[1] for p in cur.values()]
+    for s in highlight:
+        for p in tails.get(s, []):
+            xs.append(p[0])
+            ys.append(p[1])
+    dx = max(1.5, max(abs(x - 100) for x in xs) * 1.15)
+    dy = max(1.5, max(abs(y - 100) for y in ys) * 1.15)
+    rgb = {"LEADING": "48,209,88", "WEAKENING": "255,159,10", "LAGGING": "255,69,58", "IMPROVING": "90,200,250"}
+    fig = go.Figure()
+    for name, x0, x1, y0, y1, xa, ya in (("IMPROVING", 100 - dx, 100, 100, 100 + dy, "left", "top"),
+                                         ("LEADING", 100, 100 + dx, 100, 100 + dy, "right", "top"),
+                                         ("LAGGING", 100 - dx, 100, 100 - dy, 100, "left", "bottom"),
+                                         ("WEAKENING", 100, 100 + dx, 100 - dy, 100, "right", "bottom")):
+        fig.add_shape(type="rect", x0=x0, x1=x1, y0=y0, y1=y1, fillcolor=f"rgba({rgb[name]},0.06)", line_width=0, layer="below")
+        fig.add_annotation(x=x0 if xa == "left" else x1, y=y1 if ya == "top" else y0, xanchor=xa, yanchor=ya, showarrow=False,
+                           text=f"<b>{name}</b>", font=dict(size=13, color=f"rgb({rgb[name]})"))
+    for s in highlight:
+        t = tails.get(s) or []
+        if len(t) < 2 or s not in recs:
+            continue
+        col = PHASE_C.get(recs[s].get("phase"), T2)
+        fig.add_trace(go.Scatter(x=[p[0] for p in t], y=[p[1] for p in t], mode="lines+markers", showlegend=False,
+                                 hoverinfo="skip", opacity=0.9, line=dict(color=col, width=2),
+                                 marker=dict(size=[3 + 4 * i / len(t) for i in range(len(t))], color=col)))
+        fig.add_annotation(x=t[-1][0], y=t[-1][1], ax=t[-2][0], ay=t[-2][1], xref="x", yref="y", axref="x", ayref="y",
+                           showarrow=True, arrowhead=2, arrowsize=1.3, arrowwidth=2, arrowcolor=col, text="")
+    order = sorted(cur, key=lambda s: -(_f(recs[s].get("score")) or 0))
+    if label_mode == "All":
+        labels = set(cur)
+    elif label_mode == "None":
+        labels = set()
+    else:
+        labels = set(highlight) | set(order[:6]) | {s for s in cur if recs[s].get("action") == "ROTATING IN"}
+    pos = ["top center", "bottom center", "middle right", "middle left"]
+    names = sorted(cur, key=lambda s: cur[s][0])
+    sizes = [10 + (_f(recs[s].get("score")) or 40) / 100 * 12 for s in names]
+    cols_ = [PHASE_C.get(recs[s].get("phase"), T2) for s in names]
+    hov = [f"<b>{_e(s)}</b><br>{_e(recs[s].get('action', ''))} · {_e(recs[s].get('phase', ''))}"
+           + (f" · score {_f(recs[s].get('score')):.0f}" if _f(recs[s].get("score")) is not None else "")
+           + f"<br>RS-Ratio {cur[s][0]:.2f} · RS-Momentum {cur[s][1]:.2f}" for s in names]
+    fig.add_trace(go.Scatter(x=[cur[s][0] for s in names], y=[cur[s][1] for s in names], mode="markers+text",
+                             text=[(s if len(s) <= 22 else s[:21] + "…") if s in labels else "" for s in names],
+                             textposition=[pos[i % 4] for i in range(len(names))], textfont=dict(size=11, color=cols_),
+                             hovertext=hov, hoverinfo="text", showlegend=False,
+                             marker=dict(size=sizes, color=cols_, line=dict(color="#000", width=1))))
+    ui._dark(fig, 660, legend=False, margin=(8, 8, 8, 8))
+    fig.update_xaxes(range=[100 - dx, 100 + dx], gridcolor="#151515", zeroline=False,
+                     title=f"RS-RATIO ·  ◀ weaker than {bench}   |   stronger than {bench} ▶")
+    fig.update_yaxes(range=[100 - dy, 100 + dy], gridcolor="#151515", zeroline=False,
+                     title=f"RS-MOMENTUM ·  ◀ slowing   |   accelerating ▶  ({unit})")
+    fig.add_vline(x=100, line_color="#3a3a3a", line_width=1)
+    fig.add_hline(y=100, line_color="#3a3a3a", line_width=1)
+    return fig
+
+
+def _show_fig(fig, key):
     if fig is None:
-        if fallback_df is not None:
-            st.line_chart(fallback_df)
-        else:
-            st.info("Install plotly (add `plotly` to requirements.txt) to see this chart.")
+        st.info("Install plotly (add `plotly` to requirements.txt) to see this chart.")
         return
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=key)
 
 
-def _plain_summary(rot, bench) -> str:
-    pick = lambda stg, n=4: rot.loc[rot.stage == stg, "sector"].head(n).tolist()
-    rin, imp, lead, ext, fade = pick("ROTATING IN"), pick("IMPROVING"), pick("LEADING"), pick("EXTENDED"), pick("FADING")
-    n_rin = int((rot.stage == "ROTATING IN").sum())
-    parts = []
-    if rin:
-        parts.append(f'<b style="color:{ui.GREEN}">{n_rin} sector{"s" if n_rin != 1 else ""} rotating in</b>: {ui.esc(", ".join(rin))}.')
-    else:
-        parts.append("<b>No sector is confirmed as rotating in today.</b>")
-    if imp:
-        parts.append(f'Catching up (watch list): <b style="color:{ui.CYAN}">{ui.esc(", ".join(imp))}</b>.')
-    if lead:
-        parts.append(f'Already leading: <b style="color:#8AD66B">{ui.esc(", ".join(lead))}</b>.')
-    if ext:
-        parts.append(f'Stretched, often pause first: <b style="color:{ui.YELLOW}">{ui.esc(", ".join(ext))}</b>.')
-    if fade:
-        parts.append(f'Losing steam: <b style="color:{ui.AMBER}">{ui.esc(", ".join(fade))}</b>.')
-    return f'<div class="mf-sum">{" ".join(parts)} <span style="color:#6f6f6f">(measured against {ui.esc(bench)})</span></div>'
+def _stock_rows(df: pd.DataFrame) -> list:
+    return [{k: (None if (not isinstance(v, (list, tuple, dict, str)) and pd.isna(v)) else v) for k, v in r.items()}
+            for r in df.to_dict("records")]
 
 
-def _events(rot) -> list:
-    """Sectors that changed lane in the last 5 / 10 sessions, improvements first."""
-    out = []
-    for r in rot.to_dict("records"):
-        src = r.get("moved_from")
-        if not src or r.get("quadrant") not in ui.LANE_VALUE:
-            continue
-        to = r["quadrant"]
-        r = dict(r)
-        r["move_html"] = f'{ui.stage_pill(src)} <span style="color:#777">→</span> {ui.stage_pill(to)}'
-        r["when_txt"] = f'last {int(r["moved_when"])} sessions'
-        r["_up"] = bool(r.get("moved_up"))
-        out.append(r)
-    out.sort(key=lambda r: (not r["_up"], -(r.get("score") or 0)))
-    return out
-
-
-def _key_labels(df, extra=(), n_top=7, n_bottom=3):
-    names = df.sort_values("score", ascending=False, na_position="last")["sector"].tolist()
-    return list(dict.fromkeys(names[:n_top] + names[-n_bottom:] + list(extra)))
-
-
-def _map_controls(prefix, df, default_hl, extra_labels=()):
-    """Names / trails pickers so the map stays readable. Returns (highlight list, label list or None)."""
-    mode = st.radio("Names on the map", ["Key sectors", "All sectors", "None"], horizontal=True, key=f"{prefix}_lbl")
-    options = df["sector"].tolist()
-    k = f"{prefix}_hl"
-    st.session_state[k] = [v for v in st.session_state.get(k, default_hl) if v in options]
-    hl = st.multiselect("Show the full 30-session trail for", options, key=k)
-    labels = None if mode == "All sectors" else [] if mode == "None" else _key_labels(df, extra_labels)
-    return hl, labels
-
-
-def _view_radar(rot, trails, res, bench):
-    st.markdown(ui.how_to_read(bench), unsafe_allow_html=True)
-    st.markdown(_plain_summary(rot, bench), unsafe_allow_html=True)
-    stages = rot["stage"].value_counts()
-    names = lambda s: ", ".join(rot.loc[rot.stage == s, "sector"].head(3)) or "none right now"
-    kp = [("★ Rotating in", int(stages.get("ROTATING IN", 0)), names("ROTATING IN"), ui.GREEN),
-          ("Leading", int(stages.get("LEADING", 0)), names("LEADING"), "#8AD66B"),
-          ("Improving", int(stages.get("IMPROVING", 0)), names("IMPROVING"), ui.CYAN),
-          ("Stretched", int(stages.get("EXTENDED", 0)), names("EXTENDED"), ui.YELLOW),
-          ("Fading", int(stages.get("FADING", 0)), names("FADING"), ui.AMBER),
-          ("Weak", int(stages.get("WEAK", 0)), names("WEAK"), ui.RED)]
-    st.markdown(ui.kpi_strip(kp), unsafe_allow_html=True)
-
-    st.markdown('<div class="arka-mf-section">1 · SECTORS TURNING UP · CONFIRMED BY TREND, MOMENTUM, STRENGTH vs THE BENCHMARK, BREADTH AND FLOW</div>', unsafe_allow_html=True)
-    top = rot[rot.stage == "ROTATING IN"].head(3)
-    if len(top) < 3:
-        extra = rot[rot.stage.isin(["IMPROVING", "LEADING"]) & ~rot.sector.isin(top.sector)].head(3 - len(top))
-        if top.empty:
-            st.info("No sector shows a confirmed fresh turn today. ROTATING IN needs a new 20-EMA reclaim / RSI-50 cross / 10-20 EMA cross / relative-strength turn, "
-                    "price above the 20-EMA, RSI 50+, not stretched, and a score of 55+. Showing the strongest improving / leading sectors instead.")
-        top = pd.concat([top, extra])
-    if not top.empty:
-        st.markdown('<div class="mf-picks">' + "".join(ui.pick_card(r, bench) for r in top.to_dict("records")) + "</div>", unsafe_allow_html=True)
-
-    st.markdown(f'<div class="arka-mf-section">2 · ROTATION BOARD · EVERY SECTOR IN ITS LANE vs {bench}</div>', unsafe_allow_html=True)
-    st.markdown(ui.rotation_board(rot.to_dict("records")), unsafe_allow_html=True)
-
-    st.markdown('<div class="arka-mf-section">3 · WHAT CHANGED · SECTORS THAT SWITCHED LANE RECENTLY</div>', unsafe_allow_html=True)
-    ev = _events(rot)
-    if ev:
-        ui.show_table([ui.C("Sector", "sector", "sector"), ui.C("Move", "move_html", "html", al=""), ui.C("Happened within", "when_txt", "text"),
-                       ui.C("Score", "score", "score"), ui.C("1W", "r1w", "pct", scale=4.0), ui.C("RSI", "rsi_d", "rsi")], ev, max_height=360)
-    else:
-        st.markdown('<div class="arka-mf-note">No sector has changed lane in the last 10 sessions: the rotation picture is stable.</div>', unsafe_allow_html=True)
-
-    st.markdown(f'<div class="arka-mf-section">4 · WHERE MONEY IS LEANING · EXTRA RETURN vs {bench} (PERCENTAGE POINTS)</div>', unsafe_allow_html=True)
-    win = st.radio("Window", ["1 week", "2 weeks", "1 month"], index=1, horizontal=True, key="mf_sr_money_win")
-    col = {"1 week": "ex1w", "2 weeks": "ex2w", "1 month": "ex1m"}[win]
-    d = rot.dropna(subset=[col]).sort_values(col, ascending=False)
-    if not d.empty:
-        vals = d[col].astype(float).tolist()
-        fig = ui.fig_hbar(d["sector"].tolist(), vals, [ui.GREEN if v >= 0 else ui.RED for v in vals])
-        if fig is None:
-            st.bar_chart(d.set_index("sector")[col], horizontal=True)
-        else:
-            _plot(fig, "mf_sr_money")
-    st.markdown('<div class="arka-mf-note">Green = the sector beat the benchmark over this window, red = it trailed. Sectors that move from red to green are where buying interest '
-                'is arriving; this is price evidence, not a record of who bought.</div>', unsafe_allow_html=True)
-
-    st.markdown(f'<div class="arka-mf-section">5 · ROTATION MAP vs {bench} · DOTS = TODAY, ARROWS = LAST 10 SESSIONS, BIGGER DOT = HIGHER SCORE</div>', unsafe_allow_html=True)
-    default_hl = rot[rot.stage.isin(["ROTATING IN", "IMPROVING"])]["sector"].head(3).tolist()
-    hl, labels = _map_controls("mf_sr_map", rot, default_hl, rot[rot.stage == "ROTATING IN"]["sector"].tolist())
-    fig = ui.fig_rrg(rot, trails, hl, labels)
-    if fig is None:
-        _rotation_chart(rot.rename(columns={"sector": "index", "rrg_x": "rot_x", "rrg_y": "rot_y"}))
-    else:
-        _plot(fig, "mf_sr_rrg")
-    st.markdown('<div class="arka-mf-note">Hover any dot for details. Colour = stage (green rotating in / leading, cyan improving, yellow stretched, amber fading, red weak). '
-                'An arrow pointing up and to the right means the sector is gaining on the benchmark.</div>', unsafe_allow_html=True)
-
-    st.markdown('<div class="arka-mf-section">6 · DETAILS · ALL SECTORS WITH THE NUMBERS BEHIND THE STAGES</div>', unsafe_allow_html=True)
-    opts = {"Rotation score": ("score", False), "1D %": ("r1d", False), "1W %": ("r1w", False), "1M %": ("r1m", False),
-            "RSI (daily)": ("rsi_d", False), "Distance from 20-EMA": ("dist20", False), "Momentum": ("rrg_y", False),
-            "Turnover share Δ (1W)": ("dshare_w", False)}
-    rows = _sorted_records(rot, "radar", opts, "Rotation score")
-    cols = [ui.C("#", t="rank"), ui.C("Sector", "sector", "sector", sub="stocks", sub_fmt="{} stocks"),
-            ui.C("Stage", "stage", "stage"), ui.C("Score", "score", "score", tip="0-100 rotation score (see methodology)"),
-            ui.C("Trend", "rrg_x", "num", d=1, tip=f"Relative trend vs {bench}: above 100 = beating its own 50-session average"),
-            ui.C("Momentum", "rrg_y", "num", d=1, tip="Is the relative trend speeding up? above 100 = yes"),
-            ui.C("1D", "r1d", "pct", scale=2.0), ui.C("1W", "r1w", "pct", scale=4.0), ui.C("RSI", "rsi_d", "rsi"),
-            ui.C("EMA 10·20·50·200", t="ema"), ui.C("vs 10", "dist10", "dist", scale=5.0), ui.C("vs 20", "dist20", "dist"),
-            ui.C("Fresh signals", "signals", "tags"),
-            ui.C("% >20EMA", "pct_above20", "num", d=0, suf="%", tip="Share of the sector's stocks above their 20-EMA"),
-            ui.C("CMF", "cmf", "num", d=2, tip="Chaikin money flow (20)"), ui.C("Leaders (1W)", "leaders", "muted")]
-    ui.show_table(cols, rows, max_height=760)
-
-    with st.expander("HOW THE ROTATION SCORE AND STAGES WORK"):
-        st.markdown(
-            "**Sector index.** Liquidity-weighted, daily-rebalanced average of the sector's stocks, so every sector is read like a chart.\n\n"
-            "**Which benchmark?** MARKET AVG (the whole universe, weighted the same way as the sectors) is the fair yardstick for sector rotation. "
-            "NIFTY 50 is weighted towards a few large caps; MIDCAP 100 and SMALLCAP 100 show the rotation within those segments.\n\n"
-            "**Score (0-100).** Trend 30 (above 20-EMA 10, above 50-EMA 10, 10-EMA over 20-EMA 5, 20-EMA over 50-EMA 5) · "
-            "Momentum 20 (RSI above 50: 10, RSI rising over 5 sessions: 5, RSI not above 75: 5) · "
-            "Relative strength 25 (Trend at or above 100: 10, Momentum at or above 100: 10, relative line above its 20-EMA: 5) · "
-            "Breadth 15 (half or more of the stocks above their 20-EMA: 8, that share rising over 5 sessions: 7) · "
-            "Flow 10 (Chaikin money flow above zero: 5, turnover share up over the week: 5).\n\n"
-            "**Lanes.** LEADING = beating the benchmark and speeding up · IMPROVING = behind but catching up · FADING = still ahead but losing steam · "
-            "WEAK = behind and falling further behind.\n\n"
-            "**Stages.** ★ ROTATING IN = LEADING or IMPROVING lane + a fresh turn in the last 5-10 sessions (20-EMA reclaim, RSI back above 50, "
-            "10/20-EMA cross or the relative line crossing up) + price above the 20-EMA + RSI 50 or more + not stretched + score 55 or more. "
-            "LEADING = trend intact. STRETCHED (EXTENDED) = leading but more than 6% above the 20-EMA or RSI above 72, which often pauses first.\n\n"
-            "**Does it work?** Open ROTATION LAB → SIGNAL TESTS to see how each stage performed over the following month.\n\n"
-            "**Use it as a shortlist.** These are signals from price, breadth and volume, not forecasts or advice.")
-
-
-def _view_ranking(rot, bench):
-    opts = {"Rotation score": ("score", False), "1D %": ("r1d", False), "1W %": ("r1w", False), "1M %": ("r1m", False),
-            "3M %": ("r3m", False), f"vs {bench} 1M": ("ex1m", False), "RSI (daily)": ("rsi_d", False),
-            "Distance from 20-EMA": ("dist20", False), "Turnover": ("turnover_cr", False), "Turnover share Δ (1W)": ("dshare_w", False)}
-    rows = _sorted_records(rot, "rank", opts, "Rotation score")
-    cols = [ui.C("#", t="rank"), ui.C("Sector", "sector", "sector", sub="stocks", sub_fmt="{} stocks"),
-            ui.C("30D", "spark", "spark"),
-            ui.C("1D", "r1d", "pct", scale=2.0), ui.C("1W", "r1w", "pct", scale=4.0), ui.C("1M", "r1m", "pct", scale=8.0),
-            ui.C("3M", "r3m", "pct", scale=15.0), ui.C(f"vs {_BSHORT.get(bench, bench)} 1M", "ex1m", "pct", scale=6.0, tip="Excess return vs the benchmark, percentage points"),
-            ui.C("RSI", "rsi_d", "rsi"), ui.C("EMA 10·20·50·200", t="ema"),
-            ui.C("vs 10", "dist10", "dist", scale=5.0), ui.C("vs 20", "dist20", "dist"),
-            ui.C("Turnover ₹Cr", "turnover_cr", "num", d=0), ui.C("Share %", "share", "num", d=2),
-            ui.C("Δ Share 1W", "dshare_w", "num", d=2, tip="Change in turnover share over 5 sessions, percentage points"),
-            ui.C("A/D net", "ad_net", "num", d=2), ui.C("% >20EMA", "pct_above20", "num", d=0, suf="%"),
-            ui.C("Stage", "stage", "stage")]
-    ui.show_table(cols, rows, max_height=760)
-    st.markdown('<div class="arka-mf-note">Returns come from the liquidity-weighted sector index (daily rebalanced). EMA chips: green = the sector index is above that daily EMA, red = below. '
-                '"vs 10 / vs 20" = % distance from the EMA (amber = more than 6% above the 20-EMA). Share % = sector turnover ÷ universe turnover. '
-                'A/D net = (advancers − decliners) ÷ stocks. Turnover = close × volume.</div>', unsafe_allow_html=True)
-
-
-def _view_trend(rot):
-    opts = {"RSI (daily)": ("rsi_d", False), "RSI (weekly)": ("rsi_w", False), "RSI change (5 sessions)": ("rsi_chg", False),
-            "Distance from 10-EMA": ("dist10", False), "Distance from 20-EMA": ("dist20", False),
-            "Distance from 50-EMA": ("dist50", False), "% stocks above 50-EMA": ("pct_above50", False)}
-    rows = _sorted_records(rot, "trend", opts, "Distance from 20-EMA")
-    cols = [ui.C("#", t="rank"), ui.C("Sector", "sector", "sector", sub="stocks", sub_fmt="{} stocks"),
-            ui.C("RSI D", "rsi_d", "rsi", tip="Daily RSI(14) of the sector index"), ui.C("RSI W", "rsi_w", "rsi", tip="Weekly RSI(14)"),
-            ui.C("Δ RSI 5d", "rsi_chg", "num", d=1, tip="RSI now minus RSI 5 sessions ago"), ui.C("Zone", "rsi_zone", "text"),
-            ui.C("EMA 10·20·50·200", t="ema"),
-            ui.C("vs 10", "dist10", "dist", scale=5.0), ui.C("vs 20", "dist20", "dist"), ui.C("vs 50", "dist50", "dist", scale=12.0),
-            ui.C("vs 200", "dist200", "dist", scale=25.0, ext=999), ui.C("Trend", "trend", "text"),
-            ui.C("% >50EMA", "pct_above50", "num", d=0, suf="%"), ui.C("% >200EMA", "pct_above200", "num", d=0, suf="%")]
-    ui.show_table(cols, rows, max_height=760)
-    valid = [r for r in rows if r.get("dist20") is not None and not pd.isna(r.get("dist20"))]
-    if valid:
-        st.markdown('<div class="arka-mf-section">DISTANCE FROM THE 20-EMA · WHO IS STRETCHED, WHO HAS PULLED BACK</div>', unsafe_allow_html=True)
-        valid = sorted(valid, key=lambda r: r["dist20"], reverse=True)
-        fig = ui.fig_hbar([r["sector"] for r in valid], [float(r["dist20"]) for r in valid],
-                          [ui.AMBER if r["dist20"] > ui.EXTENDED_PCT else (ui.GREEN if r["dist20"] >= 0 else ui.RED) for r in valid])
-        if fig is None:
-            st.bar_chart(pd.DataFrame({"vs 20-EMA %": [r["dist20"] for r in valid]}, index=[r["sector"] for r in valid]), horizontal=True)
-        else:
-            _plot(fig, "mf_sr_dist20")
-    st.markdown('<div class="arka-mf-note">Green chip = price above that EMA, red = below. Distance shows how far price has run from the average: near zero after a rise is a '
-                'pullback to support; a large positive number is stretched. RSI zones: 70+ overbought, 60-70 strong, 50-60 bullish, 40-50 weak, 30-40 bearish, below 30 oversold.</div>', unsafe_allow_html=True)
-
-
-def _view_benchmarks(res, rot):
-    rv, bret = se.returns_vs_benchmarks(res)
-    srcs = res.get("bench_sources", {})
-    benches = [b for b in se.COMPARE if b in res["bench_index"].columns]
-    kp = [(b, f'{bret["1m"][b]:+.1f}%' if pd.notna(bret["1m"][b]) else "—",
-           f'1M · 3M {bret["3m"][b]:+.1f}% · 1W {bret["1w"][b]:+.1f}%<br>{ui.esc(srcs.get(b, ""))}' if pd.notna(bret["3m"][b]) else ui.esc(srcs.get(b, "")),
-           ui.BENCH_COLORS.get(b, ui.T2)) for b in benches]
-    st.markdown(ui.kpi_strip(kp), unsafe_allow_html=True)
-
-    st.markdown('<div class="arka-mf-section">EVERY SECTOR vs NIFTY 50 · MIDCAP 100 · SMALLCAP 100 · EXCESS RETURN IN PERCENTAGE POINTS</div>', unsafe_allow_html=True)
-    short = {"NIFTY 50": "N50", "MIDCAP 100": "MID100", "SMALLCAP 100": "SML100"}
-    cols = [ui.C("#", t="rank"), ui.C("Sector", "sector", "sector")]
-    for p, scale in (("1w", 4.0), ("1m", 8.0), ("3m", 15.0)):
-        cols.append(ui.C(f"{p.upper()} return", f"r{p}", "pct", scale=scale))
-        for b in benches:
-            cols.append(ui.C(f"{p.upper()} vs {short[b]}", f"x{p}_{se.BK[b]}", "pct", scale=scale / 2, tip=f"Sector return minus {b} return"))
-    opts = {f"{p.upper()} vs {short[b]}": (f"x{p}_{se.BK[b]}", False) for p in ("1m", "3m", "1w") for b in benches}
-    opts.update({"1M return": ("r1m", False), "3M return": ("r3m", False)})
-    first = next(iter(opts))
-    rows = _sorted_records(rv, "bench", opts, first)
-    ui.show_table(cols, rows, max_height=700)
-
-    st.markdown('<div class="arka-mf-section">SECTOR vs BENCHMARKS · REBASED TO 100 AND RELATIVE LINE</div>', unsafe_allow_html=True)
-    order = rot["sector"].tolist()
-    c1, c2 = st.columns([2, 3])
-    sector = c1.selectbox("Sector", order, key="mf_sr_cmp_sector")
-    per = c2.radio("Window", ["1M", "3M", "6M", "1Y"], index=1, horizontal=True, key="mf_sr_cmp_window")
-    sessions = {"1M": 21, "3M": 63, "6M": 126, "1Y": 252}[per]
-    a, b = st.columns(2)
-    with a:
-        st.markdown('<div class="pf-mini" style="font:10px monospace;color:#8a8a8a">PRICE · everything starts at 100</div>', unsafe_allow_html=True)
-        df = se.rebased(res, sector, sessions)
-        _plot(ui.fig_lines(df, sector, base_line=True), "mf_sr_cmp_lines", df)
-    with b:
-        st.markdown('<div class="pf-mini" style="font:10px monospace;color:#8a8a8a">RELATIVE LINE · sector ÷ benchmark, rising = outperforming</div>', unsafe_allow_html=True)
-        rt = se.ratios(res, sector, sessions)
-        _plot(ui.fig_lines(rt, "", base_line=True), "mf_sr_cmp_ratio", rt)
-
-    if st.checkbox("Show every sector as small multiples (sector vs NIFTY 50 / MIDCAP 100 / SMALLCAP 100)", key="mf_sr_sm_on"):
-        per2 = st.radio("Small-multiples window", ["3M", "6M", "1Y"], index=1, horizontal=True, key="mf_sr_sm_window")
-        s2 = {"3M": 63, "6M": 126, "1Y": 252}[per2]
-        frames = {s: se.rebased(res, s, s2) for s in order}
-        fig = ui.fig_multiples(frames)
-        if fig is None:
-            st.info("Install plotly (add `plotly` to requirements.txt) for the small-multiples grid.")
-        else:
-            _plot(fig, "mf_sr_multiples")
-    st.markdown('<div class="arka-mf-note">Sector lines are liquidity-weighted sector indices built from the stock universe. NIFTY 50 comes from Yahoo; MIDCAP 100 and SMALLCAP 100 use the official index ticker when it '
-                'matches the index\'s own constituents, otherwise an equal-weight proxy built from those constituents (labelled above). A rising relative line means the sector is beating that benchmark.</div>', unsafe_allow_html=True)
-
-
-def _view_turn_ad(rot):
-    opts = {"% of turnover in advancers": ("pct_turn_adv", False), "Turnover A/D": ("turn_ad", False), "Up turnover": ("up_turn_cr", False)}
-    rows = _sorted_records(rot, "tad", opts, "% of turnover in advancers")
-    cols = [ui.C("#", t="rank"), ui.C("Sector", "sector", "sector", sub="stocks", sub_fmt="{} stocks"),
-            ui.C("Adv", "adv", "int"), ui.C("Dec", "dec", "int"),
-            ui.C("Up turnover ₹Cr", "up_turn_cr", "num", d=0), ui.C("Down turnover ₹Cr", "dn_turn_cr", "num", d=0),
-            ui.C("Turnover A/D", "turn_ad", "num", d=2), ui.C("% of turnover in advancers", "pct_turn_adv", "bar", suf="%")]
-    ui.show_table(cols, rows, max_height=700)
-    chart = pd.DataFrame(rows).set_index("sector")["pct_turn_adv"]
-    st.bar_chart(chart, horizontal=True)
-    st.markdown('<div class="arka-mf-note">Turnover A/D = turnover of stocks closing up ÷ turnover of stocks closing down. Above 1 means more money changed hands in rising stocks. '
-                'Every trade has two sides, so this shows where activity is concentrated, not who is buying.</div>', unsafe_allow_html=True)
-
-
-def _view_turnover(rot, res):
-    per = st.radio("Period", ["Daily", "Weekly"], horizontal=True, key="mf_sr_period")
-    dsh = "dshare_d" if per == "Daily" else "dshare_w"
-    opts = {"Turnover": ("turnover_cr", False), "Share %": ("share", False), "Today ÷ 20d average": ("turn_vs20", False), f"Δ Share ({per.lower()})": (dsh, False)}
-    rows = _sorted_records(rot, "turn", opts, "Turnover")
-    cols = [ui.C("#", t="rank"), ui.C("Sector", "sector", "sector", sub="stocks", sub_fmt="{} stocks"),
-            ui.C("Turnover ₹Cr", "turnover_cr", "num", d=0), ui.C("20d avg ₹Cr", "turn_avg20_cr", "num", d=0),
-            ui.C("Today ÷ 20d", "turn_vs20", "num", d=2, suf="×"), ui.C("Share %", "share", "num", d=2),
-            ui.C(f"Δ Share ({per.lower()})", dsh, "num", d=2)]
-    ui.show_table(cols, rows, max_height=700)
-    top = [r["sector"] for r in sorted(rows, key=lambda r: -(r.get("turnover_cr") or 0))[:6]]
-    st.markdown("**TURNOVER SHARE % · LAST 60 SESSIONS · TOP 6 SECTORS**")
-    st.line_chart(res["share_series"][top].rename_axis("date"))
-
-
-def _view_cmf(rot, res):
-    rot = rot.copy()
-    rot["d_cmf"] = rot["cmf"] - rot["cmf_5d"]
-    rot["cmf_signal"] = np.where(rot["cmf"] > .05, "ACCUMULATION", np.where(rot["cmf"] < -.05, "DISTRIBUTION", "NEUTRAL"))
-    opts = {"CMF 20": ("cmf", False), "Δ CMF (5d)": ("d_cmf", False)}
-    rows = _sorted_records(rot, "cmf", opts, "CMF 20")
-    cols = [ui.C("#", t="rank"), ui.C("Sector", "sector", "sector", sub="stocks", sub_fmt="{} stocks"),
-            ui.C("CMF 20", "cmf", "num", d=2), ui.C("CMF 5d ago", "cmf_5d", "num", d=2), ui.C("Δ CMF", "d_cmf", "num", d=2),
-            ui.C("Signal", "cmf_signal", "text")]
-    ui.show_table(cols, rows, max_height=700)
-    chart = pd.DataFrame(rows).set_index("sector")["cmf"]
-    st.bar_chart(chart, horizontal=True)
-    pick = st.multiselect("Plot CMF history", [r["sector"] for r in rows], default=[r["sector"] for r in rows[:4]], key="mf_sr_cmf_pick")
-    if pick:
-        st.line_chart(res["cmf_series"][pick].rename_axis("date"))
-    st.markdown('<div class="arka-mf-note">Chaikin Money Flow (20) = Σ money-flow-volume ÷ Σ volume over 20 sessions, aggregated across the sector\'s stocks. '
-                'Positive = closes tend to land in the upper part of the day\'s range on volume (accumulation-like); negative = lower part (distribution-like). '
-                'The ±0.05 band is a convention, not a forecast.</div>', unsafe_allow_html=True)
-
-
-def _drilldown(res, rot, on_open):
-    st.markdown('<div class="arka-mf-section">STOCKS IN A SECTOR · RSI, EMA CHIPS, DISTANCE FROM 10 / 20 EMA</div>', unsafe_allow_html=True)
-    stk = res["stocks"]
-    c1, c2 = st.columns([3, 2])
-    pick = c1.selectbox("Sector", rot["sector"].tolist(), key="mf_sr_drill")
-    opts = {"Turnover": ("turnover_cr", False), "1D %": ("r1d", False), "1W %": ("r1w", False), "1M %": ("r1m", False),
-            "RSI": ("rsi", False), "Distance from 20-EMA": ("dist20", False), "Distance from 10-EMA": ("dist10", False)}
-    label = c2.selectbox("Sort stocks by", list(opts), key="mf_sr_drill_sort")
-    col, asc = opts[label]
-    sub = stk[stk["sector"] == pick].sort_values(col, ascending=asc, na_position="last").copy()
-    sub["bo"] = np.where(sub["bo10"], "✔", "—")
-    cols = [ui.C("#", t="rank"), ui.C("Symbol", "symbol", "sector"), ui.C("Price", "price", "num"),
-            ui.C("1D", "r1d", "pct", scale=3.0), ui.C("1W", "r1w", "pct", scale=6.0), ui.C("1M", "r1m", "pct", scale=12.0),
-            ui.C("RSI", "rsi", "rsi"), ui.C("EMA 10·20·50·200", t="ema"),
-            ui.C("vs 10", "dist10", "dist", scale=6.0), ui.C("vs 20", "dist20", "dist", scale=10.0),
-            ui.C("Turnover ₹Cr", "turnover_cr", "num", d=1), ui.C("CMF 20", "cmf", "num", d=2), ui.C("Breakout 10d", "bo", "text")]
-    ui.show_table(cols, sub.to_dict("records"), max_height=620)
-    if on_open and not sub.empty:
-        o1, o2 = st.columns([3, 1])
-        sym = o1.selectbox("Open stock in Arka", sub["symbol"].tolist(), key="mf_sr_open_sym")
-        o2.write("")
-        o2.write("")
-        if o2.button("OPEN", key="mf_sr_open_btn", use_container_width=True):
-            on_open(str(sym))
-
-
-def _render_sector_ranking(on_open=None):
-    st.markdown('<div class="arka-mf-section">SECTOR RANKING · WHERE MONEY IS ROTATING ACROSS THE STOCK UNIVERSE</div>', unsafe_allow_html=True)
-    meta = universe_meta()
-    if meta is None:
-        st.warning("The stock universe could not be downloaded: NSE and niftyindices.com are refusing this cloud server right now. "
-                   "The app retries automatically every 10 minutes and keeps a copy once one download succeeds.")
-        st.markdown('<div class="arka-mf-note"><b>Permanent fix (2 minutes):</b> download these two files on your computer from '
-                    '<a href="https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv" target="_blank">ind_nifty500list.csv</a> and '
-                    '<a href="https://www.niftyindices.com/IndexConstituent/ind_niftymicrocap250_list.csv" target="_blank">ind_niftymicrocap250_list.csv</a>, '
-                    'then upload them to a folder named <code>data</code> in your GitHub repo (Add file → Upload files, type <code>data/</code> before the name). '
-                    'Arka reads them first, so Sector Ranking and Index Explorer work even when NSE blocks the server. '
-                    'Refresh them every few months, when NSE rebalances its indices. Other index files (e.g. <code>ind_niftybanklist.csv</code>) can go in the same folder.</div>',
-                    unsafe_allow_html=True)
-        if st.button("RETRY NOW", key="mf_sr_retry"):
-            _NSE_STATE["archive_down"].clear()
-            _universe_cached.clear()
-            st.rerun()
+def _open_picker(symbols: list, key: str, on_open):
+    if not on_open or not symbols:
         return
-    c1, c2 = st.columns([1.7, 5])
-    with c1:
-        if st.button("LOAD / REFRESH SECTOR DATA", type="primary", use_container_width=True, key="mf_sr_run"):
-            if st.session_state.get("mf_sr_ready"):
-                for fn in (load_universe_frames, _sector_analysis, _yahoo_candidates):
-                    fn.clear()
-            st.session_state["mf_sr_ready"] = True
-    with c2:
-        st.markdown(f'<div class="arka-mf-note">Downloads ~2 years of daily prices for {len(meta)} stocks (Yahoo, batched; the first load can take 2-3 minutes, '
-                    'then cached 15 minutes). Sector = NSE industry classification. Each sector becomes a liquidity-weighted index, read with RSI, EMAs, '
-                    'relative strength, breadth and turnover.</div>', unsafe_allow_html=True)
-    if not st.session_state.get("mf_sr_ready"):
-        st.info("Press LOAD / REFRESH SECTOR DATA to build the sector radar.")
-        return
-    with st.spinner(f"Loading price history for {len(meta)} stocks and building sector indices…"):
-        try:
-            res = _sector_analysis(tuple(meta["symbol"]))
-        except Exception as exc:
-            st.error(f"Sector data unavailable right now: {exc}. Yahoo may be rate-limiting; try again in a minute.")
-            return
-    st.session_state["mf_sr_res"] = res          # reused by ROTATION LAB (stock-built sectors + FPI cross-check)
-    benches = list(res["bench_index"].columns)
-    if not benches:
-        st.error("No benchmark series could be built, so relative strength cannot be computed.")
-        return
-    st.caption(f"As of {res['asof']} close · {res['n_stocks']} stocks in {len(res['sectors'])} sectors · "
-               f"{len(res['unmapped'])} symbols had no Yahoo data · {len(res['stale'])} stale tickers skipped.")
-
-    bench = st.radio("Compare sectors against", benches, horizontal=True, key="mf_sr_bench2")
-    st.caption({"MARKET AVG": "MARKET AVG = the whole universe, weighted like the sectors: the fair test of whether a sector is beating the market.",
-                "NIFTY 50": "NIFTY 50 is weighted towards a few large caps, so broad sectors can look weak against it even in a healthy market.",
-                "MIDCAP 100": "Rotation measured against the mid-cap segment.",
-                "SMALLCAP 100": "Rotation measured against the small-cap segment."}.get(bench, ""))
-    view = st.radio("View", _SR_VIEWS, horizontal=True, key="mf_sr_view")
-    try:
-        rot, trails = se.rotation_table(res, bench)
-    except Exception as exc:
-        st.error(f"Could not compute rotation versus {bench}: {exc}")
-        return
-    rot["spark"] = rot["sector"].map(res["sparks"])
-    rot["rsi_chg"] = rot["rsi_d"] - rot["rsi_d_5"]
-    rot["rsi_zone"] = rot["rsi_d"].map(ui.rsi_zone)
-    rot["trend"] = [se.trend_label(a, b, c) for a, b, c in zip(rot["ab20"], rot["ab50"], rot["ab200"])]
-
-    if view == "ROTATION RADAR":
-        _view_radar(rot, trails, res, bench)
-    elif view == "SECTOR RANKING":
-        _view_ranking(rot, bench)
-    elif view == "TREND · RSI & EMA":
-        _view_trend(rot)
-    elif view == "VS BENCHMARKS":
-        _view_benchmarks(res, rot)
-    elif view == "TURNOVER A/D":
-        _view_turn_ad(rot)
-    elif view == "SECTOR TURNOVER":
-        _view_turnover(rot, res)
-    else:
-        _view_cmf(rot, res)
-    _drilldown(res, rot, on_open)
-    st.caption("Evidence from price, breadth and volume for research and shortlisting, not investment advice.")
+    a, b = st.columns([3, 1])
+    sym = a.selectbox("Open a stock in Arka", symbols, key=f"{key}_sym", label_visibility="collapsed")
+    if b.button("OPEN STOCK ▸", key=f"{key}_btn", use_container_width=True):
+        on_open(str(sym))
 
 
-def _render_index_rotation(sector, scope):
-    """SECTOR ROTATION view (NSE sectoral / thematic indices): lanes first, numbers second."""
-    miss = int(sector[["r1w", "r1m"]].isna().any(axis=1).sum())
-    if miss:
-        st.warning(f"1-week and 1-month returns are missing for {miss} of {len(sector)} indices: NSE's live snapshot does not include them. "
-                   "Load them once (about a minute) and the lanes, map and table fill in.")
-        if st.button("LOAD 1W / 1M DATA FOR THESE INDICES", type="primary", key="mf_rot_load"):
-            names = list(dict.fromkeys(sector["index"].astype(str).tolist() + ["NIFTY 50"]))
-            bar = st.progress(0.0, text=f"Loading index history · 0 / {len(names)}")
-            load_index_histories(names, progress=lambda f, t: bar.progress(min(f, 1.0), text=t))
-            bar.empty()
-            st.rerun()
-    ready = sector.dropna(subset=["rot_x", "rot_y"]).copy()
-    st.markdown(ui.how_to_read("NIFTY 50").replace(" The arrow shows where the sector moved in the last 10 sessions.", ""), unsafe_allow_html=True)
-    if ready.empty:
-        st.info("The lanes and map appear as soon as 1W and 1M returns are loaded (button above). Until then only today's move is available.")
-    else:
-        ready["sector"] = ready["index"]
-        ready["stage"] = ready["quadrant"]
-        ready["score_plain"] = ready["score"]
-        ready["score"] = np.nan
-        ready["meta_extra"] = ready["rs_1w"].map(lambda v: f"vs N50 {v:+.1f}%" if pd.notna(v) else "")
-        pick = lambda lead, n=5: ready.loc[ready.leadership == lead, "sector"].head(n).tolist()
-        em, ld, fd = pick("EMERGING"), pick("LEADER"), pick("FADING")
-        parts = []
-        if em:
-            parts.append(f'<b style="color:{ui.CYAN}">Early rotation candidates</b> (ahead of NIFTY 50 this week, still behind this month): {ui.esc(", ".join(em))}.')
-        else:
-            parts.append("<b>No index is newly turning up against NIFTY 50.</b>")
-        if ld:
-            parts.append(f'Leading on both 1W and 1M: <b style="color:{ui.GREEN}">{ui.esc(", ".join(ld))}</b>.')
-        if fd:
-            parts.append(f'Ahead this month but slipping this week: <b style="color:{ui.AMBER}">{ui.esc(", ".join(fd))}</b>.')
-        st.markdown(f'<div class="mf-sum">{" ".join(parts)}</div>', unsafe_allow_html=True)
-
-        st.markdown('<div class="arka-mf-section">ROTATION BOARD · EVERY INDEX IN ITS LANE vs NIFTY 50</div>', unsafe_allow_html=True)
-        st.markdown(ui.rotation_board(ready.to_dict("records"), show_score=False), unsafe_allow_html=True)
-
-        st.markdown('<div class="arka-mf-section">ROTATION MAP · DOTS = TODAY (1M TREND, 1W MOMENTUM)</div>', unsafe_allow_html=True)
-        order = ready.sort_values("score_plain", ascending=False)["sector"].tolist()
-        mode = st.radio("Names on the map", ["Key indices", "All indices", "None"], horizontal=True, key="mf_ir_lbl")
-        labels = None if mode == "All indices" else [] if mode == "None" else list(dict.fromkeys(order[:6] + order[-3:] + em))
-        trails = {r["sector"]: [(float(r["rot_x"]), float(r["rot_y"]))] for r in ready.to_dict("records")}
-        fig = ui.fig_rrg(ready, trails, [], labels)
-        if fig is None:
-            _rotation_chart(sector)
-        else:
-            _plot(fig, "mf_ir_rrg")
-
-    st.markdown('<div class="arka-mf-section">DETAILS · OUTPERFORMANCE vs NIFTY 50</div>', unsafe_allow_html=True)
-    rows = sector.to_dict("records")
-    for r in rows:
-        r["lead_html"] = ('<span class="mf-stage" style="--sc:' +
-                          {"LEADER": "#30D158", "EMERGING": "#5AC8FA", "FADING": "#FF9F0A", "LAGGARD": "#FF453A"}.get(r["leadership"], "#5A5A5A") +
-                          f'">{ui.esc(r["leadership"])}</span>')
-        r["rot_html"] = _quad_pill(r["quadrant"])
-    cols = [ui.C("#", "rank", "num", d=0), ui.C("Index", "index", "sector"), ui.C("Last", "last", "num"),
-            ui.C("1D", "r1d", "pct", scale=2.0), ui.C("1W", "r1w", "pct", scale=4.0), ui.C("1M", "r1m", "pct", scale=8.0),
-            ui.C("vs N50 1W", "rs_1w", "pct", scale=3.0), ui.C("vs N50 1M", "rs_1m", "pct", scale=6.0),
-            ui.C("Outperf. score", "score", "num", d=2), ui.C("Adv", "advances", "int"), ui.C("Dec", "declines", "int"),
-            ui.C("Leadership", "lead_html", "html"), ui.C("Lane", "rot_html", "html")]
-    ui.show_table(cols, rows, max_height=700)
-    st.markdown('<div class="arka-mf-note">Outperformance score = 20% 1D + 30% 1W + 50% 1M return versus NIFTY 50 (re-weighted over the periods that have data). '
-                'LEADER = ahead on both 1W and 1M · EMERGING = ahead on 1W only · FADING = ahead on 1M only · LAGGARD = behind on both. '
-                'Descriptive, not predictive. For the full stock-based radar with RSI, EMAs and stages, open SECTOR RANKING.</div>', unsafe_allow_html=True)
-    chart = sector.set_index("index").score.dropna().sort_values()
-    if not chart.empty:
-        st.markdown("**OUTPERFORMANCE SCORE**")
-        st.bar_chart(chart, horizontal=True)
-
-
-# ═════════════════════════ views that used to be tabs ═════════════════════════
-def _render_rotation_lab(on_open):
-    """Lazy import: a problem inside the Lab must never take down the rest of Money Flow."""
-    try:
-        import rotation_lab as rl
-    except Exception as exc:
-        st.error(f"Rotation Lab could not be loaded: {type(exc).__name__}: {exc}. "
-                 "Check that rotation_lab.py and rotation_backtest.py are in the repo root next to money_flow.py.")
-        return
-    rl.render_rotation_lab(on_open)
-
-
-def _view_overview(equity):
-    a, b = st.columns(2)
-    movers = equity.dropna(subset=["r1d"]).sort_values("r1d", ascending=False)
-    pcols = ["index", "key", "r1d", "r1w", "r1m"]
-    ren = {"index": "Index", "key": "Category", "r1d": "1D %", "r1w": "1W %", "r1m": "1M %"}
-    with a:
-        st.markdown('<div class="arka-mf-section">TOP EQUITY INDEX PERFORMERS · 1D</div>', unsafe_allow_html=True)
-        top = _fmt_ret(movers[pcols].head(10).copy(), ["r1d", "r1w", "r1m"]).rename(columns=ren)
-        st.dataframe(top, hide_index=True, use_container_width=True)
-    with b:
-        st.markdown('<div class="arka-mf-section">WEAKEST EQUITY INDEX PERFORMERS · 1D</div>', unsafe_allow_html=True)
-        weak = _fmt_ret(movers.sort_values("r1d")[pcols].head(10).copy(), ["r1d", "r1w", "r1m"]).rename(columns=ren)
-        st.dataframe(weak, hide_index=True, use_container_width=True)
-    st.markdown('<div class="arka-mf-section">INDEX PARTICIPATION BY CATEGORY</div>', unsafe_allow_html=True)
-    cats = equity.groupby("key", dropna=False).agg(
-        Indexes=("index", "count"), Up=("r1d", lambda s: int((s > 0).sum())), Down=("r1d", lambda s: int((s < 0).sum())),
-        Flat=("r1d", lambda s: int((s == 0).sum())), m1d=("r1d", "median"), m1w=("r1w", "median"),
-        m1m=("r1m", "median")).reset_index().rename(columns={"key": "Category"})
-    _fmt_ret(cats, ["m1d", "m1w", "m1m"])
-    cats = cats.rename(columns={"m1d": "Median 1D %", "m1w": "Median 1W %", "m1m": "Median 1M %"})
-    st.dataframe(cats, hide_index=True, use_container_width=True)
-
-
-def _view_breadth(indices, on_open):
-    st.markdown('<div class="arka-mf-section">INDEX-LEVEL ADVANCE / DECLINE · ALL NSE INDICES</div>', unsafe_allow_html=True)
-    categories = ["ALL CATEGORIES"] + sorted(indices.key.dropna().astype(str).unique().tolist())
-    cat = st.selectbox("Index category", categories, key="mf_breadth_category")
-    idxdata = indices if cat == "ALL CATEGORIES" else indices[indices.key.astype(str).eq(cat)]
-    usable = idxdata.dropna(subset=["advances", "declines"])
-    if not usable.empty:
-        vals = st.columns(4)
-        vals[0].metric("Indexes with A/D", len(usable))
-        vals[1].metric("Advancing majority", int((usable.advances > usable.declines).sum()))
-        vals[2].metric("Declining majority", int((usable.advances < usable.declines).sum()))
-        med = usable.adv_pct.median()
-        vals[3].metric("Median advancing %", f"{med:.1f}%" if pd.notna(med) else "—")
-        plot = idxdata.dropna(subset=["adv_pct"]).sort_values("adv_pct")
-        if not plot.empty:
-            st.bar_chart(plot.set_index("index").adv_pct, horizontal=True)
-    _index_table(idxdata.sort_values("adv_pct", ascending=False, na_position="last"), "mf_index_breadth_table")
-
-    st.markdown('<div class="arka-mf-section">STOCK-LEVEL BREADTH · SELECT ONE INDEX UNIVERSE</div>', unsafe_allow_html=True)
-    names = indices["index"].dropna().astype(str).tolist()
-    preferred = next((i for i, n in enumerate(names) if n.upper() == "NIFTY 500"), 0)
-    csel, cref = st.columns([4, 1])
-    with csel:
-        universe = st.selectbox("Constituent universe", names, index=preferred, key="mf_breadth_universe")
-    with cref:
-        st.write("")
-        st.write("")
-        if st.button("REFRESH BREADTH", key="mf_breadth_refresh", use_container_width=True):
-            fetch_constituents.clear()
-            st.rerun()
-    cons = fetch_constituents(universe)
-    stats, detail = stock_breadth(cons)
-    if stats is None:
-        st.warning("NSE returned no constituent data for this universe. Try another index or refresh later.")
-        return
-    m = st.columns(5)
-    m[0].metric("Stocks counted", stats["total"])
-    m[1].metric("Advancing", stats["up"], f"{stats['up_pct']:.1f}%" if pd.notna(stats["up_pct"]) else None)
-    m[2].metric("Declining", stats["down"])
-    m[3].metric("Stock A/D ratio", _num(stats["ratio"]))
-    m[4].metric("Net advances", f"{stats['net']:+d}")
-    z = st.columns(4)
-    z[0].metric("Unchanged", stats["flat"])
-    z[1].metric("Median stock move", _pct(stats["median"]))
-    z[2].metric("Within 1% of 52W high", "—" if stats["near_high"] is None else stats["near_high"])
-    z[3].metric("Within 1% of 52W low", "—" if stats["near_low"] is None else stats["near_low"])
-    st.bar_chart(pd.DataFrame({"Stocks": [stats["up"], stats["down"], stats["flat"]]}, index=["Advancing", "Declining", "Unchanged"]))
-    l, r = st.columns(2)
-    fields = [c for c in ["symbol", "lastPrice", "pChange", "totalTradedVolume", "nearWKH", "nearWKL"] if c in detail]
-    rename = {"symbol": "Symbol", "lastPrice": "Price", "pChange": "1D %", "totalTradedVolume": "Volume",
-              "nearWKH": "% from 52W High", "nearWKL": "% from 52W Low"}
-    with l:
-        st.markdown("**TOP ADVANCERS**")
-        st.dataframe(detail.sort_values("pChange", ascending=False)[fields].head(10).rename(columns=rename), hide_index=True, use_container_width=True)
-    with r:
-        st.markdown("**TOP DECLINERS**")
-        st.dataframe(detail.sort_values("pChange")[fields].head(10).rename(columns=rename), hide_index=True, use_container_width=True)
-    search, direction = st.columns([2, 1])
-    query = search.text_input("Search constituents", key="mf_breadth_search").strip().upper()
-    move = direction.selectbox("Filter", ["All", "Advancers", "Decliners", "Unchanged"], key="mf_breadth_filter")
-    filtered = detail.copy()
-    if query:
-        filtered = filtered[filtered.symbol.astype(str).str.contains(query, na=False)]
-    if move == "Advancers":
-        filtered = filtered[filtered.pChange > 0]
-    elif move == "Decliners":
-        filtered = filtered[filtered.pChange < 0]
-    elif move == "Unchanged":
-        filtered = filtered[filtered.pChange == 0]
-    fields = [c for c in ["symbol", "lastPrice", "pChange", "totalTradedVolume", "value_raw", "yearHigh", "yearLow", "nearWKH", "nearWKL"] if c in filtered]
-    rename = {"symbol": "Symbol", "lastPrice": "Price", "pChange": "1D %", "totalTradedVolume": "Volume",
-              "value_raw": "Traded Value (NSE units)", "yearHigh": "52W High", "yearLow": "52W Low",
-              "nearWKH": "% from 52W High", "nearWKL": "% from 52W Low"}
-    st.caption(f"Showing {len(filtered)} of {len(detail)} returned constituents. Live snapshot, not a time series — use INDEX EXPLORER for 120-day history.")
-    table = filtered[fields].rename(columns=rename).reset_index(drop=True)
-    event = st.dataframe(table, hide_index=True, use_container_width=True,
-                         on_select="rerun" if on_open else "ignore",
-                         selection_mode="single-row" if on_open else "multi-row", key="mf_breadth_stock_table")
-    selected = getattr(getattr(event, "selection", None), "rows", []) if event is not None else []
-    if selected and on_open:
-        on_open(str(table.iloc[int(selected[0])]["Symbol"]))
-
-
-def _view_flows(indices):
-    st.markdown('<div class="arka-mf-section">DISCLOSED MARKET-WIDE FII / DII CASH ACTIVITY</div>', unsafe_allow_html=True)
-    fii = fetch_fii_dii()
-    if fii is None or fii.empty:
-        st.info("FII/DII feed is unavailable. No values are substituted.")
-    else:
-        metrics = st.columns(min(max(len(fii), 1), 4))
-        for col, (_, row) in zip(metrics, fii.head(4).iterrows()):
-            category = str(row.get("category", "Investor")).strip() or "Investor"
-            dt = str(row.get("date", "")).strip()
-            col.metric(f"{category} · {dt}" if dt else category, _num(row.get("netValue")),
-                       help=f"Buy: {_num(row.get('buyValue'))} · Sell: {_num(row.get('sellValue'))}")
-        st.dataframe(fii, hide_index=True, use_container_width=True)
-    st.markdown('<div class="arka-mf-note">Sector-wise foreign money (NSDL fortnightly FPI data) is in ROTATION LAB → FPI SECTOR FLOWS.</div>', unsafe_allow_html=True)
-    st.markdown('<div class="arka-mf-section">SECTOR TURNOVER PRESSURE PROXY</div>', unsafe_allow_html=True)
-    st.markdown('<div class="arka-mf-note">Proxy = traded value of stocks closing up minus value of stocks closing down. It is not actual institutional flow, '
-                'not net order flow and not proof of accumulation. Turnover units are shown as returned by NSE.</div>', unsafe_allow_html=True)
-    fscope = st.radio("Flow universe", list(SCOPES), horizontal=True, key="mf_flow_scope")
-    sectors = rank_sectors(indices, fscope)
-    if sectors.empty:
-        st.info("No matching index rows are available for this scope.")
-        return
-    available = sectors["index"].astype(str).tolist()
-    chosen = st.multiselect("Indexes to calculate (select a small group to limit requests)", available,
-                            default=available[:min(8, len(available))], key="mf_flow_indexes")
-    if st.button("COMPUTE / REFRESH FLOW PROXY", type="primary", key="mf_flow_compute", disabled=not chosen):
-        result = {}
-        progress = st.progress(0, text="Fetching constituent snapshots…")
-        for i, nm in enumerate(chosen):
-            result[nm] = flow_stats(fetch_constituents(nm))
-            progress.progress((i + 1) / len(chosen), text=f"Processed {i + 1} of {len(chosen)} indexes")
-        progress.empty()
-        st.session_state["mf_flow_result"] = result
-    result = st.session_state.get("mf_flow_result", {})
-    rows = [{"Index": nm, "Up Value": x["up_value"], "Down Value": x["down_value"], "Net Value": x["net_value"],
-             "Net %": x["net_pct"], "Adv": x["up"], "Dec": x["down"], "Stocks": x["stocks"]} for nm, x in result.items() if x]
-    if rows:
-        out = pd.DataFrame(rows).sort_values("Net %", ascending=False)
-        st.dataframe(out, hide_index=True, use_container_width=True)
-        st.bar_chart(out.set_index("Index")["Net %"], horizontal=True)
-    elif result:
-        st.warning("No flow proxy values returned for the selected indexes. Refresh the snapshot or try fewer indexes.")
-
-
-def _view_constituents(indices, on_open):
-    index_names = indices["index"].dropna().astype(str).tolist()
-    preferred = next((i for i, n in enumerate(index_names) if n.upper() == "NIFTY 50"), 0)
-    a, b, c = st.columns([2, 2, 1])
-    with a:
-        index_name = st.selectbox("Index / constituent universe", index_names, index=preferred, key="mf_const_index")
-    with b:
-        query = st.text_input("Find stock", placeholder="e.g. RELIANCE", key="mf_const_search").strip().upper()
-    with c:
-        sort = st.selectbox("Sort", ["1D change", "Traded value", "Symbol"], key="mf_const_sort")
-    cons = fetch_constituents(index_name)
-    if cons is None or cons.empty:
-        arch = archive_constituents(index_name)
-        if arch is None:
-            st.warning("NSE returned no constituents for this index.")
-        else:
-            st.info("NSE live prices unavailable; showing the constituent list from NSE archive (no prices).")
-            st.dataframe(arch.rename(columns={"symbol": "Symbol", "industry": "Industry"}), hide_index=True, use_container_width=True)
-        return
-    view = cons.copy()
-    if query:
-        view = view[view.symbol.str.contains(query, na=False)]
-    if sort == "1D change":
-        view = view.sort_values("pChange", ascending=False, na_position="last")
-    elif sort == "Traded value":
-        view = view.sort_values("totalTradedValue", ascending=False, na_position="last")
-    else:
-        view = view.sort_values("symbol")
-    fields = [c for c in ["symbol", "lastPrice", "pChange", "totalTradedVolume", "value_raw", "ffmc", "yearHigh", "yearLow", "nearWKH", "nearWKL"] if c in view]
-    table = view[fields].rename(columns={"symbol": "Symbol", "lastPrice": "Price", "pChange": "1D %", "totalTradedVolume": "Volume",
-                                         "value_raw": "Traded Value (NSE units)", "ffmc": "FF Mcap", "yearHigh": "52W High",
-                                         "yearLow": "52W Low", "nearWKH": "% from 52W High", "nearWKL": "% from 52W Low"}).reset_index(drop=True)
-    st.caption(f"{len(table)} rows returned for {index_name}; select a row to open Arka stock research.")
-    event = st.dataframe(table, hide_index=True, use_container_width=True,
-                         on_select="rerun" if on_open else "ignore",
-                         selection_mode="single-row" if on_open else "multi-row", key="mf_constituents_table")
-    selected = getattr(getattr(event, "selection", None), "rows", []) if event is not None else []
-    if selected and on_open:
-        on_open(str(table.iloc[int(selected[0])]["Symbol"]))
-
-
-def _view_selector(options) -> str:
-    """Horizontal view switcher. Unlike st.tabs, only the selected view is built."""
-    if st.session_state.get("mf_view") not in options:
-        st.session_state["mf_view"] = options[0]
-    with st.container(key="mf_viewbar"):
-        return st.radio("Money Flow view", options, horizontal=True, key="mf_view", label_visibility="collapsed")
-
-
-def _sources_footer():
-    st.caption("Data: NSE India public index, constituent and FII/DII endpoints where accessible; NSE archive CSVs; Yahoo Finance; NSDL. "
-               "Snapshot data, not a licensed real-time feed.")
-    with st.expander("DATA SOURCES & METRIC DEFINITIONS"):
-        st.markdown("""
-        **Index snapshot, index-level advance/decline (all indices):** NSE `/api/allIndices` ([Live Market Indices](https://www.nseindia.com/market-data/live-market-indices)).
-
-        **Constituents, prices, free-float weights, turnover:** NSE `/api/equity-stockIndices?index=...`; fallback constituent lists from NSE archive CSVs (`nsearchives.nseindia.com/content/indices/`).
-
-        **1W / 1M index returns:** NSE index history endpoint, Yahoo Finance fallback for major indices.
-
-        **Sector ranking:** about 2 years of daily Yahoo prices for the stock universe; each NSE industry becomes a liquidity-weighted, daily-rebalanced index.
-
-        **Rotation Lab:** official NSE sector indices (Yahoo history) or the stock-built sectors; NSDL fortnightly sector-wise FPI investment reports.
-
-        **FII / DII:** [NSE FII/FPI & DII reports](https://www.nseindia.com/reports/fii-dii) — market-wide, not by sector.
-
-        **Interpretation:** relative strength compares returns with a benchmark. Rotation quadrants are simplified, not a licensed JdK RRG.
-        Pressure and rotation scores are price/volume/breadth evidence and do not reveal buyer identity. Index families overlap.
-        """)
-
-
-# ═════════════════════════ MAIN ═════════════════════════
-def render_money_flow(on_open=None):
-    """Arka Money Flow workspace."""
-    _style()
-    with st.spinner("Loading index snapshot…"):
-        indices = fetch_all_indices()
-    source = "NSE"
-    if indices is None or indices.empty:
-        indices = yahoo_index_snapshot()
-        source = "YAHOO"
-
-    # ---------- fully offline: neither NSE nor Yahoo returned an index snapshot ----------
-    if indices is None or indices.empty:
-        st.warning("NSE's live index feed is unreachable from this server (NSE often blocks cloud IPs). Index tables, A/D and FII/DII "
-                   "need that feed and are hidden rather than faked. SECTOR RANKING, ROTATION LAB and INDEX EXPLORER still work: "
-                   "constituent lists come from NSE archive CSVs and prices from Yahoo Finance.")
-        if st.button("RETRY LIVE FEED", key="mf_retry_live"):
-            _NSE_STATE["down_until"] = 0.0
-            fetch_all_indices.clear()
-            fetch_constituents.clear()
-            fetch_fii_dii.clear()
-            _session.clear()
-            st.rerun()
-        view = _view_selector(OFFLINE_VIEWS)
-        if view == "SECTOR RANKING":
-            _render_sector_ranking(on_open)
-        elif view == "ROTATION LAB":
-            _render_rotation_lab(on_open)
-        else:
-            _render_explorer(pd.DataFrame({"index": list(ARCHIVE_SLUGS)}), on_open)
-        _sources_footer()
-        return
-
-    if source == "YAHOO":
-        n1, n2 = st.columns([6, 1])
-        n1.markdown('<div class="arka-mf-note"><b>NSE live feed blocked on this server</b> (NSE refuses most cloud servers) — index data comes from '
-                    'Yahoo Finance instead: end-of-day / delayed closes, 1W / 1M returns, RSI, EMAs and pivots work; advance / decline counts, '
-                    'FII / DII and live constituents need NSE and are hidden. Sector-wise foreign money is in ROTATION LAB → FPI SECTOR FLOWS.</div>',
-                    unsafe_allow_html=True)
-        if n2.button("RETRY NSE", key="mf_retry_nse", use_container_width=True):
-            _NSE_STATE["down_until"] = 0.0
-            fetch_all_indices.clear()
-            _session.clear()
-            st.rerun()
-    indices = _apply_history_returns(indices)
-    equity = _equity_index_rows(indices)
-    changes = equity.r1d.dropna()
-    up, down = int((changes > 0).sum()), int((changes < 0).sum())
-    stamp = pd.Timestamp.now(tz="Asia/Kolkata").strftime("%d %b %Y · %H:%M IST")
+# ═════════════════════════ view · ROTATION DESK ═════════════════════════
+def _view_desk(res: dict, on_open):
+    tbl, uni, bench = res["table"], res["universe"], res["bench_name"]
+    u, u5 = uni.iloc[-1], uni.iloc[-6] if len(uni) > 5 else uni.iloc[0]
+    acts = tbl["action"].value_counts()
+    names = lambda a, n=3: ", ".join(tbl.loc[tbl.action == a, "sector"].head(n)) or "none confirmed"
     st.markdown(ui.kpi_strip([
-        ("Equity indices", len(equity), f"{len(indices)} NSE index records", ui.T2),
-        ("Indices up", up, "today", ui.GREEN),
-        ("Indices down", down, "today", ui.RED),
-        ("Index A/D", f"{up / down:.2f}" if down else (str(up) if up else "—"), "up ÷ down", ui.AMBER),
-        ("Source", source, stamp, ui.CYAN if source == "NSE" else ui.AMBER)]), unsafe_allow_html=True)
+        ("Market breadth", f"{u['above50']:.0f}%", f"stocks above their 50-EMA · {u['above50'] - u5['above50']:+.0f} pts in 5 days",
+         GREEN if u["above50"] >= 50 else RED),
+        ("Advance / decline", f"{int(u['adv'])} / {int(u['dec'])}", "stocks up / down on the last session", T2),
+        ("Money tide", _num(u["up_turn5"], 0, "%"), "of 5-day turnover went into rising stocks",
+         GREEN if (_f(u["up_turn5"]) or 0) >= 50 else RED),
+        ("★ Rotating in", int(acts.get("ROTATING IN", 0)), _e(names("ROTATING IN")), GREEN),
+        ("Leading", int(acts.get("LEADING", 0) + acts.get("STRETCHED", 0)), _e(names("LEADING")), "#8AD66B"),
+        ("Weakening / lagging", int(acts.get("WEAKENING", 0) + acts.get("LAGGING", 0)),
+         f"of {len(tbl)} sectors", RED)]), unsafe_allow_html=True)
 
-    view = _view_selector(VIEWS if source == "NSE" else YAHOO_VIEWS)
+    _h(f"1 · Action board · what to do with each sector (vs {_e(bench)})")
+    st.markdown(_board(tbl, bench), unsafe_allow_html=True)
+    moves = tbl[(tbl["in_phase"] <= 1) & ~tbl["phase_prev"].isin(["—", None]) & (tbl["phase_prev"] != tbl["phase"])]
+    if len(moves):
+        value = {"LEADING": 3, "IMPROVING": 2, "WEAKENING": 1, "LAGGING": 0}
+        bits = []
+        for r in moves.to_dict("records"):
+            up = value.get(r["phase"], 0) > value.get(r["phase_prev"], 0) or (r["phase_prev"] == "LAGGING" and r["phase"] == "IMPROVING")
+            bits.append(f'<span style="color:{GREEN if up else RED}">{"▲" if up else "▼"} <b>{_e(r["sector"])}</b></span> '
+                        f'<span style="color:#777">{_e(str(r["phase_prev"]).title())} → {_e(str(r["phase"]).title())}</span>')
+        st.markdown('<div class="rd-moves"><b style="color:#ddd">Changed phase this week:</b> ' + " &nbsp;·&nbsp; ".join(bits) + "</div>",
+                    unsafe_allow_html=True)
+    _note("<b>How the labels are decided.</b> ROTATING IN = improving or leading on the weekly rotation map, heading up-and-right, "
+          "sector index above its 20-EMA, at least half its stocks above their 20-EMA, most of the week's turnover going into rising "
+          "stocks, score 55+, not stretched and no distribution warning. LEADING = top-right of the map. STRETCHED = leading but more "
+          f"than {rot.STRETCH_PCT:.0f}% above its 20-EMA or RSI above {rot.STRETCH_RSI:.0f}. WATCH = improving but not confirmed (or "
+          "bottoming with breadth and money turning). WEAKENING / LAGGING = right-bottom / left-bottom of the map.")
 
-    if source == "NSE" and view in ("NIFTY INDICES", "SECTOR ROTATION", "OVERVIEW"):
-        hcol, hdesc = st.columns([1.6, 5.0])
-        with hcol:
-            load_history = st.button("LOAD INDEX HISTORY", key="mf_load_history", use_container_width=True, type="primary")
-        with hdesc:
-            st.markdown('<div class="arka-mf-note">Loads ~1 year of daily index history from NSE (Yahoo fallback for major indices), cached for an hour. '
-                        'It fills 1W/1M returns, RSI, EMA chips and distances, and pivots for the index tables. First load can take a minute.</div>', unsafe_allow_html=True)
-        if load_history:
-            names = list(dict.fromkeys(equity["index"].astype(str).tolist() + ["NIFTY 50", "NIFTY 500"]))
-            bar = st.progress(0.0, text=f"Loading index history · 0 / {len(names)}")
-            loaded, attempted = load_index_histories(names, progress=lambda f, t: bar.progress(min(f, 1.0), text=t))
-            bar.empty()
-            st.toast(f"History loaded for {loaded} of {attempted} indices.")
-            indices = _apply_history_returns(fetch_all_indices())
-            equity = _equity_index_rows(indices)
+    _h("2 · Relative rotation graph · where every sector sits and where it is heading")
+    c1, c2, c3 = st.columns([1.2, 1.6, 4])
+    tf = c1.radio("Timeframe", ["Weekly", "Daily"], horizontal=True, key="mf6_rrg_tf")
+    lab = c2.radio("Names", ["Key", "All", "None"], horizontal=True, key="mf6_rrg_lbl")
+    fq = "W" if tf == "Weekly" else "D"
+    summ, tails = res["rrg"][fq]
+    t2 = tbl.copy()
+    t2["phase"] = [summ.get(s, {}).get("phase", "—") for s in t2["sector"]]
+    options = tbl["sector"].tolist()
+    key = "mf6_rrg_hl"
+    if key not in st.session_state:
+        st.session_state[key] = list(dict.fromkeys(tbl.loc[tbl.action.isin(["ROTATING IN", "WATCH"]), "sector"].head(4).tolist()
+                                                   + options[:2]))[:6]
+    st.session_state[key] = [v for v in st.session_state[key] if v in options]
+    hl = c3.multiselect("Show the path (tail) for", options, key=key)
+    _show_fig(_rrg_fig(t2, tails, hl, lab, bench, "weeks" if fq == "W" else "sessions"), "mf6_rrg")
+    _note("Read it clockwise: <b>IMPROVING → LEADING → WEAKENING → LAGGING → IMPROVING</b>. Right of centre = beating the benchmark, "
+          "above centre = that out-performance is accelerating. The tail shows the last weeks: a tail pointing up-and-right is "
+          "gaining, down-and-left is losing. The best entries are usually sectors crossing from IMPROVING into LEADING with a long, "
+          "steady tail; sectors far out in LEADING have usually already moved. Weekly is the standard view for rotation; daily is noisier.")
 
-    if view == "SECTOR RANKING":
-        _render_sector_ranking(on_open)
-    elif view == "ROTATION LAB":
-        _render_rotation_lab(on_open)
-    elif view == "NIFTY INDICES":
-        _render_nifty_indices(indices)
-    elif view == "SECTOR ROTATION":
-        scope = st.radio("Universe", list(SCOPES), horizontal=True, key="mf_scope")
-        sector = rank_sectors(indices, scope)
-        if sector.empty:
-            st.info("No matching index records or NIFTY 50 reference levels are available.")
-        else:
-            _render_index_rotation(sector, scope)
-    elif view == "OVERVIEW":
-        _view_overview(equity)
-    elif view == "MARKET BREADTH":
-        _view_breadth(indices, on_open)
-    elif view == "INDEX EXPLORER":
-        _render_explorer(indices, on_open)
-    elif view == "FII / DII FLOWS":
-        _view_flows(indices)
+    _h("3 · Rotation score history · who is climbing, who is fading")
+    hist = res["hist"]["score"].reindex(tbl["sector"])
+    act = tbl.set_index("sector")["action"]
+
+    def delta(s):
+        a, b = _f(hist.loc[s, "Today"]), _f(hist.loc[s, "2W ago"])
+        if a is None or b is None:
+            return "—"
+        d = a - b
+        return f'<span style="color:{GREEN if d > 5 else RED if d < -5 else T2}">{d:+.0f}</span>'
+
+    st.markdown(_heat_table(hist, "score", {"Δ 2W": delta, "Action": lambda s: _pill(act[s], ACTION_C.get(act[s], T3))}),
+                unsafe_allow_html=True)
+    with st.expander("RANK RACE · weekly rank by rotation score, last 12 weeks (1 = strongest)"):
+        rw = res["rank_weeks"].reindex(tbl["sector"]).dropna(how="all")
+        st.markdown(_heat_table(rw, "rank"), unsafe_allow_html=True)
+        st.caption("A sector whose row turns from red to green over several weeks is where money has been rotating in.")
+    _note("Score (0-100) ranks sectors against each other: relative strength 35% (1W, 1M, 3M vs the benchmark), breadth 25% "
+          "(% of stocks above their 50 / 20-EMA and its change), money 25% (share of turnover in rising stocks, change in turnover "
+          "share, ₹-weighted CMF) and acceleration 15%. It is relative: in a falling market the top score is the least bad sector.")
+
+    _h("4 · Sector detail · why it is rated this way, and its strongest stocks")
+    pick = st.selectbox("Sector", options, key="mf6_desk_pick", format_func=lambda s: f"{s} · {act.get(s, '')}")
+    r = tbl[tbl["sector"] == pick].iloc[0].to_dict()
+    a, b = st.columns([1, 1.7], gap="medium")
+    a.markdown(_card(r, bench, full=True), unsafe_allow_html=True)
+    sub = res["stocks"][res["stocks"]["sector"] == pick].sort_values("rs_rating", ascending=False)
+    with b:
+        ui.show_table([ui.C("Stock", "symbol", "sector", sub="company"), ui.C("Price", "price", "num", pre="₹"),
+                       ui.C("1W", "r1w", "pct", scale=6.0), ui.C("1M", "r1m", "pct", scale=12.0),
+                       ui.C("RS", "rs_rating", "bar", max=99, color=CYAN, tip="RS rating 0-99 across the whole universe"),
+                       ui.C("RSI", "rsi", "rsi"), ui.C("EMA 20·50·200", t="ema", spans=(20, 50, 200)),
+                       ui.C("From 52W high", "from_hi", "pct", d=1, scale=20.0), ui.C("Vol ×", "vol_x", "num", d=2, suf="×")],
+                      _stock_rows(sub.head(12)), max_height=520)
+        _open_picker(sub["symbol"].tolist(), "mf6_desk_open", on_open)
+
+
+# ═════════════════════════ view · SECTOR RANKING ═════════════════════════
+RANK_COLS = {
+    "sector": ("Sector", "text"), "stocks": ("Stocks", "int"), "action": ("Action", "action"), "phase": ("Phase", "phase"),
+    "score": ("Score", "score"), "r1d": ("1D %", "spct"), "r1w": ("1W %", "spct"), "r1m": ("1M %", "spct"),
+    "r3m": ("3M %", "spct"), "r6m": ("6M %", "spct"), "ex1w": ("RS 1W (pp)", "spp"), "ex1m": ("RS 1M (pp)", "spp"),
+    "ex3m": ("RS 3M (pp)", "spp"), "ex6m": ("RS 6M (pp)", "spp"), "dist20": ("vs 20-EMA %", "spct1"),
+    "dist50": ("vs 50-EMA %", "spct1"), "idx_rsi": ("RSI", "rsi"), "dd52": ("From 52W high %", "spct1"),
+    "pct20": ("% > 20-EMA", "heat"), "pct50": ("% > 50-EMA", "heat"), "pct200": ("% > 200-EMA", "heat"),
+    "dpct20_5": ("Δ % > 20-EMA (5D)", "spp0"), "up_pct1d": ("Up-turnover 1D", "heat"), "up_pct5": ("Up-turnover 5D", "heat"),
+    "turnover_cr": ("Turnover ₹Cr", "cr"), "share": ("Share %", "num2"), "dshare_d": ("Δ Share 1D", "spp2"),
+    "dshare_w": ("Δ Share 1W", "spp2"), "rel_turn": ("Turnover × 20D", "ratio"), "cmf": ("CMF 20", "s2"),
+    "dcmf5": ("Δ CMF 5D", "s2"), "money_signal": ("Money signal", "money"), "cmf_trend": ("CMF trend", "cmft"),
+    "adv": ("Adv", "int"), "dec": ("Dec", "int"), "ad_net": ("A/D net 1D", "s2"), "ad_net5": ("A/D net 5D", "s2"),
+    "avg_rsi": ("Avg stock RSI", "rsi"), "bo10": ("% breakout 10D", "pct0"), "nh5": ("New highs 5D", "int"),
+    "near_hi": ("% near 52W high", "pct0"), "leaders": ("Leaders", "text"),
+}
+RANK_SETS = {
+    "OVERVIEW": ["sector", "stocks", "action", "phase", "score", "r1d", "r1w", "r1m", "ex1m", "ex3m", "pct50", "up_pct5",
+                 "dshare_w", "leaders"],
+    "PERFORMANCE": ["sector", "action", "r1d", "r1w", "r1m", "r3m", "r6m", "ex1w", "ex1m", "ex3m", "ex6m", "dist20", "dist50",
+                    "idx_rsi", "dd52"],
+    "MONEY": ["sector", "action", "turnover_cr", "share", "dshare_d", "dshare_w", "rel_turn", "up_pct1d", "up_pct5", "cmf",
+              "dcmf5", "money_signal", "cmf_trend"],
+    "BREADTH": ["sector", "stocks", "adv", "dec", "ad_net", "ad_net5", "pct20", "dpct20_5", "pct50", "pct200", "avg_rsi", "bo10",
+                "nh5", "near_hi"],
+}
+
+
+def _fm(fmt):
+    return lambda v: "—" if _isna(v) else fmt.format(v)
+
+
+_FORMATS = {"int": _fm("{:,.0f}"), "score": _fm("{:.0f}"), "spct": _fm("{:+.2f}%"), "spct1": _fm("{:+.1f}%"),
+            "spp": _fm("{:+.1f}"), "spp0": _fm("{:+.0f}"), "spp2": _fm("{:+.2f}"), "rsi": _fm("{:.0f}"), "heat": _fm("{:.0f}%"),
+            "cr": _fm("{:,.0f}"), "num2": _fm("{:.2f}"), "ratio": _fm("{:.2f}×"), "s2": _fm("{:+.2f}"), "pct0": _fm("{:.0f}%")}
+
+
+def _css_signed(v):
+    return "" if _isna(v) else f"color:{GREEN if v > 0 else RED if v < 0 else T2}"
+
+
+def _css_heat(v):
+    return "" if _isna(v) else f"background-color:{_heat_bg((v - 50) / 50)};color:#f2f2f2"
+
+
+def _css_rsi(v):
+    return "" if _isna(v) else f"color:{ui.rsi_color(float(v))}"
+
+
+def _css_label(cmap):
+    return lambda v: f"color:{cmap.get(v, T2)};font-weight:700"
+
+
+_STYLERS = {"spct": _css_signed, "spct1": _css_signed, "spp": _css_signed, "spp0": _css_signed, "spp2": _css_signed,
+            "s2": _css_signed, "heat": _css_heat, "score": _css_heat, "rsi": _css_rsi, "action": _css_label(ACTION_C),
+            "phase": _css_label(PHASE_C), "money": _css_label(MONEY_C), "cmft": _css_label(CMF_C)}
+
+
+def _styled(df: pd.DataFrame, keys: list):
+    disp = df[keys].rename(columns={k: RANK_COLS[k][0] for k in keys})
+    sty = disp.style.format({RANK_COLS[k][0]: _FORMATS[RANK_COLS[k][1]] for k in keys if RANK_COLS[k][1] in _FORMATS})
+    for k in keys:
+        lab, kind = RANK_COLS[k]
+        fn = _STYLERS.get(kind)
+        if fn:
+            sty = (getattr(sty, "map", None) or sty.applymap)(fn, subset=[lab])
+    return sty
+
+
+GLOSSARY = """
+- **Action / Phase** — see ROTATION DESK. Phase is the quadrant on the weekly rotation map.
+- **Score** — 0-100 relative ranking: relative strength 35%, breadth 25%, money 25%, acceleration 15%.
+- **RS (pp)** — sector return minus benchmark return over the period, in percentage points.
+- **vs 20-EMA / 50-EMA** — how far the sector index is from its average. Above +8% = stretched.
+- **% > 20 / 50 / 200-EMA** — share of the sector's stocks above their own average (participation).
+- **Up-turnover** — share of the sector's ₹ turnover that traded in stocks that closed up. Above 55% = buyers in control.
+- **Share % / Δ Share** — sector turnover as % of all market turnover, and its change vs the previous day / previous week (5-day averages).
+- **Turnover × 20D** — today's turnover ÷ its 20-day average. Above 1.3× = unusual activity.
+- **CMF 20** — Chaikin Money Flow over 20 sessions, ₹-weighted across stocks. Above +0.05 accumulation-like, below −0.05 distribution-like.
+- **Money signal** — BUYING ON VOLUME = rising share of turnover and mostly up-turnover; SELLING ON VOLUME = rising share but mostly down-turnover.
+- **% breakout 10D** — stocks that closed above their previous 20-day high at least once in the last 10 sessions.
+- **New highs 5D / % near 52W high** — stocks at a new 52-week closing high in the last 5 sessions / within 5% of it.
+"""
+
+
+def _view_ranking(res: dict):
+    tbl = res["table"].copy()
+    c1, c2 = st.columns([3, 1.4])
+    cset = c1.radio("Columns", list(RANK_SETS), horizontal=True, key="mf6_rank_set")
+    fam = c2.selectbox("Family", ["All"] + sorted(tbl["family"].dropna().astype(str).unique()), key="mf6_rank_fam")
+    if fam != "All":
+        tbl = tbl[tbl["family"] == fam]
+    st.caption("Click any column header to sort. Rows start in rotation-score order. Hover a column for the full name.")
+    st.dataframe(_styled(tbl, RANK_SETS[cset]), use_container_width=True, hide_index=True,
+                 height=min(42 + 35 * len(tbl), 940))
+    with st.expander("WHAT EVERY COLUMN MEANS"):
+        st.markdown(GLOSSARY)
+    st.download_button("⤓ DOWNLOAD SECTOR TABLE (CSV)", tbl.drop(columns=["why", "warn"], errors="ignore").to_csv(index=False),
+                       "arka_sector_rotation.csv", "text/csv", key="mf6_rank_dl")
+
+
+# ═════════════════════════ view · MONEY FLOW ═════════════════════════
+def _view_money(res: dict):
+    tbl = res["table"]
+    _h("1 · Where turnover is moving · share of all market turnover and which side it traded on")
+    rows = _stock_rows(tbl.sort_values("dshare_w", ascending=False, na_position="last"))
+    for r in rows:
+        r["sig_h"] = _pill(r.get("money_signal") or "—", MONEY_C.get(r.get("money_signal"), T3))
+        r["dsd_h"], r["dsw_h"], r["cmf_h"] = _sg(r.get("dshare_d")), _sg(r.get("dshare_w")), _sg(r.get("cmf"))
+    ui.show_table([ui.C("#", t="rank"), ui.C("Sector", "sector", "sector", sub="stocks", sub_fmt="{:.0f} stocks"),
+                   ui.C("Signal", "sig_h", "html"), ui.C("Turnover ₹Cr", "turnover_cr", "num", d=0),
+                   ui.C("× 20D avg", "rel_turn", "num", d=2, suf="×"), ui.C("Share %", "share", "num", d=2),
+                   ui.C("Δ Share 1D", "dsd_h", "html", al="r"), ui.C("Δ Share 1W", "dsw_h", "html", al="r"),
+                   ui.C("Up-turnover 1D", "up_pct1d", "bar", suf="%", color=CYAN),
+                   ui.C("Up-turnover 5D", "up_pct5", "bar", suf="%", color=GREEN),
+                   ui.C("1W", "r1w", "pct", scale=4.0), ui.C("CMF 20", "cmf_h", "html", al="r")], rows, max_height=760)
+    _note("A rising <b>share</b> of turnover only says activity moved there; the <b>up-turnover</b> column says which side won. "
+          "BUYING ON VOLUME (more of the market's money AND most of it in rising stocks) is the footprint of rotation in. "
+          "SELLING ON VOLUME is the opposite: heavy trading while prices fall. Every trade has a buyer and a seller, so this is "
+          "evidence of who was more aggressive, not a count of who bought.")
+
+    _h("2 · Chaikin money flow (₹-weighted, 20 sessions) · 1 month ago → today")
+    cm = res["hist"]["cmf"].reindex(tbl.sort_values("cmf", ascending=False)["sector"])
+    trend = tbl.set_index("sector")["cmf_trend"]
+    st.markdown(_heat_table(cm, "cmf", {"Trend": lambda s: _pill(trend.get(s, "—"), CMF_C.get(trend.get(s), T3))}),
+                unsafe_allow_html=True)
+    _note("Green = closes landing in the upper part of the day's range on heavy ₹ volume (accumulation-like); red = the lower part "
+          "(distribution-like). The most useful pattern is a row turning from red to green while the sector's relative strength "
+          "improves: money arriving before the price trend is obvious.")
+
+    _h("3 · Turnover share trend · 5-day average, last 90 sessions")
+    opts = tbl["sector"].tolist()
+    default = tbl.sort_values("dshare_w", ascending=False)["sector"].head(5).tolist()
+    pick = st.multiselect("Sectors", opts, default=default, key="mf6_share_pick")
+    if pick:
+        st.line_chart(res["share"][pick].rolling(5).mean().tail(90).rename_axis("date"))
+
+
+# ═════════════════════════ view · BREADTH ═════════════════════════
+def _breadth_flag(r) -> str:
+    p20, d5 = _f(r.get("pct20")), _f(r.get("dpct20_5"))
+    if p20 is None or d5 is None:
+        return _pill("—", T3)
+    if p20 >= 70 and d5 >= 30:
+        return _pill("BREADTH THRUST", GREEN)
+    if d5 >= 10:
+        return _pill("BROADENING", CYAN)
+    if d5 <= -25:
+        return _pill("COLLAPSING", RED)
+    if d5 <= -10:
+        return _pill("NARROWING", AMBER)
+    return _pill("STEADY", T2)
+
+
+def _view_breadth(res: dict):
+    tbl = res["table"]
+    _h("1 · Participation by sector · how many of its stocks are actually moving")
+    rows = _stock_rows(tbl.sort_values("dpct20_5", ascending=False, na_position="last"))
+    for r in rows:
+        r["flag"], r["d5_h"], r["d20_h"] = _breadth_flag(r), _sg(r.get("dpct20_5"), 0), _sg(r.get("dpct50_20"), 0)
+        r["ad_h"], r["ad5_h"] = _sg(r.get("ad_net")), _sg(r.get("ad_net5"))
+    ui.show_table([ui.C("#", t="rank"), ui.C("Sector", "sector", "sector", sub="stocks", sub_fmt="{:.0f} stocks"),
+                   ui.C("Breadth", "flag", "html"), ui.C("% > 20-EMA", "pct20", "bar", suf="%", color=CYAN),
+                   ui.C("Δ 5D", "d5_h", "html", al="r"), ui.C("% > 50-EMA", "pct50", "bar", suf="%", color=GREEN),
+                   ui.C("Δ 20D", "d20_h", "html", al="r", tip="Change in % above the 50-EMA over 20 sessions"),
+                   ui.C("% > 200-EMA", "pct200", "bar", suf="%", color=PURPLE), ui.C("Adv", "adv", "int"), ui.C("Dec", "dec", "int"),
+                   ui.C("A/D 1D", "ad_h", "html", al="r"), ui.C("A/D 5D", "ad5_h", "html", al="r"), ui.C("Avg RSI", "avg_rsi", "rsi"),
+                   ui.C("% breakout 10D", "bo10", "num", d=0, suf="%"), ui.C("New highs 5D", "nh5", "int"),
+                   ui.C("% near 52W high", "near_hi", "num", d=0, suf="%")], rows, max_height=760)
+    _note("Participation usually turns before the sector index does. A <b>BREADTH THRUST</b> (70%+ of stocks above the 20-EMA after a "
+          "30-point jump in 5 sessions) is one of the strongest early signs that a group is being accumulated. Leadership with "
+          "<b>NARROWING</b> breadth means a few stocks are carrying the sector — late-stage behaviour.")
+
+    _h("2 · % of stocks above the 20-EMA · 1 month ago → today")
+    st.markdown(_heat_table(res["hist"]["pct20"].reindex(tbl["sector"]), "pct"), unsafe_allow_html=True)
+
+    _h("3 · Whole-market breadth · % of all stocks above their 20 / 50 / 200-EMA")
+    u = res["universe"].tail(160)
+    st.line_chart(u[["above20", "above50", "above200"]].rename(
+        columns={"above20": "Above 20-EMA %", "above50": "Above 50-EMA %", "above200": "Above 200-EMA %"}).rename_axis("date"))
+    st.caption("Rotation works best when the whole market is healthy (50-EMA breadth above ~50% and rising). In weak markets, "
+               "the 'best' sector is often just the one falling least.")
+
+
+# ═════════════════════════ view · STOCKS ═════════════════════════
+def _view_stocks(res: dict, on_open):
+    tbl, stk = res["table"], res["stocks"]
+    act = tbl.set_index("sector")["action"]
+    c1, c2, c3 = st.columns([2.2, 1.4, 1.8])
+    pick = c1.selectbox("Sector", tbl["sector"].tolist(), key="mf6_stk_sector", format_func=lambda s: f"{s} · {act.get(s, '')}")
+    sort = c2.selectbox("Sort by", ["RS rating", "1D %", "1W %", "1M %", "Turnover", "Volume ×", "Near 52W high"], key="mf6_stk_sort")
+    show = c3.radio("Show", ["All", "Uptrend only", "Breakouts (10D)"], horizontal=True, key="mf6_stk_show")
+    r = tbl[tbl["sector"] == pick].iloc[0].to_dict()
+    st.markdown(_card(r, res["bench_name"], full=True), unsafe_allow_html=True)
+    sub = stk[stk["sector"] == pick].copy()
+    if show == "Uptrend only":
+        sub = sub[(sub["ab50"] == 1) & (sub["ab200"] == 1)]
+    elif show == "Breakouts (10D)":
+        sub = sub[sub["bo10"] == 1]
+    col = {"RS rating": "rs_rating", "1D %": "r1d", "1W %": "r1w", "1M %": "r1m", "Turnover": "avg_turn_cr",
+           "Volume ×": "vol_x", "Near 52W high": "from_hi"}[sort]
+    sub = sub.sort_values(col, ascending=False, na_position="last")
+    view = pd.DataFrame({
+        "Symbol": sub["symbol"], "Company": sub["company"], "Price": sub["price"], "1D %": sub["r1d"], "1W %": sub["r1w"],
+        "1M %": sub["r1m"], "3M %": sub["r3m"], "RS rating": sub["rs_rating"], "vs market 1M (pp)": sub["ex1m"],
+        "RSI": sub["rsi"], "Trend": sub["trend"], "vs 20-EMA %": sub["dist20"], "From 52W high %": sub["from_hi"],
+        "Volume ×": sub["vol_x"], "Avg turnover ₹Cr": sub["avg_turn_cr"], "Breakout 10D": np.where(sub["bo10"] == 1, "✔", ""),
+        "CMF 20": sub["cmf"]}).reset_index(drop=True)
+    cc = st.column_config
+    cfg = {"Price": cc.NumberColumn(format="₹%.2f"), "1D %": cc.NumberColumn(format="%+.2f%%"),
+           "1W %": cc.NumberColumn(format="%+.2f%%"), "1M %": cc.NumberColumn(format="%+.2f%%"),
+           "3M %": cc.NumberColumn(format="%+.2f%%"),
+           "RS rating": cc.ProgressColumn(min_value=0, max_value=99, format="%d", help="0-99 vs every stock in the universe (1M/3M/6M)"),
+           "vs market 1M (pp)": cc.NumberColumn(format="%+.1f"), "RSI": cc.NumberColumn(format="%.0f"),
+           "vs 20-EMA %": cc.NumberColumn(format="%+.1f%%"), "From 52W high %": cc.NumberColumn(format="%+.1f%%"),
+           "Volume ×": cc.NumberColumn(format="%.2f×", help="Today's volume ÷ 20-day average"),
+           "Avg turnover ₹Cr": cc.NumberColumn(format="%.1f"), "CMF 20": cc.NumberColumn(format="%+.2f")}
+    st.caption(f"{len(view)} stocks. Click a row, then OPEN STOCK. The best rotation candidates are usually high RS rating, "
+               "uptrend, within ~10% of the 52-week high, in a sector that is ROTATING IN or LEADING.")
+    event = st.dataframe(view, use_container_width=True, hide_index=True, column_config=cfg, height=min(42 + 35 * len(view), 760),
+                         on_select="rerun", selection_mode="single-row", key="mf6_stk_tbl")
+    rows = getattr(getattr(event, "selection", None), "rows", []) if event is not None else []
+    if rows and on_open:
+        sym = str(view.iloc[int(rows[0])]["Symbol"])
+        if st.button(f"OPEN {sym} ▸", type="primary", key="mf6_stk_open"):
+            on_open(sym)
+
+
+# ═════════════════════════ view · NSE INDICES ═════════════════════════
+@st.cache_data(ttl=6 * 3600, show_spinner=False, max_entries=2)
+def _official(bucket: int):
+    if yf is None:
+        raise RuntimeError("yfinance is not installed")
+    frames = _yf_batch(list(OFFICIAL.values()) + ["^NSEI"], "3y", chunk=50)
+    if "^NSEI" not in frames:
+        raise RuntimeError("Yahoo returned no NIFTY 50 history")
+    closes = pd.DataFrame({n: rot.norm_series(frames[t]["Close"]) for n, t in OFFICIAL.items() if t in frames})
+    last = closes.apply(lambda c: c.last_valid_index())
+    closes = closes[[c for c in closes.columns if last[c] is not None and (last.max() - last[c]).days <= 10]]
+    return closes, rot.norm_series(frames["^NSEI"]["Close"])
+
+
+def _view_indices():
+    _note("Official NSE sector indices (Yahoo daily closes) on the same weekly rotation map, measured against NIFTY 50. They are "
+          "cap-weighted and broad, so they move later than the stock-built sectors — use them to confirm, not to find, rotation.")
+    if st.button("LOAD / REFRESH NSE INDICES", type="primary", key="mf6_ix_load"):
+        if st.session_state.get("mf6_ix_ready"):
+            _official.clear()
+        st.session_state["mf6_ix_ready"] = True
+    if not st.session_state.get("mf6_ix_ready"):
+        return
+    with st.spinner("Downloading sector index history…"):
+        try:
+            closes, bench = _official(int(time.time() // (6 * 3600)))
+            tbl, tails = rot.index_view(closes, bench)
+        except Exception as exc:
+            st.error(f"Index history unavailable right now: {exc}. Yahoo may be rate-limiting; try again in a minute.")
+            return
+    tbl = tbl.sort_values("ex1m", ascending=False, na_position="last")
+    rows = _stock_rows(tbl)
+    for r in rows:
+        r["ph_h"] = _pill(f'{rot.compass(r.get("heading"))} {r.get("phase")} {int(_f(r.get("in_phase")) or 0)}w',
+                          PHASE_C.get(r.get("phase"), T3))
+    _h("1 · Official sector indices vs NIFTY 50")
+    ui.show_table([ui.C("#", t="rank"), ui.C("Index", "index", "sector"), ui.C("Weekly phase", "ph_h", "html"),
+                   ui.C("Price", "price", "num", d=1), ui.C("1D", "r1d", "pct", scale=2.0), ui.C("1W", "r1w", "pct", scale=4.0),
+                   ui.C("1M", "r1m", "pct", scale=8.0), ui.C("3M", "r3m", "pct", scale=15.0),
+                   ui.C("RS 1M (pp)", "ex1m", "pct", scale=5.0), ui.C("RS 3M (pp)", "ex3m", "pct", scale=10.0),
+                   ui.C("RSI", "rsi_d", "rsi"), ui.C("EMA 10·20·50·200", t="ema"), ui.C("vs 20", "dist20", "dist"),
+                   ui.C("vs 50", "dist50", "dist", scale=12.0)], rows, max_height=760)
+    _h("2 · Rotation map · official indices")
+    t2 = tbl.rename(columns={"index": "sector"}).assign(score=np.nan, action="")
+    _show_fig(_rrg_fig(t2, tails, [], "All", "NIFTY 50"), "mf6_ix_rrg")
+
+
+# ═════════════════════════ view · FPI FLOWS ═════════════════════════
+@st.cache_data(ttl=12 * 3600, show_spinner=False, max_entries=64)
+def _nsdl_fetch(d: str):
+    sess = requests.Session()
+    sess.headers.update({"User-Agent": UA})
+    for url in rot.nsdl_urls(pd.Timestamp(d)):
+        try:
+            r = sess.get(url, timeout=12)
+            if r.status_code == 200 and "Sector" in r.text:
+                p = rot.parse_nsdl_sector_html(r.text)
+                if not p.empty:
+                    return p
+        except requests.RequestException:
+            continue
+    return None
+
+
+def _view_fpi():
+    _note("NSDL publishes how much <b>foreign portfolio investors</b> put into or took out of each sector every fortnight — recorded "
+          "money, not a price-based estimate. Limits: FPIs only (not mutual funds or DIIs), published with a lag, NSE's broad "
+          "22-sector classification. Source: fpi.nsdl.co.in (Fortnightly Sector-wise FPI Investment Data).")
+    c1, c2 = st.columns([1, 3])
+    n = c1.selectbox("Fortnights", [12, 24, 48], index=1, key="mf6_fpi_n")
+    with c2:
+        st.write("")
+        if st.button("LOAD FPI SECTOR FLOWS", type="primary", key="mf6_fpi_load"):
+            dates = [str(d)[:10] for d in rot.nsdl_report_dates(int(n))]
+            with st.spinner("Downloading NSDL fortnightly reports…"):
+                with ThreadPoolExecutor(max_workers=6) as pool:
+                    got = list(pool.map(_nsdl_fetch, dates))
+            st.session_state["mf6_fpi"] = (rot.nsdl_panels(got), sum(g is not None for g in got), len(dates))
+    got = st.session_state.get("mf6_fpi")
+    if not got:
+        return
+    (net, auc), ok, tried = got
+    if net.empty:
+        st.warning(f"No NSDL report could be read ({ok} of {tried}). The site may be blocking this server or its file names changed.")
+        return
+    st.caption(f"{ok} of {tried} reports loaded · latest fortnight ending {str(net.index[-1])[:10]} · ₹ crore, equity.")
+    broad = {rot.norm_name(k): v for k, v in (st.session_state.get("mf_broad_rs") or {}).items()}
+    rows = []
+    for s in net.columns:
+        x = net[s].dropna()
+        a = auc[s].dropna() if s in auc else pd.Series(dtype=float)
+        aum = float(a.iloc[-1]) if len(a) else np.nan
+        f2, f6, f12 = x.tail(2).sum(), x.tail(6).sum(), x.tail(12).sum()
+        streak = 0
+        for v in x.iloc[::-1]:
+            if streak >= 0 and v > 0:
+                streak += 1
+            elif streak <= 0 and v < 0:
+                streak -= 1
+            else:
+                break
+        rows.append({"sector": s, "last": float(x.iloc[-1]) if len(x) else np.nan, "f2": f2, "f6": f6, "f12": f12,
+                     "pct_hold": f6 / aum * 100 if aum and aum > 0 else np.nan, "streak": streak, "aum": aum,
+                     "price_rs": broad.get(rot.norm_name(s))})
+    tb = pd.DataFrame(rows).sort_values("pct_hold", ascending=False, na_position="last")
+
+    def cr(v):
+        v = _f(v)
+        if v is None:
+            return '<span class="mf-na">—</span>'
+        return f'<span class="mf-pct" style="color:{GREEN if v >= 0 else RED};background:{ui._heat(v, 20000)}">{v:+,.0f}</span>'
+
+    recs = _stock_rows(tb)
+    for r in recs:
+        for k in ("last", "f2", "f6", "f12"):
+            r[k + "_h"] = cr(r.get(k))
+        sv = int(r.get("streak") or 0)
+        r["streak_h"] = (f'<span class="mf-chip {"up" if sv > 0 else "dn"}">{"▲" if sv > 0 else "▼"} {abs(sv)}</span>'
+                         if sv else '<span class="mf-na">0</span>')
+    cols = [ui.C("#", t="rank"), ui.C("Sector", "sector", "sector"), ui.C("Last fortnight", "last_h", "html", al="r"),
+            ui.C("1M ₹Cr", "f2_h", "html", al="r"), ui.C("3M ₹Cr", "f6_h", "html", al="r"), ui.C("6M ₹Cr", "f12_h", "html", al="r"),
+            ui.C("3M % of holdings", "pct_hold", "pct", scale=2.0, tip="3-month net flow ÷ FPI holdings in the sector"),
+            ui.C("Streak", "streak_h", "html", tip="+3 = three fortnights of buying in a row; −2 = two of selling"),
+            ui.C("FPI holdings ₹Cr", "aum", "num", d=0)]
+    if any(r.get("price_rs") is not None for r in recs):
+        cols.append(ui.C("Price RS 1M (pp)", "price_rs", "pct", d=1, scale=5.0,
+                         tip="Median stock in this NSE sector vs the market over 1 month (from the sector data you loaded)"))
+    _h("1 · FPI money by sector · net equity investment")
+    ui.show_table(cols, recs, max_height=760)
+    _note("'% of holdings' scales flows by how much FPIs already own, so ₹2,000 Cr into a small sector counts for more than into "
+          "Financial Services. The strongest confirmation is when foreign money (positive streak) and price (positive RS) agree.")
+    if go is not None:
+        _h(f"2 · Flow heat-map · last 12 fortnights (₹ Cr)")
+        hm = net.tail(12).T
+        hm = hm.loc[hm.sum(axis=1).sort_values(ascending=False).index]
+        z = hm.values
+        lim = float(np.nanpercentile(np.abs(z), 90)) or 1.0
+        fig = go.Figure(go.Heatmap(z=z, x=[d.strftime("%d %b %y") for d in hm.columns], y=list(hm.index),
+                                   colorscale=[[0, RED], [0.5, "#151515"], [1, GREEN]], zmin=-lim, zmax=lim, showscale=False,
+                                   text=np.round(z / 100) / 10, texttemplate="%{text}k",
+                                   hovertemplate="%{y} · %{x}: ₹%{z:,.0f} Cr<extra></extra>"))
+        fig.update_yaxes(autorange="reversed")
+        ui._dark(fig, 26 * len(hm) + 70, False)
+        _show_fig(fig, "mf6_fpi_hm")
+    st.download_button("⤓ FPI FLOWS (CSV)", net.to_csv(), "nsdl_fpi_sector_flows.csv", "text/csv", key="mf6_fpi_dl")
+
+
+# ═════════════════════════ page ═════════════════════════
+def _view_selector() -> str:
+    if st.session_state.get("mf6_view") not in VIEWS:
+        st.session_state["mf6_view"] = VIEWS[0]
+    with st.container(key="mf_viewbar"):
+        return st.radio("Money Flow view", VIEWS, horizontal=True, key="mf6_view", label_visibility="collapsed")
+
+
+def _universe_missing():
+    st.warning("The stock universe could not be loaded: NSE and niftyindices.com are refusing this server and no copy is in "
+               "the repo yet. The app retries every 10 minutes.")
+    _note("<b>Permanent fix (2 minutes):</b> download "
+          '<a href="https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv" target="_blank">ind_nifty500list.csv</a> and '
+          '<a href="https://www.niftyindices.com/IndexConstituent/ind_niftymicrocap250_list.csv" target="_blank">ind_niftymicrocap250_list.csv</a> '
+          "on your computer and upload them to a <code>data</code> folder in the GitHub repo. Money Flow reads them first.")
+    if st.button("RETRY NOW", key="mf6_retry"):
+        _ARCH_DOWN.clear()
+        _universe_cached.clear()
+        st.rerun()
+
+
+def _status(res: dict, source: str, err):
+    q = res["quality"]
+    today = datetime.now(IST).date().isoformat()
+    w = "equal-weight" if q.get("weighting") == "equal" else "√turnover-weighted"
+    st.markdown(f'<div class="rd-status"><span>AS OF <b>{q["asof"]}</b>{" (intraday)" if q["asof"] == today and _market_live() else " close"}</span>'
+                f'<span><b>{q["in_sectors"]}</b> stocks in <b>{q["sectors"]}</b> sectors</span><span>vs <b>{_e(res["bench_name"])}</b></span>'
+                f'<span>{w} sector indices</span><span>coverage <b>{q["coverage"] * 100:.0f}%</b></span></div>', unsafe_allow_html=True)
+    if q["asof"] == today and _market_live():
+        st.caption("Market is open: today's bar is still forming, so 1-day turnover and money readings compare a partial day "
+                   "with full days. The 5-day, weekly and monthly readings are the reliable ones intraday.")
+    if err:
+        st.warning(f"Showing the last good load — the refresh failed ({err}).")
+    with st.expander("DATA CHECK · what was loaded, skipped and why"):
+        st.markdown(
+            f"- Universe: `{source}` · requested **{q['stocks_requested']}**, price history for **{q['stocks_loaded']}**, "
+            f"used **{q['stocks_used']}** (liquid), in sector tables **{q['in_sectors']}**\n"
+            f"- Excluded as illiquid (median turnover under ₹{q['min_turnover_cr']:g} Cr/day): **{len(q['illiquid'])}**\n"
+            f"- No Yahoo data: **{len(q['missing'])}** {', '.join(q['missing'][:15])}{'…' if len(q['missing']) > 15 else ''}\n"
+            f"- Stale tickers dropped: **{len(q['stale'])}** {', '.join(q['stale'][:10])}\n"
+            f"- Half-loaded sessions dropped: {', '.join(q['dropped_sessions']) or 'none'} · bad ticks repaired: {q['bad_ticks']}\n"
+            f"- Small groups folded into their family: {', '.join(q['folded_groups']) or 'none'}\n"
+            f"- Sector of every stock: see `sector_map.py` (edit it, or add `data/sector_map.csv` with a `group` column to override).")
+
+
+def render_money_flow(on_open=None):
+    """Arka MONEY FLOW workspace."""
+    _style()
+    view = _view_selector()
+    if view == "NSE INDICES":
+        _view_indices()
+        return _footer()
+    if view == "FPI FLOWS":
+        _view_fpi()
+        return _footer()
+
+    try:
+        meta, source = _universe_cached()
+    except Exception:
+        meta, source = None, ""
+    if meta is None:
+        return _universe_missing()
+
+    ready = st.session_state.get("mf6_ready", False)
+    c1, c2, c3, c4 = st.columns([1.3, 2.4, 1.9, 1.2], gap="small")
+    with c1:
+        st.write("")
+        load = st.button("LOAD / REFRESH" if ready else "LOAD SECTOR DATA", type="primary", use_container_width=True, key="mf6_load")
+    bench = c2.radio("Compare against", ["MARKET", "NIFTY 50", "NIFTY 500"], horizontal=True, key="mf6_bench", help=BENCH_HELP)
+    wt = c3.radio("Sector index", ["Equal weight", "Turnover weight"], horizontal=True, key="mf6_wt",
+                  help="Equal weight = every stock counts the same (best for spotting rotation). Turnover weight = √turnover, "
+                       "closer to how the big money is positioned.")
+    min_turn = c4.selectbox("Min turnover / day", [0.25, 0.5, 1.0, 2.0, 5.0], index=1, key="mf6_minturn",
+                            format_func=lambda v: f"₹{v:g} Cr")
+    if load:
+        if ready:
+            _prices.clear()
+            _analysis.clear()
+        st.session_state["mf6_ready"] = ready = True
+    if not ready:
+        _note(f"Press <b>LOAD SECTOR DATA</b>. Arka downloads ~2 years of daily prices for <b>{len(meta)}</b> stocks "
+              f"({_e(source)}) from Yahoo in batches — the first load takes 1-3 minutes, then it is cached for everyone "
+              "(30 minutes in market hours, 3 hours after the close).")
+        return _footer()
+
+    with st.spinner(f"Loading {len(meta)} stocks and building {meta['group'].nunique()} sectors…"):
+        try:
+            res, err = _get_analysis(tuple(meta["symbol"]), bench, "turnover" if wt.startswith("Turnover") else "equal", float(min_turn))
+        except Exception as exc:
+            st.error(f"Sector data unavailable right now: {type(exc).__name__}: {exc}. Yahoo may be rate-limiting; try again in a minute.")
+            return _footer()
+    _publish(res)
+    _status(res, source, err)
+
+    if view == "ROTATION DESK":
+        _view_desk(res, on_open)
+    elif view == "SECTOR RANKING":
+        _view_ranking(res)
+    elif view == "MONEY FLOW":
+        _view_money(res)
+    elif view == "BREADTH":
+        _view_breadth(res)
     else:
-        _view_constituents(indices, on_open)
-    _sources_footer()
+        _view_stocks(res, on_open)
+    _footer()
+
+
+def _footer():
+    with st.expander("HOW THIS WORKS · method, sources and limits"):
+        st.markdown("""
+**Universe.** NIFTY 500 + NIFTY MICROCAP 250 (or NIFTY TOTAL MARKET if that file is in `data/`), minus illiquid stocks.
+Each stock is placed in one of ~50 rotation groups (`sector_map.py`).
+
+**Sector index.** Equal-weight average of the members' daily returns (moves above ±20% in a day are clipped), compounded.
+**Benchmark MARKET** is built the same way from every stock, so the comparison is like-for-like.
+
+**Rotation map (RRG).** Weekly closes. RS = sector ÷ benchmark. RS-Ratio = z-score of the smoothed RS over 12 weeks, centred on 100.
+RS-Momentum = the same treatment applied to RS-Ratio's rate of change. This follows the published open approximations of the
+JdK method; the exact JdK formula is proprietary, so values differ slightly from paid RRG tools, but the quadrants and direction agree.
+
+**Breadth.** % of the sector's stocks above their own 20 / 50 / 200-day EMA, advance-decline, breakouts above the prior 20-day high,
+new 52-week closing highs.
+
+**Money.** ₹ turnover = close × volume. Share = sector turnover ÷ all turnover. Up-turnover = turnover in stocks that closed up.
+CMF = Σ(close-location × ₹ turnover) ÷ Σ ₹ turnover over 20 sessions, summed across the sector.
+
+**FPI flows.** NSDL fortnightly sector-wise report (equity, ₹ crore).
+
+**Limits.** Yahoo data is delayed and occasionally has gaps; turnover is computed, not exchange-reported; every trade has a buyer
+and a seller, so "money flow" here means which side was more aggressive. Signals are research evidence, not forecasts or advice.
+""")
