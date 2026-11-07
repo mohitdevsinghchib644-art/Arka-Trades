@@ -219,7 +219,7 @@ NIFTY50 = {
     "TELECOM": ["BHARTIARTL"],
 }
 
-FUNCS = [("MF", "MONEY FLOW", "flow", "Sector rotation radar, Rotation Lab backtests, FPI sector flows, FII / DII"),
+FUNCS = [("MF", "MONEY FLOW", "flow", "Rotation desk: where money is moving, sector ranking, breadth, FPI flows"),
          ("RES", "RESEARCH", "research", "Financials, peers, valuation, health score and technicals"),
          ("PORT", "PORTFOLIO", "portfolio", "P&amp;L, tax, risk, rebalance, dividends and reports"),
          ("WL", "WATCHLIST", "watchlist", "Live list with RSI, PDH / PDL levels and signals"),
@@ -1022,34 +1022,24 @@ def _book(holds, realised, wl, wl_label, quotes):
 
 
 def _rotation():
-    res = st.session_state.get("mf_sr_res")
-    if not res:
-        return ('<div class="hm-empty">Open <b>MONEY FLOW</b> (code <b>MF</b>) → Sector Ranking once this session and the live rotation board '
-                '— which sectors money is moving into — appears here.</div>')
-    try:
-        key = str(res.get("asof"))
-        memo = st.session_state.get("_hm_rot")
-        if memo and memo[0] == key:
-            rot = memo[1]
-        else:
-            import sector_engine as se
-            bi = res["bench_index"]
-            bench = "MARKET AVG" if "MARKET AVG" in bi.columns else bi.columns[0]
-            rot, _ = se.rotation_table(res, bench)
-            st.session_state["_hm_rot"] = (key, rot)
-    except Exception:
-        return '<div class="hm-empty">Rotation data could not be read — reopen MONEY FLOW to refresh it.</div>'
-    colors = {"ROTATING IN": GREEN, "LEADING": "#8AD66B", "EXTENDED": YELLOW, "IMPROVING": CYAN, "FADING": AMBER, "WEAK": RED}
-    counts = rot["stage"].value_counts().to_dict() if "stage" in rot else {}
-    chips = " ".join(f'<span class="hm-pill" style="color:{colors.get(k, T2)}">{_e(k)} {v}</span>' for k, v in counts.items())
+    """Snapshot published by MONEY FLOW (money_flow._publish) into st.session_state['mf_rot']."""
+    snap = st.session_state.get("mf_rot")
+    if not snap or snap.get("table") is None:
+        return ('<div class="hm-empty">Open <b>MONEY FLOW</b> (code <b>MF</b>) and press <b>LOAD SECTOR DATA</b> once this session: '
+                'the rotation desk — which sectors money is moving into — appears here.</div>')
+    tbl = snap["table"]
+    colors = {"ROTATING IN": GREEN, "LEADING": "#8AD66B", "STRETCHED": YELLOW, "WATCH": CYAN, "WEAKENING": AMBER, "LAGGING": RED}
+    counts = tbl["action"].value_counts().to_dict()
+    chips = " ".join(f'<span class="hm-pill" style="color:{c}">{_e(k)} {counts[k]}</span>' for k, c in colors.items() if k in counts)
     rows = []
-    for _, r in rot.head(6).iterrows():
-        sc, w = r.get("score"), r.get("r1w")
-        rows.append(f'<tr><td class="l">{_e(str(r["sector"])[:22])}</td><td><span class="hm-pill" style="color:{colors.get(r.get("stage"), T2)}">'
-                    f'{_e(r.get("stage") or "—")}</span></td><td class="n">{(f"{sc:.0f}" if _ok(sc) else "—")}</td>'
-                    f'<td class="{_cls(w)}">{_pct(w, 1)}</td></tr>')
-    return (f'<div style="padding:2px 0 12px;line-height:2.3">{chips}</div><table class="hm-t"><thead><tr><th>Top sectors</th><th>Stage</th>'
-            f'<th>Score</th><th>1W</th></tr></thead><tbody>{"".join(rows)}</tbody></table>')
+    for r in tbl.sort_values("score", ascending=False).head(7).to_dict("records"):
+        sc, ex = r.get("score"), r.get("ex1m")
+        rows.append(f'<tr><td class="l">{_e(str(r["sector"])[:24])}</td><td><span class="hm-pill" style="color:{colors.get(r["action"], T2)}">'
+                    f'{_e(r["action"])}</span></td><td class="n">{(f"{sc:.0f}" if _ok(sc) else "—")}</td>'
+                    f'<td class="{_cls(ex)}">{_pct(ex, 1)}</td></tr>')
+    return (f'<div style="padding:2px 0 12px;line-height:2.3">{chips}</div><table class="hm-t"><thead><tr><th>Top sectors</th>'
+            f'<th>Action</th><th>Score</th><th>RS 1M</th></tr></thead><tbody>{"".join(rows)}</tbody></table>'
+            f'<div class="hm-cap" style="margin-top:6px">vs {_e(snap.get("bench", "MARKET"))} · as of {_e(snap.get("asof", ""))}</div>')
 
 
 WORLD = [("TOKYO", "Asia/Tokyo", (9, 0), (15, 30)), ("HONG KONG", "Asia/Hong_Kong", (9, 30), (16, 0)),
