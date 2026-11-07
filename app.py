@@ -870,7 +870,7 @@ def _render_topbar():
                                   type="primary" if active else "secondary", on_click=_nav_cb, args=(target,))
         with c3:
             with st.container(key="topuser"):
-                a, b = st.columns([2.2, 1.25], gap="small")
+                a, b = st.columns([2.0, 1.45], gap="small")
                 a.markdown(f'<div class="ak-chips"><span class="ak-chip {cls}" title="{_esc(detail)}"><i class="ak-dot"></i>{label}</span>'
                            f'<span class="ak-chip">{clock}</span></div>', unsafe_allow_html=True)
                 with b:
