@@ -1,4 +1,24 @@
-"""Arka Trades — Research Terminal v12 (function-code UI + new analytics).
+"""Arka Trades — Research Terminal v13 (deliveries, quant, financial health, filings, research intelligence).
+
+What changed vs v12
+-------------------
+New functions (data layer: research_data.py)
+* DLV   Deliveries — delivered vs traded quantity and delivery %, daily / weekly / monthly, from NSE's
+        daily bhavcopy. Stored in Supabase when configured so history builds up.
+* FH    Financial health — debt/equity, interest coverage, current ratio, net debt/EBITDA, free cash flow,
+        cash conversion, working-capital days.
+* ERN   Earnings trend — each quarter against the same quarter a year earlier.
+* QR    Quant — relative strength vs NIFTY 500 and NIFTY 50, RS line and trend, momentum 12-1,
+        volatility, beta, drawdown.
+* SYN   Research intelligence — evidence sheet with sources, contradiction detection, and a Gemini
+        synthesis that is given only that evidence sheet.
+* CACS  now reads the company's filings from BSE (by category); ScanX remains the fallback.
+* NOTE  thesis notes are saved to Supabase when configured.
+Fixes
+* DES   52-week high / low now comes from Yahoo history (it showed N/A); sector uses the NSE classification.
+* HC    the liquidity test (current ratio) is now computed from Yahoo's balance sheet.
+
+v12 notes follow.
 
 What changed vs v11
 -------------------
@@ -33,6 +53,7 @@ Unchanged
 from __future__ import annotations
 
 import html
+import json
 import math
 from datetime import datetime, timezone, timedelta
 from typing import Any
@@ -55,6 +76,11 @@ except Exception:  # pragma: no cover
     _ss = None
     _SECTOR_PEERS = {}
 
+try:
+    import research_data as rd
+except Exception:  # pragma: no cover
+    rd = None
+
 IST = timezone(timedelta(hours=5, minutes=30))
 BENCHMARK = ("^NSEI", "NIFTY 50")
 
@@ -71,20 +97,24 @@ GROUPS = [
         ("DES", "Description", "Company profile, key fundamentals, growth snapshot, pros & cons"),
         ("HC", "Health Check", "Piotroski-style quality score and automatic red / green flags"),
         ("VAL", "Valuation", "TTM P/E, P/B, earnings yield, Graham number and historical P/E band"),
+        ("FH", "Financial Health", "Leverage, coverage, liquidity, free cash flow and cash conversion"),
     ]),
     ("FINANCIALS", [
         ("FA", "Income Statement", "Quarterly / yearly results with QoQ and YoY growth"),
+        ("ERN", "Earnings Trend", "Each quarter against the same quarter a year earlier"),
         ("BS", "Balance Sheet", "Assets, liabilities, borrowings and reserves"),
         ("CF", "Cash Flow", "Operating, investing and financing cash flows"),
         ("RAT", "Ratios", "Efficiency and return ratios"),
     ]),
     ("OWNERSHIP", [
         ("HDS", "Shareholding", "Promoter / FII / DII / public holding trend"),
+        ("DLV", "Deliveries", "Delivered vs traded quantity and delivery %, daily / weekly / monthly (NSE)"),
         ("MF", "MF Holdings", "Mutual fund positions (ScanX, optional source)"),
     ]),
     ("COMPARE", [
         ("RV", "Peers", "Relative value versus sector peers"),
         ("PERF", "vs NIFTY 50", "Relative performance, alpha, beta, volatility, drawdown"),
+        ("QR", "Quant", "Relative strength vs NIFTY 500 / 50, momentum, volatility, beta, drawdown"),
     ]),
     ("MARKET", [
         ("TECH", "Technicals", "Trend, momentum, moving averages and pivot levels"),
@@ -94,7 +124,10 @@ GROUPS = [
     ("EVENTS", [
         ("DVD", "Dividends", "Dividend history, splits and bonus issues"),
         ("CN", "News", "Company news timeline"),
-        ("CACS", "Announcements", "Exchange filings (ScanX, optional source)"),
+        ("CACS", "Announcements", "Exchange filings from BSE, by category"),
+    ]),
+    ("INTELLIGENCE", [
+        ("SYN", "Research Intel", "Evidence sheet, contradiction detection and AI synthesis"),
     ]),
     ("WORKSPACE", [
         ("NOTE", "Thesis Notes", "Your bull / bear case, catalysts, risks and target"),
@@ -112,6 +145,8 @@ ALIASES = {
     "BETA": "PERF", "GP": "TECH", "TECHNICALS": "TECH", "SEASONALITY": "SEAS", "SEAG": "SEAS",
     "ANALYST": "ANR", "TARGET": "ANR", "DIVIDENDS": "DVD", "NEWS": "CN", "ANNOUNCEMENTS": "CACS",
     "FILINGS": "CACS", "THESIS": "NOTE", "NOTES": "NOTE", "SOURCES": "SRC",
+    "DELIVERY": "DLV", "DELIVERIES": "DLV", "DEL": "DLV", "FINHEALTH": "FH", "EARNINGS": "ERN", "EE": "ERN",
+    "QUANT": "QR", "RS": "QR", "MOMENTUM": "QR", "INTEL": "SYN", "AI": "SYN", "SYNTHESIS": "SYN", "EVIDENCE": "SYN",
 }
 
 
@@ -462,13 +497,21 @@ def _overview(sym, B, T, key, nf):
     info = yf_attr(sym, "info") or {}
     _header("Key fundamentals", T, "live" if B.get("resolved") else "unavailable", B.get("url"))
     ed = _earnings_date(sym)
+    hh = get_history(sym, "1y")
+    if hh is not None and len(hh) > 20:
+        hl = (f'₹{float(hh["High"].max()):,.2f} / ₹{float(hh["Low"].min()):,.2f}', "Yahoo, last 1 year")
+    else:
+        hl = (f'₹{s["year_high"]} / ₹{s["year_low"]}', "Screener") if s.get("year_high") else ("N/A", "Screener")
+    sc = B.get("sector") or {}
+    sector = sc.get("Sector") or sc.get("Broad Sector") or info.get("sector") or "N/A"
+    industry = sc.get("Industry") or sc.get("Broad Industry") or info.get("industry") or ""
     _kpis([
         ("Market Cap", f'₹{s["market_cap"]} Cr' if s.get("market_cap") else "N/A", "Screener"),
         ("Stock P/E", f'{s["pe_ratio"]}x' if s.get("pe_ratio") else "N/A", "Screener"),
         ("Book Value", f'₹{s["book_value"]}' if s.get("book_value") else "N/A", "Screener"),
         ("Face Value", f'₹{s["face_value"]}' if s.get("face_value") else "N/A", "Screener"),
-        ("52W High / Low", f'₹{s["year_high"]} / ₹{s["year_low"]}' if s.get("year_high") else "N/A", "Screener"),
-        ("Sector", str(info.get("sector") or "N/A"), str(info.get("industry") or "Yahoo")),
+        ("52W High / Low", hl[0], hl[1]),
+        ("Sector", str(sector), str(industry) or ("Screener" if sc else "Yahoo")),
         ("Employees", f'{info["fullTimeEmployees"]:,}' if isinstance(info.get("fullTimeEmployees"), int) else "N/A", "Yahoo"),
         ("Next earnings", ed or "N/A", "Yahoo calendar" if ed else "Not published"),
     ], T, 4)
@@ -498,7 +541,7 @@ def _overview(sym, B, T, key, nf):
 
 
 # ---------- HC: health check ----------
-def _piotroski(B):
+def _piotroski(B, liq=None):
     y, bs, cf = B.get("yearly"), B.get("balance_sheet"), B.get("cash_flow")
     npf = _annual_map(y, "Net Profit", "Profit for the period")
     sales = _annual_map(y, "Sales", "Revenue")
@@ -533,7 +576,8 @@ def _piotroski(B):
         ("Cash flow exceeds profit (earnings quality)", (cfo[t] > npf[t]) if has_cfo else None,
          f"CFO/NP {cfo[t] / npf[t]:.2f}x" if has_cfo and npf[t] else ""),
         ("Leverage falling (debt / assets)", None if lev_t is None or lev_p is None else lev_t <= lev_p, arrow(lev_t, lev_p)),
-        ("Liquidity improving (current ratio)", None, "current assets not published on Screener"),
+        ("Liquidity improving (current ratio)", None if not liq else liq[0] > liq[1],
+         f"{liq[1]:.2f}x → {liq[0]:.2f}x · Yahoo" if liq else "current assets not available"),
         ("No share dilution (equity capital)", None if t not in eqc or p not in eqc else eqc[t] <= eqc[p],
          "a split / bonus can show as a false fail"),
         ("Operating margin improving", up(opm.get(t), opm.get(p)), arrow(opm.get(t), opm.get(p), 1)),
@@ -605,7 +649,10 @@ def _health(sym, B, T, key, nf):
     if not B.get("resolved"):
         _unavailable("Health check", "Screener yearly P&L, balance sheet and cash flow", T, B.get("reason"))
         return
-    res = _piotroski(B)
+    ybs = yf_attr(sym, "balance_sheet")
+    crs = [(_yv(ybs, ["Current Assets"], i), _yv(ybs, ["Current Liabilities"], i)) for i in (0, 1)]
+    liq = (crs[0][0] / crs[0][1], crs[1][0] / crs[1][1]) if all(a is not None and b for a, b in crs) else None
+    res = _piotroski(B, liq)
     _header("Quality score · Piotroski-style, computed from Screener annual data", T, "live" if res else "unavailable")
     if res is None:
         _unavailable("Quality score", "At least two fiscal years of P&L and balance sheet", T)
@@ -1056,7 +1103,371 @@ def _news(sym, B, T, key, news_fetch_fn):
                     unsafe_allow_html=True)
 
 
-def _announcements(sym, B, T, key, nf):
+# ═══════════════════════════ v13 additions ═══════════════════════════
+def _yv(df, names, col=0):
+    """A value from a yfinance statement frame (index = line item, columns = dates, newest first)."""
+    if df is None or getattr(df, "empty", True):
+        return None
+    for n in names:
+        if n in df.index:
+            try:
+                v = df.loc[n].iloc[col]
+                return None if pd.isna(v) else float(v)
+            except Exception:
+                return None
+    return None
+
+
+def _last_num(vals):
+    v = [x for x in vals if x is not None]
+    return v[-1] if v else None
+
+
+def _user_id():
+    for k in ("username", "user", "user_email", "auth_user", "user_id"):
+        v = st.session_state.get(k)
+        if isinstance(v, dict):
+            v = v.get("email") or v.get("username") or v.get("id")
+        if v:
+            return str(v)[:80]
+    return "default"
+
+
+def _qty(v):
+    return "—" if v is None or pd.isna(v) else f"{v:,.0f}"
+
+
+def _pe_stats(B, close):
+    """(current TTM P/E, percentile of it within the stock's own quarter-end P/E history) or (None, None)."""
+    ttm = _ttm_eps(B)
+    if close is None or len(close) == 0 or not ttm or ttm <= 0:
+        return None, None
+    pe = float(close.iloc[-1]) / ttm
+    q = B.get("quarterly")
+    eps = _nums(_row(q, "EPS"))
+    hist = []
+    for i in range(3, len(eps)):
+        w = eps[i - 3:i + 1]
+        if any(v is None for v in w) or sum(w) <= 0 or i >= len(q["periods"]):
+            continue
+        d = _quarter_end(q["periods"][i])
+        if d is None or d < close.index[0]:
+            continue
+        px = close.asof(d)
+        if pd.notna(px):
+            hist.append(float(px) / sum(w))
+    return pe, (sum(1 for v in hist if v < pe) / len(hist) * 100 if len(hist) >= 4 else None)
+
+
+# ---------- DLV: deliveries ----------
+def _delivery_frame(sym, sessions):
+    h = get_history(sym, "2y")
+    if h is None or len(h) < 5:
+        return None, {"error": "no price history to take trading dates from"}
+    days = [d.date() for d in _naive(h["Close"]).index]
+    if days and days[-1] == datetime.now(IST).date() and datetime.now(IST).hour < 19:
+        days = days[:-1]                      # today's file is published in the evening
+    days = days[-int(sessions):]
+    ck = f"rp_dlv_{sym}_{sessions}_{days[-1] if days else ''}"
+    if ck in st.session_state:
+        return st.session_state[ck]
+    df, info = rd.delivery_history(sym, days)
+    if df is not None and not df.empty:
+        st.session_state[ck] = (df, info)
+        st.session_state[f"rp_dlv_last_{sym}"] = df
+    return df, info
+
+
+def _deliveries(sym, B, T, key, nf):
+    if rd is None:
+        _unavailable("Deliveries", "research_data.py next to research_page.py", T)
+        return
+    c1, c2 = st.columns([2, 1])
+    mode = c1.radio("Period", ["Daily", "Weekly", "Monthly"], index=1, horizontal=True, key=f"{key}_dlv_mode", label_visibility="collapsed")
+    n = c2.selectbox("History", [60, 120, 250], key=f"{key}_dlv_n", format_func=lambda v: f"Last {v} sessions", label_visibility="collapsed")
+    with st.spinner("Loading NSE delivery data…"):
+        df, info = _delivery_frame(sym, n)
+    ok = df is not None and not df.empty
+    _header("Deliveries · NSE security-wise bhavcopy", T, "live" if ok else "unavailable",
+            "Delivered quantity = shares that changed hands for delivery (not squared off intraday). NSE only.")
+    if not ok:
+        _unavailable("Delivery data", "NSE daily bhavcopy with delivery (sec_bhavdata_full)", T,
+                     f"{info.get('error') or 'No file could be read'}. NSE may be refusing this server. "
+                     "See SRC for source health; a small script on your PC can fill the Supabase table instead.")
+        return
+    d = df["deliv_pct"].dropna()
+    last_i = d.index[-1] if len(d) else None
+    avg20 = float(d.tail(20).mean()) if len(d) >= 5 else None
+    avg_all = float(d.mean()) if len(d) else None
+    lastv = float(d.iloc[-1]) if len(d) else None
+    _kpis([("Latest delivery %", _pct(lastv), str(last_i)[:10] if last_i is not None else "",
+            (T["green"] if lastv is not None and avg_all and lastv > avg_all else None)),
+           ("20-session average", _pct(avg20), "delivered ÷ traded quantity"),
+           (f"{len(d)}-session average", _pct(avg_all), "the stock's own normal"),
+           ("Sessions loaded", f"{len(df)} / {info.get('requested', len(df))}",
+            f"{info.get('from_store', 0)} stored · {info.get('not_published', 0)} no file · {info.get('errors', 0)} failed")], T, 4)
+
+    agg = rd.aggregate_delivery(df, {"Daily": "D", "Weekly": "W", "Monthly": "M"}[mode])
+    show = agg.tail({"Daily": 30, "Weekly": 16, "Monthly": 12}[mode]).iloc[::-1]
+    try:
+        import plotly.graph_objects as go
+        fig = go.Figure()
+        fig.add_trace(go.Bar(y=show["label"], x=show["volume"], orientation="h", name="Traded qty", marker_color="#2A3F5F"))
+        fig.add_trace(go.Bar(y=show["label"], x=show["deliv_qty"], orientation="h", name="Delivered qty", marker_color=T["cyan"],
+                             text=[("" if pd.isna(v) else f"{v:.1f}%") for v in show["deliv_pct"]], textposition="outside"))
+        fig.update_yaxes(autorange="reversed")
+        _fig(fig, T, 70 + 26 * len(show), f"{key}_dlv_bar_{mode}", barmode="overlay")
+    except Exception:
+        pass
+    rows = [{"label": r["label"], "values": [_qty(r["deliv_qty"]), _qty(r["volume"]), _pct(None if pd.isna(r["deliv_pct"]) else r["deliv_pct"]),
+                                             _rs(None if pd.isna(r["close"]) else r["close"]),
+                                             _pct(None if pd.isna(r["chg_pct"]) else r["chg_pct"], 1, True)]} for _, r in show.iterrows()]
+    _table(["DELIVERED QTY", "TRADED QTY", "DELIVERY %", "CLOSE", "CHANGE"], rows, T, dl=f"{sym}_delivery_{mode.lower()}_{key}")
+
+    top = df.dropna(subset=["deliv_pct"]).sort_values("deliv_pct", ascending=False).head(5)
+    if len(top):
+        _header("Highest delivery days in this window", T)
+        _table(["DELIVERY %", "DELIVERED QTY", "CLOSE", "DAY CHANGE"],
+               [{"label": str(i)[:10], "values": [_pct(r["deliv_pct"]), _qty(r["deliv_qty"]), _rs(r["close"]),
+                                                  _pct((r["close"] / r["prev_close"] - 1) * 100 if r["prev_close"] and r["prev_close"] == r["prev_close"] else None, 1, True)]}
+                for i, r in top.iterrows()], T)
+    st.caption("High delivery means more of the day's trading was taken for delivery. It does not show who bought or sold, "
+               "or whether they were buying or selling. Compare a day with the stock's own average, not with other stocks.")
+
+
+# ---------- FH: financial health ----------
+def _fin_health(sym, B, T, key, nf):
+    y, bs, cf, rt = B.get("yearly"), B.get("balance_sheet"), B.get("cash_flow"), B.get("ratios")
+    ybs, ycf = yf_attr(sym, "balance_sheet"), yf_attr(sym, "cashflow")
+    info = yf_attr(sym, "info") or {}
+    de = _debt_equity(B)
+    lender = _row(y, "Financing Profit", "Financing Margin") is not None
+    op, it = _last_num(_nums(_row(y, "Operating Profit"))), _last_num(_nums(_row(y, "Interest")))
+    cov = op / it if (not lender and op is not None and it and it > 0) else None
+    ca = _yv(ybs, ["Current Assets", "Total Current Assets"])
+    cl = _yv(ybs, ["Current Liabilities", "Total Current Liabilities"])
+    cr = ca / cl if ca is not None and cl else None
+    fcf = _yv(ycf, ["Free Cash Flow"])
+    td, cash, ebitda = info.get("totalDebt"), info.get("totalCash"), info.get("ebitda")
+    nde = (td - cash) / ebitda if all(isinstance(v, (int, float)) for v in (td, cash, ebitda)) and ebitda and ebitda > 0 else None
+    npm, cfo = _annual_map(y, "Net Profit", "Profit for the period"), _annual_map(cf, "Cash from Operating", "Operating")
+    common = [p for p in (y or {}).get("periods", []) if p in npm and p in cfo][-3:]
+    conv = sum(cfo[p] for p in common) / sum(npm[p] for p in common) * 100 if len(common) == 3 and sum(npm[p] for p in common) > 0 else None
+    _header("Financial health · balance-sheet strength and cash quality", T, "live" if B.get("resolved") else "unavailable")
+    _kpis([("Debt / equity", f"{de}x" if de is not None else "N/A", "Borrowings ÷ (equity + reserves) · Screener"),
+           ("Interest coverage", f"{cov:.1f}x" if cov is not None else "N/A",
+            "Not meaningful for lenders" if lender else "Operating profit ÷ interest, latest year · Screener"),
+           ("Current ratio", f"{cr:.2f}x" if cr is not None else "N/A", "Current assets ÷ current liabilities · Yahoo"),
+           ("Net debt / EBITDA", f"{nde:.1f}x" if nde is not None else "N/A", "(Debt − cash) ÷ EBITDA · Yahoo"),
+           ("Free cash flow", f"₹{fcf / 1e7:,.0f} Cr" if fcf is not None else "N/A", "Latest year · Yahoo"),
+           ("Cash conversion, 3 yrs", _pct(conv, 0), "Operating cash flow ÷ net profit · Screener")], T, 3)
+    extra = []
+    for lab in ("Debtor Days", "Inventory Days", "Days Payable", "Cash Conversion Cycle", "Working Capital Days", "ROCE"):
+        r = _row(rt, lab)
+        v = [x for x in (r or {}).get("values", []) if x not in ("—", "")]
+        if r and len(v) >= 2:
+            extra.append({"label": r["label"], "values": [v[-2], v[-1]]})
+    if extra:
+        _header("Working capital · previous year → latest", T)
+        _table(["PREVIOUS", "LATEST"], extra, T, ["Cash Conversion", "ROCE"])
+    if bs and bs.get("rows"):
+        _header("Balance sheet trend · ₹ Cr", T)
+        keep = [r for lab in ("Borrowings", "Reserves", "Total Assets") if (r := _row(bs, lab))]
+        seen, rows = set(), []
+        for r in keep:
+            if r["label"] not in seen:
+                seen.add(r["label"])
+                rows.append({"label": r["label"], "values": r["values"][-6:]})
+        _table(bs["periods"][-6:], rows, T, ["Borrowings"])
+    st.caption("Ratios are shown without a verdict: what is healthy differs by industry. Compare with peers (RV) and with the company's own past.")
+
+
+# ---------- ERN: earnings trend ----------
+def _earnings_trend(sym, B, T, key, nf):
+    q = B.get("quarterly")
+    if not q or not q.get("rows"):
+        _unavailable("Earnings trend", "Screener quarterly results", T, B.get("reason"))
+        return
+    per = q["periods"]
+
+    def yoy(vals):
+        return [((vals[i] / vals[i - 4] - 1) * 100 if i >= 4 and vals[i] is not None and vals[i - 4] and vals[i - 4] > 0 else None)
+                for i in range(len(vals))]
+
+    sales, npf = _nums(_row(q, "Sales", "Revenue")), _nums(_row(q, "Net Profit", "Profit for the period"))
+    eps, opm = _nums(_row(q, "EPS")), _nums(_row(q, "OPM", "Financing Margin"))
+    ys, yn, ye = yoy(sales), yoy(npf), yoy(eps)
+    n = min(8, len(per))
+    cut = lambda a: (a + [None] * len(per))[:len(per)][-n:]
+    f0 = lambda a: [("—" if v is None else f"{v:,.0f}") for v in cut(a)]
+    f2 = lambda a: [("—" if v is None else f"{v:,.2f}") for v in cut(a)]
+    fp = lambda a: [("—" if v is None else f"{v:+.1f}%") for v in cut(a)]
+    wins = [v for v in cut(yn) if v is not None]
+    ttm = lambda a: (sum(a[-4:]), sum(a[-8:-4])) if len(a) >= 8 and all(v is not None for v in a[-8:]) else (None, None)
+    (s1, s0), (p1, p0) = ttm(sales), ttm(npf)
+    o = [v for v in opm if v is not None]
+    _header("Earnings trend · last quarters vs the same quarter a year earlier", T, "live")
+    _kpis([("Sales, last 4 quarters", _pct((s1 / s0 - 1) * 100 if s1 is not None and s0 and s0 > 0 else None, 1, True), "vs the 4 quarters before"),
+           ("Net profit, last 4 quarters", _pct((p1 / p0 - 1) * 100 if p1 is not None and p0 and p0 > 0 else None, 1, True), "vs the 4 quarters before"),
+           ("Profit up year-on-year", f"{sum(1 for v in wins if v > 0)} of {len(wins)}" if wins else "N/A", "quarters shown"),
+           ("Operating margin", f"{o[-1]:.0f}%" if o else "N/A", f"{o[-5]:.0f}% a year ago" if len(o) >= 5 else "")], T, 4)
+    try:
+        import plotly.graph_objects as go
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=per[-n:], y=cut(ys), name="Sales YoY %", marker_color=T["cyan"]))
+        fig.add_trace(go.Bar(x=per[-n:], y=cut(yn), name="Net profit YoY %", marker_color=T["green"]))
+        _fig(fig, T, 280, f"{key}_ern_bar", barmode="group")
+    except Exception:
+        pass
+    _table(per[-n:], [{"label": "Sales ₹ Cr", "values": f0(sales)}, {"label": "Sales YoY", "values": fp(ys)},
+                      {"label": "Net profit ₹ Cr", "values": f0(npf)}, {"label": "Net profit YoY", "values": fp(yn)},
+                      {"label": "EPS ₹", "values": f2(eps)}, {"label": "EPS YoY", "values": fp(ye)},
+                      {"label": "Operating margin %", "values": f0(opm)}], T, ["YoY"], dl=f"{sym}_earnings_trend_{key}")
+    st.caption("YoY compares each quarter with the same quarter a year earlier, which removes seasonality. "
+               "Result dates and the price reaction to each result are not available from this source.")
+
+
+# ---------- QR: quant ----------
+def _quant(sym, B, T, key, nf):
+    h = _hist(sym, "2y", "1y")
+    if h is None:
+        _unavailable("Quant", "Yahoo daily price history", T)
+        return
+    s = _naive(h["Close"].astype(float))
+    bn = {}
+    for name, tk in (("NIFTY 500", "^CRSLDX"), ("NIFTY 50", "^NSEI")):
+        ix = _index_history(tk)
+        if ix is not None and len(ix) > 60:
+            bn[name] = _naive(ix["Close"].astype(float))
+    if not bn:
+        _unavailable("Benchmarks", "Yahoo history for NIFTY 500 / NIFTY 50", T)
+        return
+    main = "NIFTY 500" if "NIFTY 500" in bn else "NIFTY 50"
+    rows = []
+    for lab, k in (("5 sessions", 5), ("20 sessions", 20), ("60 sessions", 60), ("120 sessions", 120), ("252 sessions", 252)):
+        vals = []
+        for name in ("NIFTY 500", "NIFTY 50"):
+            if name not in bn:
+                vals.append("N/A")
+                continue
+            df = pd.concat([s.rename("s"), bn[name].rename("b")], axis=1).dropna()
+            if len(df) <= k:
+                vals.append("—")
+                continue
+            rs_, rb = (df["s"].iloc[-1] / df["s"].iloc[-1 - k] - 1) * 100, (df["b"].iloc[-1] / df["b"].iloc[-1 - k] - 1) * 100
+            if not vals:
+                vals.insert(0, f"{rs_:+.1f}%")
+            vals.append(f"{rs_ - rb:+.1f} pp")
+        while len(vals) < 3:
+            vals.insert(0, "—")
+        rows.append({"label": lab, "values": vals[:3]})
+    _header("Relative strength · stock return minus index return", T, "live")
+    _table([sym, "vs NIFTY 500", "vs NIFTY 50"], rows, T, ["60 sessions"])
+
+    df = pd.concat([s.rename("s"), bn[main].rename("b")], axis=1).dropna()
+    ratio = df["s"] / df["b"]
+    sma = ratio.rolling(50).mean()
+    trend = "N/A"
+    if len(sma.dropna()) > 21:
+        up, rising = ratio.iloc[-1] > sma.iloc[-1], sma.iloc[-1] > sma.iloc[-21]
+        trend = "UP" if up and rising else "DOWN" if (not up and not rising) else "MIXED"
+    w = df.tail(252)
+    r = w.pct_change().dropna()
+    vol20 = float(r["s"].tail(20).std() * math.sqrt(252) * 100) if len(r) >= 20 else None
+    vol60 = float(r["s"].tail(60).std() * math.sqrt(252) * 100) if len(r) >= 60 else None
+    beta = float(r["s"].cov(r["b"]) / r["b"].var()) if len(r) >= 60 and r["b"].var() else None
+    dd = w["s"] / w["s"].cummax() - 1
+    mom = (s.iloc[-22] / s.iloc[-253] - 1) * 100 if len(s) > 253 else None
+    upd = float((r["s"].tail(60) > 0).mean() * 100) if len(r) >= 60 else None
+    _header(f"Relative-strength line · {sym} ÷ {main}", T, note="Rising line = the stock is beating the index. Trend uses the 50-session average, as in Money Flow.")
+    try:
+        import plotly.graph_objects as go
+        x = (ratio / ratio.iloc[-min(252, len(ratio))] * 100).tail(252)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=x.index, y=x.values, name="RS line (100 = a year ago)", line=dict(color=T["amber"], width=2)))
+        sm = (sma / ratio.iloc[-min(252, len(ratio))] * 100).tail(252)
+        fig.add_trace(go.Scatter(x=sm.index, y=sm.values, name="50-session average", line=dict(color=T["cyan"], width=1)))
+        _fig(fig, T, 280, f"{key}_qr_rs")
+    except Exception:
+        pass
+    tc = T["green"] if trend == "UP" else T["red"] if trend == "DOWN" else None
+    _kpis([("RS trend", trend, f"vs {main}", tc),
+           ("Momentum 12-1", _pct(mom, 1, True), "12 months ago → 1 month ago"),
+           ("Volatility 20 / 60", f"{vol20:.0f}% / {vol60:.0f}%" if vol20 is not None and vol60 is not None else "N/A", "annualised, daily returns"),
+           ("Beta", f"{beta:.2f}" if beta is not None else "N/A", f"vs {main}, 1 year"),
+           ("Drawdown now / max 1Y", f"{dd.iloc[-1] * 100:.1f}% / {dd.min() * 100:.1f}%", "from the 1-year high", T["red"]),
+           ("Up days, last 60", _pct(upd, 0), "share of sessions that closed higher")], T, 3)
+    st.caption("Descriptive statistics from daily closes. Momentum 12-1 skips the latest month, the standard academic definition.")
+
+
+# ---------- CACS: exchange filings from BSE ----------
+def _filings(sym, B, T, key, nf):
+    code = rd.bse_code(B.get("url")) if rd is not None else None
+    anns = rd.bse_announcements(code, 180) if code else []
+    if not anns:
+        return _announcements_scanx(sym, B, T, key, nf)
+    _header(f"Exchange filings · BSE (scrip {code}) · {len(anns)} in 180 days", T, "live")
+    cats = ["All"] + sorted({a["category"] for a in anns})
+    c1, c2 = st.columns([1, 2])
+    cat = c1.selectbox("Category", cats, key=f"{key}_cacs_cat", label_visibility="collapsed")
+    q = c2.text_input("Filter filings", key=f"{key}_cacs_q", placeholder="Filter… e.g. result, dividend, order, board meeting", label_visibility="collapsed")
+    if cat != "All":
+        anns = [a for a in anns if a["category"] == cat]
+    if q:
+        anns = [a for a in anns if q.lower() in (a["title"] + " " + a["sub"]).lower()]
+    for a in anns[:80]:
+        url = html.escape(a["url"], quote=True)
+        st.markdown(f'<div style="padding:8px 0;border-bottom:1px solid {T["border"]};font:10px {T["mono"]}">'
+                    f'<a href="{url}" target="_blank" style="color:{T["ivory"]};text-decoration:none">{_esc(a["title"])}</a>'
+                    f'<div style="color:{T["t3"]};margin-top:3px">{_esc(a["dt"])} · <span style="color:{T["cyan"]}">{_esc(a["category"])}</span>'
+                    f'{" · " + _esc(a["sub"]) if a["sub"] else ""} · OPEN DOCUMENT ↗</div></div>', unsafe_allow_html=True)
+
+
+# ---------- SYN: research intelligence ----------
+_SYN_SYSTEM = ("You are the research interpretation layer of Arka Trades, an Indian equity research terminal. "
+               "Use ONLY the facts in the JSON you are given. Do not add any number, price, target, date or outside knowledge. "
+               "Do not give a buy, sell or hold recommendation. Write three short sections with these exact headings: "
+               "FACT (what the numbers show), INFERENCE (what they suggest together, including each listed contradiction and what could explain it), "
+               "UNKNOWN (what is missing and why it matters). Plain English, under 220 words.")
+
+
+def _synthesis(sym, B, T, key, nf):
+    if rd is None:
+        _unavailable("Research intelligence", "research_data.py next to research_page.py", T)
+        return
+    h = _hist(sym, "5y", "2y")
+    close = _naive(h["Close"].astype(float)) if h is not None else None
+    pe, pct = _pe_stats(B, close) if close is not None else (None, None)
+    E = rd.evidence(B, close, pe, pct, st.session_state.get(f"rp_dlv_last_{sym}"))
+    con = E["contradictions"]
+    _header(f"Contradictions · {len(con)} found", T, "live" if E["facts"] else "unavailable",
+            "Places where two measurements point in different directions. Rules are fixed and shown; nothing here is a forecast.")
+    if con:
+        _panel("Where the evidence disagrees", _checklist([(c["name"], False, c["numbers"]) for c in con], T, ("", "⚠", "")), T)
+    else:
+        _panel("No contradiction rule triggered", f'<div style="font:10px {T["mono"]};color:{T["t2"]}">Checked: valuation vs profit, price vs profit, '
+               "sales vs margin, profit vs cash flow, price vs promoter holding, price vs delivery share.</div>", T)
+    _header("Evidence sheet · every fact with its source", T)
+    _table(["VALUE", "SOURCE"], [{"label": f["label"], "values": [f["value"], f["source"]]} for f in E["facts"]], T, dl=f"{sym}_evidence_{key}")
+    _panel("Not available", f'<div style="font:10px {T["mono"]};color:{T["t2"]};line-height:1.7">{_esc("; ".join(E["unknown"]))}.'
+           + ("" if st.session_state.get(f"rp_dlv_last_{sym}") is not None else " Open DLV once to add delivery data to this sheet.") + "</div>", T, dashed=True)
+
+    _header("AI synthesis · Gemini reads the evidence sheet above, nothing else", T)
+    sk = f"rp_syn_{sym}"
+    if st.button("GENERATE SYNTHESIS", key=f"{key}_syn_btn", type="primary"):
+        payload = {"company": B.get("name", sym), "symbol": sym, "as_of": datetime.now(IST).strftime("%d %b %Y"),
+                   "facts": E["facts"], "contradictions": con, "unknown": E["unknown"]}
+        with st.spinner("Asking Gemini…"):
+            st.session_state[sk] = rd.gemini_generate(json.dumps(payload, ensure_ascii=False), _SYN_SYSTEM)
+    res = st.session_state.get(sk)
+    if res and res.get("text"):
+        st.markdown(res["text"])
+        st.caption(f"Written by {res.get('model')} from the evidence sheet only. AI text can be wrong: check it against the numbers above. Not investment advice.")
+    elif res:
+        _unavailable("AI synthesis", "GEMINI_KEY in Streamlit secrets", T, res.get("error"))
+
+
+def _announcements_scanx(sym, B, T, key, nf):
     d = get_scanx(sym, B.get("name", ""))
     anns = (d or {}).get("announcements") or []
     _header("Exchange announcements · ScanX (optional source)", T, "live" if anns else "unavailable")
@@ -1095,6 +1506,26 @@ def _mf(sym, B, T, key, nf):
 
 
 def _thesis(sym, B, T, key, nf):
+    store = rd is not None and rd.sb_config() is not None
+    uid, lk = _user_id(), f"{key}_note_loaded_{sym}"
+    if store and not st.session_state.get(lk):
+        st.session_state[lk] = True
+        try:
+            saved = rd.note_load(uid, sym)
+            pl = (saved or {}).get("payload") or {}
+            if pl.get("stance") in ("—", "Bullish", "Neutral", "Bearish"):
+                st.session_state[f"{key}_note_stance_{sym}"] = pl["stance"]
+            if isinstance(pl.get("tp"), (int, float)):
+                st.session_state[f"{key}_note_tp_{sym}"] = float(max(0.0, pl["tp"]))
+            if isinstance(pl.get("conv"), (int, float)) and 1 <= int(pl["conv"]) <= 5:
+                st.session_state[f"{key}_note_conv_{sym}"] = int(pl["conv"])
+            for k2 in ("bull", "bear", "cat", "risk"):
+                if isinstance(pl.get(k2), str):
+                    st.session_state[f"{key}_note_{k2}_{sym}"] = pl[k2]
+            if saved:
+                st.session_state[f"{key}_note_at_{sym}"] = str(saved.get("updated_at", ""))[:16].replace("T", " ")
+        except Exception as e:
+            st.session_state[f"{key}_note_err_{sym}"] = f"{type(e).__name__}: {e}"[:200]
     a, b, c = st.columns(3)
     a.selectbox("Stance", ["—", "Bullish", "Neutral", "Bearish"], key=f"{key}_note_stance_{sym}")
     b.number_input("Target price (₹)", min_value=0.0, step=1.0, key=f"{key}_note_tp_{sym}")
@@ -1109,7 +1540,21 @@ def _thesis(sym, B, T, key, nf):
             f"Conviction: {ss.get(f'{key}_note_conv_{sym}', 3)}/5\n")
     txt = head + "\n\n".join(f"{t.upper()}\n{ss.get(f'{key}_note_{k}_{sym}', '')}" for t, k in fields)
     st.download_button("⤓ DOWNLOAD NOTE (.txt)", txt, file_name=f"{sym}_research_note.txt", key=f"{key}_note_dl_{sym}")
-    st.caption("Notes live in this browser session. Download them to keep a copy.")
+    if store:
+        if st.button("SAVE NOTE", key=f"{key}_note_save_{sym}", type="primary"):
+            try:
+                rd.note_save(uid, sym, {k2: ss.get(f"{key}_note_{k2}_{sym}") for k2 in ("stance", "tp", "conv", "bull", "bear", "cat", "risk")})
+                st.session_state[f"{key}_note_at_{sym}"] = datetime.now(IST).strftime("%Y-%m-%d %H:%M")
+                st.session_state.pop(f"{key}_note_err_{sym}", None)
+            except Exception as e:
+                st.session_state[f"{key}_note_err_{sym}"] = f"{type(e).__name__}: {e}"[:200]
+        err = ss.get(f"{key}_note_err_{sym}")
+        if err:
+            st.caption(f"Supabase problem: {err}. Check that the research_notes table exists (supabase_setup.sql).")
+        else:
+            st.caption(f"Notes are saved in Supabase for user '{uid}'. Last saved: {ss.get(f'{key}_note_at_{sym}') or 'not yet'}.")
+    else:
+        st.caption("Notes live in this browser session. Add SUPABASE_URL and SUPABASE_KEY to Streamlit secrets to save them.")
 
 
 def _sources(sym, B, T, key, nf):
@@ -1121,7 +1566,13 @@ def _sources(sym, B, T, key, nf):
         {"label": "Health check, valuation, P/E band", "values": ["Computed from the above", "on demand"]},
         {"label": "Analyst / dividends / fallbacks", "values": ["Yahoo Finance", "on demand"]},
         {"label": "News", "values": ["news_feed.py / Yahoo", "on demand"]},
-        {"label": "Announcements / MF holdings", "values": ["ScanX (optional)", "on demand"]}], T)
+        {"label": "Delivery (DLV)", "values": ["NSE daily bhavcopy", "on demand"]},
+        {"label": "Announcements (CACS)", "values": ["BSE API, ScanX fallback", "on demand"]},
+        {"label": "MF holdings", "values": ["ScanX (optional)", "on demand"]},
+        {"label": "Storage for notes and delivery history", "values": ["Supabase", "configured" if rd and rd.sb_config() else "not configured"]},
+        {"label": "AI synthesis (SYN)", "values": ["Gemini", "key found" if rd and rd._secret("GEMINI_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY") else "no key"]},
+    ] + [{"label": f"Last call · {k}", "values": [v["detail"] or "—", ("OK" if v["ok"] else "FAILED") + " · " + v["at"]]}
+         for k, v in (rd.status() if rd else {}).items()], T)
     _panel("Integrity rule", f'<div style="font:10px {T["mono"]};color:{T["t2"]};line-height:1.8">Values are shown only when a source returns them '
            f'or when they are computed directly from returned values (formula shown on screen). Missing data says DATA UNAVAILABLE; nothing is estimated or invented.</div>', T)
 
@@ -1132,7 +1583,8 @@ HANDLERS = {
     "HDS": _shareholding, "MF": _mf,
     "RV": _peers, "PERF": _performance,
     "TECH": _technicals, "SEAS": _seasonality, "ANR": _analyst,
-    "DVD": _dividends, "CN": _news, "CACS": _announcements,
+    "DVD": _dividends, "CN": _news, "CACS": _filings,
+    "FH": _fin_health, "ERN": _earnings_trend, "DLV": _deliveries, "QR": _quant, "SYN": _synthesis,
     "NOTE": _thesis, "SRC": _sources,
 }
 
@@ -1200,7 +1652,7 @@ def _command_bar(sym, key, T):
         msg = st.session_state.get(f"rp_msg_{key}")
         tip = (f'<span style="color:{T["red"]}">{_esc(msg)}</span>' if msg else
                f'<span style="color:{T["t3"]}">SHORTCUTS · </span>' + " ".join(
-                   f'<b style="color:{T["t2"]}">{c}</b>' for c in ("DES", "HC", "VAL", "FA", "HDS", "PERF", "TECH")))
+                   f'<b style="color:{T["t2"]}">{c}</b>' for c in ("DES", "HC", "FH", "ERN", "DLV", "QR", "SYN")))
         st.markdown(f'<div style="font:10px {T["mono"]};padding-top:9px">{tip}</div>', unsafe_allow_html=True)
 
 
