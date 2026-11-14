@@ -1,35 +1,29 @@
 """
-money_flow.py — Arka MONEY FLOW v6 · Sector Rotation Desk
+money_flow.py - Arka MONEY FLOW v7 · Sector Rotation Research
 
-Rebuilt around one question: WHERE IS MONEY MOVING, AND IS IT EARLY OR LATE TO FOLLOW IT?
+Drop-in replacement for the v6 page. Same entry point: render_money_flow(on_open=None).
+All numbers come from the arka_flow package (pure Python, unit-tested). This file only loads data and draws.
 
-Views (only the open view is built)
-  ROTATION DESK    action board (buy zone / hold / avoid), weekly Relative Rotation Graph with tails,
-                   rotation-score history, weekly rank race, sector detail with its strongest stocks
-  SECTOR RANKING   every sector, sortable (click a header), four column sets: overview / performance / money / breadth
-  MONEY FLOW       turnover share and its change, up- vs down-turnover, ₹-weighted Chaikin Money Flow heat-map
-  BREADTH          % of stocks above 20 / 50 / 200-EMA, breakouts, new highs, A/D, whole-market breadth
-  STOCKS           drill into one sector: every stock with RS rating, trend, distance from highs, volume
-  NSE INDICES      official NSE sector indices on the same rotation map (Yahoo history; works when NSE blocks)
-  FPI FLOWS        NSDL fortnightly sector-wise foreign investment — real recorded money
+What changed vs v6
+  * One engine for the screen and for the signal tests (v6 showed labels from one formula and tested another).
+  * No BUY ZONE / HOLD / AVOID / EXIT board. Each sector gets a rotation STATE decided by written rules
+    (arka_flow/state.py), with supporting, contradicting and missing evidence, and a contradiction panel.
+  * A sector that is ahead over 60 sessions and above its 50-EMA is LEADERSHIP or MATURE LEADERSHIP. It cannot be
+    called deteriorating because its pace slowed. The weekly RRG quadrant no longer decides anything.
+  * Only completed sessions are used. A part-day bar is dropped, so labels do not repaint intraday.
+  * Failed downloads are listed by ticker and by sector. Nothing is skipped silently.
+  * SIGNAL TESTS shows what followed each state on the loaded history (next-session entry).
+  * Names: "up-close turnover share", "relative activity". Nothing here is called buying, accumulation or distribution.
 
-What changed vs v5
-  * ~50 granular sectors (sector_map.py) instead of NSE's 22 broad ones: PSU Banks, Private Banks, NBFC,
-    Capital Markets, Electrical Equipment, Cables, Defence, Railways … are now separate.
-  * Equal-weight sector indices measured against an equal-weight MARKET (like-for-like); money flow is
-    ₹-weighted; illiquid stocks are excluded; weekly JdK-style RRG.
-  * Every sector gets one action label with the reasons behind it.
-  * Removed: the backtest lab, broad index snapshot tables, constituent explorer and the NSE-live-only
-    views that failed on Streamlit Cloud. FPI flows moved here from the lab.
+Views: OVERVIEW · SECTOR DETAIL · RANKING · BREADTH · ACTIVITY · SIGNAL TESTS · FPI FLOWS · DATA & METHOD
 
-Data: NSE index constituent CSVs (data/ folder or NSE archives) for the universe, Yahoo Finance daily prices,
-NSDL for FPI flows. Evidence from price, volume and breadth: not order-flow data, not investment advice.
+Data: NSE constituent CSVs for the universe (data/ folder or NSE archives), Yahoo Finance daily bars, NSDL for FPI.
+Research evidence from price, breadth and traded value. Not order-flow data, not forecasts, not investment advice.
 """
 from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
 
@@ -39,19 +33,17 @@ import requests
 import streamlit as st
 
 import mf_ui as ui
-import rotation_engine as rot
 import sector_map as smap
+from arka_flow import MODEL_VERSION, backtest as bt, fpi, history, loader, report, state as rstate, universe
+from arka_flow.calc import relative_strength as rs
+from arka_flow.config import HORIZONS, MIN_SECTOR_COVERAGE
+from arka_flow.data import validation as val
 
-try:
-    import yfinance as yf
-except Exception:  # pragma: no cover
-    yf = None
 try:
     import plotly.graph_objects as go
 except Exception:  # pragma: no cover
     go = None
 
-IST = timezone(timedelta(hours=5, minutes=30))
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 LOCAL_DATA = Path("data")
 DISK_CACHE = Path(".cache") / "nse"
@@ -60,66 +52,48 @@ ARCHIVE_MIRRORS = ("https://nsearchives.nseindia.com/content/indices/", "https:/
                    "https://www.niftyindices.com/IndexConstituent/")
 UNIVERSE_SETS = (("ind_niftytotalmarket_list",), ("ind_nifty500list", "ind_niftymicrocap250_list"), ("ind_nifty500list",))
 MAX_SYMBOLS = 1500
-BENCH_TICKERS = {"NIFTY 50": "^NSEI", "NIFTY 500": "^CRSLDX"}
-BENCH_HELP = ("MARKET = every stock in the universe, equal-weighted exactly like the sectors: the fair yardstick. "
-              "NIFTY 50 / NIFTY 500 are cap-weighted, so small and mid-cap sectors look weak whenever large caps lead.")
-OFFICIAL = {"NIFTY BANK": "^NSEBANK", "NIFTY PVT BANK": "NIFTY_PVT_BANK.NS", "NIFTY PSU BANK": "^CNXPSUBANK",
-            "NIFTY FIN SERVICE": "NIFTY_FIN_SERVICE.NS", "NIFTY IT": "^CNXIT", "NIFTY AUTO": "^CNXAUTO",
-            "NIFTY FMCG": "^CNXFMCG", "NIFTY PHARMA": "^CNXPHARMA", "NIFTY HEALTHCARE": "NIFTY_HEALTHCARE.NS",
-            "NIFTY METAL": "^CNXMETAL", "NIFTY REALTY": "^CNXREALTY", "NIFTY ENERGY": "^CNXENERGY",
-            "NIFTY OIL & GAS": "NIFTY_OIL_AND_GAS.NS", "NIFTY MEDIA": "^CNXMEDIA", "NIFTY INFRA": "^CNXINFRA",
-            "NIFTY CONSUMER DURABLES": "NIFTY_CONSR_DURBL.NS", "NIFTY PSE": "^CNXPSE", "NIFTY MNC": "^CNXMNC",
-            "NIFTY SERVICES": "^CNXSERVICE", "NIFTY COMMODITIES": "^CNXCMDT", "NIFTY CONSUMPTION": "^CNXCONSUM"}
-VIEWS = ["ROTATION DESK", "SECTOR RANKING", "MONEY FLOW", "BREADTH", "STOCKS", "NSE INDICES", "FPI FLOWS"]
+BENCH_TICKERS = {"NIFTY 500": "^CRSLDX", "NIFTY 50": "^NSEI"}
+EW_MARKET = "EQUAL-WEIGHT MARKET"
+INDEX_REG = {**universe.OFFICIAL_SECTOR_INDICES, **universe.THEMATIC_INDICES}
+VIEWS = ["OVERVIEW", "SECTOR DETAIL", "RANKING", "BREADTH", "ACTIVITY", "SIGNAL TESTS", "FPI FLOWS", "DATA & METHOD"]
+KINDS = {"ARKA GROUPS": "Arka's rotation groups from sector_map.py: equal-weight baskets of today's members.",
+         "NSE INDICES": "Official NSE sector indices: the index level itself. Breadth needs the index's constituent file in data/."}
 
 GREEN, RED, AMBER, CYAN, YELLOW, PURPLE, T2, T3 = ui.GREEN, ui.RED, ui.AMBER, ui.CYAN, ui.YELLOW, ui.PURPLE, ui.T2, ui.T3
-PHASE_C = {"LEADING": GREEN, "WEAKENING": AMBER, "LAGGING": RED, "IMPROVING": CYAN, "—": T3}
-ACTION_C = {"ROTATING IN": GREEN, "LEADING": "#8AD66B", "STRETCHED": YELLOW, "WATCH": CYAN, "WEAKENING": AMBER, "LAGGING": RED}
-MONEY_C = {"BUYING ON VOLUME": GREEN, "QUIET BUYING": CYAN, "MIXED": T2, "QUIET SELLING": AMBER, "SELLING ON VOLUME": RED, "—": T3}
-CMF_C = {"ACCUMULATING": GREEN, "IMPROVING": CYAN, "NEUTRAL": T2, "WEAKENING": AMBER, "DISTRIBUTING": RED, "—": T3}
-_LAST_RES: dict = {}
+STATE_C = {"LEADERSHIP": GREEN, "MATURE LEADERSHIP": YELLOW, "PARTICIPATION CONFIRMATION": "#8AD66B", "EARLY IMPROVEMENT": CYAN,
+           "RECOVERY": PURPLE, "DETERIORATION": RED, rstate.NONE: T2, rstate.NOHIST: T3}
+STATE_HELP = {"EARLY IMPROVEMENT": "Still behind over 60 sessions; relative strength has turned up. Early, unconfirmed.",
+              "PARTICIPATION CONFIRMATION": "Turning up with more stocks joining and 20-session relative return positive.",
+              "LEADERSHIP": "Ahead over 60 sessions, above its 50-EMA, relative-strength trend not down.",
+              "MATURE LEADERSHIP": "Still a leader, but two or more of: extended, slowing, breadth falling, 20-session RS negative.",
+              "DETERIORATION": "20-session RS negative, RS trend down, confirmed by breadth or price.",
+              "RECOVERY": "Price trend still damaged; relative strength and breadth are stabilising."}
+BOARD_ORDER = ("EARLY IMPROVEMENT", "PARTICIPATION CONFIRMATION", "LEADERSHIP", "MATURE LEADERSHIP", "RECOVERY", "DETERIORATION")
 _ARCH_DOWN: dict = {}
+_e = ui.esc
 
 
-# ═════════════════════════ style + small helpers ═════════════════════════
+# ═════════════════════════ style + helpers ═════════════════════════
 def _style():
     ui.inject()
     st.markdown("""<style>
     .arka-mf-section{font:700 11px 'JetBrains Mono',monospace;letter-spacing:1.2px;color:#d6d6d6;margin:24px 0 10px;padding-bottom:8px;border-bottom:1px solid #262626;text-transform:uppercase}
     .arka-mf-note{font:12px/1.75 'Inter',sans-serif;color:#9a9a9a;border-left:2px solid #3a3a3a;padding:8px 12px;background:rgba(255,255,255,.02);margin:8px 0 14px}
     .arka-mf-note b{color:#e2e2e2}
-    div[class*="st-key-mf_viewbar"] [role="radiogroup"]{gap:6px !important}
-    div[class*="st-key-mf_viewbar"] label[data-baseweb="radio"]{padding:8px 14px !important}
-    div[class*="st-key-mf_viewbar"] label[data-baseweb="radio"] p{font-size:11px !important}
     .rd-status{display:flex;flex-wrap:wrap;gap:6px 18px;font:600 11px 'JetBrains Mono',monospace;color:#8a8a8a;padding:8px 2px;border-bottom:1px solid #1f1f1f;margin-bottom:6px}
     .rd-status b{color:#e6e6e6}
-    .rd-board{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:6px 0 10px}
-    @media(max-width:1150px){.rd-board{grid-template-columns:1fr}}
-    .rd-col{background:#080808;border:1px solid #1f1f1f;border-top:3px solid var(--c);padding:12px 12px 4px;min-width:0}
-    .rd-ch{display:flex;flex-direction:column;gap:3px;margin-bottom:2px}
-    .rd-ch b{font:800 13px 'JetBrains Mono',monospace;letter-spacing:1.3px;color:var(--c)}
-    .rd-ch span{font:12px 'Inter',sans-serif;color:#8a8a8a}
-    .rd-sub{font:700 10px 'JetBrains Mono',monospace;letter-spacing:1px;color:#777;margin:14px 0 7px;text-transform:uppercase}
-    .rd-card{border:1px solid #242424;border-left:3px solid var(--c);background:rgba(255,255,255,.02);padding:10px 12px;margin-bottom:9px;border-radius:3px}
-    .rd-card .h{display:flex;justify-content:space-between;align-items:center;gap:8px}
-    .rd-card .n{font:700 14px 'Inter',sans-serif;color:#f2f2f2}
-    .rd-card .m{font:11.5px/1.65 'JetBrains Mono',monospace;color:#a0a0a0;margin-top:5px}
-    .rd-card ul{margin:7px 0 0 16px;padding:0;font:12px/1.6 'Inter',sans-serif;color:#c4c4c4}
-    .rd-card ul.w{color:#e0ad4c}
-    .rd-card .l{font:11px 'JetBrains Mono',monospace;color:#7a7a7a;margin-top:7px}
-    .rd-card .l b{color:#FF9F0A}
-    .rd-pill{display:inline-block;padding:2px 9px;border-radius:999px;font:800 9.5px 'JetBrains Mono',monospace;letter-spacing:.7px;border:1px solid currentColor;white-space:nowrap}
-    .rd-sc{display:inline-flex;align-items:center;gap:7px;font:700 13px 'JetBrains Mono',monospace}
-    .rd-sc i{display:inline-block;width:48px;height:5px;background:#1c1c1c}
-    .rd-sc i b{display:block;height:100%}
-    .rd-empty{font:12px 'Inter',sans-serif;color:#666;padding:2px 0 10px}
-    .rd-moves{font:12.5px/1.9 'Inter',sans-serif;color:#bbb;margin:4px 0 8px}
-    .rd-hw{overflow:auto;max-height:760px;border:1px solid #1f1f1f;background:#070707;margin:6px 0 12px}
-    .rd-ht{width:100%;border-collapse:separate;border-spacing:2px;font:12px 'JetBrains Mono',monospace}
-    .rd-ht th{position:sticky;top:0;background:#0c0c0c;font:700 10px 'JetBrains Mono',monospace;color:#7a7a7a;letter-spacing:.8px;text-transform:uppercase;padding:8px;text-align:center;white-space:nowrap;z-index:2}
-    .rd-ht th:first-child{text-align:left}
-    .rd-ht td{padding:7px 9px;text-align:center;color:#f0f0f0;white-space:nowrap;border-radius:2px;font-variant-numeric:tabular-nums}
-    .rd-ht td.s{text-align:left;background:transparent;color:#e6e6e6;font:600 12.5px 'Inter',sans-serif}
+    .sr-board{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:6px 0 10px}
+    @media(max-width:1150px){.sr-board{grid-template-columns:1fr}}
+    .sr-col{background:#080808;border:1px solid #1f1f1f;border-top:3px solid var(--c);padding:12px 12px 6px;min-width:0}
+    .sr-col h4{font:800 12px 'JetBrains Mono',monospace;letter-spacing:1.2px;color:var(--c);margin:0}
+    .sr-col p{font:11.5px 'Inter',sans-serif;color:#8a8a8a;margin:4px 0 10px}
+    .sr-card{border:1px solid #242424;border-left:3px solid var(--c);background:rgba(255,255,255,.02);padding:8px 10px;margin-bottom:8px;border-radius:3px}
+    .sr-card .n{font:700 13px 'Inter',sans-serif;color:#f2f2f2;display:flex;justify-content:space-between;gap:8px}
+    .sr-card .n span{font:600 10px 'JetBrains Mono',monospace;color:#8a8a8a}
+    .sr-card .m{font:11px/1.6 'JetBrains Mono',monospace;color:#a0a0a0;margin-top:4px}
+    .sr-card .w{font:11px/1.5 'Inter',sans-serif;color:#e0ad4c;margin-top:4px}
+    .sr-empty{font:12px 'Inter',sans-serif;color:#666;padding:2px 0 10px}
+    .sr-pill{display:inline-block;padding:2px 9px;border-radius:999px;font:800 10px 'JetBrains Mono',monospace;letter-spacing:.7px;border:1px solid currentColor}
     </style>""", unsafe_allow_html=True)
 
 
@@ -131,65 +105,44 @@ def _note(t):
     st.markdown(f'<div class="arka-mf-note">{t}</div>', unsafe_allow_html=True)
 
 
-_e, _f = ui.esc, rot._f
-
-
-def _isna(v) -> bool:
-    return v is None or (not isinstance(v, str) and bool(pd.isna(v)))
-
-
-def _num(v, d=1, suf="", sign=False) -> str:
-    v = _f(v)
-    if v is None:
-        return "—"
-    return f"{v:+,.{d}f}{suf}" if sign else f"{v:,.{d}f}{suf}"
-
-
-def _sg(v, d=2, suf="") -> str:
-    v = _f(v)
-    if v is None:
-        return '<span class="mf-na">—</span>'
-    c = GREEN if v > 0 else RED if v < 0 else T2
-    return f'<span style="color:{c};font:600 11px JetBrains Mono,monospace">{v:+.{d}f}{suf}</span>'
-
-
-def _pill(text, color) -> str:
-    return f'<span class="rd-pill" style="color:{color}">{_e(text)}</span>'
-
-
-def _score(v) -> str:
-    v = _f(v)
-    if v is None:
-        return '<span class="rd-sc">—</span>'
-    c = GREEN if v >= 65 else AMBER if v >= 45 else RED
-    return f'<span class="rd-sc" style="color:{c}"><i><b style="width:{v:.0f}%;background:{c}"></b></i>{v:.0f}</span>'
-
-
-def _heat_bg(d) -> str:
-    if d is None:
-        return "#121212"
-    d = max(-1.0, min(1.0, d))
-    if abs(d) < 0.04:
-        return "#1b1b1b"
-    a = 0.14 + 0.56 * abs(d)
-    return f"rgba(48,209,88,{a:.2f})" if d > 0 else f"rgba(255,69,58,{a:.2f})"
-
-
-def _market_live() -> bool:
+def _f(v, fmt="+.1f", suf=""):
     try:
-        from home_page import nse_session
-        return nse_session()["cls"] in ("live", "pre")
-    except Exception:
-        n = datetime.now(IST)
-        t = n.hour * 60 + n.minute
-        return n.weekday() < 5 and 9 * 60 <= t <= 15 * 60 + 40
+        if v is None or pd.isna(v):
+            return "n/a"
+        return format(float(v), fmt) + suf
+    except (TypeError, ValueError):
+        return "n/a"
 
 
-def _bucket() -> int:
-    return int(time.time() // (1800 if _market_live() else 3 * 3600))
+def _pill(text):
+    return f'<span class="sr-pill" style="color:{STATE_C.get(text, T2)}">{_e(text)}</span>'
 
 
-# ═════════════════════════ universe ═════════════════════════
+def _line(df: pd.DataFrame, key: str, colors=None, h=300, hline=None):
+    """Line chart: plotly when available, otherwise Streamlit's own. A chart error never breaks the page."""
+    if df is None or df.dropna(how="all").empty:
+        st.caption("Not enough history for this chart.")
+        return
+    if go is not None:
+        try:
+            fig = go.Figure()
+            for i, c in enumerate(df.columns):
+                col = (colors or [AMBER, "#D0D0D0", CYAN, PURPLE, GREEN])[i % 5]
+                fig.add_trace(go.Scatter(x=df.index, y=df[c], name=str(c), mode="lines", line=dict(color=col, width=2 if i == 0 else 1.3)))
+            if hline is not None:
+                fig.add_hline(y=hline, line_color="#444", line_width=1, line_dash="dot")
+            ui._dark(fig, h)
+            fig.update_layout(hovermode="x unified")
+            fig.update_xaxes(showgrid=False)
+            fig.update_yaxes(gridcolor="#161616", zeroline=False)
+            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=key)
+            return
+        except Exception:
+            pass
+    st.line_chart(df)
+
+
+# ═════════════════════════ universe (unchanged logic from v6) ═════════════════════════
 def _parse_csv(text: str):
     df = pd.read_csv(StringIO(text))
     df.columns = [str(c).strip() for c in df.columns]
@@ -218,8 +171,18 @@ def _archive_net(slug: str) -> pd.DataFrame:
     raise RuntimeError(last)
 
 
+def _read_local(slug: str):
+    for folder in (LOCAL_DATA, DISK_CACHE):
+        f = folder / f"{slug}.csv"
+        if f.exists():
+            try:
+                return _parse_csv(f.read_text(encoding="utf-8", errors="ignore"))
+            except Exception:
+                pass
+    return None
+
+
 def _read_archive(slug: str):
-    """Constituent CSV: repo copy in data/ -> NSE mirrors (10-min cool-down after a failure) -> last good disk copy."""
     local = LOCAL_DATA / f"{slug}.csv"
     if local.exists():
         try:
@@ -231,17 +194,10 @@ def _read_archive(slug: str):
             return _archive_net(slug)
         except Exception:
             _ARCH_DOWN[slug] = time.time() + 600
-    disk = DISK_CACHE / f"{slug}.csv"
-    if disk.exists():
-        try:
-            return _parse_csv(disk.read_text(encoding="utf-8", errors="ignore"))
-        except Exception:
-            pass
-    return None
+    return _read_local(slug)
 
 
 def _read_map():
-    """Optional data/sector_map.csv: symbol + any of company, group, basic_industry, industry, sector."""
     if not SECTOR_MAP_FILE.exists():
         return None
     try:
@@ -266,7 +222,7 @@ def _universe_cached():
     if df is None:
         raise RuntimeError("stock universe unavailable")
     if "Series" in df:
-        df = df[~df["Series"].astype(str).str.strip().str.upper().isin(["RR", "IV"])]      # REITs / InvITs are not stocks
+        df = df[~df["Series"].astype(str).str.strip().str.upper().isin(["RR", "IV"])]
     out = pd.DataFrame({"symbol": df["Symbol"].astype(str).str.upper().str.strip(),
                         "company": df["Company Name"].astype(str).str.strip() if "Company Name" in df else "",
                         "nse_sector": df["Industry"].astype(str).str.strip() if "Industry" in df else ""})
@@ -286,611 +242,387 @@ def _universe_cached():
         basic, industry, group = col("basic_industry"), col("industry"), col("group")
     out["group"] = [smap.classify(s, c, n, b, i, g) for s, c, n, b, i, g in
                     zip(out["symbol"], out["company"], out["nse_sector"], basic, industry, group)]
-    out["family"] = [smap.family(g) for g in out["group"]]
     return out.reset_index(drop=True), source
 
 
-# ═════════════════════════ prices + analysis ═════════════════════════
-def _split(raw, tickers) -> dict:
-    out = {}
-    if raw is None or getattr(raw, "empty", True):
-        return out
-    if isinstance(raw.columns, pd.MultiIndex):
-        lv0 = set(raw.columns.get_level_values(0))
-        if "Close" in lv0 and not (set(tickers) & lv0):
-            raw = raw.swaplevel(axis=1).sort_index(axis=1)
-        top = set(raw.columns.get_level_values(0))
-        for t in tickers:
-            if t in top:
-                f = raw[t].dropna(how="all")
-                if "Close" in f and f["Close"].notna().sum() >= 60:
-                    out[t] = f
-    elif len(tickers) == 1 and "Close" in raw:
-        out[tickers[0]] = raw.dropna(how="all")
-    return out
-
-
-def _yf_batch(tickers, period="2y", chunk=100) -> dict:
-    out = {}
-    for i in range(0, len(tickers), chunk):
-        part = tickers[i:i + chunk]
-        try:
-            raw = yf.download(part, period=period, interval="1d", group_by="ticker", auto_adjust=True,
-                              progress=False, threads=True)
-        except Exception:
-            continue
-        out.update(_split(raw, part))
-        time.sleep(0.4)
-    return out
-
-
+# ═════════════════════════ data + engine ═════════════════════════
 @st.cache_data(ttl=3 * 3600, show_spinner=False, max_entries=2)
-def _prices(symbols: tuple, bucket: int) -> dict:
-    if yf is None:
-        raise RuntimeError("yfinance is not installed")
-    frames = _yf_batch([f"{s}.NS" for s in symbols] + list(BENCH_TICKERS.values()))
-    n = sum(1 for t in frames if t.endswith(".NS"))
-    if n < 50:
-        raise RuntimeError(f"Yahoo returned history for only {n} stocks")
-    return frames
+def _load(symbols: tuple, period: str) -> dict:
+    tickers = list(BENCH_TICKERS.values()) + [t for _, t, _ in INDEX_REG.values() if t]
+    return loader.load_prices(list(symbols), tickers, period)
 
 
-@st.cache_data(ttl=3 * 3600, show_spinner=False, max_entries=8)
-def _analysis(symbols: tuple, bench: str, weighting: str, min_turn: float, bucket: int) -> dict:
+def _index_members() -> dict:
+    """Constituents of official indices, only from files already in data/ or the disk cache. No guessing."""
+    out = {}
+    for name, _, slug in INDEX_REG.values():
+        df = _read_local(slug)
+        if df is not None:
+            out[name] = df["Symbol"].astype(str).str.upper().str.strip().tolist()
+    return out
+
+
+@st.cache_resource(ttl=3 * 3600, show_spinner=False, max_entries=6)
+def _engine(symbols: tuple, period: str, kind: str, bench_name: str, min_turn: float) -> dict:
     meta, _ = _universe_cached()
-    frames = _prices(symbols, bucket)
-    pan = rot.build_panels(frames, meta, min_turn)
-    benches = {k: frames[t]["Close"] for k, t in BENCH_TICKERS.items() if t in frames}
-    res = rot.analyse(pan, benches, bench, weighting)
-    nse = meta.set_index("symbol")["nse_sector"]
-    s = res["stocks"].assign(nse_sector=lambda d: d["symbol"].map(nse))
-    res["broad_rs"] = s.groupby("nse_sector")["ex1m"].median().to_dict()       # used by FPI FLOWS
-    return res
+    P = dict(_load(symbols, period))
+    ss = val.session_state()
+    P, dropped = loader.drop_partial_session(P, ss["last_complete_session"])
+    close, volume, high, index = P["close"], P["volume"], P["high"], P["index"]
+    if close.shape[1] < 30:
+        raise RuntimeError(f"Yahoo returned usable history for only {close.shape[1]} stocks")
+    tv = (close * volume).tail(20).median()
+    illiquid = sorted(tv.index[tv < min_turn * 1e7])
+    close, volume, high = (df.drop(columns=illiquid, errors="ignore") for df in (close, volume, high))
 
-
-def _get_analysis(symbols, bench, weighting, min_turn):
-    key = (bench, weighting, min_turn)
-    try:
-        res = _analysis(symbols, bench, weighting, min_turn, _bucket())
-        _LAST_RES[key] = res
-        return res, None
-    except Exception as exc:
-        if key in _LAST_RES:
-            return _LAST_RES[key], f"{type(exc).__name__}: {exc}"
-        raise
-
-
-def _publish(res):
-    """Snapshot for HOME's rotation panel and the FPI view."""
-    t = res["table"]
-    st.session_state["mf_rot"] = {"asof": res["asof"], "bench": res["bench_name"],
-                                  "table": t[["sector", "action", "phase", "score", "ex1m", "r1w"]].copy()}
-    st.session_state["mf_broad_rs"] = res.get("broad_rs", {})
-
-
-# ═════════════════════════ shared blocks ═════════════════════════
-def _card(r: dict, bench: str, full: bool = False) -> str:
-    c = ACTION_C.get(r.get("action"), T3)
-    ph = r.get("phase") or "—"
-    why = list(r.get("why") or [])
-    warn = list(r.get("warn") or [])
-    n_why, n_warn = (len(why), len(warn)) if full else (3, 2)
-    stocks = _f(r.get("stocks"))
-    meta = (f'{_pill(r.get("action"), c)} <span style="color:{PHASE_C.get(ph, T3)}">{rot.compass(r.get("heading"))} '
-            f'{_e(ph.title())} {int(_f(r.get("in_phase")) or 0)} wk</span>' + (f" · {int(stocks)} stocks" if stocks else ""))
-    nums = (f'RS 1M {_num(r.get("ex1m"), 1, " pp", True)} · 3M {_num(r.get("ex3m"), 1, " pp", True)} · '
-            f'1W {_num(r.get("r1w"), 1, "%", True)}<br>{_num(r.get("pct20"), 0, "%")} above 20-EMA · '
-            f'{_num(r.get("up_pct5"), 0, "%")} up-turnover · CMF {_num(r.get("cmf"), 2, "", True)}')
-    lead = f'<div class="l">LEADERS · <b>{_e(r.get("leaders"))}</b></div>' if r.get("leaders") else ""
-    ul = "".join(f"<li>{_e(x)}</li>" for x in why[:n_why])
-    wl = "".join(f"<li>{_e(x)}</li>" for x in warn[:n_warn])
-    return (f'<div class="rd-card" style="--c:{c}"><div class="h"><span class="n">{_e(r.get("sector"))}</span>{_score(r.get("score"))}</div>'
-            f'<div class="m">{meta}</div><div class="m">{nums}</div><ul>{ul}</ul>'
-            + (f'<ul class="w">{wl}</ul>' if wl else "") + lead + "</div>")
-
-
-def _board(tbl: pd.DataFrame, bench: str) -> str:
-    recs = tbl.to_dict("records")
-    by = lambda a: [r for r in recs if r.get("action") == a]
-    sc = lambda r: _f(r.get("score")) or 0.0
-    drop = lambda r: (_f(r.get("score_2w")) or 0.0) - sc(r)
-    cols = [("BUY ZONE", GREEN, "Money arriving, trend confirmed, not stretched yet.",
-             [("★ Rotating in", by("ROTATING IN")[:6]), ("Watch next · turning up, not confirmed", by("WATCH")[:4])]),
-            ("HOLD", "#8AD66B", "Current leaders. Keep; add only on pullbacks to the 20-EMA.",
-             [("Leading", by("LEADING")[:6]), ("Stretched · wait for a pullback", by("STRETCHED")[:4])]),
-            ("AVOID / EXIT", RED, "Leadership fading or money leaving. No fresh buying.",
-             [("Weakening · biggest deterioration first", sorted(by("WEAKENING"), key=drop, reverse=True)[:5]),
-              ("Lagging · weakest first", sorted(by("LAGGING"), key=sc)[:5])])]
-    html = ""
-    for title, c, sub, parts in cols:
-        body = ""
-        for lab, rows in parts:
-            body += f'<div class="rd-sub">{_e(lab)}</div>'
-            body += "".join(_card(r, bench) for r in rows) or '<div class="rd-empty">None right now.</div>'
-        html += f'<div class="rd-col" style="--c:{c}"><div class="rd-ch"><b>{title}</b><span>{_e(sub)}</span></div>{body}</div>'
-    return f'<div class="rd-board">{html}</div>'
-
-
-def _heat_table(df: pd.DataFrame, kind: str, extra: dict | None = None) -> str:
-    """df: sectors (index) x period columns -> coloured HTML grid. extra: {header: fn(sector) -> html}."""
-    n = max(len(df), 2)
-    cols = list(df.columns)
-    head = "<th>Sector</th>" + "".join(f"<th>{_e(c)}</th>" for c in cols) + "".join(f"<th>{_e(k)}</th>" for k in (extra or {}))
-    body = []
-    for s, r in df.iterrows():
-        tds = []
-        for c in cols:
-            v = _f(r[c])
-            if v is None:
-                tds.append('<td style="background:#121212;color:#555">—</td>')
-                continue
-            if kind == "score":
-                d, txt = (v - 50) / 50, f"{v:.0f}"
-            elif kind == "pct":
-                d, txt = (v - 50) / 50, f"{v:.0f}%"
-            elif kind == "cmf":
-                d, txt = v / 0.15, f"{v:+.2f}"
-            elif kind == "rank":
-                d, txt = ((n + 1) / 2 - v) / ((n - 1) / 2), f"{v:.0f}"
-            else:
-                d, txt = 0.0, f"{v:.2f}"
-            tds.append(f'<td style="background:{_heat_bg(d)}">{txt}</td>')
-        for fn in (extra or {}).values():
-            tds.append(f"<td>{fn(s)}</td>")
-        body.append(f'<tr><td class="s">{_e(s)}</td>{"".join(tds)}</tr>')
-    return f'<div class="rd-hw"><table class="rd-ht"><thead><tr>{head}</tr></thead><tbody>{"".join(body)}</tbody></table></div>'
-
-
-def _rrg_fig(tbl: pd.DataFrame, tails: dict, highlight: list, label_mode: str, bench: str, unit: str = "weeks"):
-    """Relative Rotation Graph: dot = today, tail = path over the last periods, bigger dot = higher score."""
-    if go is None:
-        return None
-    recs = tbl.set_index("sector").to_dict("index")
-    cur = {s: t[-1] for s, t in tails.items() if t and s in recs}
-    if not cur:
-        return None
-    xs, ys = [p[0] for p in cur.values()], [p[1] for p in cur.values()]
-    for s in highlight:
-        for p in tails.get(s, []):
-            xs.append(p[0])
-            ys.append(p[1])
-    dx = max(1.5, max(abs(x - 100) for x in xs) * 1.15)
-    dy = max(1.5, max(abs(y - 100) for y in ys) * 1.15)
-    rgb = {"LEADING": "48,209,88", "WEAKENING": "255,159,10", "LAGGING": "255,69,58", "IMPROVING": "90,200,250"}
-    fig = go.Figure()
-    for name, x0, x1, y0, y1, xa, ya in (("IMPROVING", 100 - dx, 100, 100, 100 + dy, "left", "top"),
-                                         ("LEADING", 100, 100 + dx, 100, 100 + dy, "right", "top"),
-                                         ("LAGGING", 100 - dx, 100, 100 - dy, 100, "left", "bottom"),
-                                         ("WEAKENING", 100, 100 + dx, 100 - dy, 100, "right", "bottom")):
-        fig.add_shape(type="rect", x0=x0, x1=x1, y0=y0, y1=y1, fillcolor=f"rgba({rgb[name]},0.06)", line_width=0, layer="below")
-        fig.add_annotation(x=x0 if xa == "left" else x1, y=y1 if ya == "top" else y0, xanchor=xa, yanchor=ya, showarrow=False,
-                           text=f"<b>{name}</b>", font=dict(size=13, color=f"rgb({rgb[name]})"))
-    for s in highlight:
-        t = tails.get(s) or []
-        if len(t) < 2 or s not in recs:
-            continue
-        col = PHASE_C.get(recs[s].get("phase"), T2)
-        fig.add_trace(go.Scatter(x=[p[0] for p in t], y=[p[1] for p in t], mode="lines+markers", showlegend=False,
-                                 hoverinfo="skip", opacity=0.9, line=dict(color=col, width=2),
-                                 marker=dict(size=[3 + 4 * i / len(t) for i in range(len(t))], color=col)))
-        fig.add_annotation(x=t[-1][0], y=t[-1][1], ax=t[-2][0], ay=t[-2][1], xref="x", yref="y", axref="x", ayref="y",
-                           showarrow=True, arrowhead=2, arrowsize=1.3, arrowwidth=2, arrowcolor=col, text="")
-    order = sorted(cur, key=lambda s: -(_f(recs[s].get("score")) or 0))
-    if label_mode == "All":
-        labels = set(cur)
-    elif label_mode == "None":
-        labels = set()
+    benches = {n: index[t].dropna() for n, t in BENCH_TICKERS.items() if t in index and index[t].notna().sum() >= 60}
+    benches[EW_MARKET] = history.equal_weight_level(close, list(close.columns)).dropna()
+    if bench_name not in benches:
+        raise RuntimeError(f"{bench_name} history did not download (Yahoo ticker {BENCH_TICKERS.get(bench_name)}). "
+                           f"Pick another benchmark: {', '.join(benches)}.")
+    grp = meta.set_index("symbol")["group"]
+    small = []
+    if kind == "ARKA GROUPS":
+        known = grp[grp != "Unclassified"]
+        members = {g: sorted(s.index) for g, s in known.groupby(known) if len(s)}
+        small = sorted(g for g, m in members.items() if sum(x in close.columns for x in m) < 3)
+        members = {g: m for g, m in members.items() if g not in small}
+        levels, level_src = None, "equal-weight basket of today's members (Yahoo adjusted closes)"
     else:
-        labels = set(highlight) | set(order[:6]) | {s for s in cur if recs[s].get("action") == "ROTATING IN"}
-    pos = ["top center", "bottom center", "middle right", "middle left"]
-    names = sorted(cur, key=lambda s: cur[s][0])
-    sizes = [10 + (_f(recs[s].get("score")) or 40) / 100 * 12 for s in names]
-    cols_ = [PHASE_C.get(recs[s].get("phase"), T2) for s in names]
-    hov = [f"<b>{_e(s)}</b><br>{_e(recs[s].get('action', ''))} · {_e(recs[s].get('phase', ''))}"
-           + (f" · score {_f(recs[s].get('score')):.0f}" if _f(recs[s].get("score")) is not None else "")
-           + f"<br>RS-Ratio {cur[s][0]:.2f} · RS-Momentum {cur[s][1]:.2f}" for s in names]
-    fig.add_trace(go.Scatter(x=[cur[s][0] for s in names], y=[cur[s][1] for s in names], mode="markers+text",
-                             text=[(s if len(s) <= 22 else s[:21] + "…") if s in labels else "" for s in names],
-                             textposition=[pos[i % 4] for i in range(len(names))], textfont=dict(size=11, color=cols_),
-                             hovertext=hov, hoverinfo="text", showlegend=False,
-                             marker=dict(size=sizes, color=cols_, line=dict(color="#000", width=1))))
-    ui._dark(fig, 660, legend=False, margin=(8, 8, 8, 8))
-    fig.update_xaxes(range=[100 - dx, 100 + dx], gridcolor="#151515", zeroline=False,
-                     title=f"RS-RATIO ·  ◀ weaker than {bench}   |   stronger than {bench} ▶")
-    fig.update_yaxes(range=[100 - dy, 100 + dy], gridcolor="#151515", zeroline=False,
-                     title=f"RS-MOMENTUM ·  ◀ slowing   |   accelerating ▶  ({unit})")
-    fig.add_vline(x=100, line_color="#3a3a3a", line_width=1)
-    fig.add_hline(y=100, line_color="#3a3a3a", line_width=1)
-    return fig
+        names = {t: n for n, t, _ in INDEX_REG.values() if t}
+        levels = index[[t for t in names if t in index and index[t].notna().sum() >= 120]].rename(columns=names)
+        if levels.shape[1] < 3:
+            raise RuntimeError("fewer than 3 NSE sector indices returned history from Yahoo")
+        members = {k: v for k, v in _index_members().items() if k in levels.columns}
+        level_src = "official index close from Yahoo (price index, no dividends)"
+    H = history.build(close, volume, members, benches[bench_name], levels=levels)
+    H["bench_name"] = bench_name
+    cl = rstate.classify(H)
+    return {"H": H, "cl": cl, "table": report.sector_table(H, cl), "close": close, "high": high, "volume": volume,
+            "benches": benches, "members": members, "kind": kind, "level_src": level_src,
+            "q": {"dropped_sessions": dropped, "session": ss, "illiquid": illiquid, "small_groups": small,
+                  "failures": P["failures"], "stale": P["stale"], "jumps": P["jumps"], "requested": P["requested"],
+                  "loaded": int(P["close"].shape[1]), "used": int(close.shape[1]), "loaded_at": P["loaded_at"],
+                  "source": P["source"], "adjusted": P["adjusted"], "period": period, "min_turn": min_turn,
+                  "duplicates_dropped": P["duplicates_dropped"], "non_positive": P["non_positive"],
+                  "index_missing": sorted(n for n, t, _ in INDEX_REG.values() if t and t not in index)}}
 
 
-def _show_fig(fig, key):
-    if fig is None:
-        st.info("Install plotly (add `plotly` to requirements.txt) to see this chart.")
-        return
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=key)
+def _publish(E):
+    """Snapshot for HOME's rotation panel (same keys as v6: action = state, phase = RS trend, score = RS percentile)."""
+    t = E["table"]
+    st.session_state["mf_rot"] = {"asof": E["H"]["asof"], "bench": E["H"]["bench_name"], "table": pd.DataFrame({
+        "sector": t["sector"], "action": t["state"], "phase": t["rs_trend"].fillna("—").astype(str).str.upper(),
+        "score": t["pctile_20"], "ex1m": t["rel_20"], "r1w": t["abs_5"]})}
+    st.session_state["mf_broad_rs"] = {}
 
 
-def _stock_rows(df: pd.DataFrame) -> list:
-    return [{k: (None if (not isinstance(v, (list, tuple, dict, str)) and pd.isna(v)) else v) for k, v in r.items()}
-            for r in df.to_dict("records")]
+def _status(E):
+    H, q = E["H"], E["q"]
+    n_fail = len(q["failures"])
+    st.markdown(f'<div class="rd-status"><span>AS OF <b>{H["asof"]}</b> close (completed sessions only)</span>'
+                f'<span><b>{len(H["sectors"])}</b> sectors · {_e(E["kind"])}</span><span>vs <b>{_e(H["bench_name"])}</b></span>'
+                f'<span><b>{q["used"]}</b> stocks used of {q["requested"]}</span><span>loaded {q["loaded_at"][11:16]} IST</span>'
+                f'<span>model {MODEL_VERSION}</span></div>', unsafe_allow_html=True)
+    if q["dropped_sessions"]:
+        st.caption(f"Today's unfinished session ({', '.join(q['dropped_sessions'])}) is excluded so that labels do not change intraday.")
+    stale_by = val.stale_sessions(H["asof"], q["session"]["last_complete_session"])
+    if stale_by:
+        st.warning(f"Latest data is {stale_by} session(s) behind the last completed session ({q['session']['last_complete_session']}). "
+                   "Readings below describe the older date.")
+    if n_fail:
+        st.warning(f"{n_fail} ticker(s) returned no data from Yahoo. Affected sectors are marked INCOMPLETE. See DATA & METHOD.")
 
 
-def _open_picker(symbols: list, key: str, on_open):
-    if not on_open or not symbols:
-        return
-    a, b = st.columns([3, 1])
-    sym = a.selectbox("Open a stock in Arka", symbols, key=f"{key}_sym", label_visibility="collapsed")
-    if b.button("OPEN STOCK ▸", key=f"{key}_btn", use_container_width=True):
-        on_open(str(sym))
+# ═════════════════════════ view · OVERVIEW ═════════════════════════
+def _card(r) -> str:
+    c = STATE_C.get(r["state"], T3)
+    warn = ""
+    if r["coverage_status"] == "INCOMPLETE":
+        warn += f'<div class="w">INCOMPLETE: {r["with_prices"]} of {r["members"]} members have prices</div>'
+    for x in (r["contradictions"] or [])[:2]:
+        warn += f'<div class="w">{_e(x["name"])}</div>'
+    return (f'<div class="sr-card" style="--c:{c}"><div class="n">{_e(r["sector"])}<span>{_e(r["confidence"])} · {int(r["sessions"])} d</span></div>'
+            f'<div class="m">RS 20d {_f(r["rel_20"])} pp · 60d {_f(r["rel_60"])} pp · rank {_f(r["pctile_20"], ".0f")}<br>'
+            f'{_f(r["pct50"], ".0f")}% above 50-EMA ({_f(r["d50_stocks_20"], "+.0f")} stocks / 20d) · '
+            f'evidence {r["n_support"]}+ / {r["n_contra"]}−' + (f' / {r["n_missing"]} missing' if r["n_missing"] else "")
+            + f'</div>{warn}</div>')
 
 
-# ═════════════════════════ view · ROTATION DESK ═════════════════════════
-def _view_desk(res: dict, on_open):
-    tbl, uni, bench = res["table"], res["universe"], res["bench_name"]
-    u, u5 = uni.iloc[-1], uni.iloc[-6] if len(uni) > 5 else uni.iloc[0]
-    acts = tbl["action"].value_counts()
-    names = lambda a, n=3: ", ".join(tbl.loc[tbl.action == a, "sector"].head(n)) or "none confirmed"
+def _view_overview(E):
+    H, tbl = E["H"], E["table"]
+    close = E["close"]
+    e50 = close.ewm(span=50, adjust=False, min_periods=50).mean()
+    ok = close.iloc[-1].notna() & e50.iloc[-1].notna()
+    mb = float((close.iloc[-1] > e50.iloc[-1])[ok].mean() * 100) if ok.any() else np.nan
+    ok5 = close.iloc[-6].notna() & e50.iloc[-6].notna() if len(close) > 6 else ok
+    mb5 = float((close.iloc[-6] > e50.iloc[-6])[ok5].mean() * 100) if len(close) > 6 and ok5.any() else np.nan
+    cnt = tbl["state"].value_counts()
+    ahead = int((tbl["rel_60"] > 0).sum())
+    spread = tbl["rel_20"].quantile(0.9) - tbl["rel_20"].quantile(0.1)
+    names = lambda s: ", ".join(tbl[tbl.state == s].sort_values("pctile_20", ascending=False)["sector"].head(3)) or "none"
     st.markdown(ui.kpi_strip([
-        ("Market breadth", f"{u['above50']:.0f}%", f"stocks above their 50-EMA · {u['above50'] - u5['above50']:+.0f} pts in 5 days",
-         GREEN if u["above50"] >= 50 else RED),
-        ("Advance / decline", f"{int(u['adv'])} / {int(u['dec'])}", "stocks up / down on the last session", T2),
-        ("Money tide", _num(u["up_turn5"], 0, "%"), "of 5-day turnover went into rising stocks",
-         GREEN if (_f(u["up_turn5"]) or 0) >= 50 else RED),
-        ("★ Rotating in", int(acts.get("ROTATING IN", 0)), _e(names("ROTATING IN")), GREEN),
-        ("Leading", int(acts.get("LEADING", 0) + acts.get("STRETCHED", 0)), _e(names("LEADING")), "#8AD66B"),
-        ("Weakening / lagging", int(acts.get("WEAKENING", 0) + acts.get("LAGGING", 0)),
-         f"of {len(tbl)} sectors", RED)]), unsafe_allow_html=True)
+        ("Market breadth", _f(mb, ".0f", "%"), f"of {int(ok.sum())} stocks above their 50-EMA · {_f(mb - mb5, '+.0f')} pts in 5 sessions", GREEN if mb >= 50 else RED),
+        ("Leading", int(cnt.get("LEADERSHIP", 0) + cnt.get("MATURE LEADERSHIP", 0)), _e(names("LEADERSHIP")), GREEN),
+        ("Improving", int(cnt.get("EARLY IMPROVEMENT", 0) + cnt.get("PARTICIPATION CONFIRMATION", 0) + cnt.get("RECOVERY", 0)),
+         _e(names("EARLY IMPROVEMENT")), CYAN),
+        ("Deteriorating", int(cnt.get("DETERIORATION", 0)), _e(names("DETERIORATION")), RED),
+        ("Leadership concentration", f"{ahead} / {len(tbl)}", f"sectors ahead of {_e(H['bench_name'])} over 60 sessions", T2),
+        ("RS spread", _f(spread, ".1f", " pp"), "gap between the 90th and 10th percentile sector, 20 sessions", T2)]), unsafe_allow_html=True)
 
-    _h(f"1 · Action board · what to do with each sector (vs {_e(bench)})")
-    st.markdown(_board(tbl, bench), unsafe_allow_html=True)
-    moves = tbl[(tbl["in_phase"] <= 1) & ~tbl["phase_prev"].isin(["—", None]) & (tbl["phase_prev"] != tbl["phase"])]
-    if len(moves):
-        value = {"LEADING": 3, "IMPROVING": 2, "WEAKENING": 1, "LAGGING": 0}
-        bits = []
-        for r in moves.to_dict("records"):
-            up = value.get(r["phase"], 0) > value.get(r["phase_prev"], 0) or (r["phase_prev"] == "LAGGING" and r["phase"] == "IMPROVING")
-            bits.append(f'<span style="color:{GREEN if up else RED}">{"▲" if up else "▼"} <b>{_e(r["sector"])}</b></span> '
-                        f'<span style="color:#777">{_e(str(r["phase_prev"]).title())} → {_e(str(r["phase"]).title())}</span>')
-        st.markdown('<div class="rd-moves"><b style="color:#ddd">Changed phase this week:</b> ' + " &nbsp;·&nbsp; ".join(bits) + "</div>",
+    _h(f"1 · Rotation states · every sector, with its evidence (vs {_e(H['bench_name'])})")
+    html = ""
+    for s in BOARD_ORDER:
+        rows = tbl[tbl.state == s].sort_values("pctile_20", ascending=False).to_dict("records")
+        body = "".join(_card(r) for r in rows[:8]) or '<div class="sr-empty">None right now.</div>'
+        more = f'<div class="sr-empty">+ {len(rows) - 8} more in RANKING</div>' if len(rows) > 8 else ""
+        html += f'<div class="sr-col" style="--c:{STATE_C[s]}"><h4>{s} · {len(rows)}</h4><p>{_e(STATE_HELP[s])}</p>{body}{more}</div>'
+    st.markdown(f'<div class="sr-board">{html}</div>', unsafe_allow_html=True)
+    rest = int(cnt.get(rstate.NONE, 0) + cnt.get(rstate.NOHIST, 0))
+    st.caption(f"{rest} sector(s) have no clear state or not enough history. A state is a description decided by written rules "
+               "(see DATA & METHOD). It is not an instruction. SIGNAL TESTS shows what each state was followed by on this history.")
+
+    recent = tbl[(tbl["sessions"] <= 5) & tbl["previous"].notna()]
+    if len(recent):
+        _h("2 · State changes in the last 5 sessions")
+        st.markdown("  \n".join(f"**{_e(r['sector'])}**: {r['previous']} → {r['state']} on {r['since']}" for r in recent.to_dict("records")))
+    con = [(r["sector"], c) for r in tbl.to_dict("records") for c in (r["contradictions"] or [])]
+    if con:
+        _h("3 · Contradictions · where the measurements disagree")
+        st.dataframe(pd.DataFrame([{"Sector": s, "Contradiction": c["name"], "Numbers": c["numbers"]} for s, c in con]),
+                     use_container_width=True, hide_index=True)
+    _h("4 · Relative-strength distribution · 20-session return minus benchmark, all sectors (pp)")
+    st.bar_chart(tbl.set_index("sector")["rel_20"].sort_values(ascending=False))
+
+
+# ═════════════════════════ view · RANKING / BREADTH / ACTIVITY ═════════════════════════
+COLS = {
+    "sector": "Sector", "state": "State", "confidence": "Confidence", "since": "Since", "sessions": "Sessions in state",
+    "previous": "Previous state", "abs_5": "Return 5d %", "abs_20": "Return 20d %", "abs_60": "Return 60d %", "abs_120": "Return 120d %",
+    "abs_252": "Return 252d %", "rel_5": "RS 5d pp", "rel_20": "RS 20d pp", "rel_60": "RS 60d pp", "rel_120": "RS 120d pp",
+    "rel_252": "RS 252d pp", "pctile_20": "RS percentile", "pctile_chg_20": "RS percentile change 20d", "rs_trend": "RS trend",
+    "rs_accel": "RS acceleration pp", "leadership": "Leadership", "pct20": "% above 20-EMA", "pct50": "% above 50-EMA",
+    "pct200": "% above 200-EMA", "d20_stocks_10": "Stocks above 20-EMA, change 10d", "d50_stocks_20": "Stocks above 50-EMA, change 20d",
+    "new_high20": "New 20d highs", "new_low20": "New 20d lows", "breakout20": "Breakouts today", "adv": "Advancing", "dec": "Declining",
+    "n_bar": "Stocks", "up_share5": "Up-close turnover share 5d %", "down_share5": "Down-close turnover share 5d %",
+    "rel_activity": "Relative activity (x 20d)", "turnover_accel": "Turnover 5d / 20d", "traded_value_cr": "Traded value ₹Cr",
+    "dist50": "Level vs 50-EMA %", "ext_pctile": "Extension percentile", "ew_minus_level_60": "Equal-weight minus index 60d pp",
+    "coverage_status": "Data", "with_prices": "Members with prices", "members": "Members",
+}
+SETS = {
+    "OVERVIEW": ["sector", "state", "confidence", "since", "abs_20", "abs_60", "rel_20", "rel_60", "pctile_20", "pctile_chg_20",
+                 "pct50", "d50_stocks_20", "rel_activity", "coverage_status"],
+    "RELATIVE STRENGTH": ["sector", "state", "rel_5", "rel_20", "rel_60", "rel_120", "rel_252", "pctile_20", "pctile_chg_20",
+                          "rs_trend", "rs_accel", "leadership", "dist50", "ext_pctile"],
+    "RETURNS": ["sector", "state", "abs_5", "abs_20", "abs_60", "abs_120", "abs_252", "ew_minus_level_60"],
+}
+BREADTH_COLS = ["sector", "state", "n_bar", "pct20", "d20_stocks_10", "pct50", "d50_stocks_20", "pct200", "adv", "dec",
+                "new_high20", "new_low20", "breakout20", "coverage_status"]
+ACTIVITY_COLS = ["sector", "state", "traded_value_cr", "rel_activity", "turnover_accel", "up_share5", "down_share5", "abs_5", "rel_20"]
+
+
+def _table(tbl, keys, key, sort=None, height=None):
+    df = tbl[keys].rename(columns=COLS)
+    if sort:
+        df = df.sort_values(COLS[sort], ascending=False, na_position="last")
+    num = df.select_dtypes("number").columns
+    st.dataframe(df.style.format({c: "{:,.1f}" for c in num}, na_rep="n/a"), use_container_width=True, hide_index=True,
+                 height=height or min(42 + 35 * len(df), 900), key=key)
+
+
+def _view_ranking(E):
+    tbl = E["table"]
+    c1, c2 = st.columns([3, 2])
+    cset = c1.radio("Columns", list(SETS), horizontal=True, key="mf7_rank_set")
+    pick = c2.multiselect("States", list(BOARD_ORDER) + [rstate.NONE], default=[], key="mf7_rank_states")
+    view = tbl[tbl["state"].isin(pick)] if pick else tbl
+    st.caption(f"{len(view)} sectors, ranked across all {len(tbl)}. Click a column header to sort. RS = sector return minus "
+               f"{E['H']['bench_name']} return, in percentage points. RS percentile: 100 = strongest of {int(E['H']['n_ranked'].iloc[-1])} ranked sectors.")
+    _table(view, SETS[cset], "mf7_rank_tbl", sort="pctile_20")
+    st.download_button("⤓ DOWNLOAD SECTOR TABLE (CSV)",
+                       tbl.drop(columns=["evidence", "contradictions", "situations"], errors="ignore").to_csv(index=False),
+                       "arka_sector_states.csv", "text/csv", key="mf7_rank_dl")
+
+
+def _view_breadth(E):
+    _h("Participation by sector · level and direction are separate columns")
+    _table(E["table"], BREADTH_COLS, "mf7_br_tbl", sort="pct50")
+    _note("<b>Level</b> is the % of a sector's stocks above their own EMA. <b>Direction</b> is the change in the NUMBER of stocks, so a "
+          "sector of 5 and a sector of 40 are judged the same way. A move of one stock is treated as noise. "
+          "80% above the 50-EMA is broad even if it was 90% last month; 30% and rising is weak but improving.")
+    if E["kind"] == "NSE INDICES" and E["table"]["pct50"].isna().all():
+        st.info("Breadth is NOT AVAILABLE for NSE indices until their constituent files (ind_*list.csv from niftyindices.com) are in the data/ folder.")
+    _h("Whole market · % of all loaded stocks above their 20 / 50 / 200-EMA")
+    c = E["close"]
+    u = pd.DataFrame({f"Above {n}-EMA %": ((c > c.ewm(span=n, adjust=False, min_periods=n).mean()) & c.notna()).sum(axis=1)
+                      / c.notna().sum(axis=1).replace(0, np.nan) * 100 for n in (20, 50, 200)}).tail(250)
+    _line(u, "mf7_br_mkt", [CYAN, GREEN, PURPLE], 280)
+
+
+def _view_activity(E):
+    _h("Trading activity by sector")
+    _table(E["table"], ACTIVITY_COLS, "mf7_act_tbl", sort="rel_activity")
+    _note(f"Traded value basis: <b>{_e(E['H']['value_basis'])}</b>. <b>Relative activity</b> = today's traded value ÷ the average of the previous "
+          "20 sessions. <b>Up-close turnover share</b> = share of 5-session traded value in stocks that closed above their previous close. "
+          "These show how much traded and on what kind of day. They do not show who bought or sold. "
+          "Delivery quantity and delivery % are NOT AVAILABLE in this build (they need NSE's bhavcopy).")
+
+
+# ═════════════════════════ view · SECTOR DETAIL ═════════════════════════
+def _view_detail(E, on_open):
+    H, cl, tbl = E["H"], E["cl"], E["table"]
+    opts = tbl.sort_values("pctile_20", ascending=False)["sector"].tolist()
+    state_of = tbl.set_index("sector")["state"]
+    if st.session_state.get("mf7_detail_pick") not in opts:          # selection left over from the other sector list
+        st.session_state.pop("mf7_detail_pick", None)
+    pick = st.selectbox("Sector", opts, key="mf7_detail_pick", format_func=lambda s: f"{s} · {state_of.get(s, '')}")
+    r = tbl[tbl["sector"] == pick].iloc[0].to_dict()
+    a, b = st.columns([1, 1.25], gap="medium")
+    with a:
+        st.markdown(_pill(r["state"]) + f' &nbsp;<span style="color:#8a8a8a;font:12px Inter">{_e(STATE_HELP.get(r["state"], ""))}</span>',
                     unsafe_allow_html=True)
-    _note("<b>How the labels are decided.</b> ROTATING IN = improving or leading on the weekly rotation map, heading up-and-right, "
-          "sector index above its 20-EMA, at least half its stocks above their 20-EMA, most of the week's turnover going into rising "
-          "stocks, score 55+, not stretched and no distribution warning. LEADING = top-right of the map. STRETCHED = leading but more "
-          f"than {rot.STRETCH_PCT:.0f}% above its 20-EMA or RSI above {rot.STRETCH_RSI:.0f}. WATCH = improving but not confirmed (or "
-          "bottoming with breadth and money turning). WEAKENING / LAGGING = right-bottom / left-bottom of the map.")
-
-    _h("2 · Relative rotation graph · where every sector sits and where it is heading")
-    c1, c2, c3 = st.columns([1.2, 1.6, 4])
-    tf = c1.radio("Timeframe", ["Weekly", "Daily"], horizontal=True, key="mf6_rrg_tf")
-    lab = c2.radio("Names", ["Key", "All", "None"], horizontal=True, key="mf6_rrg_lbl")
-    fq = "W" if tf == "Weekly" else "D"
-    summ, tails = res["rrg"][fq]
-    t2 = tbl.copy()
-    t2["phase"] = [summ.get(s, {}).get("phase", "—") for s in t2["sector"]]
-    options = tbl["sector"].tolist()
-    key = "mf6_rrg_hl"
-    if key not in st.session_state:
-        st.session_state[key] = list(dict.fromkeys(tbl.loc[tbl.action.isin(["ROTATING IN", "WATCH"]), "sector"].head(4).tolist()
-                                                   + options[:2]))[:6]
-    st.session_state[key] = [v for v in st.session_state[key] if v in options]
-    hl = c3.multiselect("Show the path (tail) for", options, key=key)
-    _show_fig(_rrg_fig(t2, tails, hl, lab, bench, "weeks" if fq == "W" else "sessions"), "mf6_rrg")
-    _note("Read it clockwise: <b>IMPROVING → LEADING → WEAKENING → LAGGING → IMPROVING</b>. Right of centre = beating the benchmark, "
-          "above centre = that out-performance is accelerating. The tail shows the last weeks: a tail pointing up-and-right is "
-          "gaining, down-and-left is losing. The best entries are usually sectors crossing from IMPROVING into LEADING with a long, "
-          "steady tail; sectors far out in LEADING have usually already moved. Weekly is the standard view for rotation; daily is noisier.")
-
-    _h("3 · Rotation score history · who is climbing, who is fading")
-    hist = res["hist"]["score"].reindex(tbl["sector"])
-    act = tbl.set_index("sector")["action"]
-
-    def delta(s):
-        a, b = _f(hist.loc[s, "Today"]), _f(hist.loc[s, "2W ago"])
-        if a is None or b is None:
-            return "—"
-        d = a - b
-        return f'<span style="color:{GREEN if d > 5 else RED if d < -5 else T2}">{d:+.0f}</span>'
-
-    st.markdown(_heat_table(hist, "score", {"Δ 2W": delta, "Action": lambda s: _pill(act[s], ACTION_C.get(act[s], T3))}),
-                unsafe_allow_html=True)
-    with st.expander("RANK RACE · weekly rank by rotation score, last 12 weeks (1 = strongest)"):
-        rw = res["rank_weeks"].reindex(tbl["sector"]).dropna(how="all")
-        st.markdown(_heat_table(rw, "rank"), unsafe_allow_html=True)
-        st.caption("A sector whose row turns from red to green over several weeks is where money has been rotating in.")
-    _note("Score (0-100) ranks sectors against each other: relative strength 35% (1W, 1M, 3M vs the benchmark), breadth 25% "
-          "(% of stocks above their 50 / 20-EMA and its change), money 25% (share of turnover in rising stocks, change in turnover "
-          "share, ₹-weighted CMF) and acceleration 15%. It is relative: in a falling market the top score is the least bad sector.")
-
-    _h("4 · Sector detail · why it is rated this way, and its strongest stocks")
-    pick = st.selectbox("Sector", options, key="mf6_desk_pick", format_func=lambda s: f"{s} · {act.get(s, '')}")
-    r = tbl[tbl["sector"] == pick].iloc[0].to_dict()
-    a, b = st.columns([1, 1.7], gap="medium")
-    a.markdown(_card(r, bench, full=True), unsafe_allow_html=True)
-    sub = res["stocks"][res["stocks"]["sector"] == pick].sort_values("rs_rating", ascending=False)
+        st.markdown(report.explain(r, H["bench_name"]))
+        if r["coverage_status"] != "ok":
+            st.warning(f"Data: {r['coverage_status']}. {r['with_prices']} of {r['members']} members have prices"
+                       + (f"; missing: {', '.join(H['coverage'][pick]['missing'][:12])}" if H["coverage"][pick]["missing"] else "") + ".")
+        st.caption(f"Level: {E['level_src']}. As of {H['asof']}. Model {MODEL_VERSION}.")
     with b:
-        ui.show_table([ui.C("Stock", "symbol", "sector", sub="company"), ui.C("Price", "price", "num", pre="₹"),
-                       ui.C("1W", "r1w", "pct", scale=6.0), ui.C("1M", "r1m", "pct", scale=12.0),
-                       ui.C("RS", "rs_rating", "bar", max=99, color=CYAN, tip="RS rating 0-99 across the whole universe"),
-                       ui.C("RSI", "rsi", "rsi"), ui.C("EMA 20·50·200", t="ema", spans=(20, 50, 200)),
-                       ui.C("From 52W high", "from_hi", "pct", d=1, scale=20.0), ui.C("Vol ×", "vol_x", "num", d=2, suf="×")],
-                      _stock_rows(sub.head(12)), max_height=520)
-        _open_picker(sub["symbol"].tolist(), "mf6_desk_open", on_open)
+        lv = pd.DataFrame({pick: H["levels"][pick], H["bench_name"]: H["bench"]}).tail(252).dropna()
+        st.caption("Sector level vs benchmark, both rebased to 100 one year ago")
+        _line(lv / lv.iloc[0] * 100 if len(lv) else lv, "mf7_d_lv", [AMBER, "#D0D0D0"], 250, 100)
+        st.caption("Relative-strength line (sector ÷ benchmark) and its 50-session average")
+        _line(pd.DataFrame({"RS line": H["ratio"][pick], "50-session average": H["ratio_sma50"][pick]}).tail(252), "mf7_d_rs", [AMBER, CYAN], 220)
+
+    _h("Returns and relative strength · every horizon, every benchmark")
+    rows = []
+    for bn, bser in E["benches"].items():
+        t = rs.rs_table(H["levels"], bser)
+        for h in HORIZONS:
+            rows.append({"Benchmark": bn, "Sessions": h, "Sector return %": t.at[pick, f"abs_{h}"], "Benchmark return %": t.at[pick, f"bench_{h}"],
+                         "Relative return pp": t.at[pick, f"rel_{h}"], "Ratio change %": t.at[pick, f"ratio_chg_{h}"],
+                         "Percentile": t.at[pick, f"pctile_{h}"], "Ranked": t.at[pick, f"n_ranked_{h}"]})
+    st.dataframe(pd.DataFrame(rows).style.format({c: "{:+.1f}" for c in ("Sector return %", "Benchmark return %", "Relative return pp", "Ratio change %")}
+                                                 | {"Percentile": "{:.0f}"}, na_rep="n/a"), use_container_width=True, hide_index=True, height=300)
+    st.caption("Relative return = sector return minus benchmark return. Ratio change = % change in (sector ÷ benchmark). They are different numbers.")
+
+    c1, c2 = st.columns(2, gap="medium")
+    with c1:
+        _h("Breadth history · % of members above their EMA")
+        _line(pd.DataFrame({"Above 20-EMA %": H["pct20"][pick], "Above 50-EMA %": H["pct50"][pick], "Above 200-EMA %": H["pct200"][pick]}).tail(250),
+              "mf7_d_br", [CYAN, GREEN, PURPLE], 240)
+    with c2:
+        _h("State history · last 10 changes")
+        s = cl["state"][pick]
+        chg = s[s.ne(s.shift(1))].tail(10)[::-1]
+        st.dataframe(pd.DataFrame({"From": [str(d.date()) for d in chg.index], "State": chg.values}), use_container_width=True, hide_index=True, height=240)
+
+    if r["state"] in rstate.STATES:
+        _h(f"What followed {r['state']} on this history · all sectors, non-overlapping windows, entry next session")
+        t = bt.state_table(cl["state"], H["levels"], H["bench"], mode="all", states=[r["state"]])
+        st.dataframe(t.rename(columns={"horizon": "Sessions held", "n": "Observations", "mean": "Mean excess pp", "median": "Median excess pp",
+                                       "beat_pct": "Beat benchmark %", "abs_mean": "Mean return %", "mae": "Avg worst point %", "mfe": "Avg best point %",
+                                       "t_stat": "t-stat (overstated)"}).drop(columns=["state"]).style.format("{:,.1f}", na_rep="n/a"),
+                     use_container_width=True, hide_index=True)
+
+    mem = E["members"].get(pick, [])
+    _h(f"Constituents · {len(mem)} members")
+    if not mem:
+        st.info("Constituents are NOT AVAILABLE for this index (no constituent file in data/).")
+    else:
+        stk = report.stock_table(E["close"], E["high"], E["volume"], mem, H["bench"], H["levels"][pick])
+        names = {"symbol": "Symbol", "price": "Price ₹", "ret_20": "Return 20d %", "ret_60": "Return 60d %", "rel_bench_20": "vs benchmark 20d pp",
+                 "rel_bench_60": "vs benchmark 60d pp", "rel_sector_20": "vs sector 20d pp", "rel_sector_60": "vs sector 60d pp",
+                 "above_20": "> 20-EMA", "above_50": "> 50-EMA", "above_200": "> 200-EMA", "from_52w_high": "From 52w high %",
+                 "rel_volume": "Volume x 20d", "avg_value_cr": "Avg value ₹Cr", "volatility_20": "Daily volatility %", "range_20": "20d range %", "setup": "Setup (descriptive)"}
+        show = stk.rename(columns=names)
+        num = show.select_dtypes("number").columns
+        st.dataframe(show.style.format({c: "{:,.1f}" for c in num}, na_rep="n/a"), use_container_width=True, hide_index=True,
+                     height=min(42 + 35 * len(show), 620))
+        st.caption("A strong sector does not make every member a good trade. Setups are rule-based descriptions of the chart, not entries. "
+                   "Avg value is close × volume (approximate).")
+        if on_open and len(stk):
+            x, y = st.columns([3, 1])
+            if st.session_state.get("mf7_d_sym") not in stk["symbol"].tolist():
+                st.session_state.pop("mf7_d_sym", None)
+            sym = x.selectbox("Open a stock in Arka", stk["symbol"].tolist(), key="mf7_d_sym", label_visibility="collapsed")
+            if y.button("OPEN STOCK ▸", key="mf7_d_open", use_container_width=True):
+                on_open(str(sym))
+    with st.expander("STRUCTURED DATA FOR ARKA AI · facts, rules and unknowns for this sector"):
+        st.json(report.ai_payload(r, H["asof"], H["bench_name"], E["level_src"]))
+        st.caption("Arka AI should be given this object and asked to explain it. It must not add numbers of its own.")
 
 
-# ═════════════════════════ view · SECTOR RANKING ═════════════════════════
-RANK_COLS = {
-    "sector": ("Sector", "text"), "stocks": ("Stocks", "int"), "action": ("Action", "action"), "phase": ("Phase", "phase"),
-    "score": ("Score", "score"), "r1d": ("1D %", "spct"), "r1w": ("1W %", "spct"), "r1m": ("1M %", "spct"),
-    "r3m": ("3M %", "spct"), "r6m": ("6M %", "spct"), "ex1w": ("RS 1W (pp)", "spp"), "ex1m": ("RS 1M (pp)", "spp"),
-    "ex3m": ("RS 3M (pp)", "spp"), "ex6m": ("RS 6M (pp)", "spp"), "dist20": ("vs 20-EMA %", "spct1"),
-    "dist50": ("vs 50-EMA %", "spct1"), "idx_rsi": ("RSI", "rsi"), "dd52": ("From 52W high %", "spct1"),
-    "pct20": ("% > 20-EMA", "heat"), "pct50": ("% > 50-EMA", "heat"), "pct200": ("% > 200-EMA", "heat"),
-    "dpct20_5": ("Δ % > 20-EMA (5D)", "spp0"), "up_pct1d": ("Up-turnover 1D", "heat"), "up_pct5": ("Up-turnover 5D", "heat"),
-    "turnover_cr": ("Turnover ₹Cr", "cr"), "share": ("Share %", "num2"), "dshare_d": ("Δ Share 1D", "spp2"),
-    "dshare_w": ("Δ Share 1W", "spp2"), "rel_turn": ("Turnover × 20D", "ratio"), "cmf": ("CMF 20", "s2"),
-    "dcmf5": ("Δ CMF 5D", "s2"), "money_signal": ("Money signal", "money"), "cmf_trend": ("CMF trend", "cmft"),
-    "adv": ("Adv", "int"), "dec": ("Dec", "int"), "ad_net": ("A/D net 1D", "s2"), "ad_net5": ("A/D net 5D", "s2"),
-    "avg_rsi": ("Avg stock RSI", "rsi"), "bo10": ("% breakout 10D", "pct0"), "nh5": ("New highs 5D", "int"),
-    "near_hi": ("% near 52W high", "pct0"), "leaders": ("Leaders", "text"),
-}
-RANK_SETS = {
-    "OVERVIEW": ["sector", "stocks", "action", "phase", "score", "r1d", "r1w", "r1m", "ex1m", "ex3m", "pct50", "up_pct5",
-                 "dshare_w", "leaders"],
-    "PERFORMANCE": ["sector", "action", "r1d", "r1w", "r1m", "r3m", "r6m", "ex1w", "ex1m", "ex3m", "ex6m", "dist20", "dist50",
-                    "idx_rsi", "dd52"],
-    "MONEY": ["sector", "action", "turnover_cr", "share", "dshare_d", "dshare_w", "rel_turn", "up_pct1d", "up_pct5", "cmf",
-              "dcmf5", "money_signal", "cmf_trend"],
-    "BREADTH": ["sector", "stocks", "adv", "dec", "ad_net", "ad_net5", "pct20", "dpct20_5", "pct50", "pct200", "avg_rsi", "bo10",
-                "nh5", "near_hi"],
-}
+# ═════════════════════════ view · SIGNAL TESTS ═════════════════════════
+def _view_tests(E):
+    H, cl = E["H"], E["cl"]
+    st.warning("Read before trusting any number here. "
+               + ("ARKA GROUPS use today's member lists for the whole history, so failed and delisted stocks are missing "
+                  "(survivorship bias) and results look better than they were. " if E["kind"] == "ARKA GROUPS" else
+                  "NSE index levels are free of survivorship bias, but there are few of them, so samples are small. ")
+               + "Sector baskets cannot be bought directly. Past behaviour is evidence, not a promise.")
+    valid = cl["state"].ne(rstate.NOHIST).any(axis=1)
+    first = valid.idxmax()
+    n_sess = int(valid.sum())
+    c1, c2, c3 = st.columns([1.4, 1, 2])
+    mode = c1.radio("Sample", ["Every h-th session in the state", "First session of each new state"], key="mf7_t_mode")
+    h = c2.selectbox("Horizon for comparisons (sessions)", list(bt.HORIZONS), index=2, key="mf7_t_h")
+    c3.caption(f"{n_sess} sessions with states, from {first.date()} to {H['asof']}. Entry is the NEXT session's close after the state is known; "
+               "exit h sessions later. Load 5 years for a more useful sample.")
+    m = "all" if mode.startswith("Every") else "entries"
+    if n_sess < 150:
+        st.info("Fewer than 150 sessions with states. Load a longer history before reading these tables.")
 
+    _h("1 · How often each state occurs")
+    st.dataframe(bt.state_stats(cl["state"].loc[first:]).rename(columns={
+        "state": "State", "share_of_time_pct": "Share of time %", "entries": "Entries", "avg_sessions": "Avg sessions per spell",
+        "entries_per_sector_year": "Entries per sector per year"}).style.format({"Share of time %": "{:.1f}", "Avg sessions per spell": "{:.0f}",
+                                                                                "Entries per sector per year": "{:.1f}"}, na_rep="n/a"),
+                 use_container_width=True, hide_index=True)
 
-def _fm(fmt):
-    return lambda v: "—" if _isna(v) else fmt.format(v)
+    _h(f"2 · Forward return minus {_e(H['bench_name'])} after each state (percentage points)")
+    full = bt.state_table(cl["state"], H["levels"], H["bench"], mode=m, start=first, states=list(rstate.ALL_STATES))
+    piv = lambda col: full.pivot(index="state", columns="horizon", values=col).reindex(list(rstate.ALL_STATES)).rename(
+        columns=lambda c: f"{c} sessions").rename_axis(index="State", columns=None)
+    a, b = st.columns(2)
+    with a:
+        st.caption("Mean excess return (pp) by sessions held")
+        st.dataframe(piv("mean").style.format("{:+.2f}", na_rep="n/a"), use_container_width=True)
+        st.caption("Observations")
+        st.dataframe(piv("n").style.format("{:.0f}", na_rep="0"), use_container_width=True)
+    with b:
+        st.caption("Share of observations that beat the benchmark (%)")
+        st.dataframe(piv("beat_pct").style.format("{:.0f}", na_rep="n/a"), use_container_width=True)
+        st.caption("Average worst point reached while holding (%, sector's own price)")
+        st.dataframe(piv("mae").style.format("{:+.1f}", na_rep="n/a"), use_container_width=True)
+    _note("If the states carry information, LEADERSHIP and PARTICIPATION CONFIRMATION should show positive excess and beat rates above 50%, "
+          "and DETERIORATION should show negative excess. Where a row has few observations or sits near zero, that state has shown "
+          "<b>no measurable edge</b> on this history and should be read as a description only.")
 
+    _h(f"3 · Stability · the same test on each half of the history ({h} sessions held)")
+    cut = bt.split_point(cl["state"].loc[first:].index)
+    halves = []
+    for lab, kw in ((f"First 60% (to {cut.date()})", {"start": first, "end": cut}), (f"Last 40% (from {cut.date()})", {"start": cut})):
+        t = bt.state_table(cl["state"], H["levels"], H["bench"], horizons=(h,), mode=m, states=list(rstate.ALL_STATES), **kw)
+        halves.append(t.set_index("state")[["n", "mean", "beat_pct"]].rename(columns={"n": f"{lab} · n", "mean": f"{lab} · mean pp", "beat_pct": f"{lab} · beat %"}))
+    st.dataframe(pd.concat(halves, axis=1).style.format("{:,.1f}", na_rep="n/a"), use_container_width=True)
+    st.caption("The rules were written before seeing this data and were not tuned on it. A result that flips sign between the two halves is not reliable.")
 
-_FORMATS = {"int": _fm("{:,.0f}"), "score": _fm("{:.0f}"), "spct": _fm("{:+.2f}%"), "spct1": _fm("{:+.1f}%"),
-            "spp": _fm("{:+.1f}"), "spp0": _fm("{:+.0f}"), "spp2": _fm("{:+.2f}"), "rsi": _fm("{:.0f}"), "heat": _fm("{:.0f}%"),
-            "cr": _fm("{:,.0f}"), "num2": _fm("{:.2f}"), "ratio": _fm("{:.2f}×"), "s2": _fm("{:+.2f}"), "pct0": _fm("{:.0f}%")}
+    _h(f"4 · Against simple alternatives · same dates, {h} sessions held")
+    bl = bt.baseline_table(H, cl["state"], h, start=first)
+    st.dataframe(bl.rename(columns={"selection": "Selection", "n": "Observations", "mean": "Mean excess pp", "median": "Median excess pp",
+                                    "beat_pct": "Beat benchmark %", "t_stat": "t-stat (overstated)"}).style.format(
+        {"Mean excess pp": "{:+.2f}", "Median excess pp": "{:+.2f}", "Beat benchmark %": "{:.0f}", "t-stat (overstated)": "{:.1f}"}, na_rep="n/a"),
+        use_container_width=True, hide_index=True)
+    st.caption("If a state does no better than 'top third by 20-session relative return', the extra rules add nothing and the simple rank is the better tool.")
 
-
-def _css_signed(v):
-    return "" if _isna(v) else f"color:{GREEN if v > 0 else RED if v < 0 else T2}"
-
-
-def _css_heat(v):
-    return "" if _isna(v) else f"background-color:{_heat_bg((v - 50) / 50)};color:#f2f2f2"
-
-
-def _css_rsi(v):
-    return "" if _isna(v) else f"color:{ui.rsi_color(float(v))}"
-
-
-def _css_label(cmap):
-    return lambda v: f"color:{cmap.get(v, T2)};font-weight:700"
-
-
-_STYLERS = {"spct": _css_signed, "spct1": _css_signed, "spp": _css_signed, "spp0": _css_signed, "spp2": _css_signed,
-            "s2": _css_signed, "heat": _css_heat, "score": _css_heat, "rsi": _css_rsi, "action": _css_label(ACTION_C),
-            "phase": _css_label(PHASE_C), "money": _css_label(MONEY_C), "cmft": _css_label(CMF_C)}
-
-
-def _styled(df: pd.DataFrame, keys: list):
-    disp = df[keys].rename(columns={k: RANK_COLS[k][0] for k in keys})
-    sty = disp.style.format({RANK_COLS[k][0]: _FORMATS[RANK_COLS[k][1]] for k in keys if RANK_COLS[k][1] in _FORMATS})
-    for k in keys:
-        lab, kind = RANK_COLS[k]
-        fn = _STYLERS.get(kind)
-        if fn:
-            sty = (getattr(sty, "map", None) or sty.applymap)(fn, subset=[lab])
-    return sty
-
-
-GLOSSARY = """
-- **Action / Phase** — see ROTATION DESK. Phase is the quadrant on the weekly rotation map.
-- **Score** — 0-100 relative ranking: relative strength 35%, breadth 25%, money 25%, acceleration 15%.
-- **RS (pp)** — sector return minus benchmark return over the period, in percentage points.
-- **vs 20-EMA / 50-EMA** — how far the sector index is from its average. Above +8% = stretched.
-- **% > 20 / 50 / 200-EMA** — share of the sector's stocks above their own average (participation).
-- **Up-turnover** — share of the sector's ₹ turnover that traded in stocks that closed up. Above 55% = buyers in control.
-- **Share % / Δ Share** — sector turnover as % of all market turnover, and its change vs the previous day / previous week (5-day averages).
-- **Turnover × 20D** — today's turnover ÷ its 20-day average. Above 1.3× = unusual activity.
-- **CMF 20** — Chaikin Money Flow over 20 sessions, ₹-weighted across stocks. Above +0.05 accumulation-like, below −0.05 distribution-like.
-- **Money signal** — BUYING ON VOLUME = rising share of turnover and mostly up-turnover; SELLING ON VOLUME = rising share but mostly down-turnover.
-- **% breakout 10D** — stocks that closed above their previous 20-day high at least once in the last 10 sessions.
-- **New highs 5D / % near 52W high** — stocks at a new 52-week closing high in the last 5 sessions / within 5% of it.
-"""
-
-
-def _view_ranking(res: dict):
-    tbl = res["table"].copy()
-    c1, c2 = st.columns([3, 1.4])
-    cset = c1.radio("Columns", list(RANK_SETS), horizontal=True, key="mf6_rank_set")
-    fam = c2.selectbox("Family", ["All"] + sorted(tbl["family"].dropna().astype(str).unique()), key="mf6_rank_fam")
-    if fam != "All":
-        tbl = tbl[tbl["family"] == fam]
-    st.caption("Click any column header to sort. Rows start in rotation-score order. Hover a column for the full name.")
-    st.dataframe(_styled(tbl, RANK_SETS[cset]), use_container_width=True, hide_index=True,
-                 height=min(42 + 35 * len(tbl), 940))
-    with st.expander("WHAT EVERY COLUMN MEANS"):
-        st.markdown(GLOSSARY)
-    st.download_button("⤓ DOWNLOAD SECTOR TABLE (CSV)", tbl.drop(columns=["why", "warn"], errors="ignore").to_csv(index=False),
-                       "arka_sector_rotation.csv", "text/csv", key="mf6_rank_dl")
-
-
-# ═════════════════════════ view · MONEY FLOW ═════════════════════════
-def _view_money(res: dict):
-    tbl = res["table"]
-    _h("1 · Where turnover is moving · share of all market turnover and which side it traded on")
-    rows = _stock_rows(tbl.sort_values("dshare_w", ascending=False, na_position="last"))
-    for r in rows:
-        r["sig_h"] = _pill(r.get("money_signal") or "—", MONEY_C.get(r.get("money_signal"), T3))
-        r["dsd_h"], r["dsw_h"], r["cmf_h"] = _sg(r.get("dshare_d")), _sg(r.get("dshare_w")), _sg(r.get("cmf"))
-    ui.show_table([ui.C("#", t="rank"), ui.C("Sector", "sector", "sector", sub="stocks", sub_fmt="{:.0f} stocks"),
-                   ui.C("Signal", "sig_h", "html"), ui.C("Turnover ₹Cr", "turnover_cr", "num", d=0),
-                   ui.C("× 20D avg", "rel_turn", "num", d=2, suf="×"), ui.C("Share %", "share", "num", d=2),
-                   ui.C("Δ Share 1D", "dsd_h", "html", al="r"), ui.C("Δ Share 1W", "dsw_h", "html", al="r"),
-                   ui.C("Up-turnover 1D", "up_pct1d", "bar", suf="%", color=CYAN),
-                   ui.C("Up-turnover 5D", "up_pct5", "bar", suf="%", color=GREEN),
-                   ui.C("1W", "r1w", "pct", scale=4.0), ui.C("CMF 20", "cmf_h", "html", al="r")], rows, max_height=760)
-    _note("A rising <b>share</b> of turnover only says activity moved there; the <b>up-turnover</b> column says which side won. "
-          "BUYING ON VOLUME (more of the market's money AND most of it in rising stocks) is the footprint of rotation in. "
-          "SELLING ON VOLUME is the opposite: heavy trading while prices fall. Every trade has a buyer and a seller, so this is "
-          "evidence of who was more aggressive, not a count of who bought.")
-
-    _h("2 · Chaikin money flow (₹-weighted, 20 sessions) · 1 month ago → today")
-    cm = res["hist"]["cmf"].reindex(tbl.sort_values("cmf", ascending=False)["sector"])
-    trend = tbl.set_index("sector")["cmf_trend"]
-    st.markdown(_heat_table(cm, "cmf", {"Trend": lambda s: _pill(trend.get(s, "—"), CMF_C.get(trend.get(s), T3))}),
-                unsafe_allow_html=True)
-    _note("Green = closes landing in the upper part of the day's range on heavy ₹ volume (accumulation-like); red = the lower part "
-          "(distribution-like). The most useful pattern is a row turning from red to green while the sector's relative strength "
-          "improves: money arriving before the price trend is obvious.")
-
-    _h("3 · Turnover share trend · 5-day average, last 90 sessions")
-    opts = tbl["sector"].tolist()
-    default = tbl.sort_values("dshare_w", ascending=False)["sector"].head(5).tolist()
-    pick = st.multiselect("Sectors", opts, default=default, key="mf6_share_pick")
-    if pick:
-        st.line_chart(res["share"][pick].rolling(5).mean().tail(90).rename_axis("date"))
-
-
-# ═════════════════════════ view · BREADTH ═════════════════════════
-def _breadth_flag(r) -> str:
-    p20, d5 = _f(r.get("pct20")), _f(r.get("dpct20_5"))
-    if p20 is None or d5 is None:
-        return _pill("—", T3)
-    if p20 >= 70 and d5 >= 30:
-        return _pill("BREADTH THRUST", GREEN)
-    if d5 >= 10:
-        return _pill("BROADENING", CYAN)
-    if d5 <= -25:
-        return _pill("COLLAPSING", RED)
-    if d5 <= -10:
-        return _pill("NARROWING", AMBER)
-    return _pill("STEADY", T2)
-
-
-def _view_breadth(res: dict):
-    tbl = res["table"]
-    _h("1 · Participation by sector · how many of its stocks are actually moving")
-    rows = _stock_rows(tbl.sort_values("dpct20_5", ascending=False, na_position="last"))
-    for r in rows:
-        r["flag"], r["d5_h"], r["d20_h"] = _breadth_flag(r), _sg(r.get("dpct20_5"), 0), _sg(r.get("dpct50_20"), 0)
-        r["ad_h"], r["ad5_h"] = _sg(r.get("ad_net")), _sg(r.get("ad_net5"))
-    ui.show_table([ui.C("#", t="rank"), ui.C("Sector", "sector", "sector", sub="stocks", sub_fmt="{:.0f} stocks"),
-                   ui.C("Breadth", "flag", "html"), ui.C("% > 20-EMA", "pct20", "bar", suf="%", color=CYAN),
-                   ui.C("Δ 5D", "d5_h", "html", al="r"), ui.C("% > 50-EMA", "pct50", "bar", suf="%", color=GREEN),
-                   ui.C("Δ 20D", "d20_h", "html", al="r", tip="Change in % above the 50-EMA over 20 sessions"),
-                   ui.C("% > 200-EMA", "pct200", "bar", suf="%", color=PURPLE), ui.C("Adv", "adv", "int"), ui.C("Dec", "dec", "int"),
-                   ui.C("A/D 1D", "ad_h", "html", al="r"), ui.C("A/D 5D", "ad5_h", "html", al="r"), ui.C("Avg RSI", "avg_rsi", "rsi"),
-                   ui.C("% breakout 10D", "bo10", "num", d=0, suf="%"), ui.C("New highs 5D", "nh5", "int"),
-                   ui.C("% near 52W high", "near_hi", "num", d=0, suf="%")], rows, max_height=760)
-    _note("Participation usually turns before the sector index does. A <b>BREADTH THRUST</b> (70%+ of stocks above the 20-EMA after a "
-          "30-point jump in 5 sessions) is one of the strongest early signs that a group is being accumulated. Leadership with "
-          "<b>NARROWING</b> breadth means a few stocks are carrying the sector — late-stage behaviour.")
-
-    _h("2 · % of stocks above the 20-EMA · 1 month ago → today")
-    st.markdown(_heat_table(res["hist"]["pct20"].reindex(tbl["sector"]), "pct"), unsafe_allow_html=True)
-
-    _h("3 · Whole-market breadth · % of all stocks above their 20 / 50 / 200-EMA")
-    u = res["universe"].tail(160)
-    st.line_chart(u[["above20", "above50", "above200"]].rename(
-        columns={"above20": "Above 20-EMA %", "above50": "Above 50-EMA %", "above200": "Above 200-EMA %"}).rename_axis("date"))
-    st.caption("Rotation works best when the whole market is healthy (50-EMA breadth above ~50% and rising). In weak markets, "
-               "the 'best' sector is often just the one falling least.")
-
-
-# ═════════════════════════ view · STOCKS ═════════════════════════
-def _view_stocks(res: dict, on_open):
-    tbl, stk = res["table"], res["stocks"]
-    act = tbl.set_index("sector")["action"]
-    c1, c2, c3 = st.columns([2.2, 1.4, 1.8])
-    pick = c1.selectbox("Sector", tbl["sector"].tolist(), key="mf6_stk_sector", format_func=lambda s: f"{s} · {act.get(s, '')}")
-    sort = c2.selectbox("Sort by", ["RS rating", "1D %", "1W %", "1M %", "Turnover", "Volume ×", "Near 52W high"], key="mf6_stk_sort")
-    show = c3.radio("Show", ["All", "Uptrend only", "Breakouts (10D)"], horizontal=True, key="mf6_stk_show")
-    r = tbl[tbl["sector"] == pick].iloc[0].to_dict()
-    st.markdown(_card(r, res["bench_name"], full=True), unsafe_allow_html=True)
-    sub = stk[stk["sector"] == pick].copy()
-    if show == "Uptrend only":
-        sub = sub[(sub["ab50"] == 1) & (sub["ab200"] == 1)]
-    elif show == "Breakouts (10D)":
-        sub = sub[sub["bo10"] == 1]
-    col = {"RS rating": "rs_rating", "1D %": "r1d", "1W %": "r1w", "1M %": "r1m", "Turnover": "avg_turn_cr",
-           "Volume ×": "vol_x", "Near 52W high": "from_hi"}[sort]
-    sub = sub.sort_values(col, ascending=False, na_position="last")
-    view = pd.DataFrame({
-        "Symbol": sub["symbol"], "Company": sub["company"], "Price": sub["price"], "1D %": sub["r1d"], "1W %": sub["r1w"],
-        "1M %": sub["r1m"], "3M %": sub["r3m"], "RS rating": sub["rs_rating"], "vs market 1M (pp)": sub["ex1m"],
-        "RSI": sub["rsi"], "Trend": sub["trend"], "vs 20-EMA %": sub["dist20"], "From 52W high %": sub["from_hi"],
-        "Volume ×": sub["vol_x"], "Avg turnover ₹Cr": sub["avg_turn_cr"], "Breakout 10D": np.where(sub["bo10"] == 1, "✔", ""),
-        "CMF 20": sub["cmf"]}).reset_index(drop=True)
-    cc = st.column_config
-    cfg = {"Price": cc.NumberColumn(format="₹%.2f"), "1D %": cc.NumberColumn(format="%+.2f%%"),
-           "1W %": cc.NumberColumn(format="%+.2f%%"), "1M %": cc.NumberColumn(format="%+.2f%%"),
-           "3M %": cc.NumberColumn(format="%+.2f%%"),
-           "RS rating": cc.ProgressColumn(min_value=0, max_value=99, format="%d", help="0-99 vs every stock in the universe (1M/3M/6M)"),
-           "vs market 1M (pp)": cc.NumberColumn(format="%+.1f"), "RSI": cc.NumberColumn(format="%.0f"),
-           "vs 20-EMA %": cc.NumberColumn(format="%+.1f%%"), "From 52W high %": cc.NumberColumn(format="%+.1f%%"),
-           "Volume ×": cc.NumberColumn(format="%.2f×", help="Today's volume ÷ 20-day average"),
-           "Avg turnover ₹Cr": cc.NumberColumn(format="%.1f"), "CMF 20": cc.NumberColumn(format="%+.2f")}
-    st.caption(f"{len(view)} stocks. Click a row, then OPEN STOCK. The best rotation candidates are usually high RS rating, "
-               "uptrend, within ~10% of the 52-week high, in a sector that is ROTATING IN or LEADING.")
-    event = st.dataframe(view, use_container_width=True, hide_index=True, column_config=cfg, height=min(42 + 35 * len(view), 760),
-                         on_select="rerun", selection_mode="single-row", key="mf6_stk_tbl")
-    rows = getattr(getattr(event, "selection", None), "rows", []) if event is not None else []
-    if rows and on_open:
-        sym = str(view.iloc[int(rows[0])]["Symbol"])
-        if st.button(f"OPEN {sym} ▸", type="primary", key="mf6_stk_open"):
-            on_open(sym)
-
-
-# ═════════════════════════ view · NSE INDICES ═════════════════════════
-@st.cache_data(ttl=6 * 3600, show_spinner=False, max_entries=2)
-def _official(bucket: int):
-    if yf is None:
-        raise RuntimeError("yfinance is not installed")
-    frames = _yf_batch(list(OFFICIAL.values()) + ["^NSEI"], "3y", chunk=50)
-    if "^NSEI" not in frames:
-        raise RuntimeError("Yahoo returned no NIFTY 50 history")
-    closes = pd.DataFrame({n: rot.norm_series(frames[t]["Close"]) for n, t in OFFICIAL.items() if t in frames})
-    last = closes.apply(lambda c: c.last_valid_index())
-    closes = closes[[c for c in closes.columns if last[c] is not None and (last.max() - last[c]).days <= 10]]
-    return closes, rot.norm_series(frames["^NSEI"]["Close"])
-
-
-def _view_indices():
-    _note("Official NSE sector indices (Yahoo daily closes) on the same weekly rotation map, measured against NIFTY 50. They are "
-          "cap-weighted and broad, so they move later than the stock-built sectors — use them to confirm, not to find, rotation.")
-    if st.button("LOAD / REFRESH NSE INDICES", type="primary", key="mf6_ix_load"):
-        if st.session_state.get("mf6_ix_ready"):
-            _official.clear()
-        st.session_state["mf6_ix_ready"] = True
-    if not st.session_state.get("mf6_ix_ready"):
-        return
-    with st.spinner("Downloading sector index history…"):
-        try:
-            closes, bench = _official(int(time.time() // (6 * 3600)))
-            tbl, tails = rot.index_view(closes, bench)
-        except Exception as exc:
-            st.error(f"Index history unavailable right now: {exc}. Yahoo may be rate-limiting; try again in a minute.")
-            return
-    tbl = tbl.sort_values("ex1m", ascending=False, na_position="last")
-    rows = _stock_rows(tbl)
-    for r in rows:
-        r["ph_h"] = _pill(f'{rot.compass(r.get("heading"))} {r.get("phase")} {int(_f(r.get("in_phase")) or 0)}w',
-                          PHASE_C.get(r.get("phase"), T3))
-    _h("1 · Official sector indices vs NIFTY 50")
-    ui.show_table([ui.C("#", t="rank"), ui.C("Index", "index", "sector"), ui.C("Weekly phase", "ph_h", "html"),
-                   ui.C("Price", "price", "num", d=1), ui.C("1D", "r1d", "pct", scale=2.0), ui.C("1W", "r1w", "pct", scale=4.0),
-                   ui.C("1M", "r1m", "pct", scale=8.0), ui.C("3M", "r3m", "pct", scale=15.0),
-                   ui.C("RS 1M (pp)", "ex1m", "pct", scale=5.0), ui.C("RS 3M (pp)", "ex3m", "pct", scale=10.0),
-                   ui.C("RSI", "rsi_d", "rsi"), ui.C("EMA 10·20·50·200", t="ema"), ui.C("vs 20", "dist20", "dist"),
-                   ui.C("vs 50", "dist50", "dist", scale=12.0)], rows, max_height=760)
-    _h("2 · Rotation map · official indices")
-    t2 = tbl.rename(columns={"index": "sector"}).assign(score=np.nan, action="")
-    _show_fig(_rrg_fig(t2, tails, [], "All", "NIFTY 50"), "mf6_ix_rrg")
+    _h("5 · Costs of acting on a signal")
+    x, y = st.columns(2)
+    brk = x.number_input("Brokerage per side %", 0.0, 1.0, 0.0, 0.01, key="mf7_t_brk")
+    slp = y.number_input("Slippage per side %", 0.0, 1.0, 0.05, 0.01, key="mf7_t_slp")
+    cst = bt.round_trip_cost(brk, slp)
+    st.markdown(f"Estimated round trip for delivery equity: **{cst['total_pct']:.2f}%** of trade value "
+                f"(STT {cst['stt']:.2f}%, stamp duty {cst['stamp']:.3f}%, brokerage + exchange + SEBI + GST {cst['brokerage_exchange_sebi_gst']:.3f}%, "
+                f"slippage {cst['slippage']:.2f}%). Subtract this from any excess return above. Rates are assumptions: check your contract note.")
 
 
 # ═════════════════════════ view · FPI FLOWS ═════════════════════════
@@ -898,11 +630,11 @@ def _view_indices():
 def _nsdl_fetch(d: str):
     sess = requests.Session()
     sess.headers.update({"User-Agent": UA})
-    for url in rot.nsdl_urls(pd.Timestamp(d)):
+    for url in fpi.nsdl_urls(pd.Timestamp(d)):
         try:
             r = sess.get(url, timeout=12)
             if r.status_code == 200 and "Sector" in r.text:
-                p = rot.parse_nsdl_sector_html(r.text)
+                p = fpi.parse_nsdl_sector_html(r.text)
                 if not p.empty:
                     return p
         except requests.RequestException:
@@ -911,34 +643,33 @@ def _nsdl_fetch(d: str):
 
 
 def _view_fpi():
-    _note("NSDL publishes how much <b>foreign portfolio investors</b> put into or took out of each sector every fortnight — recorded "
-          "money, not a price-based estimate. Limits: FPIs only (not mutual funds or DIIs), published with a lag, NSE's broad "
-          "22-sector classification. Source: fpi.nsdl.co.in (Fortnightly Sector-wise FPI Investment Data).")
+    _note("NSDL's fortnightly report of <b>foreign portfolio investor</b> net investment by sector. This is recorded money, but it is FPIs only "
+          "(no mutual funds or other domestic institutions), it uses NSDL's own sector list, and it is published after the fortnight ends. "
+          "It is shown as context and is <b>not used in any state or test</b> in this build.")
     c1, c2 = st.columns([1, 3])
-    n = c1.selectbox("Fortnights", [12, 24, 48], index=1, key="mf6_fpi_n")
+    n = c1.selectbox("Fortnights", [12, 24, 48], index=1, key="mf7_fpi_n")
     with c2:
         st.write("")
-        if st.button("LOAD FPI SECTOR FLOWS", type="primary", key="mf6_fpi_load"):
-            dates = [str(d)[:10] for d in rot.nsdl_report_dates(int(n))]
+        if st.button("LOAD FPI SECTOR FLOWS", type="primary", key="mf7_fpi_load"):
+            dates = [str(d)[:10] for d in fpi.nsdl_report_dates(int(n))]
             with st.spinner("Downloading NSDL fortnightly reports…"):
-                with ThreadPoolExecutor(max_workers=6) as pool:
+                with ThreadPoolExecutor(max_workers=4) as pool:
                     got = list(pool.map(_nsdl_fetch, dates))
-            st.session_state["mf6_fpi"] = (rot.nsdl_panels(got), sum(g is not None for g in got), len(dates))
-    got = st.session_state.get("mf6_fpi")
+            st.session_state["mf7_fpi"] = (fpi.nsdl_panels(got), sum(g is not None for g in got), len(dates))
+    got = st.session_state.get("mf7_fpi")
     if not got:
         return
     (net, auc), ok, tried = got
     if net.empty:
-        st.warning(f"No NSDL report could be read ({ok} of {tried}). The site may be blocking this server or its file names changed.")
+        st.warning(f"FPI data NOT AVAILABLE: no NSDL report could be read ({ok} of {tried}). The site may be blocking this server or its file names changed.")
         return
-    st.caption(f"{ok} of {tried} reports loaded · latest fortnight ending {str(net.index[-1])[:10]} · ₹ crore, equity.")
-    broad = {rot.norm_name(k): v for k, v in (st.session_state.get("mf_broad_rs") or {}).items()}
+    age = (pd.Timestamp.today().normalize() - net.index[-1]).days
+    st.caption(f"{ok} of {tried} reports loaded · latest fortnight ended {str(net.index[-1])[:10]} ({age} days ago) · ₹ crore, equity.")
+    if age > 25:
+        st.warning("This FPI data is stale: the latest fortnight loaded ended more than 25 days ago.")
     rows = []
     for s in net.columns:
         x = net[s].dropna()
-        a = auc[s].dropna() if s in auc else pd.Series(dtype=float)
-        aum = float(a.iloc[-1]) if len(a) else np.nan
-        f2, f6, f12 = x.tail(2).sum(), x.tail(6).sum(), x.tail(12).sum()
         streak = 0
         for v in x.iloc[::-1]:
             if streak >= 0 and v > 0:
@@ -947,180 +678,133 @@ def _view_fpi():
                 streak -= 1
             else:
                 break
-        rows.append({"sector": s, "last": float(x.iloc[-1]) if len(x) else np.nan, "f2": f2, "f6": f6, "f12": f12,
-                     "pct_hold": f6 / aum * 100 if aum and aum > 0 else np.nan, "streak": streak, "aum": aum,
-                     "price_rs": broad.get(rot.norm_name(s))})
-    tb = pd.DataFrame(rows).sort_values("pct_hold", ascending=False, na_position="last")
+        a = auc[s].dropna() if s in auc else pd.Series(dtype=float)
+        aum = float(a.iloc[-1]) if len(a) else np.nan
+        rows.append({"NSDL sector": s, "Last fortnight ₹Cr": float(x.iloc[-1]) if len(x) else np.nan, "Last 2 ₹Cr": x.tail(2).sum(),
+                     "Last 6 ₹Cr": x.tail(6).sum(), "Last 12 ₹Cr": x.tail(12).sum(),
+                     "Last 6 as % of FPI holdings": x.tail(6).sum() / aum * 100 if aum and aum > 0 else np.nan,
+                     "Fortnights in a row (+ in / − out)": streak, "FPI holdings ₹Cr": aum})
+    tb = pd.DataFrame(rows).sort_values("Last 6 as % of FPI holdings", ascending=False, na_position="last")
+    st.dataframe(tb.style.format({c: "{:+,.0f}" for c in tb.columns if "₹Cr" in c and "holdings" not in c}
+                                 | {"Last 6 as % of FPI holdings": "{:+.2f}", "FPI holdings ₹Cr": "{:,.0f}"}, na_rep="n/a"),
+                 use_container_width=True, hide_index=True, height=min(42 + 35 * len(tb), 760))
+    st.caption("Holdings (assets under custody) move with prices as well as flows, so a change in holdings is not shown as buying or selling.")
+    st.download_button("⤓ FPI FLOWS (CSV)", net.to_csv(), "nsdl_fpi_sector_flows.csv", "text/csv", key="mf7_fpi_dl")
 
-    def cr(v):
-        v = _f(v)
-        if v is None:
-            return '<span class="mf-na">—</span>'
-        return f'<span class="mf-pct" style="color:{GREEN if v >= 0 else RED};background:{ui._heat(v, 20000)}">{v:+,.0f}</span>'
 
-    recs = _stock_rows(tb)
-    for r in recs:
-        for k in ("last", "f2", "f6", "f12"):
-            r[k + "_h"] = cr(r.get(k))
-        sv = int(r.get("streak") or 0)
-        r["streak_h"] = (f'<span class="mf-chip {"up" if sv > 0 else "dn"}">{"▲" if sv > 0 else "▼"} {abs(sv)}</span>'
-                         if sv else '<span class="mf-na">0</span>')
-    cols = [ui.C("#", t="rank"), ui.C("Sector", "sector", "sector"), ui.C("Last fortnight", "last_h", "html", al="r"),
-            ui.C("1M ₹Cr", "f2_h", "html", al="r"), ui.C("3M ₹Cr", "f6_h", "html", al="r"), ui.C("6M ₹Cr", "f12_h", "html", al="r"),
-            ui.C("3M % of holdings", "pct_hold", "pct", scale=2.0, tip="3-month net flow ÷ FPI holdings in the sector"),
-            ui.C("Streak", "streak_h", "html", tip="+3 = three fortnights of buying in a row; −2 = two of selling"),
-            ui.C("FPI holdings ₹Cr", "aum", "num", d=0)]
-    if any(r.get("price_rs") is not None for r in recs):
-        cols.append(ui.C("Price RS 1M (pp)", "price_rs", "pct", d=1, scale=5.0,
-                         tip="Median stock in this NSE sector vs the market over 1 month (from the sector data you loaded)"))
-    _h("1 · FPI money by sector · net equity investment")
-    ui.show_table(cols, recs, max_height=760)
-    _note("'% of holdings' scales flows by how much FPIs already own, so ₹2,000 Cr into a small sector counts for more than into "
-          "Financial Services. The strongest confirmation is when foreign money (positive streak) and price (positive RS) agree.")
-    if go is not None:
-        _h(f"2 · Flow heat-map · last 12 fortnights (₹ Cr)")
-        hm = net.tail(12).T
-        hm = hm.loc[hm.sum(axis=1).sort_values(ascending=False).index]
-        z = hm.values
-        lim = float(np.nanpercentile(np.abs(z), 90)) or 1.0
-        fig = go.Figure(go.Heatmap(z=z, x=[d.strftime("%d %b %y") for d in hm.columns], y=list(hm.index),
-                                   colorscale=[[0, RED], [0.5, "#151515"], [1, GREEN]], zmin=-lim, zmax=lim, showscale=False,
-                                   text=np.round(z / 100) / 10, texttemplate="%{text}k",
-                                   hovertemplate="%{y} · %{x}: ₹%{z:,.0f} Cr<extra></extra>"))
-        fig.update_yaxes(autorange="reversed")
-        ui._dark(fig, 26 * len(hm) + 70, False)
-        _show_fig(fig, "mf6_fpi_hm")
-    st.download_button("⤓ FPI FLOWS (CSV)", net.to_csv(), "nsdl_fpi_sector_flows.csv", "text/csv", key="mf6_fpi_dl")
+# ═════════════════════════ view · DATA & METHOD ═════════════════════════
+def _view_data(E, source):
+    H, q, tbl = E["H"], E["q"], E["table"]
+    _h("1 · What was loaded")
+    st.markdown(
+        f"- Source: **{q['source']}** · prices {q['adjusted']} · history requested: {q['period']} · loaded at {q['loaded_at']}\n"
+        f"- Universe: `{source}` · requested **{q['requested']}** stocks, received **{q['loaded']}**, used **{q['used']}**\n"
+        f"- Session: last completed session **{q['session']['last_complete_session']}** · holiday calendar: {q['session']['holiday_calendar']} · "
+        f"part-day sessions dropped: {', '.join(q['dropped_sessions']) or 'none'}\n"
+        f"- Excluded as illiquid (median daily value under ₹{q['min_turn']:g} Cr): **{len(q['illiquid'])}**\n"
+        f"- Stale tickers excluded (last bar more than 5 sessions old): **{len(q['stale'])}** {', '.join(q['stale'][:15])}\n"
+        f"- Groups with fewer than 3 priced members (not analysed): {', '.join(q['small_groups']) or 'none'}\n"
+        f"- NSE index series that did not download: {', '.join(q['index_missing']) or 'none'}\n"
+        f"- Duplicate dates dropped: {q['duplicates_dropped']} · non-positive prices removed: {q['non_positive']}")
+    if q["failures"]:
+        _h(f"2 · Tickers with no data · {len(q['failures'])}")
+        st.dataframe(pd.DataFrame([{"Ticker": k, "Reason": v} for k, v in q["failures"].items()]), use_container_width=True, hide_index=True, height=240)
+    _h("3 · Coverage by sector")
+    cov = tbl[["sector", "members", "with_prices", "coverage", "coverage_status"]].copy()
+    cov["missing"] = [", ".join(H["coverage"][s]["missing"][:10]) for s in cov["sector"]]
+    cov["coverage"] = cov["coverage"] * 100
+    st.dataframe(cov.rename(columns={"sector": "Sector", "members": "Members", "with_prices": "With prices", "coverage": "Coverage %",
+                                     "coverage_status": "Status", "missing": "Missing members"}).sort_values("Coverage %").style.format(
+        {"Coverage %": "{:.0f}"}, na_rep="n/a"), use_container_width=True, hide_index=True, height=320)
+    st.caption(f"A sector with under {MIN_SECTOR_COVERAGE * 100:.0f}% of its members priced is marked INCOMPLETE.")
+    if q["jumps"]:
+        _h(f"4 · One-session moves above 25% · {len(q['jumps'])} · check for unadjusted splits or bonuses")
+        st.dataframe(pd.DataFrame(q["jumps"]).rename(columns={"symbol": "Symbol", "date": "Date", "move_pct": "Move %"}),
+                     use_container_width=True, hide_index=True, height=220)
+        st.caption("These are listed, not altered. If one is a missed corporate action, that stock's returns and its sector basket are wrong around that date.")
+    with st.expander("HOW STATES ARE DECIDED · the full rules"):
+        st.code(rstate.__doc__)
+    with st.expander("FORMULAS · relative strength, breadth, activity, signal tests"):
+        from arka_flow.calc import activity, breadth
+        st.code("\n".join(m.__doc__ for m in (rs, breadth, activity, bt)))
+    with st.expander("SOURCES AND LIMITS"):
+        st.markdown("""
+- **Prices:** Yahoo Finance daily bars. Unofficial and delayed; adjustments for splits and dividends are Yahoo's and are not cross-checked.
+- **Traded value:** close × volume, an approximation. Exchange-reported value and delivery data need NSE's bhavcopy and are not loaded in this build.
+- **Sectors:** ARKA GROUPS are custom baskets from `sector_map.py`, equal-weighted, built from today's members. NSE INDICES are official index levels (price indices, cap-weighted). The two are never mixed in one ranking.
+- **History:** today's member lists are applied to the past (survivorship bias). Point-in-time membership is NOT AVAILABLE.
+- **Not in this build:** delivery participation, mutual-fund and other institutional disclosures, fundamentals, earnings revisions, macro drivers. They are shown as unknown, not estimated.
+- **Thresholds** in the state rules (60% / 40% breadth, 2 stocks, top 10% extension, 3-session persistence) are provisional. SIGNAL TESTS is where they are judged.
+""")
 
 
 # ═════════════════════════ page ═════════════════════════
-def _view_selector() -> str:
-    if st.session_state.get("mf6_view") not in VIEWS:
-        st.session_state["mf6_view"] = VIEWS[0]
-    with st.container(key="mf_viewbar"):
-        return st.radio("Money Flow view", VIEWS, horizontal=True, key="mf6_view", label_visibility="collapsed")
-
-
 def _universe_missing():
-    st.warning("The stock universe could not be loaded: NSE and niftyindices.com are refusing this server and no copy is in "
-               "the repo yet. The app retries every 10 minutes.")
-    _note("<b>Permanent fix (2 minutes):</b> download "
-          '<a href="https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv" target="_blank">ind_nifty500list.csv</a> and '
+    st.warning("The stock universe could not be loaded: NSE and niftyindices.com are refusing this server and no copy is in the repo yet.")
+    _note('<b>Fix:</b> download <a href="https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv" target="_blank">ind_nifty500list.csv</a> and '
           '<a href="https://www.niftyindices.com/IndexConstituent/ind_niftymicrocap250_list.csv" target="_blank">ind_niftymicrocap250_list.csv</a> '
-          "on your computer and upload them to a <code>data</code> folder in the GitHub repo. Money Flow reads them first.")
-    if st.button("RETRY NOW", key="mf6_retry"):
+          "and put them in a <code>data</code> folder next to the app. Money Flow reads them first.")
+    if st.button("RETRY NOW", key="mf7_retry"):
         _ARCH_DOWN.clear()
         _universe_cached.clear()
         st.rerun()
 
 
-def _status(res: dict, source: str, err):
-    q = res["quality"]
-    today = datetime.now(IST).date().isoformat()
-    w = "equal-weight" if q.get("weighting") == "equal" else "√turnover-weighted"
-    st.markdown(f'<div class="rd-status"><span>AS OF <b>{q["asof"]}</b>{" (intraday)" if q["asof"] == today and _market_live() else " close"}</span>'
-                f'<span><b>{q["in_sectors"]}</b> stocks in <b>{q["sectors"]}</b> sectors</span><span>vs <b>{_e(res["bench_name"])}</b></span>'
-                f'<span>{w} sector indices</span><span>coverage <b>{q["coverage"] * 100:.0f}%</b></span></div>', unsafe_allow_html=True)
-    if q["asof"] == today and _market_live():
-        st.caption("Market is open: today's bar is still forming, so 1-day turnover and money readings compare a partial day "
-                   "with full days. The 5-day, weekly and monthly readings are the reliable ones intraday.")
-    if err:
-        st.warning(f"Showing the last good load — the refresh failed ({err}).")
-    with st.expander("DATA CHECK · what was loaded, skipped and why"):
-        st.markdown(
-            f"- Universe: `{source}` · requested **{q['stocks_requested']}**, price history for **{q['stocks_loaded']}**, "
-            f"used **{q['stocks_used']}** (liquid), in sector tables **{q['in_sectors']}**\n"
-            f"- Excluded as illiquid (median turnover under ₹{q['min_turnover_cr']:g} Cr/day): **{len(q['illiquid'])}**\n"
-            f"- No Yahoo data: **{len(q['missing'])}** {', '.join(q['missing'][:15])}{'…' if len(q['missing']) > 15 else ''}\n"
-            f"- Stale tickers dropped: **{len(q['stale'])}** {', '.join(q['stale'][:10])}\n"
-            f"- Half-loaded sessions dropped: {', '.join(q['dropped_sessions']) or 'none'} · bad ticks repaired: {q['bad_ticks']}\n"
-            f"- Small groups folded into their family: {', '.join(q['folded_groups']) or 'none'}\n"
-            f"- Sector of every stock: see `sector_map.py` (edit it, or add `data/sector_map.csv` with a `group` column to override).")
-
-
 def render_money_flow(on_open=None):
     """Arka MONEY FLOW workspace."""
     _style()
-    view = _view_selector()
-    if view == "NSE INDICES":
-        _view_indices()
-        return _footer()
+    if st.session_state.get("mf7_view") not in VIEWS:
+        st.session_state["mf7_view"] = VIEWS[0]
+    view = st.radio("Money Flow view", VIEWS, horizontal=True, key="mf7_view", label_visibility="collapsed")
     if view == "FPI FLOWS":
-        _view_fpi()
-        return _footer()
+        return _view_fpi()
 
     try:
         meta, source = _universe_cached()
     except Exception:
-        meta, source = None, ""
-    if meta is None:
         return _universe_missing()
 
-    ready = st.session_state.get("mf6_ready", False)
-    c1, c2, c3, c4 = st.columns([1.3, 2.4, 1.9, 1.2], gap="small")
+    ready = st.session_state.get("mf7_ready", False)
+    c1, c2, c3, c4, c5 = st.columns([1.2, 1.6, 2.2, 1, 1], gap="small")
     with c1:
         st.write("")
-        load = st.button("LOAD / REFRESH" if ready else "LOAD SECTOR DATA", type="primary", use_container_width=True, key="mf6_load")
-    bench = c2.radio("Compare against", ["MARKET", "NIFTY 50", "NIFTY 500"], horizontal=True, key="mf6_bench", help=BENCH_HELP)
-    wt = c3.radio("Sector index", ["Equal weight", "Turnover weight"], horizontal=True, key="mf6_wt",
-                  help="Equal weight = every stock counts the same (best for spotting rotation). Turnover weight = √turnover, "
-                       "closer to how the big money is positioned.")
-    min_turn = c4.selectbox("Min turnover / day", [0.25, 0.5, 1.0, 2.0, 5.0], index=1, key="mf6_minturn",
-                            format_func=lambda v: f"₹{v:g} Cr")
+        load = st.button("LOAD / REFRESH" if ready else "LOAD SECTOR DATA", type="primary", use_container_width=True, key="mf7_load")
+    kind = c2.radio("Sectors", list(KINDS), horizontal=True, key="mf7_kind", help=" ".join(f"{k}: {v}" for k, v in KINDS.items()))
+    bench = c3.radio("Compare against", ["NIFTY 500", "NIFTY 50", EW_MARKET], horizontal=True, key="mf7_bench",
+                     help="NIFTY 500 and NIFTY 50 are cap-weighted official indices. EQUAL-WEIGHT MARKET is every loaded stock, equal-weighted.")
+    period = c4.selectbox("History", ["3y", "5y", "2y"], key="mf7_period", help="5y gives the signal tests a more useful sample; it takes longer to load.")
+    min_turn = c5.selectbox("Min value / day", [0.5, 0.25, 1.0, 2.0, 5.0], key="mf7_minturn", format_func=lambda v: f"₹{v:g} Cr")
     if load:
         if ready:
-            _prices.clear()
-            _analysis.clear()
-        st.session_state["mf6_ready"] = ready = True
+            _load.clear()
+            _engine.clear()
+        st.session_state["mf7_ready"] = ready = True
     if not ready:
-        _note(f"Press <b>LOAD SECTOR DATA</b>. Arka downloads ~2 years of daily prices for <b>{len(meta)}</b> stocks "
-              f"({_e(source)}) from Yahoo in batches — the first load takes 1-3 minutes, then it is cached for everyone "
-              "(30 minutes in market hours, 3 hours after the close).")
-        return _footer()
+        _note(f"Press <b>LOAD SECTOR DATA</b>. Arka downloads daily prices for <b>{len(meta)}</b> stocks ({_e(source)}) and the NSE indices from Yahoo. "
+              "The first load takes a few minutes, then it is cached for 3 hours.")
+        return
 
-    with st.spinner(f"Loading {len(meta)} stocks and building {meta['group'].nunique()} sectors…"):
+    with st.spinner(f"Loading {len(meta)} stocks and computing sector states…"):
         try:
-            res, err = _get_analysis(tuple(meta["symbol"]), bench, "turnover" if wt.startswith("Turnover") else "equal", float(min_turn))
+            E = _engine(tuple(meta["symbol"]), period, kind, bench, float(min_turn))
         except Exception as exc:
-            st.error(f"Sector data unavailable right now: {type(exc).__name__}: {exc}. Yahoo may be rate-limiting; try again in a minute.")
-            return _footer()
-    _publish(res)
-    _status(res, source, err)
-
-    if view == "ROTATION DESK":
-        _view_desk(res, on_open)
-    elif view == "SECTOR RANKING":
-        _view_ranking(res)
-    elif view == "MONEY FLOW":
-        _view_money(res)
+            st.error(f"Sector data unavailable: {type(exc).__name__}: {exc}")
+            st.caption("If Yahoo is rate-limiting, wait a minute and press LOAD / REFRESH. Nothing is shown from partial or substituted data.")
+            return
+    _publish(E)
+    _status(E)
+    if view == "OVERVIEW":
+        _view_overview(E)
+    elif view == "SECTOR DETAIL":
+        _view_detail(E, on_open)
+    elif view == "RANKING":
+        _view_ranking(E)
     elif view == "BREADTH":
-        _view_breadth(res)
+        _view_breadth(E)
+    elif view == "ACTIVITY":
+        _view_activity(E)
+    elif view == "SIGNAL TESTS":
+        _view_tests(E)
     else:
-        _view_stocks(res, on_open)
-    _footer()
-
-
-def _footer():
-    with st.expander("HOW THIS WORKS · method, sources and limits"):
-        st.markdown("""
-**Universe.** NIFTY 500 + NIFTY MICROCAP 250 (or NIFTY TOTAL MARKET if that file is in `data/`), minus illiquid stocks.
-Each stock is placed in one of ~50 rotation groups (`sector_map.py`).
-
-**Sector index.** Equal-weight average of the members' daily returns (moves above ±20% in a day are clipped), compounded.
-**Benchmark MARKET** is built the same way from every stock, so the comparison is like-for-like.
-
-**Rotation map (RRG).** Weekly closes. RS = sector ÷ benchmark. RS-Ratio = z-score of the smoothed RS over 12 weeks, centred on 100.
-RS-Momentum = the same treatment applied to RS-Ratio's rate of change. This follows the published open approximations of the
-JdK method; the exact JdK formula is proprietary, so values differ slightly from paid RRG tools, but the quadrants and direction agree.
-
-**Breadth.** % of the sector's stocks above their own 20 / 50 / 200-day EMA, advance-decline, breakouts above the prior 20-day high,
-new 52-week closing highs.
-
-**Money.** ₹ turnover = close × volume. Share = sector turnover ÷ all turnover. Up-turnover = turnover in stocks that closed up.
-CMF = Σ(close-location × ₹ turnover) ÷ Σ ₹ turnover over 20 sessions, summed across the sector.
-
-**FPI flows.** NSDL fortnightly sector-wise report (equity, ₹ crore).
-
-**Limits.** Yahoo data is delayed and occasionally has gaps; turnover is computed, not exchange-reported; every trade has a buyer
-and a seller, so "money flow" here means which side was more aggressive. Signals are research evidence, not forecasts or advice.
-""")
+        _view_data(E, source)
+    st.caption("Research tool. States and tests describe price, breadth and traded value. They are not forecasts or investment advice.")
