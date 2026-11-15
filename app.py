@@ -414,6 +414,7 @@ div[class*="st-key-ak_mod_"] .stButton>button{background:transparent !important;
 </style>
 """
 st.markdown(APP_CSS, unsafe_allow_html=True)
+st.markdown(MOBILE_CSS, unsafe_allow_html=True)
 
 
 # ═══════════════════════════════ HELPERS ═══════════════════════════════
