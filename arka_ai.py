@@ -1,5 +1,26 @@
 """
-arka_ai.py — Arka AI v9 · YOUR playbook, YOUR zones, YOUR trade plan
+arka_ai.py — Arka AI v10 · YOUR playbook, YOUR zones, YOUR trade plan — now with evidence
+
+NEW IN v10 (your saved playbook is read unchanged)
+  EXACT MAPPING   * Prices are the prices on your chart: Yahoo data is no longer dividend-adjusted, so zones and levels sit where
+                    you see them on TradingView / your broker (v9 shifted older zones down by the dividends paid since).
+                  * The AI can no longer place a price. Its plan is rebuilt by Python from detections: entry = the exact top / bottom of
+                    a detected zone of the right type, stop beyond its distal line, each target = the exact price of a detected level
+                    or opposing zone. Anything that does not map is dropped and listed under ENGINE CHECK OF THE AI.
+                  * Scorecard = every rule of every active setup, once, in playbook order, matched by rule id. Match %, score, grade and
+                    verdict are computed by Python from the rule statuses (the model used to pick its own score).
+                  * Charts show the swing points that make each level and trendline, each zone's distal line and price range, and
+                    R multiples on the targets. Today's unfinished candle is flagged and cannot confirm a trigger.
+  EVIDENCE        * TRACK RECORD: every zone your style would have drawn in the last 2 years is replayed with no hindsight (first return,
+                    1R / 2R before the stop), per stock in ANALYZE and across a list in RADAR. This is the test of your ZONE STYLE.
+                  * JOURNAL: log a plan and Arka follows it (waiting / filled / target 1 / stopped), giving a real forward record in R.
+  RISK            * Room before the first obstacle, in R; plans with less than 1R of room are flagged and scored down.
+                  * NIFTY trend, 3-month return vs NIFTY, and a warning when results are due within two weeks.
+  PLUMBING        * Works with the current google-genai SDK (the old google-generativeai reached end of life) and picks the newest
+                    stable flash model your key supports. Add `google-genai` to requirements.txt.
+                  * Rejected-zone reasons you typed are now given to the AI; style learning uses rejections as well as approvals.
+
+v9 notes follow.
 
 You teach Arka how YOU trade. Then you type a stock and it answers with a complete, marked-up analysis.
 
@@ -44,12 +65,23 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 # ── Safe imports ────────────────────────────────────────────
-try:
-    import google.generativeai as genai
-    HAS_GEMINI = True
+try:                                    # current SDK (package: google-genai)
+    from google import genai as genai_new
+    from google.genai import types as genai_types
+    HAS_GENAI_NEW = True
+except Exception:  # pragma: no cover
+    genai_new = genai_types = None
+    HAS_GENAI_NEW = False
+try:                                    # legacy SDK (package: google-generativeai, end of life Nov 2025) — used only if the new one is absent
+    import warnings as _w
+    with _w.catch_warnings():
+        _w.simplefilter("ignore")
+        import google.generativeai as genai
+    HAS_GENAI_OLD = True
 except Exception:  # pragma: no cover
     genai = None
-    HAS_GEMINI = False
+    HAS_GENAI_OLD = False
+HAS_GEMINI = HAS_GENAI_NEW or HAS_GENAI_OLD
 
 try:
     from pinecone import Pinecone, ServerlessSpec
@@ -90,7 +122,8 @@ def _secret(name: str) -> str:
 GEMINI_KEY = _secret("GEMINI_KEY")
 PINECONE_KEY = _secret("PINECONE_KEY")
 INDEX_NAME = "arka-trading-rules"          # unchanged: your v8 setups are still readable
-V9_VERSION = "arka-v9"
+V9_VERSION = "arka-v10"
+DEFAULT_MODEL = "gemini-2.5-flash"         # only a fallback: the newest stable flash model your key can use is picked automatically
 IST = timezone(timedelta(hours=5, minutes=30))
 
 # ── Theme (matches the terminal) ────────────────────────────
@@ -102,7 +135,7 @@ IVORY, T2, T3 = "#ECECEC", "#A3A3A3", "#6B6B6B"
 MONO = "'JetBrains Mono',ui-monospace,Menlo,monospace"
 FONT = "'Inter',system-ui,sans-serif"
 
-KIND_LABEL = {"setup": "SETUP", "lesson": "LESSON", "feedback": "LABELLED ZONES", "style": "ZONE STYLE"}
+KIND_LABEL = {"setup": "SETUP", "lesson": "LESSON", "feedback": "LABELLED ZONES", "style": "ZONE STYLE", "call": "LOGGED PLAN"}
 
 # How the engine reads a chart. Learned values (from your labelled zones) override these.
 DEFAULT_STYLE = {
@@ -148,18 +181,6 @@ def get_pinecone_index():
             pc.create_index(name=INDEX_NAME, dimension=768, metric="cosine",
                             spec=ServerlessSpec(cloud="aws", region="us-east-1"))
         return pc.Index(INDEX_NAME)
-    except Exception:
-        return None
-
-
-def get_embedding(text):
-    if not HAS_GEMINI or not GEMINI_KEY or not text or not str(text).strip():
-        return None
-    try:
-        genai.configure(api_key=GEMINI_KEY)
-        r = genai.embed_content(model="models/text-embedding-004", content=str(text).strip()[:8000])
-        emb = r.get("embedding", [])
-        return emb if len(emb) == 768 and any(abs(v) > 1e-7 for v in emb) else None
     except Exception:
         return None
 
@@ -247,7 +268,7 @@ def save_item(kind: str, name: str, payload: dict, activate: bool = True, source
         if len(compact) > 34000:
             st.error("This item is too large to store (over 34 KB). Trim it or split the document.")
             return False
-        emb = get_embedding(name + "\n" + str(payload.get("summary", "")) + "\n" + compact[:4000]) or _CONST_VEC
+        emb = _CONST_VEC
         meta = {"memory_kind": kind, "item_id": item_id, "name": name, "active": bool(activate), "saved_at": saved_at,
                 "source_name": source_name, "source_text": str(source_text or "")[:3000], "version": V9_VERSION}
         if kind == "setup":
@@ -333,17 +354,64 @@ RULES YOU MUST FOLLOW
 4. If the evidence cannot decide a rule, say UNCLEAR. Do not guess.
 5. A score is how well the evidence matches the playbook. It is NOT a probability of profit.
 6. Be direct and specific: exact prices, exact dates, exact detection IDs. Plain language, no hype.
-7. Reply with ONE JSON object and nothing else."""
+7. The scorecard must contain EVERY rule id of EVERY active setup exactly once, using the ids exactly as written in the playbook.
+8. A candle or event marked "provisional" belongs to today's unfinished candle. It cannot confirm a trigger; say so.
+9. Reply with ONE JSON object and nothing else."""
+
+
+_MODEL_RX = re.compile(r"^gemini-(\d+(?:\.\d+)?)-flash$")
+
+
+def _rank_models(names) -> list:
+    """Stable 'gemini-<version>-flash' names, newest first, then safe fallbacks."""
+    stable = sorted({n for n in names if _MODEL_RX.match(n)}, key=lambda n: float(_MODEL_RX.match(n).group(1)), reverse=True)
+    out = []
+    for n in [_secret("ARKA_GEMINI_MODEL")] + stable + [DEFAULT_MODEL, "gemini-flash-latest"]:
+        if n and n not in out:
+            out.append(n)
+    return out
+
+
+@st.cache_resource(show_spinner=False)
+def _ai_backend(key_tail: str):
+    """{"kind": "new" | "old", "client": ..., "models": [candidates, best first]} or None."""
+    if not GEMINI_KEY:
+        return None
+    if HAS_GENAI_NEW:
+        try:
+            client = genai_new.Client(api_key=GEMINI_KEY)
+            names = []
+            try:
+                names = [str(getattr(m, "name", "")).split("/")[-1] for m in client.models.list()]
+            except Exception:
+                pass
+            return {"kind": "new", "client": client, "models": _rank_models(names)}
+        except Exception:
+            pass
+    if HAS_GENAI_OLD:
+        try:
+            genai.configure(api_key=GEMINI_KEY)
+            names = []
+            try:
+                names = [str(m.name).split("/")[-1] for m in genai.list_models()]
+            except Exception:
+                pass
+            return {"kind": "old", "client": None, "models": _rank_models(names)}
+        except Exception:
+            pass
+    return None
 
 
 def get_gemini():
+    """The AI backend, or None when no key / SDK is available (the engine still works)."""
     if not HAS_GEMINI or not GEMINI_KEY:
         return None
-    try:
-        genai.configure(api_key=GEMINI_KEY)
-        return genai.GenerativeModel(model_name="gemini-2.5-flash", system_instruction=SYSTEM_PROMPT)
-    except Exception:
-        return None
+    return _ai_backend(GEMINI_KEY[-6:])
+
+
+def ai_model_name() -> str:
+    b = get_gemini()
+    return (st.session_state.get("aa_model_ok") or (b["models"][0] if b else "")) if b else ""
 
 
 def _extract_json(raw: str) -> str:
@@ -362,36 +430,72 @@ def parse_json_loose(raw: str) -> dict:
     """strict parse -> outermost {...} -> trailing-comma repair. One local pass, no extra API call."""
     for candidate in (raw or "", _extract_json(raw)):
         try:
-            return json.loads(candidate)
+            out = json.loads(candidate)
+            if isinstance(out, dict):
+                return out
         except Exception:
             pass
     repaired = re.sub(r",\s*([}\]])", r"\1", _extract_json(raw))
-    return json.loads(repaired)
+    out = json.loads(repaired)
+    if not isinstance(out, dict):
+        raise ValueError("the AI did not return a JSON object")
+    return out
 
 
-def call_json(prompt: str, images=None, uploaded_file=None) -> dict:
-    """images: list of PNG bytes."""
-    model = get_gemini()
-    if model is None:
-        raise RuntimeError("Gemini is not configured (check GEMINI_KEY and the google-generativeai package).")
-    content = [prompt]
-    if uploaded_file is not None:
-        content.append(uploaded_file)
-    for png in images or []:
-        content.append({"mime_type": "image/png", "data": png})
+def _model_gone(exc) -> bool:
+    t = str(exc).lower()
+    return any(k in t for k in ("not found", "404", "is not supported", "deprecated", "no longer available", "unknown model", "not_found"))
+
+
+def _generate(prompt: str, images=None, pdf: bytes | None = None, want_json: bool = True) -> str:
+    """One Gemini call through whichever SDK is installed. A retired model name moves on to the next candidate."""
+    b = get_gemini()
+    if b is None:
+        raise RuntimeError("Gemini is not configured (check GEMINI_KEY and add `google-genai` to requirements.txt).")
+    ok = st.session_state.get("aa_model_ok")
+    models = ([ok] if ok else []) + [m for m in b["models"] if m != ok]
+    last = None
+    for model in models[:4]:
+        try:
+            if b["kind"] == "new":
+                parts = [prompt]
+                if pdf:
+                    parts.append(genai_types.Part.from_bytes(data=pdf, mime_type="application/pdf"))
+                for png in images or []:
+                    parts.append(genai_types.Part.from_bytes(data=png, mime_type="image/png"))
+                cfg = genai_types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT, temperature=0.0,
+                                                        response_mime_type="application/json" if want_json else None)
+                resp = b["client"].models.generate_content(model=model, contents=parts, config=cfg)
+            else:
+                m = genai.GenerativeModel(model_name=model, system_instruction=SYSTEM_PROMPT)
+                content = [prompt]
+                if pdf:
+                    content.append({"mime_type": "application/pdf", "data": pdf})
+                for png in images or []:
+                    content.append({"mime_type": "image/png", "data": png})
+                gc = {"temperature": 0.0, **({"response_mime_type": "application/json"} if want_json else {})}
+                resp = m.generate_content(content, generation_config=gc)
+            st.session_state["aa_model_ok"] = model
+            return (getattr(resp, "text", "") or "").strip()
+        except Exception as exc:
+            last = exc
+            if not _model_gone(exc):
+                break
+    raise RuntimeError(f"Gemini call failed: {last}")
+
+
+def call_json(prompt: str, images=None, pdf: bytes | None = None) -> dict:
+    """images: list of PNG bytes. One automatic retry when the reply is not valid JSON."""
+    raw = _generate(prompt, images, pdf, True)
     try:
-        resp = model.generate_content(content, generation_config={"response_mime_type": "application/json", "temperature": 0.2})
+        return parse_json_loose(raw)
     except Exception:
-        resp = model.generate_content(content)                      # older SDKs without response_mime_type
-    return parse_json_loose(getattr(resp, "text", "") or "")
+        raw = _generate(prompt + "\n\nYour previous reply was not valid JSON. Reply again with ONE valid JSON object only.", images, pdf, True)
+        return parse_json_loose(raw)
 
 
 def call_text(prompt: str) -> str:
-    model = get_gemini()
-    if model is None:
-        raise RuntimeError("Gemini is not configured.")
-    resp = model.generate_content([prompt])
-    return (getattr(resp, "text", "") or "").strip()
+    return _generate(prompt, None, None, False)
 
 
 # ══════════════════════════════════════════════════════════
@@ -435,7 +539,7 @@ def fetch_ohlc(ticker: str, interval: str = "1d", period: str = "2y") -> pd.Data
     last_err = None
     for sym in yahoo_symbols(ticker):
         try:
-            hist = yf.Ticker(sym).history(period=period, interval=interval, auto_adjust=True)
+            hist = yf.Ticker(sym).history(period=period, interval=interval, auto_adjust=False)   # prices as on your chart (splits adjusted, dividends not)
             if hist is not None and len(hist) >= 40:
                 return _clean_ohlc(hist)
         except Exception as exc:
@@ -473,9 +577,40 @@ def fetch_many(symbols: tuple) -> dict:
     if not HAS_YFINANCE:
         raise RuntimeError("yfinance is not installed")
     tick = [s + ".NS" for s in symbols]
-    raw = yf.download(tick, period="1y", interval="1d", group_by="ticker", threads=True, progress=False, auto_adjust=True)
+    raw = yf.download(tick, period="2y", interval="1d", group_by="ticker", threads=True, progress=False, auto_adjust=False)
     frames = _split_download(raw, tick)
     return {t[:-3]: f for t, f in frames.items()}
+
+
+def live_fraction(last_date, now=None):
+    """Share of today's session already traded (0.15-1) when the last daily candle is still forming, else None."""
+    now = now or datetime.now(IST)
+    mins = now.hour * 60 + now.minute
+    if now.weekday() >= 5 or pd.Timestamp(last_date).date() != now.date() or not (9 * 60 + 15 <= mins < 15 * 60 + 30):
+        return None
+    return max(0.15, min(1.0, (mins - (9 * 60 + 15)) / 375.0))
+
+
+def is_index(ticker: str) -> bool:
+    t = (ticker or "").upper().replace(" ", "")
+    return t in _SYMBOL_MAP or t.startswith("^")
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False, max_entries=128)
+def next_results_date(ticker: str):
+    """Next earnings date from Yahoo's calendar as 'YYYY-MM-DD', or None. Never raises."""
+    if not HAS_YFINANCE or is_index(ticker):
+        return None
+    try:
+        cal = yf.Ticker(yahoo_symbols(ticker)[0]).calendar
+        val = cal.get("Earnings Date") if isinstance(cal, dict) else (cal.loc["Earnings Date"].tolist() if hasattr(cal, "loc") else None)
+        dates = [pd.Timestamp(v) for v in (val if isinstance(val, (list, tuple)) else [val]) if v is not None]
+        today = pd.Timestamp(datetime.now(IST).date())
+        fut = sorted(d.tz_localize(None) if d.tzinfo else d for d in dates)
+        fut = [d for d in fut if d >= today]
+        return str(fut[0])[:10] if fut else None
+    except Exception:
+        return None
 
 
 # ══════════════════════════════════════════════════════════
@@ -543,11 +678,17 @@ def build_levels(df, ph, pl, atr_now, style):
         prices, idxs = [x[0] for x in cl], [x[1] for x in cl]
         lvl = float(np.median(prices))
         raw.append({"price": round(lvl, 2), "touches": len(cl), "first": int(min(idxs)), "last": int(max(idxs)),
+                    "touch_idx": sorted(int(i) for i in idxs), "touch_px": [round(float(p), 2) for _, p in sorted(zip(idxs, prices))],
                     "flip": len({x[2] for x in cl}) == 2,
                     "score": round(sum(0.5 + 0.5 * (i / max(1, n - 1)) for i in idxs), 2),
                     "dist_pct": round((lvl - price) / price * 100, 2), "dist_atr": round((lvl - price) / atr_now, 2) if atr_now else None})
-    above = sorted([x for x in raw if x["price"] > price], key=lambda x: x["price"])[:5]
-    below = sorted([x for x in raw if x["price"] <= price], key=lambda x: -x["price"])[:5]
+    def pick(side, near_key):
+        """The 3 nearest levels plus the 2 strongest of the rest (so a major level is never crowded out by weak nearby ones)."""
+        near = sorted(side, key=near_key)
+        keep = near[:3] + sorted(near[3:], key=lambda x: -x["score"])[:2]
+        return sorted(keep, key=near_key)
+    above = pick([x for x in raw if x["price"] > price], lambda x: x["price"])
+    below = pick([x for x in raw if x["price"] <= price], lambda x: -x["price"])
     for k, x in enumerate(above, 1):
         x.update({"id": f"R{k}", "kind": "resistance"})
     for k, x in enumerate(below, 1):
@@ -691,17 +832,19 @@ def detect_trendlines(df, ph, pl, atr_now):
                 ys = p0 + slope * (np.arange(i0, n) - i0)
                 if (kind == "support" and (c[i0:] < ys - tol).any()) or (kind == "resistance" and (c[i0:] > ys + tol).any()):
                     continue
-                touches = sum(1 for (i, p) in cand if i >= i0 and abs(p - (p0 + slope * (i - i0))) <= tol)
+                tp = [(int(i), round(float(p), 2)) for (i, p) in cand if i >= i0 and abs(p - (p0 + slope * (i - i0))) <= tol]
+                touches = len(tp)
                 if touches < 3:
                     continue
                 score = touches * 2 + (i1 / n) * 3
                 if best is None or score > best[0]:
-                    best = (score, i0, p0, slope, touches)
+                    best = (score, i0, p0, slope, touches, tp)
         if best:
-            _, i0, p0, slope, touches = best
+            _, i0, p0, slope, touches, tp = best
             now = p0 + slope * (n - 1 - i0)
             out.append({"kind": kind, "i0": int(i0), "p0": round(p0, 2), "i1": int(n - 1), "p1": round(now, 2),
-                        "touches": int(touches), "slope_pct_per_bar": round(slope / float(c[-1]) * 100, 3),
+                        "touches": int(touches), "touch_idx": [i for i, _ in tp], "touch_px": [p for _, p in tp],
+                        "slope_pct_per_bar": round(slope / float(c[-1]) * 100, 3),
                         "dist_pct": round((float(c[-1]) - now) / float(c[-1]) * 100, 2)})
     for k, t in enumerate(out, 1):
         t["id"] = f"TL{k}"
@@ -765,8 +908,9 @@ def market_structure(ph, pl):
     return "UNDEFINED"
 
 
-def analyze_market(df_raw: pd.DataFrame, style: dict) -> dict:
-    """Everything the engine can say about one timeframe, with exact candle indices and prices."""
+def analyze_market(df_raw: pd.DataFrame, style: dict, live_frac: float | None = None) -> dict:
+    """Everything the engine can say about one timeframe, with exact candle indices and prices.
+    live_frac: share of today's session already traded when the last candle is still forming (volume is projected, signals on it are provisional)."""
     df = prepare(df_raw)
     n = len(df)
     price, atr_now = float(df.close.iloc[-1]), float(df.atr.iloc[-1]) if np.isfinite(df.atr.iloc[-1]) else float(df.close.iloc[-1]) * 0.02
@@ -775,7 +919,9 @@ def analyze_market(df_raw: pd.DataFrame, style: dict) -> dict:
     zones = detect_zones(df, style)
     lines = detect_trendlines(df, ph, pl, atr_now)
     last = df.iloc[-1]
-    vr20 = float(last.volume / last.vavg) if np.isfinite(last.vavg) and last.vavg > 0 else None
+    vavg_prev = float(df.vavg.iloc[-2]) if n > 1 and np.isfinite(df.vavg.iloc[-2]) else float("nan")      # average that excludes today
+    vol_now = float(last.volume) / live_frac if live_frac else float(last.volume)
+    vr20 = float(vol_now / vavg_prev) if np.isfinite(vavg_prev) and vavg_prev > 0 else None
     sma = {p: _f(last[f"sma{p}"]) for p in (20, 50, 200)}
     s50, s50p = df.sma50.iloc[-1], df.sma50.iloc[-6] if n > 6 else np.nan
     det = {
@@ -794,8 +940,13 @@ def analyze_market(df_raw: pd.DataFrame, style: dict) -> dict:
         "swings": {"highs": [{"i": i, "date": str(df.index[i])[:10], "price": round(p, 2)} for i, p in ph[-4:]],
                    "lows": [{"i": i, "date": str(df.index[i])[:10], "price": round(p, 2)} for i, p in pl[-4:]]},
         "zones": zones, "levels": levels, "trendlines": lines,
-        "events": detect_events(df, levels, zones, atr_now), "candles": candle_signals(df),
+        "events": detect_events(df, levels, zones, atr_now), "candles": candle_signals(df), "live": bool(live_frac),
     }
+    if live_frac:                                    # anything read off today's unfinished candle is provisional
+        det["volume"]["projected"] = True
+        for x in det["events"] + det["candles"]:
+            if x.get("i") == n - 1:
+                x["provisional"] = True
     return det
 
 
@@ -843,11 +994,195 @@ def calibrate_style(approved: list, rejected: list):
     if rejected:
         rth = arr("thickness_atr", rejected)
         if len(rth) and len(th) and np.median(rth) > np.median(th) * 1.3:
-            notes.append(f"You rejected thicker zones (median {np.median(rth):.2f} ATR) than you approved ({np.median(th):.2f}).")
+            cap = float(np.clip(round((np.percentile(th, 80) + np.median(rth)) / 2, 2), 0.8, 3.5))
+            if cap < params.get("max_zone_atr", 9):
+                params["max_zone_atr"] = cap
+            notes.append(f"You rejected thicker zones (median {np.median(rth):.2f} ATR) than you approved ({np.median(th):.2f}) -> max zone thickness tightened to {params['max_zone_atr']} ATR.")
+        r_tested = np.mean([1.0 if x.get("tests", 0) > 0 else 0.0 for x in rejected])
+        if len(rejected) >= 4 and r_tested >= 0.75 and fresh >= 0.6 and not params.get("fresh_only"):
+            params["fresh_only"] = True
+            notes.append(f"{r_tested:.0%} of the zones you rejected had already been tested, and most you approved were untested -> showing fresh zones only.")
+        rdp = arr("dep_atr", rejected)
+        if len(rdp) and len(dp) and np.median(rdp) < np.median(dp) * 0.75:
+            lift = float(np.clip(round((np.median(rdp) + np.percentile(dp, 20)) / 2, 2), 1.0, 4.0))
+            if lift > params.get("impulse_atr", 0):
+                params["impulse_atr"] = lift
+            notes.append(f"You rejected zones with weaker moves away (median {np.median(rdp):.1f} ATR vs {np.median(dp):.1f}) -> minimum impulse raised to {params['impulse_atr']} ATR.")
         rq = arr("quality", rejected)
         if len(rq) and len(ql) and np.median(rq) < np.median(ql) - 10:
             notes.append("Rejected zones scored clearly lower than approved ones: the quality score matches your taste.")
     return params, notes
+
+
+# ── track record: replay every past zone with no hindsight ──
+def zone_history(df_raw: pd.DataFrame, style: dict, max_wait: int = 120) -> list:
+    """Every zone this style would have drawn in the past, and what happened the first time price came back to it.
+
+    No hindsight: a zone exists only from the candle on which the move away reached the required size (`confirm`), its quality uses
+    data up to that candle, and the entry / stop / targets are fixed at that moment.
+    Trade model: limit entry at the proximal line on the first return (or the open, if price gaps through it), stop 0.25 ATR beyond the
+    distal line, targets at 1R and 2R. If a candle touches both stop and target, the stop is counted (conservative). The entry candle
+    itself can only stop the trade out, never hit a target."""
+    df = prepare(df_raw)
+    n = len(df)
+    if n < 60:
+        return []
+    o, h, l, c, v = (df[k].values for k in ("open", "high", "low", "close", "volume"))
+    atr, vavg, sma50, rng = df.atr.values, df.vavg.values, df.sma50.values, df.high.values - df.low.values
+    bmax, brng, impa, W = int(style["base_max"]), float(style["base_range_atr"]), float(style["impulse_atr"]), int(style["impulse_window"])
+    out, last = [], {"demand": None, "supply": None}
+    for k in range(max(30, bmax + 1), n):
+        e = k - 1
+        a = atr[e]
+        if not np.isfinite(a) or a <= 0 or abs(c[k] - o[k]) < 0.55 * a:
+            continue
+        m, j = 0, e
+        while j >= 0 and m < bmax and rng[j] <= brng * a:
+            m += 1
+            j -= 1
+        if m == 0:
+            continue
+        s, w_end, up = e - m + 1, min(n - 1, k + W - 1), c[k] > o[k]
+        base_hi, base_lo = float(h[s:e + 1].max()), float(l[s:e + 1].min())
+        confirm, dep = None, 0.0
+        for j in range(k, w_end + 1):
+            dep = (c[j] - base_hi) / a if up else (base_lo - c[j]) / a
+            if dep >= impa:
+                confirm = j
+                break
+        if confirm is None:
+            continue
+        if up:
+            distal, proximal = base_lo, max(float(np.maximum(o[s:e + 1], c[s:e + 1]).max()), base_lo + 0.1 * a)
+        else:
+            distal, proximal = base_hi, min(float(np.minimum(o[s:e + 1], c[s:e + 1]).min()), base_hi - 0.1 * a)
+        thick = abs(proximal - distal)
+        if thick > float(style["max_zone_atr"]) * a:
+            continue
+        zt = "demand" if up else "supply"
+        vr = float(v[k:confirm + 1].max() / vavg[e]) if np.isfinite(vavg[e]) and vavg[e] > 0 else None
+        pw = slice(max(0, s - 15), s)
+        bos = bool(s > 0 and ((up and c[confirm] > h[pw].max()) or ((not up) and c[confirm] < l[pw].min())))
+        aligned = bool(s > 0 and np.isfinite(sma50[s - 1]) and ((up and c[s - 1] > sma50[s - 1]) or ((not up) and c[s - 1] < sma50[s - 1])))
+        q0 = _zone_quality(dep, impa, m, thick / a, 0, vr, bos, aligned)
+        if q0 < style["min_quality"]:
+            continue
+        top, bottom = max(proximal, distal), min(proximal, distal)
+        pv = last[zt]
+        if pv and confirm - pv["confirm"] <= 10 and min(pv["top"], top) - max(pv["bottom"], bottom) > 0.5 * min(pv["top"] - pv["bottom"], top - bottom):
+            continue                                                    # the same area, formed again a few candles later
+        stop = distal - 0.25 * a if up else distal + 0.25 * a
+        row = {"type": zt, "quality": q0, "aligned": aligned, "confirm": int(confirm), "formed": str(df.index[e])[:10], "top": round(top, 2),
+               "bottom": round(bottom, 2), "proximal": round(float(proximal), 2), "stop": round(float(stop), 2), "touch": None, "touch_date": None,
+               "outcome": "WAITING", "hit1": None, "hit2": None, "wait": None}
+        last[zt] = row
+        touch = None
+        for t in range(confirm + 1, min(n, confirm + 1 + max_wait)):
+            if (up and l[t] <= proximal) or ((not up) and h[t] >= proximal):
+                touch = t
+                break
+        if touch is None:
+            row["outcome"] = "NEVER TESTED" if confirm + max_wait < n - 1 else "WAITING"
+            out.append(row)
+            continue
+        entry = min(proximal, o[touch]) if up else max(proximal, o[touch])
+        risk = (entry - stop) if up else (stop - entry)
+        row.update(touch=int(touch), touch_date=str(df.index[touch])[:10], wait=int(touch - confirm), entry=round(float(entry), 2))
+        if risk <= 0:                                                   # gapped straight through the whole zone
+            row.update(outcome="STOP", hit1=False, hit2=False)
+            out.append(row)
+            continue
+        t1, t2 = (entry + risk, entry + 2 * risk) if up else (entry - risk, entry - 2 * risk)
+        hit1, outcome = False, "OPEN"
+        for t in range(touch, n):
+            if (up and l[t] <= stop) or ((not up) and h[t] >= stop):
+                outcome = "STOP"
+                break
+            if t > touch:
+                if (up and h[t] >= t1) or ((not up) and l[t] <= t1):
+                    hit1 = True
+                if (up and h[t] >= t2) or ((not up) and l[t] <= t2):
+                    outcome = "2R"
+                    break
+        row.update(outcome=outcome, hit1=bool(hit1) if (hit1 or outcome == "STOP") else None, hit2=(outcome == "2R") if outcome in ("2R", "STOP") else None)
+        out.append(row)
+    return out
+
+
+def track_stats(rows: list) -> dict:
+    """n1 / p1: zones resolved at 1R and the share that reached 1R before the stop. n2 / p2: the same for 2R.
+    exp2: average result in R when every trade aims for 2R (win +2, loss -1), before costs."""
+    r1 = [x["hit1"] for x in rows if x.get("hit1") is not None]
+    r2 = [x["hit2"] for x in rows if x.get("hit2") is not None]
+    p2 = (sum(r2) / len(r2)) if r2 else None
+    return {"formed": len(rows), "tested": sum(1 for x in rows if x.get("touch") is not None), "n1": len(r1),
+            "p1": round(sum(r1) / len(r1) * 100, 1) if r1 else None, "n2": len(r2), "p2": round(p2 * 100, 1) if r2 else None,
+            "exp2": round(p2 * 2 - (1 - p2), 2) if r2 else None}
+
+
+def track_record(rows: list, zone: dict | None = None) -> dict:
+    """Stats for all zones, by type, by quality band and with / against trend; `like` = zones similar to the plan's zone."""
+    band = lambda q: "Q 70+" if q >= 70 else "Q 55-69" if q >= 55 else "Q below 55"
+    groups = {"All zones": rows, "Demand": [x for x in rows if x["type"] == "demand"], "Supply": [x for x in rows if x["type"] == "supply"],
+              "With trend": [x for x in rows if x["aligned"]], "Against trend": [x for x in rows if not x["aligned"]]}
+    for b in ("Q 70+", "Q 55-69", "Q below 55"):
+        groups[b] = [x for x in rows if band(x["quality"]) == b]
+    out = {"groups": {k: track_stats(v) for k, v in groups.items()}, "like": None, "like_label": None,
+           "recent": [x for x in rows if x.get("touch") is not None][-8:][::-1]}
+    if zone:
+        like = [x for x in rows if x["type"] == zone["type"] and x["aligned"] == bool(zone.get("aligned"))]
+        out["like"] = track_stats(like)
+        out["like_label"] = f'{zone["type"].title()} zones {"with" if zone.get("aligned") else "against"} the trend'
+    return out
+
+
+def evaluate_call(p: dict, df: pd.DataFrame) -> dict:
+    """What happened to a logged plan since the day it was logged (daily candles, stop counted first when a candle touches both)."""
+    try:
+        long = p["direction"] == "LONG"
+        ref, stop = float(p["entry_ref"]), float(p["stop"])
+        t1 = float(p["targets"][0]["price"]) if p.get("targets") else None
+        risk = abs(ref - stop)
+        after = df[df.index > pd.Timestamp(p["asof"])]
+        base = {"status": "WAITING", "r": None, "days": len(after), "entry": None, "last": float(df.close.iloc[-1]) if len(df) else None}
+        if risk <= 0 or t1 is None:
+            return dict(base, status="INVALID")
+        in_zone = float(p["entry_low"]) <= float(p.get("close_at_log", ref)) <= float(p["entry_high"])
+        entry, start = (ref, 0) if in_zone else (None, None)
+        o, h, l, c = (after[k].values for k in ("open", "high", "low", "close"))
+        if entry is None:
+            for t in range(len(after)):
+                if (long and l[t] <= ref) or ((not long) and h[t] >= ref):
+                    entry, start = (min(ref, o[t]) if long else max(ref, o[t])), t
+                    break
+                if (long and h[t] >= t1) or ((not long) and l[t] <= t1):
+                    return dict(base, status="MISSED (ran to target without entry)")
+        if entry is None:
+            return base
+        risk = abs(entry - stop) or risk
+        for t in range(start, len(after)):
+            if (long and l[t] <= stop) or ((not long) and h[t] >= stop):
+                return dict(base, status="STOPPED", r=-1.0, entry=round(float(entry), 2), exit_date=str(after.index[t])[:10])
+            if (t > start or in_zone) and ((long and h[t] >= t1) or ((not long) and l[t] <= t1)):
+                return dict(base, status="TARGET 1 HIT", r=round(abs(t1 - entry) / risk, 2), entry=round(float(entry), 2), exit_date=str(after.index[t])[:10])
+        now = float(c[-1]) if len(after) else float(p.get("close_at_log", ref))
+        return dict(base, status="OPEN", r=round(((now - entry) if long else (entry - now)) / risk, 2), entry=round(float(entry), 2))
+    except Exception as exc:
+        return {"status": f"ERROR ({type(exc).__name__})", "r": None, "days": 0, "entry": None, "last": None}
+
+
+def market_context(stock_df: pd.DataFrame, nifty_df: pd.DataFrame | None) -> dict | None:
+    """NIFTY 50 trend and the stock's 3-month return against it (context only)."""
+    if nifty_df is None or len(nifty_df) < 80:
+        return None
+    nf = prepare(nifty_df)
+    ph, pl = find_pivots(nf, 3, 3)
+    roc = lambda d: (float(d.close.iloc[-1]) / float(d.close.iloc[-64]) - 1) * 100 if len(d) > 64 else None
+    sr, nr = roc(stock_df), roc(nf)
+    s50 = nf.sma50.iloc[-1]
+    return {"nifty_structure": market_structure(ph, pl), "nifty_close": round(float(nf.close.iloc[-1]), 2),
+            "nifty_vs_sma50": None if not np.isfinite(s50) else ("ABOVE" if nf.close.iloc[-1] > s50 else "BELOW"),
+            "stock_3m_pct": _f(sr), "nifty_3m_pct": _f(nr), "rs_3m_pp": _f(sr - nr) if sr is not None and nr is not None else None}
 
 
 # ── deterministic plan + score (works with no AI at all) ────
@@ -890,9 +1225,59 @@ def deterministic_plan(det: dict):
         if len(targets) < 2:
             p = ref + mult * risk if long else ref - mult * risk
             targets.append({"price": round(p, 2), "ref": f"{mult}R", "reason": f"{mult}R projection (no level found)", "rr": float(mult)})
-    return {"direction": "LONG" if long else "SHORT", "ref_zone": z["id"], "entry_low": z["bottom"],
-            "entry_high": z["top"], "entry_ref": round(ref, 2), "stop": stop, "stop_reason": f"Beyond {z['id']} distal line ({z['distal']:.2f}) minus 0.25 ATR",
+    plan = {"direction": "LONG" if long else "SHORT", "ref_zone": z["id"], "entry_low": z["bottom"],
+            "entry_high": z["top"], "entry_ref": round(ref, 2), "stop": stop,
+            "stop_reason": f"Beyond {z['id']} distal line ({z['distal']:.2f}) {'minus' if long else 'plus'} 0.25 ATR",
             "targets": targets[:3], "counter_trend": bool((long and trend_dn) or ((not long) and trend_up)), "source": "engine"}
+    plan.update(plan_room(det, plan))
+    return plan
+
+
+def plan_room(det: dict, plan: dict) -> dict:
+    """Distance from the entry to the FIRST thing in the way (any level, or the near edge of an opposing zone), in R.
+    Less than 1R of room means the trade risks more than it can reasonably make before meeting resistance / support."""
+    long, ref = plan["direction"] == "LONG", plan["entry_ref"]
+    risk = abs(ref - plan["stop"])
+    if risk <= 0:
+        return {"room_r": None, "obstacle": None, "blocked": False}
+    obs = []
+    for lv in det["levels"]:
+        if (long and lv["price"] > ref) or ((not long) and lv["price"] < ref):
+            obs.append((abs(lv["price"] - ref), lv["id"], lv["price"]))
+    for oz in det["zones"]:
+        if oz["id"] == plan.get("ref_zone"):
+            continue
+        if long and oz["type"] == "supply" and oz["bottom"] > ref:
+            obs.append((oz["bottom"] - ref, oz["id"], oz["bottom"]))
+        if (not long) and oz["type"] == "demand" and oz["top"] < ref:
+            obs.append((ref - oz["top"], oz["id"], oz["top"]))
+    if not obs:
+        return {"room_r": None, "obstacle": None, "blocked": False}
+    d, oid, px = min(obs)
+    # a level between today's price and the entry is support / resistance today, but price has to break it to reach the entry,
+    # after which it stands in the way of the trade (role reversal)
+    flips = bool((long and px < det["close"]) or ((not long) and px > det["close"]))
+    return {"room_r": round(d / risk, 2), "obstacle": oid, "obstacle_price": round(px, 2), "blocked": bool(d / risk < 1.0), "obstacle_flips": flips}
+
+
+def targets_for(det: dict, ref: float, risk: float, long: bool) -> list:
+    """Targets at detected levels / opposing zones at least 1R away, padded with 2R / 3R projections when fewer than two exist."""
+    cands = []
+    for lv in det["levels"]:
+        if (long and lv["price"] > ref + risk) or ((not long) and lv["price"] < ref - risk):
+            cands.append((lv["price"], lv["id"], "resistance" if long else "support"))
+    for oz in det["zones"]:
+        if long and oz["type"] == "supply" and oz["bottom"] > ref + risk:
+            cands.append((oz["bottom"], oz["id"], "supply zone"))
+        if (not long) and oz["type"] == "demand" and oz["top"] < ref - risk:
+            cands.append((oz["top"], oz["id"], "demand zone"))
+    cands.sort(key=lambda x: x[0] if long else -x[0])
+    out = [{"price": round(p, 2), "ref": r, "reason": f"Next {k}", "rr": round(abs(p - ref) / risk, 2)} for p, r, k in cands[:3]]
+    for mult in (2, 3):
+        if len(out) < 2:
+            p = ref + mult * risk if long else ref - mult * risk
+            out.append({"price": round(p, 2), "ref": f"{mult}R", "reason": f"{mult}R projection (no level found)", "rr": float(mult)})
+    return sorted(out[:3], key=lambda t: t["rr"])
 
 
 def engine_score(det: dict, plan: dict | None) -> int:
@@ -909,7 +1294,12 @@ def engine_score(det: dict, plan: dict | None) -> int:
     sig = any(s["bias"] == want and s["i"] >= det["n"] - 2 for s in det["candles"])
     vol = (det["volume"]["ratio20"] or 0) >= 1.2
     confirm = 100 if (sig and vol) else 65 if sig else 40 if vol else 20
-    return int(round(0.40 * z["quality"] + 0.20 * proximity + 0.15 * trend + 0.10 * htf + 0.15 * confirm))
+    sig = any(s["bias"] == want and s["i"] >= det["n"] - 2 and not s.get("provisional") for s in det["candles"])
+    confirm = 100 if (sig and vol) else 65 if sig else 40 if vol else 20
+    score = 0.40 * z["quality"] + 0.20 * proximity + 0.15 * trend + 0.10 * htf + 0.15 * confirm
+    if plan.get("blocked"):
+        score -= 15                                  # less than 1R of room before the first obstacle
+    return int(round(max(0, score)))
 
 
 def grade_for(score: int) -> str:
@@ -937,6 +1327,8 @@ def build_spec(det: dict, draw: dict | None, plan: dict | None) -> dict:
     tid = set((draw or {}).get("trendlines", []))
     if plan:
         zid.add(plan.get("ref_zone"))
+        ob = str(plan.get("obstacle") or "")                             # always draw what stands in the way of the trade
+        (zid if ob.startswith(("DZ", "SZ")) else lid).add(ob)
         for t in plan.get("targets", []):
             (zid if str(t.get("ref", "")).startswith(("DZ", "SZ")) else lid).add(t.get("ref"))
     if not zid:
@@ -950,7 +1342,7 @@ def build_spec(det: dict, draw: dict | None, plan: dict | None) -> dict:
     markers = [{"i": e["i"], "price": e["price"], "dir": "up" if e["type"] == "BREAKOUT" else "down", "label": e["type"].title()}
                for e in det["events"] if e["type"] in ("BREAKOUT", "BREAKDOWN")]
     return {"zones": [z for z in det["zones"] if z["id"] in zid], "levels": [x for x in det["levels"] if x["id"] in lid],
-            "lines": [x for x in det["trendlines"] if x["id"] in tid], "markers": markers, "candles": det["candles"], "plan": plan}
+            "lines": [x for x in det["trendlines"] if x["id"] in tid], "markers": markers, "candles": det["candles"], "plan": plan, "live": bool(det.get("live"))}
 
 
 def _rgba(hex_color: str, a: float) -> str:
@@ -997,14 +1389,20 @@ def fig_plotly(df: pd.DataFrame, spec: dict, window: int = 120, show: dict | Non
             x0 = max(z["s"], start)
             fig.add_shape(type="rect", x0=x0, x1=xr, y0=z["bottom"], y1=z["top"], fillcolor=_rgba(col, .15), line=dict(color=_rgba(col, .9), width=1),
                           layer="below", row=1, col=1)
+            fig.add_shape(type="line", x0=x0, x1=xr, y0=z["distal"], y1=z["distal"], line=dict(color=_rgba(col, .9), width=1, dash="dash"), row=1, col=1)
             fig.add_annotation(x=x0, y=z["top"] if z["type"] == "supply" else z["bottom"], xanchor="left", yanchor="bottom" if z["type"] == "supply" else "top",
-                               text=f"<b>{z['id']}</b> {z['pattern']} · Q{z['quality']} · {z['status']}", showarrow=False, font=dict(size=10, color=col), row=1, col=1)
+                               text=f"<b>{z['id']}</b> {z['pattern']} · Q{z['quality']} · {z['status']} · {z['bottom']:,.2f}–{z['top']:,.2f}", showarrow=False,
+                               font=dict(size=10, color=col), row=1, col=1)
             if z["top"] >= ys[0] * .8 and z["bottom"] <= ys[1] * 1.2:
                 ys += [z["top"], z["bottom"]]
     if show["levels"]:
         for lv in spec["levels"]:
             col = GREEN if lv["kind"] == "support" else RED
-            fig.add_shape(type="line", x0=start, x1=xr, y0=lv["price"], y1=lv["price"], line=dict(color=_rgba(col, .75), width=1, dash="dot"), row=1, col=1)
+            fig.add_shape(type="line", x0=max(start, lv.get("first", start)), x1=xr, y0=lv["price"], y1=lv["price"], line=dict(color=_rgba(col, .75), width=1, dash="dot"), row=1, col=1)
+            tx = [(i, p) for i, p in zip(lv.get("touch_idx", []), lv.get("touch_px", [])) if i >= start]
+            if tx:                                                       # the swing points that make this level
+                fig.add_trace(go.Scatter(x=[i for i, _ in tx], y=[p for _, p in tx], mode="markers", showlegend=False, hovertext=[f"{lv['id']} touch · {p:,.2f}" for _, p in tx],
+                                         hoverinfo="text", marker=dict(symbol="circle-open", size=9, color=col, line=dict(width=1.5, color=col))), row=1, col=1)
             fig.add_annotation(x=xr, y=lv["price"], xanchor="right", yanchor="bottom", showarrow=False, font=dict(size=9, color=col),
                                text=f"{lv['id']} {lv['price']:,.2f} ({lv['touches']}x)", row=1, col=1)
             ys.append(lv["price"])
@@ -1013,6 +1411,10 @@ def fig_plotly(df: pd.DataFrame, spec: dict, window: int = 120, show: dict | Non
             col = GREEN if t["kind"] == "support" else RED
             fig.add_trace(go.Scatter(x=[t["i0"], n - 1 + ext // 2], y=[t["p0"], t["p0"] + (t["p1"] - t["p0"]) / max(1, t["i1"] - t["i0"]) * (n - 1 + ext // 2 - t["i0"])],
                                      mode="lines", name=f"{t['id']} trendline", line=dict(color=col, width=1.6, dash="dash")), row=1, col=1)
+            tx = [(i, p) for i, p in zip(t.get("touch_idx", []), t.get("touch_px", [])) if i >= start]
+            if tx:
+                fig.add_trace(go.Scatter(x=[i for i, _ in tx], y=[p for _, p in tx], mode="markers", showlegend=False, hovertext=[f"{t['id']} touch · {p:,.2f}" for _, p in tx],
+                                         hoverinfo="text", marker=dict(symbol="diamond-open", size=9, color=col, line=dict(width=1.5, color=col))), row=1, col=1)
     p = spec.get("plan")
     if show["plan"] and p:
         ref, stop = p["entry_ref"], p["stop"]
@@ -1021,7 +1423,7 @@ def fig_plotly(df: pd.DataFrame, spec: dict, window: int = 120, show: dict | Non
         t1 = p["targets"][0]["price"] if p["targets"] else ref
         fig.add_shape(type="rect", x0=x0, x1=x1, y0=min(ref, t1), y1=max(ref, t1), fillcolor=_rgba(GREEN, .10), line=dict(width=0), row=1, col=1)
         fig.add_shape(type="rect", x0=x0, x1=x1, y0=p["entry_low"], y1=p["entry_high"], fillcolor=_rgba(CYAN, .18), line=dict(color=CYAN, width=1), row=1, col=1)
-        for price, label, col in [(stop, "STOP", RED)] + [(t["price"], f"T{i}", GREEN) for i, t in enumerate(p["targets"], 1)]:
+        for price, label, col in [(stop, "STOP", RED)] + [(t["price"], f"T{i} · {t.get('rr', 0):g}R", GREEN) for i, t in enumerate(p["targets"], 1)]:
             fig.add_shape(type="line", x0=x0, x1=x1, y0=price, y1=price, line=dict(color=col, width=1.4), row=1, col=1)
             fig.add_annotation(x=x1, y=price, xanchor="left", showarrow=False, text=f"<b>{label}</b> {price:,.2f}", font=dict(size=10, color=col), row=1, col=1)
             ys.append(price)
@@ -1087,19 +1489,28 @@ def render_png(df: pd.DataFrame, spec: dict, window: int = 110, title: str = "",
         col = GREEN if z["type"] == "demand" else RED
         x0 = max(z["s"], start) - start
         ax.add_patch(Rectangle((x0, z["bottom"]), m + ext - x0, z["top"] - z["bottom"], facecolor=col, alpha=.16, edgecolor=col, linewidth=1, zorder=1))
-        ax.text(x0 + .3, z["top"] if z["type"] == "supply" else z["bottom"], f"{z['id']} {z['pattern']} Q{z['quality']} {z['status']}", color=col, fontsize=8,
-                fontfamily="monospace", va="bottom" if z["type"] == "supply" else "top", zorder=6)
+        ax.hlines(z["distal"], x0, m + ext, colors=col, linestyles="--", linewidth=1.1, zorder=2)             # distal line = where the zone fails
+        ax.annotate(f"{z['id']} {z['pattern']} Q{z['quality']} {z['status']}  {z['bottom']:,.2f}-{z['top']:,.2f}", (x0 + .3, z["top"] if z["type"] == "supply" else z["bottom"]),
+                    xytext=(0, 3 if z["type"] == "supply" else -3), textcoords="offset points", color=col, fontsize=8, fontfamily="monospace",
+                    va="bottom" if z["type"] == "supply" else "top", zorder=6)
         ys += [z["top"], z["bottom"]]
     for lv in spec["levels"]:
         col = GREEN if lv["kind"] == "support" else RED
-        ax.hlines(lv["price"], 0, m + ext, colors=col, linestyles=":", linewidth=1, alpha=.8, zorder=1)
-        ax.text(m + ext - .3, lv["price"], f"{lv['id']} {lv['price']:,.2f}", color=col, fontsize=8, ha="right", va="bottom", fontfamily="monospace")
+        ax.hlines(lv["price"], max(0, lv.get("first", start) - start), m + ext, colors=col, linestyles=":", linewidth=1, alpha=.8, zorder=1)
+        tx = [(i - start, p_) for i, p_ in zip(lv.get("touch_idx", []), lv.get("touch_px", [])) if i >= start]
+        if tx:                                                           # the swing points that make this level
+            ax.scatter([a_ for a_, _ in tx], [b_ for _, b_ in tx], s=46, facecolors="none", edgecolors=col, linewidths=1.2, zorder=6)
+        ax.annotate(f"{lv['id']} {lv['price']:,.2f} ({lv['touches']}x)", (max(0, lv.get("first", start) - start) + .3, lv["price"]), xytext=(0, 2), textcoords="offset points",
+                    color=col, fontsize=8, ha="left", va="bottom", fontfamily="monospace", zorder=6)
         ys.append(lv["price"])
     for t in spec["lines"]:
         col = GREEN if t["kind"] == "support" else RED
         slope = (t["p1"] - t["p0"]) / max(1, t["i1"] - t["i0"])
         xe = n - 1 + ext // 2
         ax.plot([t["i0"] - start, xe - start], [t["p0"], t["p0"] + slope * (xe - t["i0"])], color=col, linestyle="--", linewidth=1.4, zorder=4)
+        tx = [(i - start, p_) for i, p_ in zip(t.get("touch_idx", []), t.get("touch_px", [])) if i >= start]
+        if tx:
+            ax.scatter([a_ for a_, _ in tx], [b_ for _, b_ in tx], s=40, marker="D", facecolors="none", edgecolors=col, linewidths=1.2, zorder=6)
     p = spec.get("plan")
     if p:
         x0, x1 = m - 1, m - 1 + int(ext * .85)
@@ -1108,11 +1519,16 @@ def render_png(df: pd.DataFrame, spec: dict, window: int = 110, title: str = "",
         ax.add_patch(Rectangle((x0, min(ref, stop)), x1 - x0, abs(ref - stop), facecolor=RED, alpha=.12, linewidth=0, zorder=1))
         ax.add_patch(Rectangle((x0, min(ref, t1)), x1 - x0, abs(t1 - ref), facecolor=GREEN, alpha=.12, linewidth=0, zorder=1))
         ax.add_patch(Rectangle((x0, p["entry_low"]), x1 - x0, p["entry_high"] - p["entry_low"], facecolor=CYAN, alpha=.22, edgecolor=CYAN, linewidth=1, zorder=2))
-        ax.text(x1 + .3, (p["entry_low"] + p["entry_high"]) / 2, f"ENTRY {p['entry_low']:,.2f}-{p['entry_high']:,.2f}", color=CYAN, fontsize=8, fontfamily="monospace", va="center")
-        for price, label, col in [(stop, "STOP", RED)] + [(t["price"], f"T{i}", GREEN) for i, t in enumerate(p["targets"], 1)]:
+        tags = [((p["entry_low"] + p["entry_high"]) / 2, f"ENTRY {p['entry_low']:,.2f}-{p['entry_high']:,.2f}", CYAN)]
+        for price, label, col in [(stop, "STOP", RED)] + [(t["price"], f"T{i} {t.get('rr', 0):g}R", GREEN) for i, t in enumerate(p["targets"], 1)]:
             ax.hlines(price, x0, x1, colors=col, linewidth=1.4, zorder=3)
-            ax.text(x1 + .3, price, f"{label} {price:,.2f}", color=col, fontsize=8, fontfamily="monospace", va="center")
+            tags.append((price, f"{label} {price:,.2f}", col))
             ys.append(price)
+        gap, prev_y = (max(ys) - min(ys)) * 0.028, None
+        for y_, text_, col in sorted(tags):                              # keep the price tags from printing over each other
+            ty = y_ if prev_y is None else max(y_, prev_y + gap)
+            ax.text(x1 + .3, ty, text_, color=col, fontsize=8, fontfamily="monospace", va="center", zorder=7)
+            prev_y = ty
     for mk in spec["markers"]:
         if mk["i"] >= start:
             ax.scatter([mk["i"] - start], [mk["price"]], marker="^" if mk["dir"] == "up" else "v", s=70, color=GREEN if mk["dir"] == "up" else RED, zorder=7)
@@ -1128,7 +1544,9 @@ def render_png(df: pd.DataFrame, spec: dict, window: int = 110, title: str = "",
     axv.set_xticklabels([str(w.index[i])[2:10] for i in pos], rotation=0, fontsize=8, color=T2)
     axv.tick_params(labelleft=False)
     fig.text(0.012, 0.965, title, color=AMBER, fontsize=12, fontweight="bold", fontfamily="monospace")
-    fig.text(0.988, 0.965, "Arka AI · research tool, not advice", color=T3, fontsize=8, ha="right", fontfamily="monospace")
+    fig.text(0.988, 0.965, "Arka AI · research tool, not advice · prices as traded (not dividend-adjusted)", color=T3, fontsize=8, ha="right", fontfamily="monospace")
+    if spec.get("live"):
+        ax.text(m - 1, float(w.high.iloc[-1]) + (max(ys) - min(ys)) * .02, "LIVE", color=AMBER, fontsize=7, ha="center", fontfamily="monospace", fontweight="bold", zorder=8)
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=dpi, facecolor=BG, bbox_inches=None)
     plt.close(fig)
@@ -1150,8 +1568,8 @@ ANALYSIS_SCHEMA = """Return ONLY this JSON object (fill every field; use null / 
               "checks": [ {"rule_id": "R01", "rule_name": "...", "status": "PRESENT | NOT_PRESENT | UNCLEAR",
                            "confidence": 0, "reason": "exact dates / prices / detection IDs", "refs": ["DZ1"]} ] } ],
  "my_zones": [ {"id": "DZ1", "role": "ENTRY_ZONE | TARGET | SUPPORT | RESISTANCE | CONTEXT", "matches_my_style": true, "comment": "..."} ],
- "plan": { "direction": "LONG | SHORT | NONE", "ref_zone": "DZ1", "entry_low": 0, "entry_high": 0, "stop": 0, "stop_reason": "...",
-           "targets": [ {"price": 0, "ref": "SZ1 or R1", "reason": "..."} ], "invalidation": "...", "confirmation_needed": ["..."] },
+ "plan": { "direction": "LONG | SHORT | NONE", "ref_zone": "the ID of ONE detected zone (demand for LONG, supply for SHORT)", "stop": 0, "stop_reason": "...",
+           "targets": [ {"ref": "ID of a detected level or opposing zone, e.g. R1 or SZ1", "reason": "..."} ], "invalidation": "...", "confirmation_needed": ["..."] },
  "supports": ["things that agree with MY playbook"],
  "contradicts": ["things that disagree with MY playbook"],
  "watch_next": ["what to watch before acting"],
@@ -1160,7 +1578,9 @@ ANALYSIS_SCHEMA = """Return ONLY this JSON object (fill every field; use null / 
  "context": ["optional observations NOT used for the verdict"],
  "draw": { "zones": ["DZ1"], "levels": ["R1"], "trendlines": ["TL1"] },
  "narrative": "a clear 150-250 word analysis in plain language"
-}"""
+}
+The entry zone is drawn by Python from ref_zone (its exact top and bottom) and each target from its ref ID, so give IDs, not your own prices.
+Python recomputes match_pct, score and grade from your rule statuses, so spend your effort on getting each status and its evidence right."""
 
 
 def _slim_zone(z):
@@ -1185,7 +1605,21 @@ def feedback_summary(items: list) -> dict:
             "approved_patterns": sorted({r.get("pattern") for r in ap if r.get("pattern")})}
 
 
-def build_prompt(ticker, det, det_w, style, setups, lessons, feedback, note, df) -> str:
+def feedback_reasons(items: list, cap: int = 14) -> list:
+    """The trader's own words about why a zone is / is not theirs (most recent first)."""
+    out = []
+    for it in items:
+        for lab in it["payload"].get("labels", []):
+            why = str(lab.get("reason") or "").strip()
+            if why:
+                f = lab.get("features", {})
+                out.append({"verdict": "MINE" if lab.get("approved") else "NOT MINE", "why": why[:200], "zone": f.get("type"), "pattern": f.get("pattern"),
+                            "thickness_atr": f.get("thickness_atr"), "tests": f.get("tests"), "quality": f.get("quality")})
+    return out[:cap]
+
+
+def build_prompt(ticker, det, det_w, style, setups, lessons, feedback, note, df, extra: dict | None = None) -> str:
+    extra = extra or {}
     setup_json = [{"setup_id": it["item_id"], "name": it["name"], **{k: v for k, v in it["payload"].items() if k not in ("source_name",)}} for it in setups]
     lesson_json = [{"name": it["name"], **it["payload"]} for it in lessons]
     market = {k: det[k] for k in ("asof", "close", "atr", "atr_pct", "day_chg_pct", "structure", "rsi", "sma", "ma_state", "sma50_slope_atr", "volume",
@@ -1204,15 +1638,20 @@ def build_prompt(ticker, det, det_w, style, setups, lessons, feedback, note, df)
         "== PLAYBOOK: ACTIVE SETUPS (evaluate EACH one separately; rule ids are inside each setup) ==\n" + (json.dumps(setup_json, ensure_ascii=False) if setup_json else "NONE TAUGHT YET"),
         "== PLAYBOOK: LESSONS (how this trader defines and draws supply / demand zones, lines, entries, stops, targets) ==\n" + (json.dumps(lesson_json, ensure_ascii=False) if lesson_json else "NONE"),
         "== PLAYBOOK: ZONES THIS TRADER APPROVED OR REJECTED (summary) ==\n" + json.dumps(feedback_summary(feedback), ensure_ascii=False),
+        "== PLAYBOOK: THE TRADER'S OWN REASONS FOR APPROVING / REJECTING ZONES ==\n" + (json.dumps(feedback_reasons(feedback), ensure_ascii=False) if feedback_reasons(feedback) else "NONE GIVEN"),
         "== ENGINE STYLE PARAMETERS (how detections below were produced) ==\n" + json.dumps(style),
         "== MARKET FACTS (daily, computed by Python) ==\n" + json.dumps(market, ensure_ascii=False, default=str),
         "== DETECTIONS (daily). Choose ONLY from these IDs ==\n" + json.dumps(detections, ensure_ascii=False, default=str),
         "== WEEKLY CONTEXT ==\n" + (json.dumps(weekly, ensure_ascii=False, default=str) if weekly else "UNAVAILABLE"),
         "== DAILY OHLC (last 70 candles; i is the candle index used by detections) ==\n" + ohlc,
+        "== CONTEXT (not part of the playbook; use only under \"context\" unless a playbook rule asks for it) ==\n" + json.dumps({
+            "last_candle_unfinished": bool(det.get("live")), "market": extra.get("market"), "next_results_date": extra.get("results"),
+            "engine_plan": {k: (extra.get("engine_plan") or {}).get(k) for k in ("direction", "ref_zone", "entry_low", "entry_high", "stop", "room_r", "obstacle", "blocked")} if extra.get("engine_plan") else None,
+            "zone_track_record_this_stock": extra.get("track")}, ensure_ascii=False, default=str),
         "== TRADER NOTE ==\n" + (note or "None"),
         ("TASK: Judge this stock ONLY against the trader's playbook. 1) Check every rule of every active setup against the detections and facts. "
          "2) Say which detected zones are the trader's kind of zone (use the lessons and the approved / rejected summary) and what role each plays. "
-         "3) Build a trade plan using ONLY detected zones and levels (entry zone inside a zone, stop beyond its distal line, targets at the next opposing zone or level); "
+         "3) Build a trade plan using ONLY detected zones and levels: name the zone to trade from (ref_zone), a stop beyond its distal line, and targets as the IDs of the next opposing zone or level; "
          "use direction NONE if nothing qualifies. 4) List what supports and what contradicts the playbook, and what to watch next. "
          "5) Give bull / bear / neutral scenarios with exact trigger prices. 6) Choose which detection IDs to draw. The attached image shows the detections. "
          "If no setup is taught, judge against the lessons and approved zones and say so in the headline."),
@@ -1225,71 +1664,216 @@ def _clean_list(x, cap=6):
     return [str(i)[:400] for i in (x if isinstance(x, list) else [])[:cap] if str(i).strip()]
 
 
-def validate_ai(ai: dict, det: dict, price: float):
-    """Coerce the model output to something safe to render and draw. Unknown IDs and impossible plans are dropped."""
-    zid, lid, tid = {z["id"] for z in det["zones"]}, {x["id"] for x in det["levels"]}, {x["id"] for x in det["trendlines"]}
-    out = {}
-    out["verdict"] = ai.get("verdict") if ai.get("verdict") in ("MATCH", "PARTIAL", "NO_MATCH", "AVOID") else "PARTIAL"
+def playbook_rules(item: dict) -> list:
+    """The rules of one saved setup that the scorecard must cover: conditions first, then confirmations. Ids are made unique."""
+    p, out, seen = item.get("payload") or {}, [], set()
+    for group, key, prefix in (("rule", "conditions", "R"), ("confirmation", "confirmation", "C")):
+        for k, c in enumerate(p.get(key) or [], 1):
+            if not isinstance(c, dict):
+                c = {"name": str(c)}
+            rid = str(c.get("id") or f"{prefix}{k:02d}").strip() or f"{prefix}{k:02d}"
+            while rid.upper() in seen:
+                rid += "'"
+            seen.add(rid.upper())
+            out.append({"id": rid, "name": str(c.get("name") or c.get("condition") or c.get("description") or rid)[:140],
+                        "required": bool(c.get("required", True)), "group": group})
+    return out
+
+
+def _check(c: dict, ids: set) -> dict:
+    st_ = c.get("status") if c.get("status") in ("PRESENT", "NOT_PRESENT", "UNCLEAR") else "UNCLEAR"
     try:
-        out["score"] = int(max(0, min(100, round(float(ai.get("score", 0))))))
+        conf = int(max(0, min(100, float(c.get("confidence", 0)))))
     except Exception:
-        out["score"] = 0
-    out["grade"] = ai.get("grade") if ai.get("grade") in ("A+", "A", "B", "C", "D") else grade_for(out["score"])
+        conf = 0
+    return {"status": st_, "confidence": conf, "reason": str(c.get("reason", ""))[:500],
+            "refs": [r for r in c.get("refs", []) if r in ids] if isinstance(c.get("refs"), list) else []}
+
+
+def _snap_price(det: dict, price: float, tol: float):
+    """Nearest detected price (level, or zone edge) within tol -> (price, id) or None."""
+    best = None
+    for lv in det["levels"]:
+        best = min(best or (9e18, 0, ""), (abs(lv["price"] - price), lv["price"], lv["id"]))
+    for z in det["zones"]:
+        for edge in (z["top"], z["bottom"]):
+            best = min(best or (9e18, 0, ""), (abs(edge - price), edge, z["id"]))
+    return (best[1], best[2]) if best and best[0] <= tol else None
+
+
+def validate_ai(ai: dict, det: dict, price: float, setups: list | None = None):
+    """Make the model's reply safe and exact.
+
+    * Scorecard: one line per rule of every active setup, in playbook order, matched by rule id. Rules the model skipped become UNCLEAR;
+      rules it invented are dropped. Match %, score, grade and verdict are computed here from the statuses.
+    * Plan: the entry zone is the exact top / bottom of a detected zone of the right type, the stop must sit beyond its distal line, and every
+      target is the exact price of a detected level or opposing zone. Anything that cannot be mapped is dropped.
+    Every change is listed in out["corrections"] so the trader can see what was fixed."""
+    zid, lid, tid = {z["id"] for z in det["zones"]}, {x["id"] for x in det["levels"]}, {x["id"] for x in det["trendlines"]}
+    ids, fix, out, atr = zid | lid | tid, [], {}, det["atr"]
+    ai = ai if isinstance(ai, dict) else {}
+    ai_verdict = ai.get("verdict") if ai.get("verdict") in ("MATCH", "PARTIAL", "NO_MATCH", "AVOID") else None
     out["bias"] = ai.get("bias") if ai.get("bias") in ("BULLISH", "BEARISH", "NEUTRAL") else "NEUTRAL"
     out["setup_state"] = str(ai.get("setup_state", "WATCHING"))[:30]
     out["headline"] = str(ai.get("headline", ""))[:400]
-    setups = []
-    for s in ai.get("setups", []) if isinstance(ai.get("setups"), list) else []:
-        checks = []
-        for c in s.get("checks", []) if isinstance(s.get("checks"), list) else []:
-            st_ = c.get("status") if c.get("status") in ("PRESENT", "NOT_PRESENT", "UNCLEAR") else "UNCLEAR"
-            try:
-                conf = int(max(0, min(100, float(c.get("confidence", 0)))))
-            except Exception:
-                conf = 0
-            checks.append({"rule_id": str(c.get("rule_id", ""))[:12], "rule_name": str(c.get("rule_name", ""))[:140], "status": st_, "confidence": conf,
-                           "reason": str(c.get("reason", ""))[:500], "refs": [r for r in c.get("refs", []) if r in zid | lid | tid] if isinstance(c.get("refs"), list) else []})
-        try:
-            mp = int(max(0, min(100, float(s.get("match_pct", 0)))))
-        except Exception:
-            mp = 0
-        setups.append({"setup_id": str(s.get("setup_id", "")), "name": str(s.get("name", "Setup"))[:120], "match_pct": mp, "state": str(s.get("state", ""))[:30], "checks": checks})
-    out["setups"] = setups
+
+    # ── scorecard ──
+    ai_setups = [x for x in (ai.get("setups") if isinstance(ai.get("setups"), list) else []) if isinstance(x, dict)]
+    result = []
+    if setups:
+        used = set()
+
+        def find(item, pos):
+            for k, a in enumerate(ai_setups):
+                if k not in used and str(a.get("setup_id", "")) == str(item["item_id"]):
+                    return k
+            for k, a in enumerate(ai_setups):
+                if k not in used and str(a.get("name", "")).strip().lower() == str(item["name"]).strip().lower():
+                    return k
+            return pos if (len(ai_setups) == len(setups) and pos not in used) else None
+        for pos, item in enumerate(setups):
+            k = find(item, pos)
+            a = ai_setups[k] if k is not None else {}
+            if k is not None:
+                used.add(k)
+            else:
+                fix.append(f'The AI did not evaluate the setup "{item["name"]}"; its rules are shown as UNCLEAR.')
+            raw = [c for c in (a.get("checks") if isinstance(a.get("checks"), list) else []) if isinstance(c, dict)]
+            by_id = {str(c.get("rule_id", "")).strip().upper(): c for c in raw}
+            by_name = {str(c.get("rule_name", "")).strip().lower(): c for c in raw}
+            rules, checks, skipped = playbook_rules(item), [], 0
+            for r in rules:
+                c = by_id.pop(r["id"].upper(), None) or by_name.get(r["name"].strip().lower())
+                if c is None:
+                    skipped += 1
+                    c = {"status": "UNCLEAR", "confidence": 0, "reason": "The AI did not evaluate this rule."}
+                checks.append({"rule_id": r["id"], "rule_name": r["name"], "required": r["required"], "group": r["group"], **_check(c, ids)})
+            if not rules:                                                # legacy setup without a rule list: keep what the model returned
+                checks = [{"rule_id": str(c.get("rule_id", ""))[:12], "rule_name": str(c.get("rule_name", ""))[:140], "required": True, "group": "rule", **_check(c, ids)} for c in raw]
+            else:
+                extra_n = len([c for c in raw if str(c.get("rule_id", "")).strip().upper() in by_id])
+                if skipped:
+                    fix.append(f'{item["name"]}: {skipped} rule(s) were not evaluated by the AI and are shown as UNCLEAR.')
+                if extra_n:
+                    fix.append(f'{item["name"]}: {extra_n} check(s) that are not rules of this setup were removed.')
+            req = [c for c in checks if c["required"]] or checks
+            present = sum(1 for c in req if c["status"] == "PRESENT")
+            result.append({"setup_id": str(item["item_id"]), "name": str(item["name"])[:120], "match_pct": int(round(100 * present / len(req))) if req else 0,
+                           "present": present, "required": len(req), "unclear": sum(1 for c in req if c["status"] == "UNCLEAR"),
+                           "failed": sum(1 for c in req if c["status"] == "NOT_PRESENT"), "state": str(a.get("state", ""))[:30], "checks": checks})
+    out["setups"] = result
+    if result:
+        best = max(result, key=lambda x: x["match_pct"])
+        out["score"] = best["match_pct"]
+        derived = "MATCH" if best["required"] and best["present"] == best["required"] else "PARTIAL" if best["match_pct"] >= 50 else "NO_MATCH"
+        out["verdict"] = "AVOID" if ai_verdict == "AVOID" else derived
+        if ai_verdict and ai_verdict not in ("AVOID", derived):
+            fix.append(f'Verdict set to {derived.replace("_", " ")} from the rule statuses ({best["present"]} of {best["required"]} required rules present); the AI had said {ai_verdict.replace("_", " ")}.')
+    else:
+        out["score"] = None                                              # no setup taught: the engine score is used
+        out["verdict"] = ai_verdict or "PARTIAL"
+    out["grade"] = grade_for(out["score"]) if out["score"] is not None else None
+
     out["my_zones"] = [{"id": z.get("id"), "role": str(z.get("role", "CONTEXT"))[:20], "matches_my_style": bool(z.get("matches_my_style")), "comment": str(z.get("comment", ""))[:300]}
-                       for z in ai.get("my_zones", []) if isinstance(z, dict) and z.get("id") in zid | lid]
+                       for z in ai.get("my_zones", []) if isinstance(z, dict) and z.get("id") in zid | lid] if isinstance(ai.get("my_zones"), list) else []
     for k in ("supports", "contradicts", "watch_next", "context"):
         out[k] = _clean_list(ai.get(k))
     sc = ai.get("scenarios") if isinstance(ai.get("scenarios"), dict) else {}
-    out["scenarios"] = {k: {kk: (sc.get(k, {}) or {}).get(kk) for kk in ("trigger", "path", "level")} for k in ("bull", "bear", "neutral")}
+    out["scenarios"] = {}
+    for k in ("bull", "bear", "neutral"):
+        one = sc.get(k) if isinstance(sc.get(k), dict) else {}
+        lvl, ref = one.get("level"), None
+        try:
+            lvl = float(lvl)
+            if not (0.4 * price < lvl < 2.5 * price):
+                lvl = None
+            else:
+                snap = _snap_price(det, lvl, 0.35 * atr)
+                if snap:
+                    lvl, ref = snap
+        except (TypeError, ValueError):
+            lvl = None
+        out["scenarios"][k] = {"trigger": one.get("trigger"), "path": one.get("path"), "level": lvl, "ref": ref}
     dr = ai.get("draw") if isinstance(ai.get("draw"), dict) else {}
-    out["draw"] = {"zones": [i for i in dr.get("zones", []) if i in zid], "levels": [i for i in dr.get("levels", []) if i in lid],
-                   "trendlines": [i for i in dr.get("trendlines", []) if i in tid]}
+    lst = lambda v: v if isinstance(v, list) else []
+    out["draw"] = {"zones": [i for i in lst(dr.get("zones")) if i in zid], "levels": [i for i in lst(dr.get("levels")) if i in lid],
+                   "trendlines": [i for i in lst(dr.get("trendlines")) if i in tid]}
     out["narrative"] = str(ai.get("narrative", ""))[:3000]
-    # plan
-    p, plan, atr = ai.get("plan") if isinstance(ai.get("plan"), dict) else {}, None, det["atr"]
+
+    # ── plan ──
+    p, plan = ai.get("plan") if isinstance(ai.get("plan"), dict) else {}, None
     direction = p.get("direction")
     out["no_trade"] = direction == "NONE"
     if direction in ("LONG", "SHORT"):
-        try:
-            lo, hi, stop = float(p["entry_low"]), float(p["entry_high"]), float(p["stop"])
-            lo, hi = min(lo, hi), max(lo, hi)
-            ref = min(max(price, lo), hi) if lo <= price <= hi else (hi if direction == "LONG" and price > hi else lo if direction == "SHORT" and price < lo else (hi if price > hi else lo))
-            long = direction == "LONG"
-            targets = []
-            for t in p.get("targets", [])[:3]:
-                tp = float(t["price"])
-                if (long and tp > ref) or ((not long) and tp < ref):
-                    targets.append({"price": round(tp, 2), "ref": str(t.get("ref", ""))[:10], "reason": str(t.get("reason", ""))[:200],
-                                    "rr": round(abs(tp - ref) / abs(ref - stop), 2) if ref != stop else 0.0})
-            sane = (stop < ref if long else stop > ref) and targets and 0.6 * price < lo and hi < 1.6 * price and abs(ref - stop) <= 8 * atr
-            if sane:
-                plan = {"direction": direction, "ref_zone": p.get("ref_zone") if p.get("ref_zone") in zid else None, "entry_low": round(lo, 2), "entry_high": round(hi, 2),
-                        "entry_ref": round(ref, 2), "stop": round(stop, 2), "stop_reason": str(p.get("stop_reason", ""))[:300], "targets": targets,
-                        "invalidation": str(p.get("invalidation", ""))[:400], "confirmation_needed": _clean_list(p.get("confirmation_needed"), 5),
-                        "counter_trend": False, "source": "ai"}
-        except Exception:
-            plan = None
+        long = direction == "LONG"
+        want = "demand" if long else "supply"
+        z = next((x for x in det["zones"] if x["id"] == p.get("ref_zone")), None)
+        if z is None:                                                    # no usable id: accept only if the AI's own prices sit on a detected zone
+            try:
+                mid = (float(p["entry_low"]) + float(p["entry_high"])) / 2
+                near = [x for x in det["zones"] if x["type"] == want and x["bottom"] - 0.25 * atr <= mid <= x["top"] + 0.25 * atr]
+                z = min(near, key=lambda x: abs((x["top"] + x["bottom"]) / 2 - mid)) if near else None
+                if z:
+                    fix.append(f'The plan did not name a zone; it was matched to {z["id"]} from its prices.')
+            except Exception:
+                z = None
+        if z is not None and z["type"] != want:
+            fix.append(f'The AI planned a {direction} from {z["id"]}, which is a {z["type"]} zone. That plan was rejected.')
+            z = None
+        if z is None:
+            fix.append("The AI's plan did not map to a detected zone, so it is not drawn. The engine plan is shown instead when one exists.")
+        else:
+            lo, hi, distal = z["bottom"], z["top"], z["distal"]
+            ref = min(max(price, lo), hi) if z["in_zone"] else (hi if long else lo)
+            default_stop = round(distal - 0.25 * atr, 2) if long else round(distal + 0.25 * atr, 2)
+            stop, reason = default_stop, f"Beyond {z['id']} distal line ({distal:.2f}) {'minus' if long else 'plus'} 0.25 ATR"
+            try:
+                s_ai = float(p.get("stop"))
+                beyond = (s_ai < distal) if long else (s_ai > distal)
+                if beyond and abs(s_ai - distal) <= 1.5 * atr:
+                    stop, reason = round(s_ai, 2), str(p.get("stop_reason") or reason)[:300]
+                elif abs(s_ai - default_stop) > 0.02 * atr:
+                    fix.append(f'Stop {s_ai:,.2f} was not a sensible distance beyond {z["id"]}\'s distal line ({distal:,.2f}); set to {default_stop:,.2f}.')
+            except (TypeError, ValueError):
+                pass
+            risk = abs(ref - stop)
+            targets, seen, dropped = [], set(), 0
+            for t in (p.get("targets") if isinstance(p.get("targets"), list) else [])[:4]:
+                if not isinstance(t, dict):
+                    continue
+                rid, px = str(t.get("ref", "")).strip(), None
+                lv = next((x for x in det["levels"] if x["id"] == rid), None)
+                oz = next((x for x in det["zones"] if x["id"] == rid and x["id"] != z["id"]), None)
+                if lv:
+                    px = lv["price"]
+                elif oz:
+                    px = oz["bottom"] if long else oz["top"]
+                else:
+                    try:
+                        snap = _snap_price(det, float(t.get("price")), 0.35 * atr)
+                        if snap:
+                            px, rid = snap
+                    except (TypeError, ValueError):
+                        pass
+                if px is None or rid in seen or not ((long and px > ref) or ((not long) and px < ref)):
+                    dropped += 1
+                    continue
+                seen.add(rid)
+                targets.append({"price": round(px, 2), "ref": rid, "reason": str(t.get("reason", ""))[:200], "rr": round(abs(px - ref) / risk, 2) if risk else 0.0})
+            if dropped:
+                fix.append(f"{dropped} target(s) did not map to a detected level or zone on the right side of the entry and were removed.")
+            if not targets and risk > 0:
+                targets = targets_for(det, ref, risk, long)
+                fix.append("No usable target came from the AI; targets were taken from the next detected levels / zones.")
+            if risk > 0 and targets:
+                st_txt = det["structure"]
+                plan = {"direction": direction, "ref_zone": z["id"], "entry_low": lo, "entry_high": hi, "entry_ref": round(ref, 2), "stop": stop,
+                        "stop_reason": reason, "targets": sorted(targets, key=lambda t: t["rr"])[:3], "invalidation": str(p.get("invalidation", ""))[:400],
+                        "confirmation_needed": _clean_list(p.get("confirmation_needed"), 5),
+                        "counter_trend": bool((long and st_txt.startswith("DOWNTREND")) or ((not long) and st_txt.startswith("UPTREND"))), "source": "ai"}
+                plan.update(plan_room(det, plan))
     out["plan"] = plan
+    out["corrections"] = fix
     return out
 
 
@@ -1311,26 +1895,47 @@ def run_analysis(ticker: str, note: str = "", use_ai: bool = True, window: int =
     except Exception:
         weekly = None
     style = get_style()
-    det = analyze_market(daily, style)
+    det = analyze_market(daily, style, live_fraction(daily.index[-1]))
     det_w = None
     if weekly is not None and len(weekly) >= 60:
         det_w = analyze_market(weekly, dict(style, pivot_left=2, pivot_right=2, lookback=140, base_max=min(3, int(style["base_max"]))))
     add_htf_confluence(det, det_w)
     eplan = deterministic_plan(det)
-    report = {"ticker": t, "asof": det["asof"], "det": det, "det_w": det_w, "style": style, "engine_plan": eplan, "engine_score": engine_score(det, eplan),
-              "ai": None, "ai_error": "", "plan": eplan, "score": engine_score(det, eplan), "note": note, "window": window,
-              "n_setups": len(active_items("setup")), "n_lessons": len(active_items("lesson")), "n_labelled": len(active_items("feedback")),
-              "ran_at": datetime.now(IST).strftime("%d %b %Y %H:%M IST"), "df": daily}
+    escore = engine_score(det, eplan)
+    market = None
+    if not is_index(t):
+        try:
+            market = market_context(daily, fetch_ohlc("NIFTY50", "1d", "2y"))
+        except Exception:
+            market = None
+    results = next_results_date(t)
+    try:
+        hist_rows = zone_history(daily, style)
+    except Exception:
+        hist_rows = []
+    setups = active_items("setup")
+    report = {"ticker": t, "asof": det["asof"], "det": det, "det_w": det_w, "style": style, "engine_plan": eplan, "engine_score": escore,
+              "ai": None, "ai_error": "", "plan": eplan, "score": escore, "note": note, "window": window, "market": market, "results": results,
+              "zone_rows": hist_rows, "n_setups": len(setups), "n_lessons": len(active_items("lesson")), "n_labelled": len(active_items("feedback")),
+              "ran_at": datetime.now(IST).strftime("%d %b %Y %H:%M IST"), "df": daily, "model": ""}
     if use_ai and get_gemini() is not None:
         try:
             preview = render_png(daily, build_spec(det, None, eplan), window=110, title=f"{t} · detections (preview for AI)")
-            prompt = build_prompt(t, det, det_w, style, active_items("setup"), active_items("lesson"), active_items("feedback"), note, daily)
-            ai = validate_ai(call_json(prompt, images=[preview]), det, det["close"])
+            zref = next((z for z in det["zones"] if eplan and z["id"] == eplan["ref_zone"]), None)
+            tr = track_record(hist_rows, zref)
+            extra = {"market": market, "results": results, "engine_plan": eplan,
+                     "track": {"all": tr["groups"]["All zones"], "similar_to_plan_zone": tr["like"], "note": "walk-forward replay on this stock; small samples are weak evidence"}}
+            prompt = build_prompt(t, det, det_w, style, setups, active_items("lesson"), active_items("feedback"), note, daily, extra)
+            ai = validate_ai(call_json(prompt, images=[preview]), det, det["close"], setups)
             report["ai"] = ai
-            report["score"] = ai["score"]
+            report["model"] = ai_model_name()
+            report["score"] = ai["score"] if ai["score"] is not None else escore
+            ai["grade"] = ai["grade"] or grade_for(report["score"])
             report["plan"] = None if ai["no_trade"] else (ai["plan"] or eplan)
         except Exception as exc:
             report["ai_error"] = str(exc)
+    zref = next((z for z in det["zones"] if report["plan"] and z["id"] == report["plan"].get("ref_zone")), None)
+    report["track"] = track_record(hist_rows, zref)
     report["spec"] = build_spec(det, (report["ai"] or {}).get("draw"), report["plan"])
     return report
 
@@ -1403,27 +2008,17 @@ def extract_pdf_text(pdf_file) -> str:
 
 
 def understand_pdf_setup(pdf_file, filename="setup.pdf") -> dict:
-    if not HAS_GEMINI or not GEMINI_KEY:
-        return {"error": "Gemini is not configured. Check GEMINI_KEY and the google-generativeai package."}
-    tmp = None
+    if get_gemini() is None:
+        return {"error": "Gemini is not configured. Check GEMINI_KEY and add `google-genai` to requirements.txt."}
     try:
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-        tmp.write(pdf_file.getvalue())
-        tmp.flush()
-        tmp.close()
-        genai.configure(api_key=GEMINI_KEY)
-        uploaded = genai.upload_file(path=tmp.name, mime_type="application/pdf", display_name=filename)
-        result = call_json(PDF_PROMPT, uploaded_file=uploaded)
+        data = pdf_file.getvalue()
+        if len(data) > 18 * 1024 * 1024:
+            return {"error": "This PDF is larger than 18 MB. Split it or export a smaller copy, then upload again."}
+        result = call_json(PDF_PROMPT, pdf=data)
         result["source_name"] = filename
         return result
     except Exception as exc:
         return {"error": str(exc)}
-    finally:
-        if tmp:
-            try:
-                os.unlink(tmp.name)
-            except Exception:
-                pass
 
 
 def learn_from_images(images: list, explanation: str) -> dict:
@@ -1444,12 +2039,15 @@ def manual_setup(name: str, summary: str, conditions: str, trigger: str, invalid
 # ══════════════════════════════════════════════════════════
 # 8. RADAR (watchlist scan, engine only: no AI cost)
 # ══════════════════════════════════════════════════════════
-def radar_scan(symbols: list, style: dict) -> list:
+def radar_scan(symbols: list, style: dict, with_track: bool = False):
+    """-> rows, or (rows, track) when with_track: track = track_record over every zone of every scanned stock."""
     frames = fetch_many(tuple(symbols))
-    rows = []
+    rows, hist = [], []
     for sym, df in frames.items():
         try:
-            det = analyze_market(df, style)
+            det = analyze_market(df, style, live_fraction(df.index[-1]))
+            if with_track:
+                hist += zone_history(df, style)
             plan = deterministic_plan(det)
             z = next((x for x in det["zones"] if plan and x["id"] == plan["ref_zone"]), None)
             near = min([x for x in det["zones"] if x["dist_atr"] is not None], key=lambda x: x["dist_atr"], default=None)
@@ -1457,10 +2055,15 @@ def radar_scan(symbols: list, style: dict) -> list:
                          "zone": (z or near or {}).get("id"), "ztype": (z or near or {}).get("type"), "quality": (z or near or {}).get("quality"),
                          "status": (z or near or {}).get("status"), "dist_pct": (z or near or {}).get("dist_pct"), "dist_atr": (z or near or {}).get("dist_atr"),
                          "direction": plan["direction"] if plan else None, "rr": plan["targets"][0]["rr"] if plan and plan["targets"] else None,
+                         "room_r": plan.get("room_r") if plan else None, "blocked": bool(plan and plan.get("blocked")),
                          "score": engine_score(det, plan), "n_zones": len(det["zones"])})
         except Exception:
             continue
     rows.sort(key=lambda r: -r["score"])
+    if with_track:
+        tr = track_record(hist)
+        tr["n_stocks"] = len(frames)
+        return rows, tr
     return rows
 
 
@@ -1573,12 +2176,14 @@ def html_status() -> str:
     ai_ok = get_gemini() is not None
     mem = storage_mode()
     n_set, n_les, n_lab = len(active_items("setup")), len(active_items("lesson")), len(active_items("feedback"))
-    chips = [_chip("AI ENGINE ONLINE" if ai_ok else "AI OFFLINE · ENGINE ONLY", "ok" if ai_ok else "warn"),
+    n_calls = sum(1 for i in load_items() if i["kind"] == "call")
+    chips = [_chip(("AI ONLINE · " + ai_model_name().upper()) if ai_ok else "AI OFFLINE · ENGINE ONLY", "ok" if ai_ok else "warn"),
              _chip("PLAYBOOK SAVED TO CLOUD" if mem == "CLOUD" else "PLAYBOOK: THIS SESSION ONLY", "ok" if mem == "CLOUD" else "warn"),
              _chip(f"{n_set} ACTIVE SETUP{'S' if n_set != 1 else ''}", "ok" if n_set else "bad"),
              _chip(f"{n_les} LESSON{'S' if n_les != 1 else ''}", "ok" if n_les else ""),
              _chip(f"{n_lab} LABELLED ZONE SET{'S' if n_lab != 1 else ''}", "ok" if n_lab else ""),
-             _chip("ZONE STYLE: " + style_source(), "ok" if style_source() != "DEFAULT" else "")]
+             _chip("ZONE STYLE: " + style_source(), "ok" if style_source() != "DEFAULT" else ""),
+             _chip(f"{n_calls} PLAN{'S' if n_calls != 1 else ''} IN JOURNAL", "ok" if n_calls else "")]
     if not HAS_PLOTLY:
         chips.append(_chip("INSTALL PLOTLY FOR INTERACTIVE CHARTS", "warn"))
     return '<div class="aa-chips">' + "".join(chips) + "</div>"
@@ -1611,6 +2216,18 @@ def html_hero(r: dict) -> str:
     bias_cls = "ok" if bias == "BULLISH" else "bad" if bias == "BEARISH" else ""
     chips = (_chip(f"GRADE {grade}", "ok" if grade in ("A+", "A") else "warn" if grade in ("B", "C") else "bad") + _chip(f"BIAS {bias}", bias_cls)
              + _chip(f"STATE {state}") + _chip(("AI + ENGINE" if ai else "ENGINE ONLY"), "ok" if ai else "warn"))
+    mk = r.get("market")
+    if mk:
+        ns = mk["nifty_structure"].split(" ")[0]
+        chips += _chip(f"NIFTY {ns}", "ok" if ns == "UPTREND" else "bad" if ns == "DOWNTREND" else "")
+        if mk.get("rs_3m_pp") is not None:
+            chips += _chip(f"VS NIFTY 3M {mk['rs_3m_pp']:+.1f} PP", "ok" if mk["rs_3m_pp"] > 0 else "bad")
+    if r.get("results"):
+        days = (pd.Timestamp(r["results"]) - pd.Timestamp(datetime.now(IST).date())).days
+        if 0 <= days <= 14:
+            chips += _chip(f"RESULTS IN {days} DAY{'S' if days != 1 else ''}" if days else "RESULTS TODAY", "warn")
+    if det.get("live"):
+        chips += _chip("TODAY'S CANDLE UNFINISHED", "warn")
     p = r.get("plan")
     if p:
         t1 = p["targets"][0] if p["targets"] else None
@@ -1660,6 +2277,10 @@ def html_plan(r: dict, risk: float) -> str:
     for i, t in enumerate(p["targets"], 1):
         rr = f'{t["rr"]} R' if t.get("rr") is not None else ""
         rows.append(f'<div class="aa-kv"><span>Target {i} · {esc(t.get("ref", ""))}</span><div><b class="up">{_fmt(t["price"])}</b><em>{rr} · {esc(t.get("reason", ""))}</em></div></div>')
+    if p.get("room_r") is not None:
+        cls = "dn" if p.get("blocked") else "up" if p["room_r"] >= 2 else ""
+        rows.append(f'<div class="aa-kv"><span>Room before first obstacle</span><div><b class="{cls}">{p["room_r"]:g} R</b>'
+                    f'<em>{esc(p.get("obstacle") or "")} at {_fmt(p.get("obstacle_price"))}{" · price must break this level to reach the entry, after which it is in the way" if p.get("obstacle_flips") else ""}{" · less than 1R: the trade risks more than it has room to make" if p.get("blocked") else ""}</em></div></div>')
     sz = position_size(p, risk)
     if sz:
         rows.append(f'<div class="aa-kv"><span>Position size @ ₹{risk:,.0f} risk</span><div><b>{sz["qty"]:,} shares</b>'
@@ -1684,11 +2305,15 @@ def html_scorecard(r: dict) -> str:
     labels = {"PRESENT": "✓ PRESENT", "NOT_PRESENT": "✕ NOT PRESENT", "UNCLEAR": "◐ UNCLEAR"}
     out = ['<div class="aa-card"><div class="aa-ct">Setup scorecard<span>your rules, one by one</span></div>']
     for s in ai["setups"]:
-        out.append(f'<div class="aa-sh"><div>{esc(s["name"])}</div><span>{s["match_pct"]}% MATCH · {esc(s["state"])}</span></div>')
+        tally = f'{s.get("present", 0)} OF {s.get("required", 0)} REQUIRED PRESENT' + (f' · {s["unclear"]} UNCLEAR' if s.get("unclear") else "")
+        out.append(f'<div class="aa-sh"><div>{esc(s["name"])}</div><span>{s["match_pct"]}% · {tally}</span></div>')
         for c in s["checks"]:
             col = colors[c["status"]]
             refs = "".join(f'<span class="aa-ref">{esc(x)}</span>' for x in c["refs"])
-            out.append(f'<div class="aa-ck" style="--c:{col}"><div class="h"><div>{esc(c["rule_name"])}{refs}</div><span>{labels[c["status"]]}</span></div>'
+            kind = "" if c.get("required", True) else '<span class="aa-ref" style="color:#A3A3A3;border-color:#2B2B2B">OPTIONAL</span>'
+            kind += '<span class="aa-ref" style="color:#BF5AF2;border-color:rgba(191,90,242,.35)">CONFIRMATION</span>' if c.get("group") == "confirmation" else ""
+            out.append(f'<div class="aa-ck" style="--c:{col}"><div class="h"><div><span style="color:#6B6B6B;font:700 9px JetBrains Mono,monospace;margin-right:6px">{esc(c.get("rule_id", ""))}</span>'
+                       f'{esc(c["rule_name"])}{kind}{refs}</div><span>{labels[c["status"]]}</span></div>'
                        f'<div class="r">{esc(c["reason"])}</div><div class="b"><i style="width:{c["confidence"]}%"></i></div></div>')
     out.append("</div>")
     return "".join(out)
@@ -1758,10 +2383,45 @@ def html_scenarios(ai: dict | None) -> str:
     cards = []
     for key, title, col in (("bull", "BULL CASE", GREEN), ("bear", "BEAR CASE", RED), ("neutral", "NEUTRAL / RANGE", AMBER)):
         s = ai["scenarios"][key]
-        lvl = _fmt(s.get("level")) if isinstance(s.get("level"), (int, float)) else "—"
+        lvl = (_fmt(s.get("level")) + (f" · {s['ref']}" if s.get("ref") else "")) if isinstance(s.get("level"), (int, float)) else "—"
         cards.append(f'<div class="aa-sc" style="--c:{col}"><div class="t">{title}</div><div class="l">{lvl}</div>'
                      f'<div class="d"><b>Trigger:</b> {esc(s.get("trigger") or "—")}<br><b>Path:</b> {esc(s.get("path") or "—")}</div></div>')
     return '<div class="aa-scn">' + "".join(cards) + "</div>"
+
+
+def _pct_cell(n, p, base=None):
+    if not n or p is None:
+        return '<td class="n" style="color:#6B6B6B">—</td>'
+    col = "#CFCFCF" if base is None else (GREEN if p > base else RED if p < base - 5 else "#CFCFCF")
+    return f'<td class="n" style="color:{col}">{p:.0f}% <span style="color:#6B6B6B">of {n}</span></td>'
+
+
+def html_track(tr: dict, universe: dict | None = None) -> str:
+    """Track record table. 33% reaching 2R first is break-even before costs; random price data gives about 30%."""
+    g = tr["groups"]
+    if not g["All zones"]["formed"]:
+        return '<div class="aa-empty">No zone of your style formed on this stock in the last two years.</div>'
+    rows = []
+
+    def line(label, x, bold=False):
+        exp = "—" if x["exp2"] is None else f'<span style="color:{GREEN if x["exp2"] > 0 else RED}">{x["exp2"]:+.2f} R</span>'
+        name = f"<b>{esc(label)}</b>" if bold else esc(label)
+        rows.append(f'<tr><td>{name}</td><td class="n">{x["formed"]}</td><td class="n">{x["tested"]}</td>{_pct_cell(x["n1"], x["p1"], 50)}{_pct_cell(x["n2"], x["p2"], 33.3)}<td class="n">{exp}</td></tr>')
+    if tr.get("like") and tr.get("like_label"):
+        line("Like the plan's zone · " + tr["like_label"], tr["like"], True)
+    for k in ("All zones", "Demand", "Supply", "With trend", "Against trend", "Q 70+", "Q 55-69", "Q below 55"):
+        if g[k]["formed"]:
+            line(k, g[k])
+    if universe and universe.get("groups", {}).get("All zones", {}).get("formed"):
+        line(f'Your last radar scan · {universe.get("n_stocks", 0)} stocks · all zones', universe["groups"]["All zones"], True)
+    head = "".join(f"<th>{h}</th>" for h in ("Zones of your style", "Formed", "Tested", "Reached 1R before stop", "Reached 2R before stop", "Average result aiming for 2R"))
+    recent = ""
+    if tr.get("recent"):
+        col = {"2R": GREEN, "STOP": RED, "OPEN": AMBER}
+        recent = '<div class="aa-note">Latest tested zones: ' + " · ".join(
+            f'{esc(x["touch_date"])} {x["type"]} Q{x["quality"]} <b style="color:{col.get(x["outcome"], T2)}">{"reached 2R" if x["outcome"] == "2R" else "stopped" + (" after 1R" if x.get("hit1") else "") if x["outcome"] == "STOP" else "still open"}</b>'
+            for x in tr["recent"][:6]) + "</div>"
+    return f'<div class="aa-tw"><table class="aa-t"><thead><tr>{head}</tr></thead><tbody>{"".join(rows)}</tbody></table></div>{recent}'
 
 
 def png_for(r: dict, window: int) -> bytes:
@@ -1798,9 +2458,22 @@ def render_report(r: dict, window: int, risk: float):
         st.markdown(html_scorecard(r), unsafe_allow_html=True)
     with c3:
         st.markdown(html_read(r.get("ai")), unsafe_allow_html=True)
+    fixes = (r.get("ai") or {}).get("corrections") or []
+    if fixes:
+        with st.expander(f"ENGINE CHECK OF THE AI · {len(fixes)} correction{'s' if len(fixes) != 1 else ''} applied", expanded=False):
+            st.caption("Everything the AI says is matched back to your playbook rules and to the detected zones and levels. These are the points where its reply did not match and what was done.")
+            for f in fixes:
+                st.markdown(f"- {f}")
     if r.get("ai"):
         _sec("Scenarios", "what would change the picture")
         st.markdown(html_scenarios(r["ai"]), unsafe_allow_html=True)
+    if r.get("track"):
+        _sec("Track record of your zone style", f"every zone of this style on {r['ticker']} in the last 2 years, replayed with no hindsight")
+        st.markdown(html_track(r["track"], st.session_state.get("aa_track_univ")), unsafe_allow_html=True)
+        st.caption("How to read it: a zone is 'tested' the first time price returns to it. Entry at the proximal line, stop 0.25 ATR beyond the distal line. "
+                   "Reaching 2R before the stop one time in three is break-even before costs; on random price data this replay gives about 30%, so a real edge "
+                   "has to sit clearly above that. Fewer than 20 tested zones is too small a sample to trust. Daily candles only: if one candle touches both "
+                   "stop and target the stop is counted, and brokerage and slippage are not included.")
     _sec("Supply & demand zones found", "every zone the engine detects, with your style applied")
     st.markdown(html_zones(r), unsafe_allow_html=True)
     _sec("Support, resistance and trendlines")
@@ -1815,7 +2488,8 @@ def render_report(r: dict, window: int, risk: float):
                     st.markdown(f"- {c}")
     with st.expander("ENGINE EVIDENCE (exact numbers the AI was given)", expanded=False):
         d = r["det"]
-        st.json({"structure": d["structure"], "ma_state": d["ma_state"], "sma": d["sma"], "volume": d["volume"], "refs": d["refs"], "swings": d["swings"],
+        st.json({"market": r.get("market"), "next_results_date": r.get("results"), "ai_model": r.get("model") or None,
+                 "structure": d["structure"], "ma_state": d["ma_state"], "sma": d["sma"], "volume": d["volume"], "refs": d["refs"], "swings": d["swings"],
                  "events": d["events"], "candle_signals": d["candles"], "weekly": ({"structure": r["det_w"]["structure"], "ma_state": r["det_w"]["ma_state"]} if r.get("det_w") else None)})
     if ai:
         _sec("Ask Arka about this chart", "follow-up questions use the same data")
@@ -1832,8 +2506,9 @@ def render_report(r: dict, window: int, risk: float):
     _sec("Export")
     e1, e2, e3, e4 = st.columns(4, gap="small")
     e1.download_button("⬇ ANNOTATED CHART (PNG)", png_for(r, window), file_name=f"{r['ticker']}_arka_{r['asof']}.png", mime="image/png", use_container_width=True)
-    payload = {k: r[k] for k in ("ticker", "asof", "score", "plan", "ai", "engine_plan")}
-    payload.update({"zones": r["det"]["zones"], "levels": r["det"]["levels"]})
+    payload = {k: r.get(k) for k in ("ticker", "asof", "score", "plan", "ai", "engine_plan", "market", "results", "model")}
+    payload.update({"zones": r["det"]["zones"], "levels": r["det"]["levels"], "trendlines": r["det"]["trendlines"],
+                    "track_record": (r.get("track") or {}).get("groups")})
     report_json = json.dumps(payload, default=str, ensure_ascii=False, indent=2)
     e2.download_button("⬇ FULL REPORT (JSON)", report_json, file_name=f"{r['ticker']}_arka_{r['asof']}.json", mime="application/json", use_container_width=True)
     if e3.button("＋ ADD TO WATCHLIST", key="aa_wl", use_container_width=True):
@@ -1846,7 +2521,15 @@ def render_report(r: dict, window: int, risk: float):
                 st.info(err or "Already in your watchlist")
         except Exception as exc:
             st.error(f"Could not add: {exc}")
-    e4.caption("Research tool, not investment advice.")
+    p = r.get("plan")
+    if e4.button("✎ LOG THIS PLAN", key="aa_log", use_container_width=True, disabled=not p,
+                 help="Saves the plan to your JOURNAL. Arka then checks every day whether it triggered, hit target 1 or was stopped."):
+        label, _ = verdict_text(r)
+        call = {k: p.get(k) for k in ("direction", "ref_zone", "entry_low", "entry_high", "entry_ref", "stop", "targets", "source", "room_r")}
+        call.update({"ticker": r["ticker"], "asof": r["asof"], "close_at_log": r["det"]["close"], "score": r["score"], "verdict": label,
+                     "summary": f'{p["direction"]} {r["ticker"]} from {p.get("ref_zone")} · entry {p["entry_ref"]:,.2f} · stop {p["stop"]:,.2f}'})
+        if save_item("call", f'{r["ticker"]} · {p["direction"]} · {r["asof"]}', call, True):
+            st.success("Plan logged. Open JOURNAL to follow it.")
 
 
 _SB = None          # Supabase client handed over by app.py (used for "add to watchlist")
@@ -1928,10 +2611,15 @@ def render_radar():
         st.caption(f"Scanning the first 40 of {len(symbols)} symbols.")
         symbols = symbols[:40]
     st.caption(f"{len(symbols)} symbol(s) · uses your zone style ({style_source()}) · no AI cost")
+    want_track = st.checkbox("Also replay the track record of my zone style on these stocks (2 years, a few seconds more)", value=True, key="aa_radar_track")
     if st.button("SCAN FOR MY ZONES", type="primary", key="aa_radar_go", disabled=not symbols):
         with st.spinner(f"Scanning {len(symbols)} stocks…"):
             try:
-                st.session_state["aa_radar"] = {"rows": radar_scan(symbols, get_style()), "at": datetime.now(IST).strftime("%d %b %H:%M IST")}
+                out = radar_scan(symbols, get_style(), want_track)
+                rows_, tr_ = out if want_track else (out, None)
+                st.session_state["aa_radar"] = {"rows": rows_, "at": datetime.now(IST).strftime("%d %b %H:%M IST"), "track": tr_}
+                if tr_:
+                    st.session_state["aa_track_univ"] = tr_
             except Exception as exc:
                 st.error(f"Scan failed: {exc}")
     res = st.session_state.get("aa_radar")
@@ -1955,14 +2643,71 @@ def render_radar():
                     f'<td class="n">{x["quality"] if x["quality"] is not None else "—"}</td><td>{esc(x["status"] or "—")}</td>'
                     f'<td class="n">{(_fmt(x["dist_pct"]) + "%") if x["dist_pct"] is not None else "—"}</td>'
                     f'<td>{esc(x["direction"] or "—")}</td><td class="n">{(str(x["rr"]) + " R") if x["rr"] else "—"}</td>'
+                    f'<td class="n" style="color:{RED if x.get("blocked") else "#CFCFCF"}">{(format(x["room_r"], "g") + " R") if x.get("room_r") is not None else "—"}</td>'
                     f'<td><span class="aa-q" style="--c:{scol};--w:{sc}%"><i></i>{sc}</span></td></tr>')
-    head = "".join(f"<th>{h}</th>" for h in ("Symbol", "Price", "1D", "Trend", "RSI", "Nearest zone", "Quality", "Status", "Distance", "Plan", "T1 R:R", "Readiness"))
+    head = "".join(f"<th>{h}</th>" for h in ("Symbol", "Price", "1D", "Trend", "RSI", "Nearest zone", "Quality", "Status", "Distance", "Plan", "T1 R:R", "Room", "Readiness"))
     st.markdown(f'<div class="aa-tw"><table class="aa-t"><thead><tr>{head}</tr></thead><tbody>{"".join(body)}</tbody></table></div>', unsafe_allow_html=True)
     st.caption(f"Scanned {res['at']}. Readiness = zone quality, proximity, trend, weekly confluence and confirmation. Run ANALYZE on a name for the full AI read.")
+    if res.get("track"):
+        _sec("Track record of your zone style on this list", f'{res["track"].get("n_stocks", 0)} stocks · 2 years · replayed with no hindsight')
+        st.markdown(html_track(res["track"]), unsafe_allow_html=True)
+        st.caption("This is the evidence for your ZONE STYLE settings: change a setting in TEACH → ZONE STYLE, scan again, and compare. "
+                   "Break-even is 33% reaching 2R first; random price data gives about 30%. Costs are not included.")
     p1, p2 = st.columns([3, 1], gap="small")
     p1.selectbox("Open in ANALYZE", [x["symbol"] for x in rows], key="aa_radar_pick")
     p2.write("")
     p2.button("ANALYZE SELECTED", key="aa_radar_open", use_container_width=True, on_click=_analyze_selected)
+
+
+# ── JOURNAL ─────────────────────────────────────────────────
+def render_journal():
+    st.markdown('<div class="aa-intro"><b>Your logged plans, checked against what the market did.</b> Press LOG THIS PLAN under any analysis. '
+                'Each plan is then followed on daily candles: did price reach the entry, then target 1 or the stop first. This is the real, forward '
+                'record of the plans you chose to take, which no backtest can give you.</div>', unsafe_allow_html=True)
+    calls = [i for i in load_items() if i["kind"] == "call"]
+    if not calls:
+        st.markdown('<div class="aa-empty">No plans logged yet.<br>Run ANALYZE on a stock and press LOG THIS PLAN.</div>', unsafe_allow_html=True)
+        return
+    rows, closed = [], []
+    for it in calls[:60]:
+        p = it["payload"]
+        try:
+            ev = evaluate_call(p, fetch_ohlc(p["ticker"], "1d", "2y"))
+        except Exception as exc:
+            ev = {"status": f"NO DATA ({type(exc).__name__})", "r": None, "days": 0, "entry": None, "last": None}
+        rows.append((it, p, ev))
+        if ev["status"] in ("STOPPED", "TARGET 1 HIT"):
+            closed.append(ev["r"])
+    wins = sum(1 for x in closed if x > 0)
+    open_r = [ev["r"] for _, _, ev in rows if ev["status"] == "OPEN" and ev["r"] is not None]
+    kp = lambda lab, val: f'<div><span>{lab}</span><b>{val}</b></div>'
+    st.markdown('<div class="aa-card" style="min-height:0"><div class="aa-mini" style="grid-template-columns:repeat(5,1fr)">'
+                + kp("PLANS LOGGED", len(rows)) + kp("CLOSED", len(closed)) + kp("HIT TARGET 1", f"{wins} of {len(closed)}" if closed else "—")
+                + kp("RESULT OF CLOSED PLANS", f"{sum(closed):+.1f} R" if closed else "—") + kp("OPEN PLANS NOW", f"{sum(open_r):+.1f} R" if open_r else "—")
+                + "</div></div>", unsafe_allow_html=True)
+    colors = {"TARGET 1 HIT": GREEN, "STOPPED": RED, "OPEN": AMBER, "WAITING": T2}
+    body = []
+    for it, p, ev in rows:
+        t1 = p["targets"][0]["price"] if p.get("targets") else None
+        rr = "—" if ev["r"] is None else f'<span style="color:{GREEN if ev["r"] > 0 else RED if ev["r"] < 0 else T2}">{ev["r"]:+.2f} R</span>'
+        body.append(f'<tr><td><b>{esc(p["ticker"])}</b></td><td>{esc(p["asof"])}</td><td>{_pill(p["direction"], GREEN if p["direction"] == "LONG" else RED)}</td>'
+                    f'<td class="n">{_fmt(p["entry_low"])} – {_fmt(p["entry_high"])}</td><td class="n">{_fmt(p["stop"])}</td><td class="n">{_fmt(t1)}</td>'
+                    f'<td class="n">{p.get("score", "—")}</td><td>{_pill(ev["status"], colors.get(ev["status"], T3))}</td><td class="n">{_fmt(ev.get("entry"))}</td>'
+                    f'<td class="n">{_fmt(ev.get("last"))}</td><td class="n">{rr}</td><td class="n">{ev.get("days", 0)}</td></tr>')
+    head = "".join(f"<th>{h}</th>" for h in ("Stock", "Logged", "Side", "Entry zone", "Stop", "Target 1", "Score", "Status", "Filled at", "Last price", "Result", "Sessions"))
+    st.markdown(f'<div class="aa-tw"><table class="aa-t"><thead><tr>{head}</tr></thead><tbody>{"".join(body)}</tbody></table></div>', unsafe_allow_html=True)
+    st.caption("WAITING = price has not reached the entry yet · OPEN = filled, result shown at the last close · a candle that touches stop and target counts as stopped · "
+               "results are in R (1R = the distance from entry to stop). Daily candles; costs not included.")
+    d1, d2, d3 = st.columns([3, 1.2, 1], gap="small")
+    pick = d1.selectbox("Plan", [it["item_id"] for it, _, _ in rows], key="aa_j_pick", label_visibility="collapsed",
+                        format_func=lambda i: next(x["name"] for x, _, _ in rows if x["item_id"] == i))
+    if d2.button("OPEN IN ANALYZE", key="aa_j_open", use_container_width=True):
+        _set_run(next(p["ticker"] for x, p, _ in rows if x["item_id"] == pick))
+        st.rerun()
+    sure = d3.checkbox("Confirm", key="aa_j_sure")
+    if st.button("DELETE THIS PLAN FROM THE JOURNAL", key="aa_j_del", disabled=not sure):
+        delete_item(pick)
+        st.rerun()
 
 
 # ── TEACH ───────────────────────────────────────────────────
@@ -2228,11 +2973,13 @@ def render_arka_ai(supabase=None):
     _consume_autorun()
     st.markdown(html_status(), unsafe_allow_html=True)
     st.session_state.setdefault("aa_mode", "ANALYZE")
-    mode = st.radio("Mode", ["ANALYZE", "RADAR", "TEACH", "PLAYBOOK"], horizontal=True, key="aa_mode", label_visibility="collapsed")
+    mode = st.radio("Mode", ["ANALYZE", "RADAR", "JOURNAL", "TEACH", "PLAYBOOK"], horizontal=True, key="aa_mode", label_visibility="collapsed")
     if mode == "ANALYZE":
         render_analyze()
     elif mode == "RADAR":
         render_radar()
+    elif mode == "JOURNAL":
+        render_journal()
     elif mode == "TEACH":
         render_teach()
     else:
