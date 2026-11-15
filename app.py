@@ -1167,4 +1167,5 @@ with center:
 
 if right_rail is not None:
     with right_rail:
-        _news_rail_fragment()
+        with st.container(key="newsrail"):
+            _news_rail_fragment()
