@@ -2,22 +2,23 @@
 """
 auth.py — Persistent 30-day login for Arka Trades.
 
-Uses a signed HMAC-SHA256 cookie.
-Compatible with the existing app.py integration:
-    auth.derive_key(...)
-    auth.auto_login(...)
-    auth.flush()
-    auth.same(...)
-    auth.remember(...)
-    auth.forget(...)
+Features:
+- Signed HMAC-SHA256 authentication tokens.
+- Persistent browser cookie for 30 days.
+- Admin and member roles.
+- Password/key changes invalidate existing tokens.
+- Logout deletes the browser cookie.
+- Compatible with existing app.py integration.
 
-No Google login. No database dependency.
+No Google login.
+No database dependency.
 """
 
 from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import re
 import time
 
@@ -31,29 +32,44 @@ COOKIE_MAX_AGE = COOKIE_DAYS * 86400
 VALID_ROLES = {"admin", "member"}
 
 
+# ---------------------------------------------------------
+# SIGNING KEY
+# ---------------------------------------------------------
+
 def derive_key(secret, *parts) -> bytes:
     """
-    Derive a signing key from AUTH_SECRET and login credentials.
+    Derive signing key from AUTH_SECRET and login credentials.
 
-    Changing AUTH_SECRET or any login credential invalidates
-    previously issued tokens.
+    Changing AUTH_SECRET or any credential invalidates
+    previously issued authentication tokens.
     """
+
     values = [str(secret or ""), *(str(p) for p in parts)]
+
     material = "arka-auth-v1\0" + "\0".join(values)
 
-    return hashlib.sha256(material.encode("utf-8")).digest()
+    return hashlib.sha256(
+        material.encode("utf-8")
+    ).digest()
 
+
+# ---------------------------------------------------------
+# CONSTANT-TIME COMPARISON
+# ---------------------------------------------------------
 
 def same(a: str, b: str) -> bool:
-    """Constant-time string comparison."""
     return hmac.compare_digest(
         str(a).encode("utf-8"),
         str(b).encode("utf-8")
     )
 
 
+# ---------------------------------------------------------
+# TOKEN SIGNATURE
+# ---------------------------------------------------------
+
 def _sig(key: bytes, payload: str) -> str:
-    """Generate HMAC-SHA256 signature."""
+
     return hmac.new(
         key,
         payload.encode("utf-8"),
@@ -61,13 +77,16 @@ def _sig(key: bytes, payload: str) -> str:
     ).hexdigest()
 
 
+# ---------------------------------------------------------
+# CREATE TOKEN
+# ---------------------------------------------------------
+
 def make_token(
     role: str,
     key: bytes,
     days: int = COOKIE_DAYS,
     now: float | None = None
 ) -> str:
-    """Create a signed role and expiry token."""
 
     if role not in VALID_ROLES:
         raise ValueError("Invalid authentication role.")
@@ -76,22 +95,27 @@ def make_token(
         raise ValueError("Token lifetime must be positive.")
 
     current_time = time.time() if now is None else now
+
     expiry = int(current_time + days * 86400)
 
     payload = f"{role}.{expiry}"
+
     signature = _sig(key, payload)
 
     return f"{payload}.{signature}"
 
+
+# ---------------------------------------------------------
+# VERIFY TOKEN
+# ---------------------------------------------------------
 
 def verify_token(
     token,
     key: bytes,
     now: float | None = None
 ):
-    """
-    Validate token signature, role and expiry.
 
+    """
     Returns:
         'admin'
         'member'
@@ -99,55 +123,74 @@ def verify_token(
     """
 
     try:
+
         if not token:
             return None
 
         token = str(token)
 
-        # Reject unexpectedly large or malformed cookies.
         if len(token) > 512:
             return None
 
-        role, exp, signature = token.split(".")
+        role, expiry, signature = token.split(".")
 
         if role not in VALID_ROLES:
             return None
 
-        if not exp.isdigit():
+        if not expiry.isdigit():
             return None
 
-        if not re.fullmatch(r"[0-9a-f]{64}", signature):
+        if not re.fullmatch(
+            r"[0-9a-f]{64}",
+            signature
+        ):
             return None
 
-        payload = f"{role}.{exp}"
-        expected_signature = _sig(key, payload)
+        payload = f"{role}.{expiry}"
+
+        expected_signature = _sig(
+            key,
+            payload
+        )
 
         if not same(signature, expected_signature):
             return None
 
         current_time = time.time() if now is None else now
 
-        if int(exp) <= current_time:
+        if int(expiry) <= current_time:
             return None
 
         return role
 
     except (ValueError, TypeError, OverflowError):
+
         return None
 
+
+# ---------------------------------------------------------
+# READ BROWSER COOKIE
+# ---------------------------------------------------------
 
 def _cookie():
-    """Read the authentication cookie from the current request."""
 
     try:
+
         return st.context.cookies.get(COOKIE_NAME)
+
     except Exception:
+
         return None
 
 
+# ---------------------------------------------------------
+# AUTOMATIC LOGIN
+# ---------------------------------------------------------
+
 def auto_login(key: bytes) -> None:
+
     """
-    Restore login before rendering the login page.
+    Restore login before the login page is displayed.
     Call once per Streamlit run.
     """
 
@@ -156,85 +199,165 @@ def auto_login(key: bytes) -> None:
     if ss.get("logged_in") or ss.get("_no_autologin"):
         return
 
-    role = verify_token(_cookie(), key)
+    role = verify_token(
+        _cookie(),
+        key
+    )
 
     if role:
+
         ss.logged_in = True
+
         ss.is_admin = role == "admin"
 
 
+# ---------------------------------------------------------
+# REMEMBER LOGIN
+# ---------------------------------------------------------
+
 def remember(role: str, key: bytes) -> None:
-    """Queue a persistent login cookie."""
+
+    """
+    Queue the authentication cookie for writing.
+    """
 
     if role not in VALID_ROLES:
         raise ValueError("Invalid authentication role.")
 
-    st.session_state["_set_cookie"] = make_token(
+    token = make_token(
         role,
         key,
         COOKIE_DAYS
     )
 
+    st.session_state["_set_cookie"] = token
+
+    st.session_state["_clear_cookie"] = False
+
     st.session_state["_no_autologin"] = False
 
 
+# ---------------------------------------------------------
+# LOGOUT
+# ---------------------------------------------------------
+
 def forget() -> None:
-    """Queue cookie deletion and prevent automatic login."""
+
+    """
+    Queue cookie deletion and block automatic login
+    for the remainder of the current Streamlit session.
+    """
 
     ss = st.session_state
 
     ss["_set_cookie"] = None
+
     ss["_clear_cookie"] = True
+
     ss["_no_autologin"] = True
 
     ss["logged_in"] = False
+
     ss["is_admin"] = False
 
 
-def flush() -> None:
-    """
-    Write or delete the cookie using a same-origin script.
+# ---------------------------------------------------------
+# WRITE / DELETE COOKIE
+# ---------------------------------------------------------
 
-    Must be called during the Streamlit run after auto_login().
+def flush() -> None:
+
+    """
+    Write or delete the browser authentication cookie.
+
+    Uses the existing Streamlit HTML component.
     """
 
     ss = st.session_state
 
     token = ss.pop("_set_cookie", None)
+
     clear = ss.pop("_clear_cookie", False)
 
     if not token and not clear:
         return
 
     if token:
-        value = (
-            f"{COOKIE_NAME}={token}; "
-            f"Max-Age={COOKIE_MAX_AGE}; "
-            "Path=/; SameSite=Lax"
-        )
+
+        age = COOKIE_MAX_AGE
+
     else:
-        value = (
-            f"{COOKIE_NAME}=; "
-            "Max-Age=0; "
-            "Path=/; SameSite=Lax"
-        )
+
+        age = 0
+
+    # JSON encoding safely passes the cookie value to JavaScript.
+    cookie_name = json.dumps(COOKIE_NAME)
+
+    cookie_value = json.dumps(token or "")
+
+    script = f"""
+    <script>
+    (() => {{
+
+        try {{
+
+            const p = window.parent;
+
+            const secure =
+                p.location.protocol === "https:"
+                ? "; Secure"
+                : "";
+
+            const name = {cookie_name};
+
+            const value = {cookie_value};
+
+            const age = {age};
+
+            const cookie =
+                name + "=" + value +
+                "; Max-Age=" + age +
+                "; Path=/" +
+                "; SameSite=Lax" +
+                secure;
+
+            // Write cookie to the main Streamlit page.
+            p.document.cookie = cookie;
+
+            // Verify whether the browser accepted it.
+            const saved = p.document.cookie
+                .split(";")
+                .map(x => x.trim())
+                .some(x => x.startsWith(name + "="));
+
+            console.log(
+                "Arka Trades cookie:",
+                saved ? "WRITE SUCCESS" : "WRITE FAILED"
+            );
+
+            // Notify the browser console if writing failed.
+            if (!saved && age > 0) {{
+
+                console.error(
+                    "Arka Trades: authentication cookie was not saved."
+                );
+
+            }}
+
+        }} catch (error) {{
+
+            console.error(
+                "Arka Trades cookie error:",
+                error
+            );
+
+        }}
+
+    }})();
+    </script>
+    """
 
     components.html(
-        f"""
-        <script>
-        (() => {{
-            try {{
-                const p = window.parent;
-                const secure = p.location.protocol === "https:"
-                    ? "; Secure"
-                    : "";
-
-                p.document.cookie = {value!r} + secure;
-            }} catch (e) {{
-                console.error("Arka Trades cookie update failed:", e);
-            }}
-        }})();
-        </script>
-        """,
-        height=0
+        script,
+        height=1
     )
