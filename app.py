@@ -42,7 +42,9 @@ import streamlit as st
 st.set_page_config(page_title="Arka Trades · Market Terminal", layout="wide", page_icon="📈",
                    initial_sidebar_state="collapsed")
 
-import user_data as ud                                                  # noqa: E402  (after set_page_config)
+import user_data as ud
+import auth                                                             # noqa: E402
+from mobile import MOBILE_CSS                                           # noqa: E402# noqa: E402  (after set_page_config)
 from data_engine import warm_security, to_float   # noqa: E402
 
 try:
