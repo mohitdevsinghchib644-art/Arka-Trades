@@ -1,5 +1,15 @@
 """
-Arka Trades — Market Terminal v8
+Arka Trades — Market Terminal v8.1
+
+What changed vs v8.0
+--------------------
+LOGIN · REMEMBER THIS DEVICE (auth.py — new file in the repo root)
+  * Sign in once per phone / browser and stay signed in for 30 days (signed cookie, no IP matching).
+  * Sign out clears it. Changing AUTH_SECRET (or a login password) in Streamlit secrets signs out every device.
+  * No passwords in the code any more: ADMIN_USER / ADMIN_PASS / MEMBER_USER / MEMBER_PASS / AUTH_SECRET come from secrets.
+
+MOBILE (mobile.py — new file in the repo root)
+  * Bottom navigation bar, slim top bar, full-width command box, news rail and function cards hidden on phones.
 
 What changed vs v7
 ------------------
@@ -42,9 +52,9 @@ import streamlit as st
 st.set_page_config(page_title="Arka Trades · Market Terminal", layout="wide", page_icon="📈",
                    initial_sidebar_state="collapsed")
 
-import user_data as ud
+import user_data as ud                                                  # noqa: E402  (after set_page_config)
 import auth                                                             # noqa: E402
-from mobile import MOBILE_CSS                                           # noqa: E402# noqa: E402  (after set_page_config)
+from mobile import MOBILE_CSS                                           # noqa: E402
 from data_engine import warm_security, to_float   # noqa: E402
 
 try:
@@ -53,7 +63,7 @@ except Exception:  # pragma: no cover
     create_client = None
 
 IST = timezone(timedelta(hours=5, minutes=30))
-APP_VERSION = "v8"
+APP_VERSION = "v8.1"
 
 
 def _secret(name: str, default=""):
@@ -102,8 +112,8 @@ def db_load_admin_watchlist() -> list:
         return []
 
 
-# Logins: set ADMIN_USER / ADMIN_PASS / MEMBER_USER / MEMBER_PASS in Streamlit Cloud → Settings → Secrets,
-# then delete the fallback strings below so no password lives in your GitHub repository.
+# Logins live ONLY in Streamlit Cloud → Settings → Secrets (nothing is hardcoded here any more):
+#   ADMIN_USER, ADMIN_PASS, MEMBER_USER, MEMBER_PASS, AUTH_SECRET (any long random string)
 _ADMIN_USER = str(_secret("ADMIN_USER", ""))
 _ADMIN_PASS = str(_secret("ADMIN_PASS", ""))
 _MEMBER_USER = str(_secret("MEMBER_USER", ""))
@@ -604,7 +614,7 @@ def _render_login():
             with st.container(key="loginwrap"):
                 with st.form("lf"):
                     st.markdown('<div class="lg-card-h"><b>Member login</b><span>Sign in to access your terminal</span></div>', unsafe_allow_html=True)
-                                        u = st.text_input("Username", placeholder="Enter username")
+                    u = st.text_input("Username", placeholder="Enter username")
                     p = st.text_input("Password", placeholder="Enter password", type="password")
                     remember = st.checkbox("Keep me signed in on this device (30 days)", value=True)
                     ok = st.form_submit_button("Sign in", use_container_width=True, type="primary")
@@ -725,9 +735,13 @@ def _render_landing():
     st.markdown('<div class="lp-foot">Arka Trades · Finance &amp; Market Education'
                 '<small>Not SEBI registered. All content is for educational purposes only. Trading involves risk: decisions and outcomes are entirely your own. '
                 'Examples shown are illustrative and not recommendations.</small></div>', unsafe_allow_html=True)
- 
+
+
+# Remember-this-device: restore the session from the signed cookie BEFORE deciding whether to show the login page.
 auth.auto_login(_AUTH_KEY)
 auth.flush()
+IS_ADMIN = st.session_state.get("is_admin", False)      # auto_login may have just set it
+
 if not st.session_state.logged_in:
     if st.query_params.get("login") == "1":
         st.session_state.show_login = True
@@ -777,7 +791,7 @@ def _nav_cb(target):
 
 
 def _sign_out_cb():
-    auth.forget()
+    auth.forget()                                   # clears the remember-this-device cookie
     for k in ("logged_in", "is_admin", "show_login"):
         st.session_state[k] = False
     st.session_state.page = "home"
@@ -1174,5 +1188,5 @@ with center:
 
 if right_rail is not None:
     with right_rail:
-        with st.container(key="newsrail"):
+        with st.container(key="newsrail"):                       # hidden on phones (see mobile.py)
             _news_rail_fragment()
