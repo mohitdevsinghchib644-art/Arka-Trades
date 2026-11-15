@@ -1,4 +1,11 @@
-"""Arka Trades — Research Terminal v13 (deliveries, quant, financial health, filings, research intelligence).
+"""Arka Trades — Research Terminal v14.
+
+v14: new terminal design (security bar, two-row function menu, dashboard as the default screen, class-based tables
+with automatic green / red) and 11 new functions: OV dashboard, GP chart, HP price history, COMP comparison,
+BETA regression, HVG volatility, TRA total return, DCF reverse DCF, DUP DuPont, GRW growth and common size,
+EVTS events timeline; plus management in DES and a P/E band on price in VAL.
+
+v13 notes follow (deliveries, quant, financial health, filings, research intelligence).
 
 What changed vs v12
 -------------------
@@ -55,6 +62,7 @@ from __future__ import annotations
 import html
 import json
 import math
+import re
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
@@ -93,41 +101,54 @@ T0 = {
 
 # ═══════════════════════════ Function map ═══════════════════════════
 GROUPS = [
-    ("SNAPSHOT", [
-        ("DES", "Description", "Company profile, key fundamentals, growth snapshot, pros & cons"),
-        ("HC", "Health Check", "Piotroski-style quality score and automatic red / green flags"),
-        ("VAL", "Valuation", "TTM P/E, P/B, earnings yield, Graham number and historical P/E band"),
-        ("FH", "Financial Health", "Leverage, coverage, liquidity, free cash flow and cash conversion"),
+    ("OVERVIEW", [
+        ("OV", "Dashboard", "Chart, performance, valuation, quality, earnings, ownership, contradictions and filings on one screen"),
+        ("DES", "Description", "Company profile, key fundamentals, management, growth snapshot, pros and cons"),
+        ("SYN", "Research Intel", "Evidence sheet, contradiction detection and AI synthesis"),
     ]),
     ("FINANCIALS", [
         ("FA", "Income Statement", "Quarterly / yearly results with QoQ and YoY growth"),
-        ("ERN", "Earnings Trend", "Each quarter against the same quarter a year earlier"),
         ("BS", "Balance Sheet", "Assets, liabilities, borrowings and reserves"),
         ("CF", "Cash Flow", "Operating, investing and financing cash flows"),
         ("RAT", "Ratios", "Efficiency and return ratios"),
+        ("GRW", "Growth", "1 / 3 / 5 / 10-year compound growth and common-size statement"),
+        ("ERN", "Earnings Trend", "Each quarter against the same quarter a year earlier"),
+    ]),
+    ("QUALITY", [
+        ("HC", "Health Check", "Piotroski-style quality score and automatic red / green flags"),
+        ("FH", "Financial Health", "Leverage, coverage, liquidity, free cash flow and cash conversion"),
+        ("DUP", "DuPont", "Return on equity split into margin, asset turnover and leverage"),
+    ]),
+    ("VALUATION", [
+        ("VAL", "Valuation", "P/E, P/B, earnings yield, Graham number, P/E history and P/E band on price"),
+        ("DCF", "Reverse DCF", "The growth rate today's price already assumes, with a sensitivity grid"),
+        ("RV", "Peers", "Relative value versus sector peers"),
+        ("ANR", "Analysts", "Price targets, rating distribution and rating changes"),
+    ]),
+    ("PRICE", [
+        ("GP", "Chart", "Full-size price chart"),
+        ("HP", "Price History", "Daily open / high / low / close / volume table with CSV export"),
+        ("TECH", "Technicals", "Trend, momentum, moving averages and pivot levels"),
+        ("SEAS", "Seasonality", "Monthly return heatmap, average month and win rate"),
+        ("TRA", "Total Return", "Price return plus dividends, per-year return"),
+    ]),
+    ("RISK", [
+        ("QR", "Quant", "Relative strength vs NIFTY 500 / 50, momentum, volatility, beta, drawdown"),
+        ("COMP", "Compare", "Rebased performance against any stocks or indices, with correlation"),
+        ("BETA", "Beta", "Regression against the index: beta, alpha, R-squared, rolling beta"),
+        ("HVG", "Volatility", "Realised volatility 20 / 60 / 120 sessions, percentile, ATR"),
+        ("PERF", "vs NIFTY 50", "Relative performance, alpha, beta, volatility, drawdown"),
     ]),
     ("OWNERSHIP", [
         ("HDS", "Shareholding", "Promoter / FII / DII / public holding trend"),
         ("DLV", "Deliveries", "Delivered vs traded quantity and delivery %, daily / weekly / monthly (NSE)"),
         ("MF", "MF Holdings", "Mutual fund positions (ScanX, optional source)"),
     ]),
-    ("COMPARE", [
-        ("RV", "Peers", "Relative value versus sector peers"),
-        ("PERF", "vs NIFTY 50", "Relative performance, alpha, beta, volatility, drawdown"),
-        ("QR", "Quant", "Relative strength vs NIFTY 500 / 50, momentum, volatility, beta, drawdown"),
-    ]),
-    ("MARKET", [
-        ("TECH", "Technicals", "Trend, momentum, moving averages and pivot levels"),
-        ("SEAS", "Seasonality", "Monthly return heatmap, average month and win rate"),
-        ("ANR", "Analysts", "Price targets, rating distribution and rating changes"),
-    ]),
     ("EVENTS", [
-        ("DVD", "Dividends", "Dividend history, splits and bonus issues"),
+        ("EVTS", "Events", "Timeline of results, board meetings, dividends, splits and material filings"),
         ("CN", "News", "Company news timeline"),
-        ("CACS", "Announcements", "Exchange filings from BSE, by category"),
-    ]),
-    ("INTELLIGENCE", [
-        ("SYN", "Research Intel", "Evidence sheet, contradiction detection and AI synthesis"),
+        ("CACS", "Filings", "Exchange filings from BSE, by category"),
+        ("DVD", "Dividends", "Dividend history, splits and bonus issues"),
     ]),
     ("WORKSPACE", [
         ("NOTE", "Thesis Notes", "Your bull / bear case, catalysts, risks and target"),
@@ -138,11 +159,11 @@ FN = {code: (name, desc, grp) for grp, items in GROUPS for code, name, desc in i
 FUNCS = list(FN)
 
 ALIASES = {
-    "OVERVIEW": "DES", "PROFILE": "DES", "HEALTH": "HC", "SCORE": "HC", "PIOTROSKI": "HC",
+    "OVERVIEW": "OV", "DASH": "OV", "DASHBOARD": "OV", "PROFILE": "DES", "MGMT": "DES", "HEALTH": "HC", "SCORE": "HC", "PIOTROSKI": "HC",
     "VALUATION": "VAL", "PE": "VAL", "FINANCIALS": "FA", "RESULTS": "FA", "PL": "FA", "IS": "FA",
     "BALANCE": "BS", "CASH": "CF", "CASHFLOW": "CF", "RATIOS": "RAT", "SHAREHOLDING": "HDS",
-    "OWN": "HDS", "HOLDING": "HDS", "MFH": "MF", "PEERS": "RV", "COMP": "RV", "PERFORMANCE": "PERF",
-    "BETA": "PERF", "GP": "TECH", "TECHNICALS": "TECH", "SEASONALITY": "SEAS", "SEAG": "SEAS",
+    "OWN": "HDS", "HOLDING": "HDS", "MFH": "MF", "PEERS": "RV", "COMPARE": "COMP", "PERFORMANCE": "PERF",
+    "CHART": "GP", "G": "GP", "PRICES": "HP", "HIST": "HP", "VOL": "HVG", "HV": "HVG", "TR": "TRA", "TOTALRETURN": "TRA", "RDCF": "DCF", "DUPONT": "DUP", "GROWTH": "GRW", "CAGR": "GRW", "EVENTS": "EVTS", "EVT": "EVTS", "CALENDAR": "EVTS", "TECHNICALS": "TECH", "SEASONALITY": "SEAS", "SEAG": "SEAS",
     "ANALYST": "ANR", "TARGET": "ANR", "DIVIDENDS": "DVD", "NEWS": "CN", "ANNOUNCEMENTS": "CACS",
     "FILINGS": "CACS", "THESIS": "NOTE", "NOTES": "NOTE", "SOURCES": "SRC",
     "DELIVERY": "DLV", "DELIVERIES": "DLV", "DEL": "DLV", "FINHEALTH": "FH", "EARNINGS": "ERN", "EE": "ERN",
@@ -229,6 +250,44 @@ def _hist(sym, period, fallback="2y"):
 
 
 # ═══════════════════════════ UI primitives ═══════════════════════════
+# ═══════════════════════════ UI primitives (v14 terminal design) ═══════════════════════════
+_POS_WORDS = {"ABOVE", "OUTPERFORM", "PASS", "UP", "UPTREND", "BULLISH", "GOLDEN CROSS", "OVERSOLD"}
+_NEG_WORDS = {"BELOW", "UNDERPERFORM", "FAIL", "DOWN", "DOWNTREND", "BEARISH", "DEATH CROSS", "OVERBOUGHT"}
+
+
+def _cls(v) -> str:
+    """Colour class for a table cell: signed numbers and a few state words."""
+    s = str(v).strip()
+    if re.match(r"^\+\s?[\d₹.]", s):
+        return " pos"
+    if re.match(r"^[-−]\s?[\d₹.]", s):
+        return " neg"
+    u = s.upper()
+    return " pos" if u in _POS_WORDS else " neg" if u in _NEG_WORDS else ""
+
+
+def _mini(title, rows, T, code=""):
+    """Compact dashboard panel. rows: (label, value) or (label, value, color)."""
+    body = ""
+    for r in rows:
+        c = r[2] if len(r) > 2 and r[2] else ""
+        cls = _cls(r[1]) if not c else ""
+        body += f'<div class="rp-mr"><span>{_esc(r[0])}</span><b class="{cls.strip()}" style="{"color:" + c if c else ""}">{_esc(r[1])}</b></div>'
+    hint = f'<em>{_esc(code)} ▸</em>' if code else ""
+    st.markdown(f'<div class="rp-panel"><div class="t">{_esc(title)}{hint}</div><div class="b tight">{body}</div></div>', unsafe_allow_html=True)
+
+
+def _spark(values, color, w=220, h=44):
+    v = [float(x) for x in values if x == x]
+    if len(v) < 3:
+        return ""
+    lo, hi = min(v), max(v)
+    rng = (hi - lo) or 1.0
+    pts = " ".join(f"{i / (len(v) - 1) * w:.1f},{h - 3 - (x - lo) / rng * (h - 6):.1f}" for i, x in enumerate(v))
+    return (f'<svg width="100%" height="{h}" viewBox="0 0 {w} {h}" preserveAspectRatio="none">'
+            f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="1.6" vector-effect="non-scaling-stroke"/></svg>')
+
+
 def _tag(status, T, text=None):
     if status == "live":
         label, color = text or "● LIVE", T["green"]
@@ -236,70 +295,49 @@ def _tag(status, T, text=None):
         label, color = text or "◐ CACHED", T["amber"]
     else:
         label, color = text or "✕ N/A", T["t3"]
-    return f'<span style="color:{color};font:700 9px {T["mono"]};letter-spacing:.8px">{_esc(label)}</span>'
+    return f'<span class="rp-tag" style="color:{color}">{_esc(label)}</span>'
 
 
 def _header(title, T, status=None, note=None):
-    right = _tag(status, T) if status else ""
-    st.markdown(
-        f'<div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid {T["border"]};padding:9px 0 6px;margin:13px 0 8px">'
-        f'<span style="font:700 11px {T["mono"]};letter-spacing:1px;color:{T["amber"]}">{_esc(title).upper()}</span>{right}</div>',
-        unsafe_allow_html=True)
-    if note:
-        st.markdown(f'<div style="font:9px {T["mono"]};color:{T["t3"]};margin:3px 0 8px">{_esc(note)}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="rp-h"><b>{_esc(title)}</b>{_tag(status, T) if status else ""}</div>'
+                + (f'<div class="rp-note">{_esc(note)}</div>' if note else ""), unsafe_allow_html=True)
 
 
 def _panel(title, body, T, dashed=False):
-    border = f"1px dashed {T['border']}" if dashed else f"1px solid {T['border']}"
-    st.markdown(
-        f'<div style="border:{border};background:{T["panel"]};padding:11px 13px;margin:7px 0">'
-        f'<div style="font:700 10px {T["mono"]};color:{T["ivory"]};margin-bottom:7px">{_esc(title).upper()}</div>{body}</div>',
-        unsafe_allow_html=True)
+    st.markdown(f'<div class="rp-panel{" dash" if dashed else ""}"><div class="t">{_esc(title)}</div><div class="b">{body}</div></div>',
+                unsafe_allow_html=True)
 
 
 def _unavailable(title, requirement, T, detail=None):
     detail = detail or "No verified dataset returned this field."
-    _panel(title,
-           f'<div style="font:10px {T["mono"]};color:{T["t2"]};line-height:1.75">'
-           f'<b style="color:{T["t3"]}">STATUS:</b> DATA UNAVAILABLE<br>'
-           f'<b style="color:{T["t3"]}">REQUIRED:</b> {_esc(requirement)}<br>{_esc(detail)}</div>', T, dashed=True)
+    _panel(title, f'<span class="rp-mut">STATUS</span> DATA UNAVAILABLE &nbsp;·&nbsp; <span class="rp-mut">NEEDS</span> {_esc(requirement)}'
+                  f'<div style="margin-top:4px">{_esc(detail)}</div>', T, dashed=True)
 
 
 def _kpis(items, T, cols=4):
-    """items: (label, value, sub) or (label, value, sub, color)."""
-    c = st.columns(cols)
-    for i, it in enumerate(items):
+    """items: (label, value, sub) or (label, value, sub, color). One dense grid, hairline separators."""
+    tiles = ""
+    for it in items:
         label, value, sub = it[:3]
         color = it[3] if len(it) > 3 and it[3] else T["ivory"]
-        with c[i % cols]:
-            st.markdown(
-                f'<div style="border:1px solid {T["border"]};background:{T["panel"]};padding:10px 11px;min-height:67px;margin-bottom:7px">'
-                f'<div style="font:9px {T["mono"]};color:{T["t3"]};letter-spacing:.6px">{_esc(label.upper())}</div>'
-                f'<div style="font:700 15px {T["mono"]};color:{color};margin-top:4px">{_esc(value)}</div>'
-                f'<div style="font:9px {T["mono"]};color:{T["t3"]};margin-top:3px">{_esc(sub or "")}</div></div>',
-                unsafe_allow_html=True)
+        tiles += (f'<div class="rp-k"><div class="l">{_esc(label)}</div><div class="v" style="color:{color}">{_esc(value)}</div>'
+                  f'<div class="s">{_esc(sub or "")}</div></div>')
+    st.markdown(f'<div class="rp-kg" style="--n:{max(1, min(cols, len(items) or 1))}">{tiles}</div>', unsafe_allow_html=True)
 
 
 def _table(periods, rows, T, highlights=(), dl=None):
     if not rows:
         _unavailable("No rows returned", "Selected dataset", T)
         return
-    heads = "".join(f'<th style="text-align:right;padding:7px 8px;color:{T["t3"]};font:700 9px {T["mono"]};white-space:nowrap">{_esc(p)}</th>' for p in periods)
+    heads = "".join(f"<th>{_esc(p)}</th>" for p in periods)
     out = []
-    for i, r in enumerate(rows):
+    for r in rows:
         label = str(r.get("label", ""))
         hl = any(x.lower() in label.lower() for x in highlights if x)
-        cells = "".join(
-            f'<td style="text-align:right;padding:7px 8px;color:{T["ivory"] if hl else T["t2"]};font:{"700" if hl else "500"} 10px {T["mono"]};white-space:nowrap">{_esc(v)}</td>'
-            for v in r.get("values", []))
-        bg = T["row_alt"] if i % 2 else T["panel"]
-        out.append(
-            f'<tr style="background:{bg};border-bottom:1px solid {T["border"]}">'
-            f'<td style="padding:7px 8px;color:{T["amber"] if hl else T["t2"]};font:{"700" if hl else "500"} 10px {T["mono"]};white-space:nowrap;position:sticky;left:0;background:{bg}">{_esc(label)}</td>{cells}</tr>')
-    st.markdown(
-        f'<div style="overflow-x:auto;border:1px solid {T["border"]};background:{T["panel"]};max-width:100%"><table style="width:100%;border-collapse:collapse">'
-        f'<thead><tr style="background:{T["panel2"]};border-bottom:1px solid {T["border"]}"><th style="text-align:left;padding:7px 8px;color:{T["t3"]};font:700 9px {T["mono"]};position:sticky;left:0;background:{T["panel2"]}">METRIC</th>{heads}</tr></thead>'
-        f'<tbody>{"".join(out)}</tbody></table></div>', unsafe_allow_html=True)
+        cells = "".join(f'<td class="n{_cls(v)}">{_esc(v)}</td>' for v in r.get("values", []))
+        out.append(f'<tr class="{"hl" if hl else ""}"><td class="l">{_esc(label)}</td>{cells}</tr>')
+    st.markdown(f'<div class="rp-tw"><table class="rp-t"><thead><tr><th class="l">&nbsp;</th>{heads}</tr></thead>'
+                f'<tbody>{"".join(out)}</tbody></table></div>', unsafe_allow_html=True)
     if dl:
         n = len(periods)
         data = [[r.get("label", "")] + (list(r.get("values", [])) + [""] * n)[:n] for r in rows]
@@ -346,20 +384,17 @@ def _checklist(items, T, labels=("PASS", "FAIL", "N/A")):
     """items: (text, ok: True/False/None, detail)."""
     body = ""
     for text, ok, detail in items:
-        mark, col = ((labels[0], T["green"]) if ok is True else
-                     (labels[1], T["red"]) if ok is False else (labels[2], T["t3"]))
-        body += (f'<div style="display:flex;gap:12px;align-items:baseline;padding:6px 0;border-bottom:1px solid {T["border"]};font:10px {T["mono"]}">'
-                 f'<b style="color:{col};min-width:42px">{mark}</b><span style="color:{T["ivory"]};flex:1">{_esc(text)}</span>'
-                 f'<span style="color:{T["t3"]};text-align:right">{_esc(detail or "")}</span></div>')
+        mark, col = ((labels[0], T["green"]) if ok is True else (labels[1], T["red"]) if ok is False else (labels[2], T["t3"]))
+        body += (f'<div class="rp-cl"><b style="color:{col}">{mark}</b><span>{_esc(text)}</span><i>{_esc(detail or "")}</i></div>')
     return body
 
 
 def _fig(fig, T, h=300, key=None, **layout):
     fig.update_layout(height=h, margin=dict(l=0, r=10, t=10, b=0), paper_bgcolor=T["bg"], plot_bgcolor=T["bg"],
-                      font=dict(color=T["t2"], family="JetBrains Mono, Consolas, monospace", size=9),
-                      legend=dict(orientation="h", y=1.1, x=0), **layout)
-    fig.update_xaxes(showgrid=False)
-    fig.update_yaxes(showgrid=True, gridcolor="#181818")
+                      font=dict(color="#B4B4B4", family="JetBrains Mono, Consolas, monospace", size=11),
+                      legend=dict(orientation="h", y=1.12, x=0), **layout)
+    fig.update_xaxes(showgrid=False, linecolor="#232323")
+    fig.update_yaxes(showgrid=True, gridcolor="#161616", zeroline=False)
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=key)
 
 
@@ -453,42 +488,33 @@ def _ttm_eps(B):
 def _snapshot(sym, B, T, show_quote=True):
     s = B.get("summary") or {}
     hist = get_history(sym, "1y")
-    price = chg = pos = None
+    price = chg = pts = pos = lo = hi = None
     if hist is not None and len(hist) >= 2:
         price, prev = float(hist["Close"].iloc[-1]), float(hist["Close"].iloc[-2])
-        chg = (price / prev - 1) * 100
+        chg, pts = (price / prev - 1) * 100, price - prev
         h252 = hist.tail(252)
         lo, hi = float(h252["Low"].min()), float(h252["High"].max())
         pos = None if hi == lo else max(0.0, min(100.0, (price - lo) / (hi - lo) * 100))
-    bv = _f(s.get("book_value"))
-    de = _debt_equity(B)
-    cells = []
+    bv, de = _f(s.get("book_value")), _debt_equity(B)
+    sc = B.get("sector") or {}
+    sub = " · ".join(x for x in (sym, "NSE", sc.get("Sector") or sc.get("Broad Sector"), sc.get("Industry")) if x)
+    cc = T["green"] if (chg or 0) >= 0 else T["red"]
+    quote = ""
     if show_quote:
-        cc = T["green"] if (chg or 0) >= 0 else T["red"]
-        cells.append(("LAST", _rs(price), T["ivory"]))
-        cells.append(("CHG", _pct(chg, 2, True), cc))
-    cells += [
-        ("MCAP", f'₹{s["market_cap"]} Cr' if s.get("market_cap") else "N/A", None),
-        ("P/E", f'{s["pe_ratio"]}x' if s.get("pe_ratio") else "N/A", None),
-        ("P/B", f"{price / bv:.2f}x" if price and bv else "N/A", None),
-        ("ROE", f'{s["roe"]}%' if s.get("roe") else "N/A", None),
-        ("ROCE", f'{s["roce"]}%' if s.get("roce") else "N/A", None),
-        ("D/E", f"{de}x" if de is not None else "N/A", None),
-        ("DIV YLD", f'{s["dividend_yield"]}%' if s.get("dividend_yield") else "N/A", None),
-    ]
-    body = "".join(
-        f'<div style="padding:6px 13px;border-right:1px solid {T["border"]}">'
-        f'<div style="font:9px {T["mono"]};color:{T["t3"]};letter-spacing:.6px">{_esc(l)}</div>'
-        f'<div style="font:700 12px {T["mono"]};color:{c or T["ivory"]};margin-top:2px;white-space:nowrap">{_esc(v)}</div></div>'
-        for l, v, c in cells)
+        quote = (f'<div class="q"><div class="px">{_rs(price)}</div>'
+                 f'<div class="ch" style="color:{cc}">{"▲" if (chg or 0) >= 0 else "▼"} {abs(pts):,.2f} ({chg:+.2f}%)</div></div>' if price else
+                 '<div class="q"><div class="px">N/A</div></div>')
+    stats = [("MCAP", f'₹{s["market_cap"]} Cr' if s.get("market_cap") else "N/A"), ("P/E", f'{s["pe_ratio"]}x' if s.get("pe_ratio") else "N/A"),
+             ("P/B", f"{price / bv:.2f}x" if price and bv else "N/A"), ("ROE", f'{s["roe"]}%' if s.get("roe") else "N/A"),
+             ("ROCE", f'{s["roce"]}%' if s.get("roce") else "N/A"), ("D/E", f"{de}x" if de is not None else "N/A"),
+             ("DIV YLD", f'{s["dividend_yield"]}%' if s.get("dividend_yield") else "N/A")]
+    cells = "".join(f'<div class="st"><span>{l}</span><b>{_esc(v)}</b></div>' for l, v in stats)
+    rng = ""
     if pos is not None:
-        body += (f'<div style="padding:6px 13px;min-width:150px;flex:1">'
-                 f'<div style="font:9px {T["mono"]};color:{T["t3"]};letter-spacing:.6px">52W POSITION · {pos:.0f}%</div>'
-                 f'<div style="position:relative;height:5px;background:#1a1a1a;margin-top:8px">'
-                 f'<div style="position:absolute;left:0;top:0;height:5px;width:{pos:.1f}%;background:{T["amber"]}55"></div>'
-                 f'<div style="position:absolute;left:{pos:.1f}%;top:-3px;width:3px;height:11px;background:{T["amber"]}"></div></div></div>')
-    st.markdown(f'<div style="display:flex;flex-wrap:wrap;align-items:stretch;border:1px solid {T["border"]};background:{T["panel"]};margin:4px 0 8px">{body}</div>',
-                unsafe_allow_html=True)
+        rng = (f'<div class="st rg"><span>52W RANGE · {pos:.0f}%</span><div class="bar"><i style="width:{pos:.1f}%"></i><u style="left:{pos:.1f}%"></u></div>'
+               f'<div class="ends"><em>{lo:,.2f}</em><em>{hi:,.2f}</em></div></div>')
+    st.markdown(f'<div class="rp-sec"><div class="id"><div class="nm">{_esc(B.get("name") or sym)}</div><div class="sb">{_esc(sub)}</div></div>'
+                f'{quote}<div class="sts">{cells}{rng}</div></div>', unsafe_allow_html=True)
 
 
 # ═══════════════════════════ Sections ═══════════════════════════
@@ -522,19 +548,21 @@ def _overview(sym, B, T, key, nf):
         cols = st.columns(len(growth))
         for c, (title, rows) in zip(cols, growth.items()):
             with c:
-                body = "".join(f'<div style="display:flex;justify-content:space-between;font:10px {T["mono"]};padding:3px 0;color:{T["t2"]}"><span>{_esc(k)}</span><b style="color:{T["ivory"]}">{_esc(v)}</b></div>' for k, v in rows.items())
+                body = "".join(f'<div style="display:flex;justify-content:space-between;font:12.5px/1.65 var(--rp-s);padding:3px 0;color:{T["t2"]}"><span>{_esc(k)}</span><b style="color:{T["ivory"]}">{_esc(v)}</b></div>' for k, v in rows.items())
                 _panel(title, body, T)
 
     desc = info.get("longBusinessSummary") or B.get("about")
     if desc:
-        _panel("Business", f'<div style="font:10px {T["mono"]};color:{T["t2"]};line-height:1.8">{_esc(desc[:1400])}</div>', T)
+        _panel("Business", f'<div style="font:12.5px/1.65 var(--rp-s);color:{T["t2"]};line-height:1.8">{_esc(desc[:1400])}</div>', T)
+
+    _management(sym, T)
 
     if B.get("pros") or B.get("cons"):
         a, b = st.columns(2)
         with a:
-            _panel("Pros (Screener)", "".join(f'<div style="font:10px {T["mono"]};color:{T["t2"]};padding:3px 0;line-height:1.6"><span style="color:{T["green"]}">+</span> {_esc(x)}</div>' for x in B.get("pros") or []) or "—", T)
+            _panel("Pros (Screener)", "".join(f'<div style="font:12.5px/1.65 var(--rp-s);color:{T["t2"]};padding:3px 0;line-height:1.6"><span style="color:{T["green"]}">+</span> {_esc(x)}</div>' for x in B.get("pros") or []) or "—", T)
         with b:
-            _panel("Cons (Screener)", "".join(f'<div style="font:10px {T["mono"]};color:{T["t2"]};padding:3px 0;line-height:1.6"><span style="color:{T["red"]}">−</span> {_esc(x)}</div>' for x in B.get("cons") or []) or "—", T)
+            _panel("Cons (Screener)", "".join(f'<div style="font:12.5px/1.65 var(--rp-s);color:{T["t2"]};padding:3px 0;line-height:1.6"><span style="color:{T["red"]}">−</span> {_esc(x)}</div>' for x in B.get("cons") or []) or "—", T)
 
     if not B.get("resolved"):
         _unavailable("Screener fundamentals", "Screener.in company page", T, B.get("reason"))
@@ -671,7 +699,7 @@ def _health(sym, B, T, key, nf):
         _panel(f"{sum(1 for f in flags if f[1] is False)} warning(s) · {sum(1 for f in flags if f[1])} positive(s)",
                _checklist(flags, T, ("✓ GOOD", "⚠ WARN", "—")), T)
     else:
-        _panel("No flags triggered", f'<div style="font:10px {T["mono"]};color:{T["t2"]}">None of the rule thresholds were crossed, or the data needed was not available.</div>', T)
+        _panel("No flags triggered", f'<div style="font:12.5px/1.65 var(--rp-s);color:{T["t2"]}">None of the rule thresholds were crossed, or the data needed was not available.</div>', T)
     st.caption("Rule-based screen for research only — not investment advice. Thresholds: promoter ±2/1 pp, debt +50% in 3y, "
                "CFO/NP <50% or ≥90%, OPM ±3 pp, 3-yr CAGR <0% or ≥15%.")
 
@@ -742,6 +770,7 @@ def _valuation(sym, B, T, key, nf):
            ("Max P/E", f"{ser.max():.1f}x", str(ser.idxmax())[:7]),
            ("Current vs history", f"{pctile:.0f}th pct" if pctile is not None else "N/A",
             f"Price at median P/E: {_rs(med * ttm)}" if ttm and ttm > 0 else "")], T, 4)
+    _pe_band_chart(sym, B, T, key, close)
 
 
 def _financials(sym, B, T, key, nf):
@@ -849,7 +878,7 @@ def _peers(sym, B, T, key, nf):
         rows = [{"label": p + (" ◀" if p == sym else ""), "values": [f'₹{q[p]["price"]:,.2f}', f'{q[p]["chg"]:+.2f}%']}
                 for p in [sym] + peers if q.get(p)]
         if rows:
-            _panel("Note", f'<div style="font:10px {T["mono"]};color:{T["t2"]}">Screener peer table did not load; showing curated peers with live prices only.</div>', T)
+            _panel("Note", f'<div style="font:12.5px/1.65 var(--rp-s);color:{T["t2"]}">Screener peer table did not load; showing curated peers with live prices only.</div>', T)
             _table(["PRICE", "CHG"], rows, T, [sym])
             return
     _unavailable("Peer set", "Screener peer table or a curated peer map", T)
@@ -1098,12 +1127,12 @@ def _news(sym, B, T, key, news_fetch_fn):
         sc = sent_col.get(sent.lower(), T["t3"])
         url = it.get("url") or it.get("link")
         link = f'<a href="{html.escape(str(url), quote=True)}" target="_blank" style="color:{T["ivory"]};text-decoration:none">{_esc(title)}</a>' if url else _esc(title)
-        st.markdown(f'<div style="padding:8px 0 8px 10px;border-bottom:1px solid {T["border"]};border-left:2px solid {sc};font:10px {T["mono"]}"><div>{link}</div>'
+        st.markdown(f'<div style="padding:8px 0 8px 10px;border-bottom:1px solid {T["border"]};border-left:2px solid {sc};font:12.5px/1.65 var(--rp-s)"><div>{link}</div>'
                     f'<div style="color:{T["t3"]};margin-top:3px">{_esc(source)} · {_esc(ts)} {("· <span style=color:" + sc + ">" + _esc(sent.upper()) + "</span>") if sent else ""}</div></div>',
                     unsafe_allow_html=True)
 
 
-# ═══════════════════════════ v13 additions ═══════════════════════════
+# ═══════════════════════════ v14 additions ═══════════════════════════
 def _yv(df, names, col=0):
     """A value from a yfinance statement frame (index = line item, columns = dates, newest first)."""
     if df is None or getattr(df, "empty", True):
@@ -1417,7 +1446,7 @@ def _filings(sym, B, T, key, nf):
         anns = [a for a in anns if q.lower() in (a["title"] + " " + a["sub"]).lower()]
     for a in anns[:80]:
         url = html.escape(a["url"], quote=True)
-        st.markdown(f'<div style="padding:8px 0;border-bottom:1px solid {T["border"]};font:10px {T["mono"]}">'
+        st.markdown(f'<div style="padding:8px 0;border-bottom:1px solid {T["border"]};font:12.5px/1.65 var(--rp-s)">'
                     f'<a href="{url}" target="_blank" style="color:{T["ivory"]};text-decoration:none">{_esc(a["title"])}</a>'
                     f'<div style="color:{T["t3"]};margin-top:3px">{_esc(a["dt"])} · <span style="color:{T["cyan"]}">{_esc(a["category"])}</span>'
                     f'{" · " + _esc(a["sub"]) if a["sub"] else ""} · OPEN DOCUMENT ↗</div></div>', unsafe_allow_html=True)
@@ -1445,11 +1474,11 @@ def _synthesis(sym, B, T, key, nf):
     if con:
         _panel("Where the evidence disagrees", _checklist([(c["name"], False, c["numbers"]) for c in con], T, ("", "⚠", "")), T)
     else:
-        _panel("No contradiction rule triggered", f'<div style="font:10px {T["mono"]};color:{T["t2"]}">Checked: valuation vs profit, price vs profit, '
+        _panel("No contradiction rule triggered", f'<div style="font:12.5px/1.65 var(--rp-s);color:{T["t2"]}">Checked: valuation vs profit, price vs profit, '
                "sales vs margin, profit vs cash flow, price vs promoter holding, price vs delivery share.</div>", T)
     _header("Evidence sheet · every fact with its source", T)
     _table(["VALUE", "SOURCE"], [{"label": f["label"], "values": [f["value"], f["source"]]} for f in E["facts"]], T, dl=f"{sym}_evidence_{key}")
-    _panel("Not available", f'<div style="font:10px {T["mono"]};color:{T["t2"]};line-height:1.7">{_esc("; ".join(E["unknown"]))}.'
+    _panel("Not available", f'<div style="font:12.5px/1.65 var(--rp-s);color:{T["t2"]};line-height:1.7">{_esc("; ".join(E["unknown"]))}.'
            + ("" if st.session_state.get(f"rp_dlv_last_{sym}") is not None else " Open DLV once to add delivery data to this sheet.") + "</div>", T, dashed=True)
 
     _header("AI synthesis · Gemini reads the evidence sheet above, nothing else", T)
@@ -1480,7 +1509,7 @@ def _announcements_scanx(sym, B, T, key, nf):
         anns = [a for a in anns if q.lower() in str(a.get("title", "")).lower()]
     for a in anns[:60]:
         url = html.escape(str(a.get("url", "")), quote=True)
-        st.markdown(f'<div style="padding:8px 0;border-bottom:1px solid {T["border"]};font:10px {T["mono"]}"><a href="{url}" target="_blank" style="color:{T["ivory"]};text-decoration:none">{_esc(a.get("title"))}</a>'
+        st.markdown(f'<div style="padding:8px 0;border-bottom:1px solid {T["border"]};font:12.5px/1.65 var(--rp-s)"><a href="{url}" target="_blank" style="color:{T["ivory"]};text-decoration:none">{_esc(a.get("title"))}</a>'
                     f'<div style="color:{T["t3"]};margin-top:3px">OPEN SOURCE DOCUMENT ↗</div></div>', unsafe_allow_html=True)
 
 
@@ -1573,8 +1602,476 @@ def _sources(sym, B, T, key, nf):
         {"label": "AI synthesis (SYN)", "values": ["Gemini", "key found" if rd and rd._secret("GEMINI_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY") else "no key"]},
     ] + [{"label": f"Last call · {k}", "values": [v["detail"] or "—", ("OK" if v["ok"] else "FAILED") + " · " + v["at"]]}
          for k, v in (rd.status() if rd else {}).items()], T)
-    _panel("Integrity rule", f'<div style="font:10px {T["mono"]};color:{T["t2"]};line-height:1.8">Values are shown only when a source returns them '
+    _panel("Integrity rule", f'<div style="font:12.5px/1.65 var(--rp-s);color:{T["t2"]};line-height:1.8">Values are shown only when a source returns them '
            f'or when they are computed directly from returned values (formula shown on screen). Missing data says DATA UNAVAILABLE; nothing is estimated or invented.</div>', T)
+
+
+# ═══════════════════════════ v14 functions ═══════════════════════════
+_IDX = {"NIFTY 500": "^CRSLDX", "NIFTY 50": "^NSEI", "NIFTY BANK": "^NSEBANK", "NIFTY IT": "^CNXIT", "NIFTY MIDCAP 100": "NIFTY_MIDCAP_100.NS"}
+
+
+def _bench(name="NIFTY 500"):
+    ix = _index_history(_IDX.get(name, name))
+    return _naive(ix["Close"].astype(float)) if ix is not None and len(ix) > 30 else None
+
+
+def _close(sym, period="5y", fallback="2y"):
+    h = _hist(sym, period, fallback)
+    return _naive(h["Close"].astype(float)) if h is not None else None
+
+
+def _ret(s, n):
+    return (s.iloc[-1] / s.iloc[-1 - n] - 1) * 100 if s is not None and len(s) > n else None
+
+
+# ---------- OV: dashboard ----------
+def _dashboard(sym, B, T, key, nf):
+    close = _close(sym, "2y", "1y")
+    b500 = _bench("NIFTY 500")
+    if b500 is None:
+        b500 = _bench("NIFTY 50")
+    pe, pct = _pe_stats(B, _close(sym)) if close is not None else (None, None)
+    E = rd.evidence(B, close, pe, pct, st.session_state.get(f"rp_dlv_last_{sym}")) if rd is not None else {"facts": [], "contradictions": [], "unknown": []}
+    F = {f["label"]: f["value"] for f in E["facts"]}
+    s = B.get("summary") or {}
+
+    left, right = st.columns([2.1, 1], gap="small")
+    with left:
+        drawn = False
+        try:
+            from chart_engine import render_pro_chart
+            drawn = bool(render_pro_chart(sym, height=520))
+        except Exception:
+            drawn = False
+        if not drawn and close is not None:
+            c = close.tail(252)
+            _panel("Price · 1 year", _spark(c.tolist(), T["green"] if c.iloc[-1] >= c.iloc[0] else T["red"], 600, 150), T)
+    with right:
+        rows = []
+        for lab, n in (("1 week", 5), ("1 month", 21), ("3 months", 63), ("6 months", 126), ("1 year", 252)):
+            r = _ret(close, n)
+            if r is None:
+                continue
+            rb = None
+            if b500 is not None:
+                df = pd.concat([close.rename("s"), b500.rename("b")], axis=1).dropna()
+                rb = _ret(df["b"], n) if len(df) > n else None
+            rows.append((lab, f"{r:+.1f}%" + (f"  ·  {r - rb:+.1f} pp" if rb is not None else "")))
+        _mini("Performance · vs NIFTY 500", rows or [("Price history", "N/A")], T, "QR")
+        bv, price = _f(s.get("book_value")), (float(close.iloc[-1]) if close is not None else None)
+        _mini("Valuation", [("P/E (TTM)", f"{pe:.1f}x" if pe else "N/A"),
+                            ("vs own history", f"{pct:.0f}th percentile" if pct is not None else "N/A"),
+                            ("P/B", f"{price / bv:.2f}x" if price and bv else "N/A"),
+                            ("Earnings yield", f"{100 / pe:.2f}%" if pe else "N/A"),
+                            ("Dividend yield", f'{s["dividend_yield"]}%' if s.get("dividend_yield") else "N/A")], T, "VAL")
+        hh = _hist(sym, "2y", "1y")
+        if hh is not None and len(hh) > 60:
+            c_, v_ = hh["Close"].astype(float), hh["Volume"].astype(float)
+            trade = [("Volume vs 20-session average", f"{v_.iloc[-1] / v_.tail(20).mean():.2f}x" if v_.tail(20).mean() else "N/A"),
+                     ("Volatility, 20 sessions", f"{c_.pct_change().tail(20).std() * math.sqrt(252) * 100:.0f}% a year"),
+                     ("RSI 14", f"{float(rsi_wilder(c_, 14).iloc[-1]):.0f}")]
+            for n in (50, 200):
+                if len(c_) >= n:
+                    trade.append((f"vs {n}-day average", f"{(c_.iloc[-1] / c_.tail(n).mean() - 1) * 100:+.1f}%"))
+            _mini("Trading", trade, T, "TECH")
+
+    a, b, c = st.columns(3, gap="small")
+    with a:
+        res = _piotroski(B)
+        sc = "N/A"
+        if res:
+            av = [x for x in res[0] if x[1] is not None]
+            sc = f"{sum(1 for x in av if x[1])} / {len(av)}"
+        de = _debt_equity(B)
+        _mini("Quality", [("Piotroski-style score", sc), ("ROE", f'{s["roe"]}%' if s.get("roe") else "N/A"),
+                          ("ROCE", f'{s["roce"]}%' if s.get("roce") else "N/A"), ("Debt / equity", f"{de}x" if de is not None else "N/A"),
+                          ("Cash flow ÷ profit, 3 yrs", F.get("Operating cash flow as % of net profit, 3 years", "N/A"))], T, "HC")
+    with b:
+        _mini("Earnings", [("Sales, last 4 quarters", F.get("Sales, last 4 quarters vs previous 4", "N/A")),
+                           ("Net profit, last 4 quarters", F.get("Net profit, last 4 quarters vs previous 4", "N/A")),
+                           ("Operating margin", F.get("Operating margin, latest quarter vs a year ago", "N/A")),
+                           ("Price, 1 year", F.get("Price change, 1 year", "N/A"))], T, "ERN")
+    with c:
+        _mini("Ownership", [("Promoters", F.get("Promoter holding", "N/A")), ("FIIs", F.get("FII holding", "N/A")), ("DIIs", F.get("DII holding", "N/A")),
+                            ("Delivery share", F.get("Delivery share of traded quantity, last 10 sessions vs before", "open DLV to load"))], T, "HDS")
+
+    l2, r2 = st.columns(2, gap="small")
+    with l2:
+        con = E["contradictions"]
+        _panel(f"Contradictions · {len(con)}" , (_checklist([(x["name"], False, x["numbers"]) for x in con], T, ("", "⚠", "")) if con else
+               "No contradiction rule triggered. Checked: valuation vs profit, price vs profit, sales vs margin, profit vs cash, price vs promoters, price vs delivery."), T)
+    with r2:
+        code = rd.bse_code(B.get("url")) if rd is not None else None
+        anns = rd.bse_announcements(code, 90)[:6] if code else []
+        if anns:
+            body = "".join(f'<div class="rp-fil"><a href="{html.escape(x["url"], quote=True)}" target="_blank">{_esc(x["title"][:110])}</a>'
+                           f'<div>{_esc(x["dt"])} · {_esc(x["category"])}</div></div>' for x in anns)
+        else:
+            body = "No BSE filings returned. Open CACS for details."
+        _panel("Latest exchange filings", body, T)
+
+
+def _graph(sym, B, T, key, nf):
+    try:
+        from chart_engine import render_pro_chart
+        render_pro_chart(sym, height=640)
+    except Exception as e:
+        _unavailable("Chart", "chart_engine.py", T, str(e))
+
+
+# ---------- HP: historical prices ----------
+def _hist_prices(sym, B, T, key, nf):
+    h = _hist(sym, "5y", "2y")
+    if h is None:
+        _unavailable("Historical prices", "Yahoo daily price history", T)
+        return
+    rng = st.radio("Range", ["1M", "3M", "6M", "1Y", "5Y"], index=1, horizontal=True, key=f"{key}_hp_rng", label_visibility="collapsed")
+    d = h.copy()
+    d.index = _naive(h["Close"]).index if len(_naive(h["Close"])) == len(h) else pd.to_datetime(h.index)
+    d = d.tail({"1M": 21, "3M": 63, "6M": 126, "1Y": 252, "5Y": len(d)}[rng])
+    chg = d["Close"].pct_change() * 100
+    _header(f"Historical prices · {len(d)} sessions · Yahoo, unadjusted", T, "live")
+    _kpis([("High", _rs(float(d["High"].max())), str(d["High"].idxmax())[:10]), ("Low", _rs(float(d["Low"].min())), str(d["Low"].idxmin())[:10]),
+           ("Average close", _rs(float(d["Close"].mean())), f"{rng} window"),
+           ("Change", _pct((d["Close"].iloc[-1] / d["Close"].iloc[0] - 1) * 100, 1, True), "first → last close",
+            T["green"] if d["Close"].iloc[-1] >= d["Close"].iloc[0] else T["red"]),
+           ("Average volume", _qty(float(d["Volume"].mean())), "shares per session")], T, 5)
+    show = d.iloc[::-1].head(90)
+    _table(["OPEN", "HIGH", "LOW", "CLOSE", "CHANGE", "VOLUME"],
+           [{"label": str(i)[:10], "values": [f"{r['Open']:,.2f}", f"{r['High']:,.2f}", f"{r['Low']:,.2f}", f"{r['Close']:,.2f}",
+                                              _pct(None if pd.isna(chg.loc[i]) else float(chg.loc[i]), 2, True), _qty(r["Volume"])]}
+            for i, r in show.iterrows()], T)
+    out = d[["Open", "High", "Low", "Close", "Volume"]].copy()
+    out.index = [str(i)[:10] for i in out.index]
+    st.download_button("⤓ CSV · full range", out.to_csv(index_label="Date"), file_name=f"{sym}_prices_{rng}.csv", mime="text/csv", key=f"{key}_hp_dl")
+
+
+# ---------- COMP: comparative returns ----------
+def _compare(sym, B, T, key, nf):
+    import plotly.graph_objects as go
+    default = ", ".join(p for p in _SECTOR_PEERS.get(sym, []) if p != sym) or "NIFTY 500, NIFTY 50"
+    c1, c2 = st.columns([3, 1])
+    raw = c1.text_input("Compare with", value=default, key=f"{key}_comp_q_{sym}", label_visibility="collapsed",
+                        placeholder="Symbols or indices, comma separated: TCS, INFY, NIFTY 500, NIFTY IT")
+    rng = c2.radio("Range", ["3M", "6M", "1Y", "2Y"], index=2, horizontal=True, key=f"{key}_comp_rng", label_visibility="collapsed")
+    n = {"3M": 63, "6M": 126, "1Y": 252, "2Y": 504}[rng]
+    names = [sym] + [t.strip().upper() for t in raw.split(",") if t.strip()][:6]
+    series, missing = {}, []
+    for nm in dict.fromkeys(names):
+        s = _bench(nm) if nm in _IDX else _close(nm, "2y", "1y")
+        if s is None or len(s) < 30:
+            missing.append(nm)
+        else:
+            series[nm] = s
+    if sym not in series or len(series) < 2:
+        _unavailable("Comparison", "Price history for the stock and at least one other name", T, f"No data for: {', '.join(missing) or 'other names'}")
+        return
+    df = pd.concat(series, axis=1).dropna().tail(n + 1)
+    reb = df / df.iloc[0] * 100
+    _header(f"Rebased performance · {rng} = 100 · {len(df) - 1} common sessions", T, "live",
+            f"No data for: {', '.join(missing)}" if missing else None)
+    pal = [T["amber"], T["cyan"], T["green"], T["purple"], "#FFD60A", T["red"], "#B8B8B8"]
+    fig = go.Figure()
+    for i, col in enumerate(reb.columns):
+        fig.add_trace(go.Scatter(x=reb.index, y=reb[col], name=col, line=dict(color=pal[i % len(pal)], width=2.4 if col == sym else 1.4)))
+    _fig(fig, T, 340, f"{key}_comp_chart")
+    r = df.pct_change().dropna()
+    rows = []
+    for col in df.columns:
+        tot = (df[col].iloc[-1] / df[col].iloc[0] - 1) * 100
+        rows.append({"label": col, "values": [f"{tot:+.1f}%", f"{tot - (df[sym].iloc[-1] / df[sym].iloc[0] - 1) * 100:+.1f} pp" if col != sym else "—",
+                                              f"{r[col].std() * math.sqrt(252) * 100:.0f}%", f"{(df[col] / df[col].cummax() - 1).min() * 100:.1f}%",
+                                              f"{r[col].corr(r[sym]):.2f}" if col != sym else "1.00"]})
+    _table(["RETURN", f"VS {sym}", "VOLATILITY", "MAX DRAWDOWN", f"CORRELATION WITH {sym}"], rows, T, [sym])
+    st.caption("Index names accepted: " + ", ".join(_IDX) + ". Prices are unadjusted closes; dividends are not included (see TRA).")
+
+
+# ---------- BETA: regression ----------
+def _beta(sym, B, T, key, nf):
+    import plotly.graph_objects as go
+    c1, c2 = st.columns(2)
+    bname = c1.radio("Index", ["NIFTY 500", "NIFTY 50"], horizontal=True, key=f"{key}_beta_ix", label_visibility="collapsed")
+    win = c2.radio("Window", ["1Y", "2Y"], horizontal=True, key=f"{key}_beta_win", label_visibility="collapsed")
+    s, b = _close(sym, "2y", "1y"), _bench(bname)
+    if s is None or b is None:
+        _unavailable("Beta", f"Price history for {sym} and {bname}", T)
+        return
+    df = pd.concat([s.rename("s"), b.rename("b")], axis=1).dropna().tail({"1Y": 253, "2Y": 505}[win])
+    r = df.pct_change().dropna() * 100
+    if len(r) < 60:
+        _unavailable("Beta", "At least 60 common sessions", T)
+        return
+    x, y = r["b"].to_numpy(), r["s"].to_numpy()
+    beta, alpha = [float(v) for v in __import__("numpy").polyfit(x, y, 1)]
+    corr = float(r["s"].corr(r["b"]))
+    resid = y - (alpha + beta * x)
+    se = float(resid.std(ddof=2) / (x.std(ddof=1) * math.sqrt(len(x))))
+    _header(f"Regression of daily returns · {sym} on {bname} · {len(r)} sessions", T, "live")
+    _kpis([("Beta", f"{beta:.2f}", f"± {1.96 * se:.2f} (95% range)"), ("Alpha, annualised", _pct(alpha * 252, 1, True), "return not explained by the index"),
+           ("R²", f"{corr * corr:.2f}", "share of moves explained by the index"), ("Correlation", f"{corr:.2f}", ""),
+           ("Stock-specific volatility", f"{resid.std() * math.sqrt(252):.0f}%", "annualised, after removing the index")], T, 5)
+    a, c = st.columns(2, gap="small")
+    with a:
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=x, y=y, mode="markers", name="Daily returns %", marker=dict(color=T["cyan"], size=4, opacity=0.55)))
+        xs = [float(x.min()), float(x.max())]
+        fig.add_trace(go.Scatter(x=xs, y=[alpha + beta * v for v in xs], mode="lines", name=f"Fit · beta {beta:.2f}", line=dict(color=T["amber"], width=2)))
+        _fig(fig, T, 300, f"{key}_beta_sc")
+    with c:
+        rb = (r["s"].rolling(60).cov(r["b"]) / r["b"].rolling(60).var()).dropna()
+        fig = go.Figure(go.Scatter(x=rb.index, y=rb.values, name="Rolling 60-session beta", line=dict(color=T["amber"], width=1.8)))
+        _fig(fig, T, 300, f"{key}_beta_roll")
+    st.caption("Beta above 1 means the stock has moved more than the index. It describes the past window only.")
+
+
+# ---------- HVG: historical volatility ----------
+def _volatility(sym, B, T, key, nf):
+    import plotly.graph_objects as go
+    h = _hist(sym, "5y", "2y")
+    if h is None or len(h) < 130:
+        _unavailable("Volatility", "At least 130 sessions of price history", T)
+        return
+    c = _naive(h["Close"].astype(float))
+    r = c.pct_change()
+    v = {n: r.rolling(n).std() * math.sqrt(252) * 100 for n in (20, 60, 120)}
+    cur = float(v[20].iloc[-1])
+    hist2y = v[20].dropna().tail(504)
+    pctl = float((hist2y < cur).mean() * 100)
+    hi, lo, cl = h["High"].astype(float), h["Low"].astype(float), h["Close"].astype(float)
+    tr = pd.concat([hi - lo, (hi - cl.shift()).abs(), (lo - cl.shift()).abs()], axis=1).max(axis=1)
+    atr = float(tr.ewm(alpha=1 / 14, adjust=False).mean().iloc[-1])
+    big = r.tail(252).abs()
+    _header("Realised volatility · annualised, from daily closes", T, "live")
+    _kpis([("20-session", f"{cur:.0f}%", f"{pctl:.0f}th percentile of the last 2 years"), ("60-session", f"{v[60].iloc[-1]:.0f}%", ""),
+           ("120-session", f"{v[120].iloc[-1]:.0f}%", ""), ("ATR 14", _rs(atr), f"{atr / float(cl.iloc[-1]) * 100:.2f}% of price"),
+           ("Days moving 3%+", f"{int((big >= 0.03).sum())}", "in the last 252 sessions"),
+           ("Largest 1-day move", _pct(float(r.tail(252).loc[big.idxmax()] * 100), 1, True), str(big.idxmax())[:10])], T, 3)
+    fig = go.Figure()
+    for n, col in ((20, T["amber"]), (60, T["cyan"]), (120, T["purple"])):
+        x = v[n].dropna().tail(504)
+        fig.add_trace(go.Scatter(x=x.index, y=x.values, name=f"{n}-session", line=dict(color=col, width=2 if n == 20 else 1.3)))
+    _fig(fig, T, 320, f"{key}_hvg_chart")
+    st.caption("Volatility is how much the price has moved, not which way. A low reading after a long calm period often precedes a bigger move, in either direction.")
+
+
+# ---------- TRA: total return ----------
+def _total_return(sym, B, T, key, nf):
+    h = _hist(sym, "5y", "2y")
+    if h is None:
+        _unavailable("Total return", "Yahoo daily price history", T)
+        return
+    c = _naive(h["Close"].astype(float))
+    dv = yf_attr(sym, "dividends")
+    d = _naive(dv.astype(float)) if dv is not None and len(dv) else pd.Series(dtype=float)
+    d = d.groupby(d.index).sum().reindex(c.index).fillna(0.0) if len(d) else pd.Series(0.0, index=c.index)
+    tr = ((c + d) / c.shift(1)).fillna(1.0).cumprod()
+    rows = []
+    for lab, n in (("1 year", 252), ("3 years", 756), ("5 years", 1240)):
+        if len(c) <= n:
+            n = len(c) - 1 if lab == "5 years" and len(c) > 800 else None
+        if not n:
+            continue
+        pr = (c.iloc[-1] / c.iloc[-1 - n] - 1) * 100
+        tt = (tr.iloc[-1] / tr.iloc[-1 - n] - 1) * 100
+        yrs = n / 252
+        rows.append({"label": lab, "values": [f"{pr:+.1f}%", f"{tt:+.1f}%", f"{tt - pr:+.1f} pp", f"₹{d.iloc[-n:].sum():,.2f}",
+                                              f"{((1 + tt / 100) ** (1 / yrs) - 1) * 100:+.1f}%"]})
+    _header("Total return · price change plus dividends reinvested on the ex-date", T, "live" if rows else "unavailable",
+            "Dividends from Yahoo. Splits and bonuses are already in Yahoo's prices." if len(dv if dv is not None else []) else "Yahoo returned no dividend history: total return equals price return here.")
+    if rows:
+        _table(["PRICE RETURN", "TOTAL RETURN", "FROM DIVIDENDS", "DIVIDENDS PAID / SHARE", "TOTAL RETURN PER YEAR"], rows, T, ["1 year"])
+    else:
+        _unavailable("Total return", "At least 1 year of price history", T)
+
+
+# ---------- DCF: reverse DCF ----------
+def _dcf_value(cf, g, r, tg, years=10):
+    """Present value of `years` of cash flows growing at g for the first half, fading in a straight line to tg, plus a terminal value."""
+    pv, cur, half = 0.0, cf, years // 2
+    for t in range(1, years + 1):
+        gt = g if t <= half else g + (tg - g) * (t - half) / (years - half)
+        cur *= 1 + gt
+        pv += cur / (1 + r) ** t
+    return pv + cur * (1 + tg) / (r - tg) / (1 + r) ** years
+
+
+def _dcf(sym, B, T, key, nf):
+    s = B.get("summary") or {}
+    mcap = _f(s.get("market_cap"))
+    npq = _nums(_row(B.get("quarterly"), "Net Profit", "Profit for the period"))
+    ttm = sum(npq[-4:]) if len(npq) >= 4 and all(v is not None for v in npq[-4:]) else None
+    if not mcap or not ttm or ttm <= 0:
+        _unavailable("Reverse DCF", "Market cap and a positive trailing-4-quarter net profit (Screener)", T,
+                     "A discounted cash flow needs positive earnings to start from.")
+        return
+    c1, c2, c3 = st.columns(3)
+    base = c1.number_input("Starting cash flow ₹ Cr (default: last 4 quarters' net profit)", min_value=0.0, value=float(round(ttm, 1)), step=10.0, key=f"{key}_dcf_cf_{sym}")
+    r = c2.number_input("Discount rate %", min_value=6.0, max_value=25.0, value=12.0, step=0.5, key=f"{key}_dcf_r") / 100
+    tg = c3.number_input("Growth after year 10 %", min_value=0.0, max_value=7.0, value=5.0, step=0.5, key=f"{key}_dcf_tg") / 100
+    if base <= 0 or r <= tg + 0.005:
+        _unavailable("Reverse DCF", "A positive cash flow and a discount rate above long-run growth", T)
+        return
+    lo, hi = -0.5, 1.0
+    if _dcf_value(base, hi, r, tg) < mcap:
+        implied = None
+    else:
+        for _ in range(60):
+            mid = (lo + hi) / 2
+            lo, hi = (mid, hi) if _dcf_value(base, mid, r, tg) < mcap else (lo, mid)
+        implied = (lo + hi) / 2
+    y = B.get("yearly")
+    hist = _annual_map(y, "Net Profit", "Profit for the period")
+    ks = [p for p in (y or {}).get("periods", []) if p in hist]
+    past = ((hist[ks[-1]] / hist[ks[-4]]) ** (1 / 3) - 1) * 100 if len(ks) >= 4 and hist[ks[-4]] > 0 and hist[ks[-1]] > 0 else None
+    _header("Reverse DCF · what growth does today's price already assume?", T, "live",
+            "The market value is taken as given and solved for the growth rate that justifies it. Growth holds for 5 years, then fades to the long-run rate by year 10.")
+    gap = (implied * 100 - past) if implied is not None and past is not None else None
+    _kpis([("Market value", f"₹{mcap:,.0f} Cr", "Screener"), ("Starting cash flow", f"₹{base:,.0f} Cr", f"market value is {mcap / base:.1f}x this"),
+           ("Growth the price assumes", _pct(implied * 100, 1) if implied is not None else "> 100%", "per year, for 5 years",
+            (T["red"] if gap is not None and gap > 5 else T["green"] if gap is not None and gap < -5 else None)),
+           ("Actual profit growth, 3 yrs", _pct(past, 1, True), "per year · Screener"),
+           ("Gap", _pct(gap, 1, True) if gap is not None else "N/A", "assumed minus achieved")], T, 5)
+    grid = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
+    rows = [{"label": f"Discount rate {rr * 100:.0f}%", "values": [f"{(_dcf_value(base, g, rr, tg) / mcap - 1) * 100:+.0f}%" for g in grid]}
+            for rr in (r - 0.02, r, r + 0.02) if rr > tg + 0.005]
+    _header("Value vs today's market value, for other growth assumptions", T)
+    _table([f"GROWTH {g * 100:.0f}%" for g in grid], rows, T, [f"Discount rate {r * 100:.0f}%"])
+    st.caption("A calculator, not a target price. Net profit stands in for cash flow; use FH to see how much profit turns into cash, and lower the "
+               "starting figure if it does not. Small changes in the discount rate move the answer a lot.")
+
+
+# ---------- DUP: DuPont ----------
+def _dupont(sym, B, T, key, nf):
+    y, bs = B.get("yearly"), B.get("balance_sheet")
+    npm, sal = _annual_map(y, "Net Profit", "Profit for the period"), _annual_map(y, "Sales", "Revenue")
+    ta, rsv, eq = _annual_map(bs, "Total Assets", "Total Liabilities"), _annual_map(bs, "Reserves"), _annual_map(bs, "Equity Capital", "Share Capital")
+    yrs = [p for p in (bs or {}).get("periods", []) if p in npm and p in sal and p in ta and p in rsv and p in eq and sal[p] and ta[p] and (rsv[p] + eq[p]) > 0][-6:]
+    if len(yrs) < 2:
+        _unavailable("DuPont", "At least two years with sales, profit, assets and equity (Screener)", T)
+        return
+    m = [npm[p] / sal[p] * 100 for p in yrs]
+    t = [sal[p] / ta[p] for p in yrs]
+    l = [ta[p] / (rsv[p] + eq[p]) for p in yrs]
+    roe = [a / 100 * b * c * 100 for a, b, c in zip(m, t, l)]
+    drv = max((("margin", m[-1] / m[0] if m[0] else 1), ("asset turnover", t[-1] / t[0]), ("leverage", l[-1] / l[0])), key=lambda z: abs(z[1] - 1))
+    _header("DuPont · what return on equity is made of", T, "live", "ROE = net margin × asset turnover × leverage. Year-end balances.")
+    _kpis([("Return on equity", f"{roe[-1]:.1f}%", f"{roe[0]:.1f}% in {yrs[0]}", T["green"] if roe[-1] >= roe[0] else T["red"]),
+           ("Net margin", f"{m[-1]:.1f}%", f"{m[0]:.1f}% in {yrs[0]}"), ("Asset turnover", f"{t[-1]:.2f}x", f"{t[0]:.2f}x in {yrs[0]}"),
+           ("Leverage", f"{l[-1]:.2f}x", f"{l[0]:.2f}x in {yrs[0]}"), ("Biggest change", drv[0].upper(), f"{(drv[1] - 1) * 100:+.0f}% since {yrs[0]}")], T, 5)
+    _table(yrs, [{"label": "Net margin %", "values": [f"{v:.1f}" for v in m]}, {"label": "Asset turnover x", "values": [f"{v:.2f}" for v in t]},
+                 {"label": "Leverage x", "values": [f"{v:.2f}" for v in l]}, {"label": "Return on equity %", "values": [f"{v:.1f}" for v in roe]}],
+           T, ["Return on equity"], dl=f"{sym}_dupont_{key}")
+    st.caption("ROE that rises because leverage rose is lower quality than ROE that rises because margin or turnover rose.")
+
+
+# ---------- GRW: growth and common size ----------
+def _growth(sym, B, T, key, nf):
+    y = B.get("yearly")
+    if not y or not y.get("rows"):
+        _unavailable("Growth", "Screener yearly results", T, B.get("reason"))
+        return
+    per = [p for p in y["periods"] if "TTM" not in str(p).upper()]
+    rows = []
+    for lab in ("Sales", "Revenue", "Operating Profit", "Financing Profit", "Net Profit", "EPS"):
+        r = _row(y, lab)
+        if not r or any(x["label"] == r["label"] for x in rows):
+            continue
+        mp = {p: _f(v) for p, v in zip(y["periods"], r["values"]) if p in per}
+        vals = []
+        for n in (1, 3, 5, 10):
+            a, b = (mp.get(per[-1]), mp.get(per[-1 - n])) if len(per) > n else (None, None)
+            vals.append(f"{((a / b) ** (1 / n) - 1) * 100:+.1f}%" if a and b and a > 0 and b > 0 else "—")
+        rows.append({"label": r["label"], "values": vals})
+    _header("Compound growth per year · to the latest full year", T, "live")
+    _table(["1 YEAR", "3 YEARS", "5 YEARS", "10 YEARS"], rows, T, ["Net Profit"])
+    sal = _row(y, "Sales", "Revenue")
+    if sal:
+        sv = [_f(v) for v in sal["values"]]
+        cs = []
+        for r in y["rows"]:
+            if r["label"] == sal["label"] or "%" in r["label"] or r["label"].lower().startswith(("eps", "dividend")):
+                continue
+            vals = [(f"{_f(v) / s * 100:.1f}" if _f(v) is not None and s else "—") for v, s in zip(r["values"], sv)][-7:]
+            cs.append({"label": r["label"], "values": vals})
+        _header("Common size · each line as % of sales", T)
+        _table(y["periods"][-7:], cs, T, ["Net Profit", "Operating Profit"], dl=f"{sym}_common_size_{key}")
+    g = B.get("growth") or {}
+    if g:
+        _header("Screener's compounded growth boxes", T)
+        heads = list(dict.fromkeys(k for rows_ in g.values() for k in rows_))
+        _table(heads, [{"label": t, "values": [rows_.get(k, "—") for k in heads]} for t, rows_ in g.items()], T)
+
+
+# ---------- EVTS: events ----------
+def _events(sym, B, T, key, nf):
+    ev = []
+    ed = _earnings_date(sym)
+    if ed:
+        ev.append((ed, "NEXT RESULTS", "Expected earnings date (Yahoo calendar)", ""))
+    for attr, kind, fmt in (("dividends", "DIVIDEND", lambda v: f"₹{float(v):,.2f} per share, ex-date"), ("splits", "SPLIT / BONUS", lambda v: f"{float(v):g} : 1")):
+        x = yf_attr(sym, attr)
+        if x is not None and len(x):
+            for i, v in x.iloc[::-1].head(12).items():
+                ev.append((str(i)[:10], kind, fmt(v), ""))
+    code = rd.bse_code(B.get("url")) if rd is not None else None
+    want = re.compile(r"result|board meeting|dividend|bonus|split|buy ?back|agm|egm|record date|acquisition|order|rating|allot", re.I)
+    for a in (rd.bse_announcements(code, 365) if code else []):
+        if want.search(a["title"] + " " + a["category"] + " " + a["sub"]):
+            ev.append((a["dt"][:10], (a["category"] or "FILING").upper()[:22], a["title"][:140], a["url"]))
+    if not ev:
+        _unavailable("Events", "Yahoo corporate actions or BSE filings", T)
+        return
+    ev.sort(key=lambda e: e[0], reverse=True)
+    today = datetime.now(IST).strftime("%Y-%m-%d")
+    up = [e for e in ev if e[0] >= today]
+    _header(f"Events timeline · {len(ev)} items · {len(up)} upcoming", T, "live", "Results, board meetings, dividends, splits and other material filings, newest first.")
+    kinds = ["All"] + sorted({e[1] for e in ev})
+    pick = st.selectbox("Type", kinds, key=f"{key}_evts_kind", label_visibility="collapsed")
+    body = ""
+    for d, kind, text, url in [e for e in ev if pick == "All" or e[1] == pick][:80]:
+        t = f'<a href="{html.escape(url, quote=True)}" target="_blank">{_esc(text)}</a>' if url else f'<a>{_esc(text)}</a>'
+        col = T["amber"] if d >= today else T["cyan"]
+        body += f'<div class="rp-fil">{t}<div><span style="color:{col}">{_esc(d)}</span> · {_esc(kind)}</div></div>'
+    st.markdown(body, unsafe_allow_html=True)
+
+
+def _management(sym, T):
+    info = yf_attr(sym, "info") or {}
+    off = [o for o in (info.get("companyOfficers") or []) if isinstance(o, dict) and o.get("name")]
+    if not off:
+        return
+    _header("Management · Yahoo", T)
+    _table(["ROLE", "AGE", "PAY"], [{"label": str(o.get("name")), "values": [str(o.get("title") or "—")[:60], str(o.get("age") or "—"),
+                                                                              f"₹{o['totalPay'] / 1e7:,.2f} Cr" if isinstance(o.get("totalPay"), (int, float)) and o["totalPay"] else "—"]}
+                                    for o in off[:12]], T)
+
+
+def _pe_band_chart(sym, B, T, key, close):
+    """Price against what it would be at the stock's own minimum / median / maximum P/E, quarter by quarter."""
+    import plotly.graph_objects as go
+    q = B.get("quarterly")
+    eps = _nums(_row(q, "EPS"))
+    pts = []
+    for i in range(3, len(eps)):
+        w = eps[i - 3:i + 1]
+        d = _quarter_end(q["periods"][i]) if i < len(q["periods"]) else None
+        if d is None or any(v is None for v in w) or sum(w) <= 0 or d < close.index[0]:
+            continue
+        px = close.asof(d)
+        if pd.notna(px):
+            pts.append((d, sum(w), float(px) / sum(w)))
+    if len(pts) < 4:
+        return
+    pes = sorted(p[2] for p in pts)
+    lo, med, hi = pes[0], pes[len(pes) // 2], pes[-1]
+    e = pd.Series([p[1] for p in pts], index=[p[0] for p in pts]).reindex(close.index, method="ffill").dropna()
+    c = close.reindex(e.index)
+    _header("P/E band on price · where the price would be at its own low, median and high P/E", T)
+    fig = go.Figure()
+    for mult, name, col in ((hi, f"{hi:.0f}x (highest)", T["red"]), (med, f"{med:.0f}x (median)", T["amber"]), (lo, f"{lo:.0f}x (lowest)", T["green"])):
+        fig.add_trace(go.Scatter(x=e.index, y=(e * mult).values, name=name, line=dict(color=col, width=1, dash="dot")))
+    fig.add_trace(go.Scatter(x=c.index, y=c.values, name="Price", line=dict(color="#EDEDED", width=2)))
+    _fig(fig, T, 320, f"{key}_val_band")
 
 
 HANDLERS = {
@@ -1586,24 +2083,82 @@ HANDLERS = {
     "DVD": _dividends, "CN": _news, "CACS": _filings,
     "FH": _fin_health, "ERN": _earnings_trend, "DLV": _deliveries, "QR": _quant, "SYN": _synthesis,
     "NOTE": _thesis, "SRC": _sources,
+    "OV": _dashboard, "GP": _graph, "HP": _hist_prices, "COMP": _compare, "BETA": _beta, "HVG": _volatility,
+    "TRA": _total_return, "DCF": _dcf, "DUP": _dupont, "GRW": _growth, "EVTS": _events,
 }
+assert set(HANDLERS) == set(FN), set(HANDLERS) ^ set(FN)
 
 
 # ═══════════════════════════ Navigation ═══════════════════════════
 def _css(T):
     st.markdown(f"""<style>
-    div[class*="st-key-rpnav"] div[data-testid="stVerticalBlock"]{{gap:2px}}
-    div[class*="st-key-rpnav"] button{{background:{T["panel"]};border:1px solid {T["border"]};border-left:3px solid transparent;
-        border-radius:0;min-height:27px;padding:2px 8px;justify-content:flex-start;width:100%}}
-    div[class*="st-key-rpnav"] button:hover{{border-color:{T["amber"]}88;background:{T["panel2"]}}}
-    div[class*="st-key-rpnav"] button p{{font:600 10px {T["mono"]} !important;color:{T["t2"]} !important;text-align:left;white-space:nowrap}}
-    div[class*="st-key-rpnav"] button[kind="primary"], div[class*="st-key-rpnav"] button[data-testid="stBaseButton-primary"]{{
-        background:{T["panel2"]};border-color:{T["amber"]};border-left:3px solid {T["amber"]}}}
-    div[class*="st-key-rpnav"] button[kind="primary"] p, div[class*="st-key-rpnav"] button[data-testid="stBaseButton-primary"] p{{color:{T["amber"]} !important}}
-    div[class*="st-key-rpcmd"] input{{background:#000 !important;color:{T["amber"]} !important;font:700 12px {T["mono"]} !important;
-        border:1px solid {T["amber"]}66 !important;border-radius:0 !important;letter-spacing:.8px}}
-    div[class*="st-key-rprecent"] button{{background:{T["panel"]};border:1px solid {T["border"]};border-radius:0;min-height:24px;padding:1px 8px}}
-    div[class*="st-key-rprecent"] button p{{font:600 9px {T["mono"]} !important;color:{T["t2"]} !important}}
+    :root{{--rp-bg:{T["bg"]};--rp-p:#0A0A0A;--rp-p2:#111111;--rp-b:#222222;--rp-am:{T["amber"]};--rp-tx:#EDEDED;--rp-t2:#B8B8B8;--rp-t3:#7C7C7C;
+           --rp-g:{T["green"]};--rp-r:{T["red"]};--rp-c:{T["cyan"]};--rp-m:{T["mono"]};--rp-s:Inter,'Segoe UI',Arial,sans-serif}}
+    .rp-sec{{display:flex;flex-wrap:wrap;align-items:stretch;gap:0;border:1px solid var(--rp-b);border-top:2px solid var(--rp-am);background:var(--rp-p);margin:4px 0 8px}}
+    .rp-sec .id{{padding:10px 16px;min-width:230px;border-right:1px solid var(--rp-b)}}
+    .rp-sec .nm{{font:800 19px var(--rp-s);color:var(--rp-tx);letter-spacing:.2px}}
+    .rp-sec .sb{{font:600 10.5px var(--rp-m);color:var(--rp-t3);margin-top:4px;letter-spacing:.5px;text-transform:uppercase}}
+    .rp-sec .q{{padding:8px 18px;border-right:1px solid var(--rp-b);text-align:right}}
+    .rp-sec .px{{font:800 24px var(--rp-m);color:var(--rp-tx)}} .rp-sec .ch{{font:700 12px var(--rp-m);margin-top:2px}}
+    .rp-sec .sts{{display:flex;flex-wrap:wrap;flex:1;align-items:stretch}}
+    .rp-sec .st{{padding:10px 14px;border-right:1px solid var(--rp-b);display:flex;flex-direction:column;justify-content:center}}
+    .rp-sec .st span{{font:700 9.5px var(--rp-m);color:var(--rp-t3);letter-spacing:.8px}}
+    .rp-sec .st b{{font:700 14px var(--rp-m);color:var(--rp-tx);margin-top:4px;white-space:nowrap}}
+    .rp-sec .rg{{flex:1;min-width:170px;border-right:0}} .rp-sec .bar{{position:relative;height:5px;background:#1c1c1c;margin-top:9px}}
+    .rp-sec .bar i{{position:absolute;left:0;top:0;height:5px;background:var(--rp-am);opacity:.35}} .rp-sec .bar u{{position:absolute;top:-4px;width:3px;height:13px;background:var(--rp-am)}}
+    .rp-sec .ends{{display:flex;justify-content:space-between;margin-top:6px}} .rp-sec .ends em{{font:normal 10px var(--rp-m);color:var(--rp-t3)}}
+
+    .rp-h{{display:flex;justify-content:space-between;align-items:center;margin:20px 0 8px;padding-bottom:7px;border-bottom:1px solid var(--rp-b)}}
+    .rp-h b{{font:700 12px var(--rp-m);letter-spacing:1.1px;color:var(--rp-am);text-transform:uppercase;border-left:3px solid var(--rp-am);padding-left:9px}}
+    .rp-tag{{font:700 10px var(--rp-m);letter-spacing:.8px}}
+    .rp-note{{font:12px/1.55 var(--rp-s);color:var(--rp-t3);margin:-2px 0 10px}}
+    .rp-mut{{color:var(--rp-t3);font-weight:700;letter-spacing:.6px}}
+    .rp-panel{{border:1px solid var(--rp-b);background:var(--rp-p);margin:8px 0 10px}} .rp-panel.dash{{border-style:dashed}}
+    .rp-panel>.t{{display:flex;justify-content:space-between;font:700 11px var(--rp-m);letter-spacing:1px;text-transform:uppercase;color:var(--rp-am);
+                 background:#14110A;padding:7px 12px;border-bottom:1px solid var(--rp-b)}}
+    .rp-panel>.t em{{font-style:normal;color:var(--rp-t3);font-weight:600}}
+    .rp-panel>.b{{padding:10px 12px;font:12.5px/1.65 var(--rp-s);color:var(--rp-t2)}} .rp-panel>.b.tight{{padding:4px 12px 6px}}
+    .rp-mr{{display:flex;justify-content:space-between;gap:10px;padding:5px 0;border-bottom:1px solid #161616;font:12px var(--rp-m)}}
+    .rp-mr:last-child{{border-bottom:0}} .rp-mr span{{color:var(--rp-t2)}} .rp-mr b{{color:var(--rp-tx);font-weight:700;text-align:right}}
+    .rp-kg{{display:grid;grid-template-columns:repeat(var(--n),minmax(0,1fr));gap:1px;background:var(--rp-b);border:1px solid var(--rp-b);margin:6px 0 12px}}
+    .rp-k{{background:var(--rp-p);padding:11px 13px;min-width:0}}
+    .rp-k .l{{font:700 9.5px var(--rp-m);color:var(--rp-t3);letter-spacing:.9px;text-transform:uppercase}}
+    .rp-k .v{{font:700 18px var(--rp-m);margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+    .rp-k .s{{font:11px/1.4 var(--rp-s);color:var(--rp-t3);margin-top:4px}}
+    @media(max-width:900px){{.rp-kg{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
+    .rp-tw{{overflow:auto;max-height:640px;border:1px solid var(--rp-b);background:var(--rp-p);margin:6px 0 12px}}
+    table.rp-t{{width:100%;border-collapse:collapse;font:12px var(--rp-m)}}
+    .rp-t th{{position:sticky;top:0;z-index:1;background:var(--rp-p2);color:var(--rp-t3);font:700 10px var(--rp-m);letter-spacing:.8px;text-transform:uppercase;
+             text-align:right;padding:8px 11px;border-bottom:1px solid var(--rp-b);white-space:nowrap}}
+    .rp-t td{{padding:6px 11px;border-bottom:1px solid #151515;white-space:nowrap;color:var(--rp-t2)}}
+    .rp-t td.n{{text-align:right;font-variant-numeric:tabular-nums}} .rp-t td.l,.rp-t th.l{{text-align:left;position:sticky;left:0;background:var(--rp-p)}}
+    .rp-t th.l{{background:var(--rp-p2);z-index:2}} .rp-t td.l{{color:var(--rp-tx);font-weight:600}}
+    .rp-t tbody tr:hover td{{background:#15120A}} .rp-t tr.hl td.l{{color:var(--rp-am)}} .rp-t tr.hl td{{color:var(--rp-tx);font-weight:700}}
+    .rp-t td.pos,.rp-t tr.hl td.pos,.rp-mr b.pos{{color:var(--rp-g)}} .rp-t td.neg,.rp-t tr.hl td.neg,.rp-mr b.neg{{color:var(--rp-r)}}
+    .rp-cl{{display:flex;gap:12px;align-items:baseline;padding:6px 0;border-bottom:1px solid #161616;font:12px var(--rp-m)}}
+    .rp-cl b{{min-width:54px}} .rp-cl span{{color:var(--rp-tx);flex:0 0 40%;font-family:var(--rp-s);font-size:12.5px}} .rp-cl i{{font-style:normal;color:var(--rp-t3);text-align:right;flex:1}}
+    .rp-title{{display:flex;justify-content:space-between;align-items:baseline;gap:14px;border:1px solid var(--rp-b);border-left:3px solid var(--rp-am);
+              background:var(--rp-p);padding:9px 13px;margin:6px 0 4px}}
+    .rp-title b{{font:800 13px var(--rp-m);color:var(--rp-am);letter-spacing:1px}} .rp-title b span{{color:var(--rp-tx)}}
+    .rp-title i{{font:normal 11.5px var(--rp-s);color:var(--rp-t3);text-align:right}}
+    .rp-fil{{padding:8px 0;border-bottom:1px solid #161616}} .rp-fil a{{font:600 12.5px var(--rp-s);color:var(--rp-tx);text-decoration:none}}
+    .rp-fil a:hover{{color:var(--rp-am)}} .rp-fil div{{font:10.5px var(--rp-m);color:var(--rp-t3);margin-top:3px}}
+
+    div[class*="st-key-rpgrp"] div[data-testid="stHorizontalBlock"],div[class*="st-key-rpnav"] div[data-testid="stHorizontalBlock"]{{gap:4px !important}}
+    div[class*="st-key-rpgrp"] button,div[class*="st-key-rpnav"] button{{border-radius:0 !important;min-height:30px !important;padding:2px 6px !important;width:100%;
+        background:var(--rp-p) !important;border:1px solid var(--rp-b) !important}}
+    div[class*="st-key-rpgrp"] button p,div[class*="st-key-rpnav"] button p{{font:700 10.5px var(--rp-m) !important;letter-spacing:.7px;white-space:nowrap;color:var(--rp-t2) !important}}
+    div[class*="st-key-rpgrp"] button:hover,div[class*="st-key-rpnav"] button:hover{{border-color:var(--rp-am) !important}}
+    div[class*="st-key-rpgrp"] button[kind="primary"],div[class*="st-key-rpgrp"] button[data-testid="stBaseButton-primary"]{{
+        background:#1A1408 !important;border-color:var(--rp-b) !important;border-bottom:2px solid var(--rp-am) !important}}
+    div[class*="st-key-rpgrp"] button[kind="primary"] p,div[class*="st-key-rpgrp"] button[data-testid="stBaseButton-primary"] p{{color:var(--rp-am) !important}}
+    div[class*="st-key-rpnav"] button[kind="primary"],div[class*="st-key-rpnav"] button[data-testid="stBaseButton-primary"]{{
+        background:var(--rp-am) !important;border-color:var(--rp-am) !important}}
+    div[class*="st-key-rpnav"] button[kind="primary"] p,div[class*="st-key-rpnav"] button[data-testid="stBaseButton-primary"] p{{color:#000 !important}}
+    div[class*="st-key-rpcmd"] input{{background:#000 !important;color:var(--rp-am) !important;font:700 13px var(--rp-m) !important;
+        border:1px solid var(--rp-am) !important;border-radius:0 !important;letter-spacing:.8px}}
+    div[class*="st-key-rprecent"] button{{background:var(--rp-p) !important;border:1px solid var(--rp-b) !important;border-radius:0 !important;min-height:26px !important;padding:1px 8px !important}}
+    div[class*="st-key-rprecent"] button p{{font:700 10px var(--rp-m) !important;color:var(--rp-t2) !important}}
     </style>""", unsafe_allow_html=True)
 
 
@@ -1629,7 +2184,7 @@ def _on_cmd(key):
     elif len(toks) == 1:
         sym = toks[0]
     else:
-        st.session_state[f"rp_msg_{key}"] = f"Unknown function '{toks[-1]}'. Try DES, FA, HC, VAL, TECH …"
+        st.session_state[f"rp_msg_{key}"] = f"Unknown function '{toks[-1]}'. All codes are listed beside the command bar."
         return
     if sym:
         st.session_state.active_security = sym
@@ -1637,8 +2192,14 @@ def _on_cmd(key):
         st.session_state[f"rp_jump_{key}"] = True
 
 
+def _set_grp(key, grp):
+    st.session_state[f"rp_grp_{key}"] = grp
+    st.session_state[f"rp_fn_{key}"] = next(code for g, items in GROUPS if g == grp for code, _, _ in items)
+
+
 def _set_fn(key, code):
     st.session_state[f"rp_fn_{key}"] = code
+    st.session_state[f"rp_grp_{key}"] = FN[code][2]
 
 
 def _command_bar(sym, key, T):
@@ -1646,35 +2207,36 @@ def _command_bar(sym, key, T):
     with c1:
         with st.container(key=f"rpcmd_wrap_{key}"):
             st.text_input("Command", key=f"rpcmd_{key}", on_change=_on_cmd, args=(key,),
-                          placeholder=f"{sym} ▸ type a function (FA, HC, VAL, TECH…) or a symbol + function (TCS FA), then Enter",
+                          placeholder=f"{sym} ▸ type a code (DLV, DCF, COMP…) or a symbol + code (TCS FA), then Enter",
                           label_visibility="collapsed")
     with c2:
         msg = st.session_state.get(f"rp_msg_{key}")
         tip = (f'<span style="color:{T["red"]}">{_esc(msg)}</span>' if msg else
-               f'<span style="color:{T["t3"]}">SHORTCUTS · </span>' + " ".join(
-                   f'<b style="color:{T["t2"]}">{c}</b>' for c in ("DES", "HC", "FH", "ERN", "DLV", "QR", "SYN")))
-        st.markdown(f'<div style="font:10px {T["mono"]};padding-top:9px">{tip}</div>', unsafe_allow_html=True)
+               '<span class="rp-mut">ALL CODES · </span>' + " ".join(f'<b style="color:#B8B8B8">{c}</b>' for c in FUNCS))
+        st.markdown(f'<div style="font:10px/1.7 {T["mono"]};padding-top:3px">{tip}</div>', unsafe_allow_html=True)
 
 
 def _nav(key, T):
     cur = st.session_state[f"rp_fn_{key}"]
+    grp = FN[cur][2]
+    st.session_state[f"rp_grp_{key}"] = grp
+    with st.container(key=f"rpgrp_{key}"):
+        cols = st.columns(len(GROUPS))
+        for c, (g, _) in zip(cols, GROUPS):
+            c.button(g, key=f"rpg_{key}_{g}", on_click=_set_grp, args=(key, g), type="primary" if g == grp else "secondary",
+                     use_container_width=True)
+    items = next(it for g, it in GROUPS if g == grp)
     with st.container(key=f"rpnav_{key}"):
-        for grp, items in GROUPS:
-            st.markdown(f'<div style="font:700 8px {T["mono"]};color:{T["t3"]};letter-spacing:1.2px;margin:8px 0 2px">{grp}</div>',
-                        unsafe_allow_html=True)
-            for code, name, _ in items:
-                st.button(f"{code} · {name}", key=f"rpb_{key}_{code}", on_click=_set_fn, args=(key, code),
-                          type="primary" if code == cur else "secondary", use_container_width=True)
+        cols = st.columns([1.5] * len(items) + [max(0.05, (6 - len(items)) * 1.5)])
+        for c, (code, name, _) in zip(cols, items):
+            c.button(f"{code} · {name}", key=f"rpb_{key}_{code}", on_click=_set_fn, args=(key, code),
+                     type="primary" if code == cur else "secondary", use_container_width=True)
 
 
 def _title_bar(fn, sym, T):
     name, desc, grp = FN[fn]
-    st.markdown(
-        f'<div style="display:flex;justify-content:space-between;align-items:baseline;border:1px solid {T["border"]};border-left:3px solid {T["amber"]};'
-        f'background:{T["panel"]};padding:8px 12px;margin:0 0 4px">'
-        f'<span style="font:800 12px {T["mono"]};color:{T["amber"]};letter-spacing:1px">{_esc(sym)} {fn} &lt;GO&gt; '
-        f'<span style="color:{T["ivory"]}">· {_esc(name).upper()}</span></span>'
-        f'<span style="font:9px {T["mono"]};color:{T["t3"]}">{_esc(grp)} · {_esc(desc)}</span></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="rp-title"><b>{_esc(sym)} {fn} &lt;GO&gt; <span>· {_esc(name).upper()}</span></b><i>{_esc(desc)}</i></div>',
+                unsafe_allow_html=True)
 
 
 # ═══════════════════════════ Panel + page ═══════════════════════════
@@ -1682,25 +2244,21 @@ def _title_bar(fn, sym, T):
 def _research_fragment(symbol, T, news_fetch_fn, key, show_quote):
     fk = f"rp_fn_{key}"
     if st.session_state.get(fk) not in FN:
-        st.session_state[fk] = "DES"
+        st.session_state[fk] = "OV"
     if st.session_state.pop(f"rp_jump_{key}", False):
-        st.rerun(scope="app")  # symbol changed from the command bar → redraw chart + header too
+        st.rerun(scope="app")  # symbol changed from the command bar → redraw everything
 
     with st.spinner("Loading fundamentals…"):
         B = get_screener_bundle(symbol) or {"resolved": False, "summary": {}, "growth": {}}
     _snapshot(symbol, B, T, show_quote)
     _command_bar(symbol, key, T)
-
-    nav, body = st.columns([1.05, 5], gap="small")
-    with nav:
-        _nav(key, T)
-    with body:
-        fn = st.session_state[fk]
-        _title_bar(fn, symbol, T)
-        try:
-            HANDLERS[fn](symbol, B, T, key, news_fetch_fn)
-        except Exception as e:  # one broken section must never take down the terminal
-            _unavailable(FN[fn][0], "Section renderer", T, f"Error while rendering: {type(e).__name__}: {e}")
+    _nav(key, T)
+    fn = st.session_state[fk]
+    _title_bar(fn, symbol, T)
+    try:
+        HANDLERS[fn](symbol, B, T, key, news_fetch_fn)
+    except Exception as e:  # one broken section must never take down the terminal
+        _unavailable(FN[fn][0], "Section renderer", T, f"Error while rendering: {type(e).__name__}: {e}")
 
 
 def render_research_panel(symbol, T=None, news_fetch_fn=None, key="rp", show_quote=True):
@@ -1728,11 +2286,10 @@ def render_research_page(T=None, news_fetch_fn=None):
     _css(T)
     now = datetime.now(IST)
     opened = _market_open(now)
-    color = T["green"] if opened else T["red"]
     st.markdown(
-        f'<div style="display:flex;justify-content:space-between;border:1px solid {T["border"]};border-bottom:2px solid {T["amber"]};background:{T["panel"]};padding:7px 12px;margin-bottom:10px;font:10px {T["mono"]}">'
-        f'<span style="color:{T["amber"]};font-weight:800;letter-spacing:1px">ARKA TERMINAL · RESEARCH</span>'
-        f'<span style="color:{color};font-weight:700">● {"MARKET OPEN" if opened else "MARKET CLOSED"}</span>'
+        f'<div style="display:flex;justify-content:space-between;border-bottom:1px solid #222;padding:4px 2px 8px;margin-bottom:8px;font:700 10.5px {T["mono"]};letter-spacing:1px">'
+        f'<span style="color:{T["amber"]}">ARKA TERMINAL · RESEARCH</span>'
+        f'<span style="color:{T["green"] if opened else T["red"]}">● {"MARKET OPEN" if opened else "MARKET CLOSED"}</span>'
         f'<span style="color:{T["t3"]}">{now.strftime("%d %b %Y · %H:%M IST")}</span></div>', unsafe_allow_html=True)
 
     active = st.session_state.get("active_security") or st.session_state.get("research_last_query") or ""
@@ -1749,38 +2306,14 @@ def render_research_page(T=None, news_fetch_fn=None):
     if recent:
         with st.container(key="rprecent"):
             cols = st.columns([0.6] + [1] * len(recent) + [max(1, 9 - len(recent))])
-            cols[0].markdown(f'<div style="font:700 8px {T["mono"]};color:{T["t3"]};letter-spacing:1px;padding-top:7px">RECENT</div>', unsafe_allow_html=True)
+            cols[0].markdown(f'<div style="font:700 9.5px {T["mono"]};color:{T["t3"]};letter-spacing:1px;padding-top:7px">RECENT</div>', unsafe_allow_html=True)
             for c, s in zip(cols[1:], recent):
                 c.button(s, key=f"rprecent_{s}", on_click=_load_symbol, args=(s,), use_container_width=True)
 
     symbol = st.session_state.get("active_security") or st.session_state.get("research_last_query") or ""
     if not symbol:
-        _panel("Research ready", f'<div style="font:11px {T["mono"]};color:{T["t3"]};line-height:1.9">Load a security to open its research workspace.<br>'
-               f'Tip: once loaded, type function codes like <b style="color:{T["amber"]}">FA</b>, <b style="color:{T["amber"]}">HC</b> or '
-               f'<b style="color:{T["amber"]}">TCS VAL</b> into the command bar.</div>', T, dashed=True)
+        _panel("Research ready", "Load a security to open its research workspace. Once loaded, type function codes such as "
+               f'<b style="color:{T["amber"]}">DLV</b>, <b style="color:{T["amber"]}">DCF</b> or <b style="color:{T["amber"]}">TCS FA</b> into the command bar.', T, dashed=True)
         return
     _remember(symbol)
-
-    hist = get_history(symbol, "1y")
-    B = get_screener_bundle(symbol) or {}
-    name = B.get("name") or symbol
-    price = chg = None
-    if hist is not None and len(hist) >= 2:
-        price, prev = float(hist["Close"].iloc[-1]), float(hist["Close"].iloc[-2])
-        chg = (price / prev - 1) * 100
-    cc = T["green"] if (chg or 0) >= 0 else T["red"]
-    st.markdown(
-        f'<div style="border:1px solid {T["border"]};border-top:2px solid {T["amber"]};background:{T["panel"]};padding:12px 14px;margin:8px 0;display:flex;justify-content:space-between;align-items:end;flex-wrap:wrap;gap:12px">'
-        f'<div><span style="font:800 18px {T["mono"]};color:{T["ivory"]}">{_esc(name)}</span><span style="font:10px {T["mono"]};color:{T["t3"]};margin-left:10px">{_esc(symbol)} · NSE</span></div>'
-        f'<div style="text-align:right"><span style="font:800 22px {T["mono"]};color:{T["ivory"]}">{"₹{:,.2f}".format(price) if price else "N/A"}</span>'
-        f'<span style="font:700 11px {T["mono"]};color:{cc};margin-left:10px">{"{:+.2f}%".format(chg) if chg is not None else ""}</span></div></div>',
-        unsafe_allow_html=True)
-
-    with st.expander("CHART", expanded=True):
-        try:
-            from chart_engine import render_pro_chart
-            render_pro_chart(symbol, height=560)
-        except Exception as e:  # chart must never break the research page
-            st.caption(f"Chart unavailable: {e}")
-
-    render_research_panel(symbol, T, news_fetch_fn, key="rp_page", show_quote=False)
+    render_research_panel(symbol, T, news_fetch_fn, key="rp_page", show_quote=True)
