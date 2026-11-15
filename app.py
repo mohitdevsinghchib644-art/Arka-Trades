@@ -104,10 +104,11 @@ def db_load_admin_watchlist() -> list:
 
 # Logins: set ADMIN_USER / ADMIN_PASS / MEMBER_USER / MEMBER_PASS in Streamlit Cloud → Settings → Secrets,
 # then delete the fallback strings below so no password lives in your GitHub repository.
-_ADMIN_USER = _secret("ADMIN_USER", "ADMIN4477MAX")
-_ADMIN_PASS = _secret("ADMIN_PASS", "MOHIT1")
-_MEMBER_USER = _secret("MEMBER_USER", "max trades")
-_MEMBER_PASS = _secret("MEMBER_PASS", "max")
+_ADMIN_USER = str(_secret("ADMIN_USER", ""))
+_ADMIN_PASS = str(_secret("ADMIN_PASS", ""))
+_MEMBER_USER = str(_secret("MEMBER_USER", ""))
+_MEMBER_PASS = str(_secret("MEMBER_PASS", ""))
+_AUTH_KEY = auth.derive_key(_secret("AUTH_SECRET", ""), _ADMIN_USER, _ADMIN_PASS, _MEMBER_USER, _MEMBER_PASS)
 
 
 # ═══════════════════════════════ DESIGN TOKENS ═══════════════════════════════
