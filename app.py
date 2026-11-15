@@ -770,6 +770,7 @@ def _nav_cb(target):
 
 
 def _sign_out_cb():
+    auth.forget()
     for k in ("logged_in", "is_admin", "show_login"):
         st.session_state[k] = False
     st.session_state.page = "home"
