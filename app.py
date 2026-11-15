@@ -604,16 +604,23 @@ def _render_login():
             with st.container(key="loginwrap"):
                 with st.form("lf"):
                     st.markdown('<div class="lg-card-h"><b>Member login</b><span>Sign in to access your terminal</span></div>', unsafe_allow_html=True)
-                    u = st.text_input("Username", placeholder="Enter username")
+                                        u = st.text_input("Username", placeholder="Enter username")
                     p = st.text_input("Password", placeholder="Enter password", type="password")
+                    remember = st.checkbox("Keep me signed in on this device (30 days)", value=True)
                     ok = st.form_submit_button("Sign in", use_container_width=True, type="primary")
                     if ok:
-                        if u.strip() == _ADMIN_USER and p.strip() == _ADMIN_PASS:
-                            st.session_state.logged_in, st.session_state.is_admin = True, True
+                        role = None
+                        if _ADMIN_USER and _ADMIN_PASS and auth.same(u.strip(), _ADMIN_USER) and auth.same(p.strip(), _ADMIN_PASS):
+                            role = "admin"
+                        elif _MEMBER_USER and _MEMBER_PASS and auth.same(u.strip().lower(), _MEMBER_USER.lower()) and auth.same(p.strip().lower(), _MEMBER_PASS.lower()):
+                            role = "member"
+                        if role:
+                            st.session_state.logged_in, st.session_state.is_admin = True, role == "admin"
+                            if remember:
+                                auth.remember(role, _AUTH_KEY)
                             st.rerun()
-                        elif u.strip().lower() == str(_MEMBER_USER).lower() and p.strip().lower() == str(_MEMBER_PASS).lower():
-                            st.session_state.logged_in, st.session_state.is_admin = True, False
-                            st.rerun()
+                        elif not (_ADMIN_PASS or _MEMBER_PASS):
+                            st.error("Logins are not configured. Add ADMIN_* / MEMBER_* to Streamlit secrets.")
                         else:
                             st.error("Invalid username or password.")
                 if st.button("← Back to home", use_container_width=True, key="back_home"):
