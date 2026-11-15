@@ -718,8 +718,9 @@ def _render_landing():
     st.markdown('<div class="lp-foot">Arka Trades · Finance &amp; Market Education'
                 '<small>Not SEBI registered. All content is for educational purposes only. Trading involves risk: decisions and outcomes are entirely your own. '
                 'Examples shown are illustrative and not recommendations.</small></div>', unsafe_allow_html=True)
-
-
+ 
+auth.auto_login(_AUTH_KEY)
+auth.flush()
 if not st.session_state.logged_in:
     if st.query_params.get("login") == "1":
         st.session_state.show_login = True
