@@ -1,5 +1,11 @@
 """
-news_feed.py — Arka News Desk v10
+news_feed.py — Arka News Desk v11
+
+v11 (look only; data, scoring and the public API are unchanged)
+  * Rebuilt on the app design system: Inter, sentence case, rounded story cards, soft pills; no uppercase monospace.
+  * Story cards: clock time + age + source, plain-word tags (Results, Order win, Breaking, Trending), stock chips, tone dot.
+  * Views are pills / segmented controls instead of radio buttons; news desk has a phone layout (one section at a time).
+  * Summaries that only repeat the headline (Google News) are dropped, so the watchlist news sheet no longer echoes titles.
 
 A Bloomberg-style news layer for the terminal: one shared wire, entity tagging, scoring and a full NEWS workspace.
 
@@ -157,7 +163,7 @@ EVENT_WEIGHT = {"REGULATORY": 3, "ORDER": 3, "STAKE": 3, "PROMOTER": 2, "EARNING
 SENT = [  # (pattern, weight); longer phrases first
     (r"record (high|profit|revenue|sales)|all[- ]time high|52[- ]week high|upper circuit|multibagger", 2),
     (r"beats? (estimates?|expectations?|street)|raises? (guidance|outlook|target)|target raised", 2),
-    (r"(wins?|bags?|secures?) (an? )?(\w+ )?(order|contract|deal)", 2),
+    (r"(wins?|bags?|secures?|receives?) (an? )?(?:[\w₹$.,-]+ ){0,4}(orders?|contracts?|deals?)", 2),   # v11: "bags ₹1,200 crore order"
     (r"surges?|soars?|skyrockets?|zooms?|rall(y|ies)|profit (jumps|surges|soars|doubles)|upgraded?", 2),
     (r"rises?|gains?|climbs?|jumps?|higher|growth|expands?|launch(es)?|partnership|approv(al|es|ed)|recover(s|y)|rebounds?|"
      r"outperforms?|buy rating|strong demand|improves?|robust|tailwinds?", 1),
@@ -376,6 +382,8 @@ def _make(row: dict, kind: str, source: str, symbol: str | None, tagger) -> dict
         if len(parts) >= 2 and len(parts[-1]) <= 60:
             src, title = row.get("src") or parts[-1].strip(), " - ".join(parts[:-1]).strip()
     summary = row.get("summary") or ""
+    if summary and (_norm_title(title)[:60] in _norm_title(summary) or len(summary) < 25):
+        summary = ""                                 # Google News summaries just repeat the headline + publisher
     text = f"{title}. {summary}"
     low = text.lower()
     score = _sentiment(title) if kind == "filing" else _sentiment(title) * 2 + _sentiment(summary)
@@ -626,41 +634,112 @@ def _reaction(symbol: str, dt) -> float | None:
     return (pts[-1][1] / after[0] - 1) * 100 if after[0] > 0 else None
 
 
-# ═════════════════════════ rendering ═════════════════════════
+# ═════════════════════════ rendering (v11: app design system) ═════════════════════════
+SANS = "Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif"
+EVENT_LABEL = {"REGULATORY": "Regulatory", "FILING": "Filing", "ORDER": "Order win", "STAKE": "Stake / M&A", "PROMOTER": "Promoter",
+               "EARNINGS": "Results", "CORP ACTION": "Corporate action", "IPO": "IPO", "RATING": "Rating", "CAPEX": "Capex",
+               "MANAGEMENT": "Management", "MACRO": "Macro", "NEWS": "News"}
+MODE_LABEL = {"TOP": "Top", "LIVE": "Latest", "MINE": "My stocks", "MY STOCKS": "My stocks", "CATALYSTS": "Catalysts", "RISK": "Risk",
+              "EARNINGS": "Results", "CORP ACTIONS": "Corporate actions", "FILINGS": "Filings", "MACRO": "Macro"}
+TAG_LABEL = {"BANKS & FIN": "Banks & finance", "IT": "IT", "AUTO": "Auto", "PHARMA": "Pharma & health", "METALS": "Metals",
+             "ENERGY": "Oil & gas", "FMCG": "FMCG", "REALTY": "Realty", "POWER": "Power", "CAP GOODS": "Capital goods",
+             "TELECOM": "Telecom", "CEMENT": "Cement", "CHEMICALS": "Chemicals", "RBI": "RBI", "FED": "Fed", "INFLATION": "Inflation",
+             "CRUDE": "Crude", "RUPEE": "Rupee", "FII": "FII / DII flows", "GDP": "GDP", "TRADE": "Trade & tariffs", "BUDGET": "Budget & GST",
+             "GLOBAL": "Global markets"}
+TONE_WORD = {"strong_positive": "Positive", "mild_positive": "Slightly positive", "neutral": "Neutral",
+             "mild_negative": "Slightly negative", "strong_negative": "Negative"}
+WINDOWS = {"24 h": 1, "3 days": 3, "7 days": 7, "30 days": 30}
+
+
+def _tag_label(t: str) -> str:
+    return TAG_LABEL.get(t, str(t).capitalize())
+
+
+def _phone() -> bool:
+    try:
+        return bool(st.session_state.get("_ak_phone"))
+    except Exception:
+        return False
+
+
+def _choice(label, options, key, fmt=None, pills=False):
+    """Segmented control / pills on newer Streamlit, a horizontal radio otherwise. Never returns None."""
+    fmt = fmt or (lambda o: o)
+    if st.session_state.get(key) not in options:
+        st.session_state[key] = options[0]
+
+    def _keep():
+        if st.session_state.get(key) not in options:
+            st.session_state[key] = options[0]
+    fn = getattr(st, "pills" if pills else "segmented_control", None) or getattr(st, "segmented_control", None) or getattr(st, "pills", None)
+    if fn is not None:
+        try:
+            v = fn(label, options, key=key, format_func=fmt, label_visibility="collapsed", on_change=_keep)
+            return v if v in options else options[0]
+        except TypeError:
+            pass
+    return st.radio(label, options, key=key, format_func=fmt, horizontal=True, label_visibility="collapsed")
+
+
 def _css():
     st.markdown(f"""<style>
-    .nd-s{{display:block;text-decoration:none !important;border-left:2px solid var(--c);padding:8px 8px 8px 10px;margin:0 0 6px;
-           background:linear-gradient(90deg,rgba(255,255,255,.025),transparent 70%);transition:background .12s ease;}}
-    .nd-s:hover{{background:linear-gradient(90deg,rgba(255,159,10,.07),transparent 80%);}}
-    .nd-m{{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font:800 8.5px {MONO};letter-spacing:.7px;color:{TX3};margin-bottom:3px;}}
-    .nd-p{{padding:0 4px;border-radius:2px;color:#000;}}
-    .nd-h{{font:600 12.5px/1.42 Inter,Arial,sans-serif;color:{TX};}}
-    .nd-full .nd-h{{font-size:14px;}}
-    .nd-x{{font:11.5px/1.55 Inter,Arial,sans-serif;color:{TX2};margin-top:4px;}}
-    .nd-f{{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font:9px {MONO};color:{TX3};margin-top:5px;}}
-    .nd-tag{{padding:0 5px;border:1px solid currentColor;border-radius:2px;font-weight:800;letter-spacing:.5px;}}
-    .nd-k{{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;border-top:1px solid {LINE};border-bottom:1px solid {LINE};padding:7px 0;margin:6px 0;text-align:center;}}
-    .nd-k b{{display:block;font:800 8px {MONO};letter-spacing:.8px;}} .nd-k span{{font:700 13px {MONO};color:{TX};}}
-    .nd-tone{{position:relative;height:5px;background:linear-gradient(90deg,{RED}66,#222 50%,{GREEN}66);margin:4px 0 2px;}}
-    .nd-tone i{{position:absolute;top:-3px;width:3px;height:11px;background:{AMBER};transform:translateX(-1px);}}
-    .nd-tape{{overflow:hidden;white-space:nowrap;border:1px solid {LINE};border-left:3px solid {RED};background:{S1};height:34px;margin:4px 0 10px;}}
-    .nd-tape div{{display:inline-block;padding:9px 0;animation:ndtape 70s linear infinite;font:700 11px {MONO};color:{TX2};}}
-    .nd-tape b{{color:{RED};margin:0 6px 0 28px;}} .nd-tape:hover div{{animation-play-state:paused;}}
+    .nd-root,.nd-s,.nd-kpis,.nd-card,.nd-tape,.nd-k{{font-family:{SANS};font-variant-numeric:tabular-nums}}
+    /* story */
+    a.nd-s{{display:block;text-decoration:none !important;padding:12px 14px;margin:0 0 8px;border-radius:12px;background:var(--s1,#0E0E10);
+           border:1px solid var(--line,#1E1E21);transition:border-color .15s ease,background .15s ease}}
+    a.nd-s:hover{{border-color:#34343A;background:#131316}}
+    a.nd-s.compact{{padding:10px 12px;margin-bottom:6px}}
+    .nd-m{{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:11.5px;color:var(--tx3,{TX3})}}
+    .nd-m .t{{color:#E4E4E8;font-weight:600}} .nd-m .dot{{opacity:.45}}
+    .nd-pill{{--c:#8A8A90;display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:600;color:var(--c);
+             background:color-mix(in srgb,var(--c) 13%,transparent);white-space:nowrap}}
+    .nd-pill.solid{{background:var(--c);color:#0A0A0A}}
+    .nd-h{{font-size:13.5px;font-weight:600;line-height:1.45;color:#F2F2F5;margin-top:5px}}
+    a.nd-s.full .nd-h{{font-size:15px}}
+    .nd-x{{font-size:12.5px;line-height:1.55;color:var(--tx2,{TX2});margin-top:5px}}
+    .nd-f{{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:11.5px;color:var(--tx3,{TX3});margin-top:8px}}
+    .nd-sym{{display:inline-block;padding:1px 7px;border-radius:6px;font-size:11px;font-weight:650;color:#E8E8EC;background:#1C1C21;border:1px solid #26262C}}
+    .nd-sym.cur{{color:{AMBER};border-color:rgba(255,159,10,.4);background:rgba(255,159,10,.08)}}
+    .nd-tone-dot{{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--c);margin-right:4px;vertical-align:1px}}
+    /* rail summary */
+    .nd-k{{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:4px 0 8px}}
+    .nd-k > div{{background:var(--s1,#0E0E10);border:1px solid var(--line,#1E1E21);border-radius:10px;padding:8px 9px}}
+    .nd-k b{{display:block;font-size:11px;font-weight:500;color:var(--tx3,{TX3})}} .nd-k span{{display:block;font-size:15px;font-weight:650;color:var(--tx,{TX});margin-top:2px}}
+    .nd-tone{{position:relative;height:5px;border-radius:5px;background:linear-gradient(90deg,rgba(255,69,58,.45),#26262A 50%,rgba(48,209,88,.45));margin:6px 2px 4px}}
+    .nd-tone i{{position:absolute;top:-4px;width:4px;height:13px;border-radius:2px;background:#fff;transform:translateX(-2px)}}
+    .nd-tl{{display:flex;justify-content:space-between;font-size:11px;color:var(--tx3,{TX3});margin:0 2px 10px}}
+    /* breaking strip */
+    .nd-tape{{display:flex;align-items:center;gap:10px;overflow:hidden;white-space:nowrap;border:1px solid var(--line,#1E1E21);border-radius:12px;
+             background:var(--s1,#0E0E10);height:40px;margin:6px 0 12px;padding-left:10px}}
+    .nd-tape .lab{{flex:0 0 auto;font-size:11.5px;font-weight:650;color:#fff;background:{RED};padding:3px 10px;border-radius:999px}}
+    .nd-tape .run{{overflow:hidden;flex:1;mask-image:linear-gradient(90deg,transparent,#000 3%,#000 97%,transparent);-webkit-mask-image:linear-gradient(90deg,transparent,#000 3%,#000 97%,transparent)}}
+    .nd-tape .run div{{display:inline-block;animation:ndtape 80s linear infinite;font-size:12.5px;color:var(--tx2,{TX2})}}
+    .nd-tape .run b{{color:#F2F2F5;font-weight:650;margin:0 6px 0 26px}}
+    .nd-tape:hover .run div{{animation-play-state:paused}}
     @keyframes ndtape{{from{{transform:translateX(0)}}to{{transform:translateX(-50%)}}}}
-    .nd-kpis{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:4px 0 8px;}}
-    .nd-kp{{background:{S1};border:1px solid {LINE};border-top:2px solid var(--a,{LINE2});padding:10px 12px;}}
-    .nd-kp .l{{font:700 8px {MONO};letter-spacing:1.1px;color:{TX3};}} .nd-kp .v{{font:700 19px {MONO};color:{TX};margin-top:4px;}}
-    .nd-kp .s{{font:10px {MONO};color:{TX3};margin-top:3px;}}
-    .nd-sec{{font:700 10px {MONO};letter-spacing:1.2px;color:{AMBER};border-bottom:1px solid {LINE};padding:8px 0 6px;margin:12px 0 8px;}}
-    .nd-pl{{display:grid;grid-template-columns:76px 34px 1fr;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid #141414;font:10px {MONO};}}
-    .nd-pl b{{color:{TX};}} .nd-pl a{{color:{TX2};text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font:11px Inter,sans-serif;}}
-    .nd-bar{{display:grid;grid-template-columns:92px 1fr 44px;gap:8px;align-items:center;font:10px {MONO};color:{TX2};margin:5px 0;}}
-    .nd-bar .t{{height:6px;background:#161616;position:relative;}} .nd-bar .t i{{position:absolute;top:0;height:100%;}}
-    .nd-src{{display:flex;justify-content:space-between;font:10px {MONO};padding:4px 0;border-bottom:1px solid #141414;color:{TX2};}}
-    .nd-empty{{font:11px {MONO};color:{TX3};padding:14px 2px;line-height:1.6;}}
-    div[class*="st-key-nd_rmode"] [role="radiogroup"],div[class*="st-key-nd_fmode"] [role="radiogroup"]{{gap:3px !important;}}
-    div[class*="st-key-nd_rmode"] label[data-baseweb="radio"]{{padding:3px 7px !important;}}
-    div[class*="st-key-nd_rmode"] label[data-baseweb="radio"] p{{font-size:9px !important;}}
+    /* KPI cards */
+    .nd-kpis{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:4px 0 12px}}
+    .nd-kp{{background:var(--s1,#0E0E10);border:1px solid var(--line,#1E1E21);border-radius:12px;padding:11px 13px}}
+    .nd-kp .l{{font-size:12px;font-weight:500;color:var(--tx3,{TX3})}} .nd-kp .v{{font-size:20px;font-weight:650;color:var(--tx,{TX});margin-top:4px;letter-spacing:-.2px}}
+    .nd-kp .s{{font-size:11.5px;color:var(--tx3,{TX3});margin-top:2px}}
+    /* side cards */
+    .nd-card{{background:var(--s1,#0E0E10);border:1px solid var(--line,#1E1E21);border-radius:14px;padding:12px 14px;margin:0 0 10px}}
+    .nd-ch{{display:flex;justify-content:space-between;align-items:baseline;font-size:13px;font-weight:600;color:var(--tx,{TX});margin-bottom:8px}}
+    .nd-ch em{{font-style:normal;font-weight:500;font-size:11.5px;color:var(--tx3,{TX3})}}
+    .nd-sec{{display:flex;justify-content:space-between;align-items:baseline;font-size:14px;font-weight:600;color:var(--tx,{TX});margin:10px 2px 8px}}
+    .nd-sec em{{font-style:normal;font-weight:500;font-size:12px;color:var(--tx3,{TX3})}}
+    .nd-pl{{display:grid;grid-template-columns:auto 1fr;gap:3px 10px;padding:8px 0;border-bottom:1px solid #18181C;text-decoration:none !important}}
+    .nd-pl:last-child{{border-bottom:0}}
+    .nd-pl .s{{font-size:12.5px;font-weight:650;color:#F2F2F5}} .nd-pl .n{{font-size:11.5px;text-align:right;font-weight:600}}
+    .nd-pl .h{{grid-column:1 / span 2;font-size:12px;line-height:1.45;color:var(--tx2,{TX2});overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}}
+    a.nd-pl:hover .h{{color:#fff}}
+    .nd-bar{{display:grid;grid-template-columns:110px 1fr 58px;gap:8px;align-items:center;font-size:12px;color:var(--tx2,{TX2});margin:7px 0}}
+    .nd-bar .t{{height:6px;border-radius:6px;background:#1A1A1E;position:relative;overflow:hidden}} .nd-bar .t i{{position:absolute;top:0;height:100%;border-radius:6px}}
+    .nd-chips{{display:flex;flex-wrap:wrap;gap:6px}}
+    .nd-src{{display:flex;justify-content:space-between;align-items:center;font-size:12px;padding:6px 0;border-bottom:1px solid #18181C;color:var(--tx2,{TX2})}}
+    .nd-src:last-child{{border-bottom:0}}
+    .nd-empty{{font-size:12.5px;color:var(--tx3,{TX3});padding:16px 4px;line-height:1.6}}
+    .nd-note{{font-size:11.5px;color:var(--tx3,{TX3});margin:8px 2px}}
     </style>""", unsafe_allow_html=True)
 
 
@@ -668,42 +747,51 @@ def _href(u: str) -> str:
     return html.escape(u, quote=True) if u and urlparse(u).scheme in ("http", "https") else "#"
 
 
+def _clock(dt) -> str:
+    now = _now()
+    return dt.strftime("%H:%M") if dt.date() == now.date() else dt.strftime("%d %b, %H:%M")
+
+
 def _story(a: dict, full: bool = False, current: str = "") -> str:
     sc = _SENT_COLOR[a["sentiment"]]
-    pr = "P1" if a["priority"] >= 70 else "P2" if a["priority"] >= 45 else "P3"
-    pc = RED if pr == "P1" else AMBER if pr == "P2" else "#444"
-    flags = ""
-    if a.get("is_breaking"):
-        flags += f'<span style="color:{RED}">● BREAKING</span>'
-    if a.get("hot"):
-        flags += f'<span style="color:{YELLOW}">▲ HOT</span>'
-    if a.get("is_new"):
-        flags += f'<span style="color:{CYAN}">NEW</span>'
     ev = a["event"]
-    syms = "".join(f'<span class="nd-tag" style="color:{AMBER if s == current else CYAN}">{html.escape(s)}</span>' for s in a["symbols"][:4])
+    pills = []
+    if a.get("is_breaking"):
+        pills.append(f'<span class="nd-pill solid" style="--c:{RED}">Breaking</span>')
+    elif a["priority"] >= 70:
+        pills.append(f'<span class="nd-pill" style="--c:{AMBER}">Important</span>')
+    if a.get("hot"):
+        pills.append(f'<span class="nd-pill" style="--c:{YELLOW}">Trending · {a["source_count"]} outlets</span>')
+    if a.get("is_new"):
+        pills.append(f'<span class="nd-pill" style="--c:{CYAN}">New</span>')
+    if ev != "NEWS":
+        pills.append(f'<span class="nd-pill" style="--c:{EVENT_COLORS.get(ev, TX3)}">{html.escape(EVENT_LABEL.get(ev, ev.capitalize()))}</span>')
+    src = html.escape(a["source"]) + (f' and {a["source_count"] - 1} more' if a["source_count"] > 1 else "")
+    ago = a["time_str"] + ("" if a["time_str"] == "now" or not a["time_str"][-1:] in "mh" else " ago")
+    meta = (f'<span class="t">{_clock(a["pub_dt"])}</span><span class="dot">·</span><span>{html.escape(ago)}</span>'
+            f'<span class="dot">·</span><span>{src}</span>')
+    syms = "".join(f'<span class="nd-sym{" cur" if s == current else ""}">{html.escape(s)}</span>' for s in a["symbols"][:4])
     if not syms:
-        syms = f'<span class="nd-tag" style="color:{TX3}">{"MACRO" if a["kind"] == "macro" or a["macro"] else "MARKET"}</span>'
-    extra = "".join(f'<span style="color:{TX3}">{html.escape(s)}</span>' for s in (a["sectors"][:2] + a["macro"][:2]))
-    amt = f'<span style="color:{GREEN if a["score"] >= 0 else RED}">₹{a["amount_cr"]:,.0f} Cr</span>' if a.get("amount_cr") else ""
-    src = html.escape(a["source"]) + (f' +{a["source_count"] - 1}' if a["source_count"] > 1 else "")
+        syms = f'<span class="nd-sym">{"Macro" if a["kind"] == "macro" or a["macro"] else "Market"}</span>'
+    tone = f'<span><span class="nd-tone-dot" style="--c:{sc}"></span>{TONE_WORD[a["sentiment"]]}</span>'
+    amt = f'<span style="color:{GREEN if a["score"] >= 0 else RED};font-weight:600">₹{a["amount_cr"]:,.0f} Cr</span>' if a.get("amount_cr") else ""
+    extra = " · ".join(html.escape(_tag_label(s)) for s in (a["sectors"][:2] + a["macro"][:2]))
     react = ""
     if full and current and current in a["symbols"] and a["kind"] != "macro":
         r = _reaction(current, a["pub_dt"])
         if r is not None:
-            react = f'<span style="color:{GREEN if r >= 0 else RED}">{current} {r:+.2f}% since</span>'
-    tone = f'<span style="color:{sc}">{"▲" if a["score"] > 0 else "▼" if a["score"] < 0 else "■"} {a["sentiment_label"]}</span>'
-    summ = f'<div class="nd-x">{html.escape(a["summary"])}</div>' if full and a.get("summary") and a["kind"] != "company" else ""
-    return (f'<a class="nd-s{" nd-full" if full else ""}" href="{_href(a["link"])}" target="_blank" style="--c:{sc}">'
-            f'<div class="nd-m"><span class="nd-p" style="background:{pc}">{pr}</span><span style="color:{EVENT_COLORS.get(ev, TX3)}">{html.escape(ev)}</span>'
-            f'<span>{a["time_str"]}</span>{flags}</div><div class="nd-h">{html.escape(a["title"])}</div>{summ}'
-            f'<div class="nd-f">{syms}{tone}{amt}<span>{src}</span>{extra}{react}</div></a>')
+            react = f'<span class="nd-pill" style="--c:{GREEN if r >= 0 else RED}">{html.escape(current)} {r:+.2f}% since</span>'
+    summ = f'<div class="nd-x">{html.escape(a["summary"])}</div>' if full and a.get("summary") else ""
+    return (f'<a class="nd-s {"full" if full else "compact"}" href="{_href(a["link"])}" target="_blank" rel="noopener noreferrer">'
+            f'<div class="nd-m">{meta}{"".join(pills)}</div><div class="nd-h">{html.escape(a["title"])}</div>{summ}'
+            f'<div class="nd-f">{syms}{tone}{amt}{f"<span>{extra}</span>" if extra else ""}{react}</div></a>')
 
 
 def _stories(items, full=False, current="", empty="No stories in this view."):
     if not items:
         st.markdown(f'<div class="nd-empty">{html.escape(empty)}</div>', unsafe_allow_html=True)
         return
-    st.markdown("".join(_story(a, full, current) for a in items), unsafe_allow_html=True)
+    st.markdown('<div class="nd-root">' + "".join(_story(a, full, current) for a in items) + "</div>", unsafe_allow_html=True)
 
 
 def _mark_new(items):
@@ -784,31 +872,34 @@ def get_news_dot(sym: str) -> str:
 
 
 def render_news_rail(watchlist, label: str = "WATCHLIST", current_security: str | None = None, sector: str | None = None):
-    """Compact right-rail news: tone, counts, mode selector, top stories."""
+    """Compact right-rail news: tone, counts, view selector, top stories."""
     _ensure_news_state()
     _css()
     current = (current_security or st.session_state.get("active_security") or "").upper().strip()
     if st.session_state.get("page") != "security":
         current = (current_security or "").upper().strip()
-    c1, c2 = st.columns([1, 1.4])
-    days = {"24H": 1, "3D": 3, "7D": 7}[c1.selectbox("Window", ["24H", "3D", "7D"], key="nd_rwin", label_visibility="collapsed")]
-    query = c2.text_input("Search news", key="nd_rq", placeholder="search…", label_visibility="collapsed")
+    c1, c2 = st.columns([1, 1.3], gap="small")
+    with c1:
+        days = WINDOWS[_choice("Window", ["24 h", "3 days", "7 days"], "nd_rwin2")]
+    query = c2.text_input("Search news", key="nd_rq", placeholder="Search news", label_visibility="collapsed")
     with st.spinner("Loading news…"):
         items = _mark_new(assemble(tuple(_universe(watchlist)), _names_from_session(), current, days))
     tone = news_tone(items)
     mine = sum(a["mine"] for a in items)
+    tc = GREEN if tone > 0 else RED if tone < 0 else TX2
     st.markdown(
-        f'<div class="nd-k"><div><b style="color:{AMBER}">STORIES</b><span>{len(items)}</span></div>'
-        f'<div><b style="color:{CYAN}">MINE</b><span>{mine}</span></div>'
-        f'<div><b style="color:{RED}">BREAKING</b><span>{sum(a["is_breaking"] for a in items)}</span></div>'
-        f'<div><b style="color:{GREEN if tone >= 0 else RED}">TONE</b><span style="color:{GREEN if tone >= 0 else RED}">{tone:+d}</span></div></div>'
-        f'<div class="nd-tone"><i style="left:{(tone + 100) / 2:.0f}%"></i></div>', unsafe_allow_html=True)
+        f'<div class="nd-k"><div><b>Stories</b><span>{len(items)}</span></div>'
+        f'<div><b>Your stocks</b><span>{mine}</span></div>'
+        f'<div><b>Breaking</b><span style="color:{RED if any(a["is_breaking"] for a in items) else TX}">{sum(a["is_breaking"] for a in items)}</span></div>'
+        f'<div><b>Tone</b><span style="color:{tc}">{tone:+d}</span></div></div>'
+        f'<div class="nd-tone"><i style="left:{(tone + 100) / 2:.0f}%"></i></div><div class="nd-tl"><span>Negative</span><span>Positive</span></div>',
+        unsafe_allow_html=True)
     modes = (["SECURITY"] if current else []) + MODES_RAIL
     with st.container(key="nd_rmode"):
-        mode = st.radio("News view", modes, horizontal=True, key="nd_rmode_v", label_visibility="collapsed")
+        mode = _choice("News view", modes, "nd_rmode_v2", lambda m: current if m == "SECURITY" else MODE_LABEL.get(m, m.capitalize()), pills=True)
     shown = _view(items, mode, query, current)
-    _stories(shown[:18], False, current, "No stories in this view yet. Add stocks to your watchlist or portfolio for company news.")
-    if st.button("OPEN NEWS DESK ▸", key="nd_open_desk", use_container_width=True):
+    _stories(shown[:18], False, current, "No stories here yet. Add stocks to your watchlist or portfolio to get company news.")
+    if st.button("Open news desk", key="nd_open_desk", use_container_width=True):
         st.session_state["page"] = "news"
         st.rerun()
 
@@ -817,24 +908,78 @@ news_panel = render_news_rail
 news_box = render_news_rail
 
 
+def _side_cards(items, universe):
+    """Your stocks, sector tone, macro themes and source health, as soft cards."""
+    pdf = pulse(items, universe)
+    if pdf.empty or pdf["stories"].sum() == 0:
+        body = '<div class="nd-empty" style="padding:4px 0">No stories name your stocks in this window.</div>'
+        quiet = 0
+    else:
+        rows = []
+        for r in pdf[pdf["stories"] > 0].head(14).to_dict("records"):
+            c = GREEN if r["tone"] > 0.2 else RED if r["tone"] < -0.2 else TX3
+            word = "positive" if r["tone"] > 0.2 else "negative" if r["tone"] < -0.2 else "mixed"
+            rows.append(f'<a class="nd-pl" href="{_href(r["link"])}" target="_blank" rel="noopener noreferrer"><span class="s">{html.escape(r["symbol"])}</span>'
+                        f'<span class="n" style="color:{c}">{r["stories"]} {"story" if r["stories"] == 1 else "stories"} · {word}</span>'
+                        f'<span class="h">{html.escape(r["latest"])}{" · " + html.escape(r["age"]) if r["age"] else ""}</span></a>')
+        body = "".join(rows)
+        quiet = int((pdf["stories"] == 0).sum())
+    out = [f'<div class="nd-card"><div class="nd-ch">Your stocks in the news<em>{len(universe)} tracked</em></div>{body}'
+           + (f'<div class="nd-note">{quiet} tracked stocks had no news.</div>' if quiet else "") + "</div>"]
+    stn = sector_tone(items)
+    if stn:
+        bars = []
+        for name, n, t in stn[:10]:
+            w = min(50, abs(t) / 3 * 50)
+            c = GREEN if t >= 0 else RED
+            pos_css = f"left:50%;width:{w:.0f}%" if t >= 0 else f"left:{50 - w:.0f}%;width:{w:.0f}%"
+            bars.append(f'<div class="nd-bar"><span>{html.escape(_tag_label(name))}</span><div class="t"><i style="{pos_css};background:{c}"></i>'
+                        f'<i style="left:50%;width:1px;background:#3A3A40;border-radius:0"></i></div><span style="color:{c};text-align:right">{n} · {t:+.1f}</span></div>')
+        out.append('<div class="nd-card"><div class="nd-ch">Sector tone<em>stories · average tone</em></div>' + "".join(bars) + "</div>")
+    mc = Counter(t for a in items for t in a["macro"]).most_common(8)
+    if mc:
+        out.append('<div class="nd-card"><div class="nd-ch">Macro themes</div><div class="nd-chips">'
+                   + "".join(f'<span class="nd-pill" style="--c:{AMBER}">{html.escape(_tag_label(k))} · {v}</span>' for k, v in mc) + "</div></div>")
+    health = source_health()
+    live = sum(1 for h in health if h["ok"])
+    out.append(f'<div class="nd-card"><div class="nd-ch">Sources<em>{live} of {len(health)} live</em></div>' + "".join(
+        f'<div class="nd-src"><span><span class="nd-tone-dot" style="--c:{GREEN if h["ok"] else RED}"></span>{html.escape(h["name"])}</span>'
+        f'<span style="color:{TX3 if h["ok"] else RED}">{str(h["n"]) + " items" if h["ok"] else "not reachable (" + html.escape(h["err"] or "failed") + ")"}'
+        f'{" · " + str(h["fail"]) + " failed" if h["ok"] and h["fail"] else ""}</span></div>' for h in health) + "</div>")
+    return out
+
+
 def render_news_terminal(watchlist=None, on_open=None, current_security: str | None = None):
-    """Full NEWS workspace: breaking tape, KPIs, wire with filters, my-stocks pulse, sector tone, source health."""
+    """Full news desk: breaking strip, summary cards, the wire with views, your stocks, sector tone, sources."""
     _ensure_news_state()
     _css()
     current = (current_security or st.session_state.get("active_security") or "").upper().strip()
     universe = _universe(watchlist)
-    c1, c2, c3, c4 = st.columns([1, 2.4, 1.2, 0.8], gap="small")
-    days = {"24 HOURS": 1, "3 DAYS": 3, "7 DAYS": 7, "30 DAYS": 30}[c1.selectbox("Window", ["24 HOURS", "3 DAYS", "7 DAYS", "30 DAYS"], key="nd_fwin", label_visibility="collapsed")]
-    query = c2.text_input("Search", key="nd_fq", placeholder="Search headlines, stocks, sectors, sources…  e.g. RBI, order, HDFCBANK, pharma", label_visibility="collapsed")
-    sort = c3.selectbox("Sort", ["Priority", "Newest"], key="nd_fsort", label_visibility="collapsed")
-    if c4.button("↻ REFRESH", key="nd_refresh", use_container_width=True):
+    phone = _phone()
+    st.markdown(f'<div class="nd-sec" style="font-size:20px;margin-top:4px">News desk<em>{_now():%a %d %b, %H:%M} IST</em></div>', unsafe_allow_html=True)
+    if phone:
+        days = WINDOWS[_choice("Window", list(WINDOWS), "nd_fwin2")]
+        query = st.text_input("Search", key="nd_fq", placeholder="Search: RBI, order, HDFCBANK, pharma…", label_visibility="collapsed")
+        s1, s2 = st.columns(2, gap="small")
+        with s1:
+            sort = _choice("Sort", ["Priority", "Newest"], "nd_fsort2")
+        refresh = s2.button("Refresh", key="nd_refresh", use_container_width=True)
+    else:
+        c1, c2, c3, c4 = st.columns([1.5, 2.4, 1.1, 0.7], gap="small")
+        with c1:
+            days = WINDOWS[_choice("Window", list(WINDOWS), "nd_fwin2")]
+        query = c2.text_input("Search", key="nd_fq", placeholder="Search headlines, stocks, sectors, sources: RBI, order, HDFCBANK, pharma…", label_visibility="collapsed")
+        with c3:
+            sort = _choice("Sort", ["Priority", "Newest"], "nd_fsort2")
+        refresh = c4.button("Refresh", key="nd_refresh", use_container_width=True)
+    if refresh:
         _MEMO.clear()
         _rss_cached.clear()
         _COOL.clear()
-    with st.spinner("Assembling the wire…"):
+    with st.spinner("Gathering the news…"):
         items = _mark_new(assemble(tuple(universe), _names_from_session(), current, days))
     if not items:
-        st.markdown('<div class="nd-empty">No stories returned yet — sources may be slow. Press REFRESH in a few seconds.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="nd-empty">No stories yet; some sources may be slow. Press Refresh in a few seconds.</div>', unsafe_allow_html=True)
         return
 
     tone = news_tone(items)
@@ -843,69 +988,51 @@ def render_news_terminal(watchlist=None, on_open=None, current_security: str | N
     live = sum(1 for h in health if h["ok"])
     breaking = [a for a in items if a["is_breaking"] or (a["priority"] >= 70 and a["age_min"] <= 180)][:12]
     if breaking:
-        tape = "".join(f'<b>{html.escape(", ".join(a["symbols"][:2]) or a["event"])}</b>{html.escape(a["title"])}' for a in breaking)
-        st.markdown(f'<div class="nd-tape"><div>{tape}{tape}</div></div>', unsafe_allow_html=True)
-    kp = lambda l, v, s, a: f'<div class="nd-kp" style="--a:{a}"><div class="l">{l}</div><div class="v">{v}</div><div class="s">{s}</div></div>'
-    st.markdown('<div class="nd-kpis">'
-                + kp("STORIES", len(items), f"{sum(a['is_new'] for a in items)} new since last look", AMBER)
-                + kp("MY STOCKS", sum(a["mine"] for a in items), f"across {len(universe)} tracked stocks", CYAN)
-                + kp("NEWS TONE", f'<span style="color:{GREEN if tone >= 0 else RED}">{tone:+d}</span>',
-                     f'<span style="color:{GREEN}">{pos} positive</span> · <span style="color:{RED}">{neg} negative</span>', GREEN if tone >= 0 else RED)
-                + kp("BREAKING · HOT", f'{sum(a["is_breaking"] for a in items)} · {sum(a["hot"] for a in items)}', "last hour · 3+ outlets in 3 h", RED)
-                + kp("FILINGS", sum(a["kind"] == "filing" for a in items), "BSE exchange announcements", PURPLE)
-                + kp("SOURCES LIVE", f"{live}/{len(health)}", "see SOURCE HEALTH", GREEN if live == len(health) else AMBER)
-                + '</div>', unsafe_allow_html=True)
+        tape = "".join(f'<b>{html.escape(", ".join(a["symbols"][:2]) or EVENT_LABEL.get(a["event"], "News"))}</b>{html.escape(a["title"])}' for a in breaking)
+        st.markdown(f'<div class="nd-tape"><span class="lab">Breaking</span><div class="run"><div>{tape}{tape}</div></div></div>', unsafe_allow_html=True)
+    tc = GREEN if tone > 0 else RED if tone < 0 else TX
+    kp = lambda l, v, s: f'<div class="nd-kp"><div class="l">{l}</div><div class="v">{v}</div><div class="s">{s}</div></div>'
+    cards = [kp("Stories", len(items), f"{sum(a['is_new'] for a in items)} new since you last looked"),
+             kp("Your stocks", sum(a["mine"] for a in items), f"stories across {len(universe)} tracked stocks"),
+             kp("News tone", f'<span style="color:{tc}">{tone:+d}</span>', f'<span style="color:{GREEN}">{pos} positive</span> · <span style="color:{RED}">{neg} negative</span>'),
+             kp("Breaking", f'{sum(a["is_breaking"] for a in items)}', f'{sum(a["hot"] for a in items)} trending (3+ outlets)')]
+    if not phone:
+        cards += [kp("Filings", sum(a["kind"] == "filing" for a in items), "BSE exchange announcements"),
+                  kp("Sources live", f"{live} of {len(health)}", "details in Sources")]
+    st.markdown('<div class="nd-kpis">' + "".join(cards) + "</div>", unsafe_allow_html=True)
 
-    left, right = st.columns([2.35, 1], gap="medium")
-    with left:
+    def wire():
         modes = (["SECURITY"] if current else []) + MODES_FULL
         with st.container(key="nd_fmode"):
-            mode = st.radio("Desk view", modes, horizontal=True, key="nd_fmode_v", label_visibility="collapsed")
+            mode = _choice("Desk view", modes, "nd_fmode_v2", lambda m: current if m == "SECURITY" else MODE_LABEL.get(m, m.capitalize()), pills=True)
         shown = _view(items, mode, query, current)
         if sort == "Newest":
             shown = sorted(shown, key=lambda a: a["pub_dt"], reverse=True)
-        st.markdown(f'<div class="nd-sec">{html.escape(mode)} · {len(shown)} STORIES</div>', unsafe_allow_html=True)
+        title = current if mode == "SECURITY" else MODE_LABEL.get(mode, mode.capitalize())
+        st.markdown(f'<div class="nd-sec">{html.escape(title)}<em>{len(shown)} {"story" if len(shown) == 1 else "stories"}</em></div>', unsafe_allow_html=True)
         _stories(shown[:45], True, current, "Nothing in this view for the selected window.")
         tagged = list(dict.fromkeys(s for a in shown[:45] for s in a["symbols"]))
         if on_open and tagged:
-            o1, o2 = st.columns([3, 1])
+            o1, o2 = st.columns([3, 1], gap="small")
             pick = o1.selectbox("Open a stock from these stories", tagged, key="nd_open_pick", label_visibility="collapsed")
-            if o2.button("OPEN STOCK ▸", key="nd_open_btn", use_container_width=True, type="primary"):
+            if o2.button("Open stock", key="nd_open_btn", use_container_width=True, type="primary"):
                 on_open(pick)
-    with right:
-        st.markdown('<div class="nd-sec">NEWS PULSE · YOUR STOCKS</div>', unsafe_allow_html=True)
-        pdf = pulse(items, universe)
-        if pdf.empty or pdf["stories"].sum() == 0:
-            st.markdown('<div class="nd-empty">No stories naming your stocks in this window.</div>', unsafe_allow_html=True)
+
+    side = _side_cards(items, universe)
+    if phone:
+        part = _choice("Section", ["Stories", "Your stocks", "Sectors & macro", "Sources"], "nd_phone_part")
+        if part == "Stories":
+            wire()
+        elif part == "Your stocks":
+            st.markdown(side[0], unsafe_allow_html=True)
+        elif part == "Sources":
+            st.markdown(side[-1], unsafe_allow_html=True)
         else:
-            rows = []
-            for r in pdf[pdf["stories"] > 0].head(16).to_dict("records"):
-                c = GREEN if r["tone"] > 0.2 else RED if r["tone"] < -0.2 else TX3
-                rows.append(f'<div class="nd-pl"><b>{html.escape(r["symbol"])}</b><span style="color:{c}">{r["stories"]}{"▲" if r["tone"] > 0.2 else "▼" if r["tone"] < -0.2 else "·"}</span>'
-                            f'<a href="{_href(r["link"])}" target="_blank" title="{html.escape(r["latest"])}">{html.escape(r["age"] or "")} · {html.escape(r["latest"])}</a></div>')
-            quiet = int((pdf["stories"] == 0).sum())
-            st.markdown("".join(rows) + (f'<div class="nd-empty" style="padding:6px 0">{quiet} tracked stocks with no news in this window.</div>' if quiet else ""),
-                        unsafe_allow_html=True)
-        st.markdown('<div class="nd-sec">SECTOR TONE</div>', unsafe_allow_html=True)
-        stn = sector_tone(items)
-        if stn:
-            bars = []
-            for name, n, t in stn[:12]:
-                w = min(50, abs(t) / 3 * 50)
-                c = GREEN if t >= 0 else RED
-                pos_css = f"left:50%;width:{w:.0f}%" if t >= 0 else f"left:{50 - w:.0f}%;width:{w:.0f}%"
-                bars.append(f'<div class="nd-bar"><span>{html.escape(name)}</span><div class="t"><i style="{pos_css};background:{c}"></i>'
-                            f'<i style="left:50%;width:1px;background:#444"></i></div><span style="color:{c};text-align:right">{n} · {t:+.1f}</span></div>')
-            st.markdown("".join(bars), unsafe_allow_html=True)
-        else:
-            st.markdown('<div class="nd-empty">Not enough sector-tagged stories yet.</div>', unsafe_allow_html=True)
-        st.markdown('<div class="nd-sec">MACRO THEMES</div>', unsafe_allow_html=True)
-        mc = Counter(t for a in items for t in a["macro"]).most_common(8)
-        st.markdown(" ".join(f'<span class="nd-tag" style="color:{AMBER};font:800 9px {MONO};margin:2px;display:inline-block">{html.escape(k)} {v}</span>' for k, v in mc)
-                    or '<div class="nd-empty">—</div>', unsafe_allow_html=True)
-        st.markdown('<div class="nd-sec">SOURCE HEALTH</div>', unsafe_allow_html=True)
-        st.markdown("".join(
-            f'<div class="nd-src"><span>{html.escape(h["name"])}</span><span style="color:{GREEN if h["ok"] else RED}">'
-            f'{"● " + str(h["n"]) + " items" if h["ok"] else "✕ " + html.escape(h["err"] or "failed")}'
-            f'{" · " + str(h["fail"]) + " failed" if h["ok"] and h["fail"] else ""}</span></div>' for h in health), unsafe_allow_html=True)
-        st.caption("Tone and event tags are automatic keyword scoring of headlines — a reading aid, not a recommendation. Click any story to read the source.")
+            st.markdown("".join(side[1:-1]) or '<div class="nd-empty">Not enough sector-tagged stories yet.</div>', unsafe_allow_html=True)
+    else:
+        left, right = st.columns([2.35, 1], gap="medium")
+        with left:
+            wire()
+        with right:
+            st.markdown("".join(side), unsafe_allow_html=True)
+    st.caption("Tone and story types are tagged automatically from the headline wording. Treat them as a reading aid, not a recommendation. Tap any story to read it at the source.")
