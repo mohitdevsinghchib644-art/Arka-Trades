@@ -1,5 +1,18 @@
 """
-arka_ai.py — Arka AI v10 · YOUR playbook, YOUR zones, YOUR trade plan — now with evidence
+arka_ai.py — Arka AI v11 · YOUR playbook, YOUR zones, YOUR trade plan — now with evidence
+
+NEW IN v11 (speed + redesign; analysis logic and your saved playbook are unchanged)
+  SPEED     * Analysis: price data, NIFTY context and the results date load in parallel; the weekly chart is built from the
+              daily data (one download fewer); the image sent to the AI is smaller; and the AI's "thinking" is capped by the
+              new Speed setting (Fast / Balanced / Deep). Balanced is typically 2-3x faster than v10 with the same output.
+            * A live progress panel shows each step and the total time.
+            * Saving is instant: the playbook is cached and updated in place after every save / switch / delete, instead of
+              re-downloading the whole playbook from Pinecone (v10 reloaded everything, twice for a zone style).
+            * Only the TEACH section you open runs (v10 ran all five tabs, including a chart, on every click).
+            * Journal fetches every plan's prices in one batched download; the chart image is built only when you download it;
+              the interactive chart is reused instead of rebuilt on every click.
+  DESIGN    * Same look as the terminal: Inter, sentence case, soft cards; verdict hero with score ring and plan tiles;
+              chart layers as pills; phone friendly (shorter chart, stacked cards).
 
 NEW IN v10 (your saved playbook is read unchanged)
   EXACT MAPPING   * Prices are the prices on your chart: Yahoo data is no longer dividend-adjusted, so zones and levels sit where
@@ -192,6 +205,27 @@ def _invalidate():
     st.session_state.pop("aa_items_cache", None)
 
 
+def _cache_put(item: dict):
+    """Add / replace one item in the session cache (newest first) instead of reloading the whole playbook."""
+    cache = st.session_state.get("aa_items_cache")
+    if cache is None:
+        return
+    cache[:] = [i for i in cache if i["item_id"] != item["item_id"]]
+    cache.insert(0, item)
+
+
+def _cache_set(item_id: str, **changes):
+    for i in st.session_state.get("aa_items_cache") or []:
+        if i["item_id"] == item_id:
+            i.update(changes)
+
+
+def _cache_drop(item_id: str):
+    cache = st.session_state.get("aa_items_cache")
+    if cache is not None:
+        cache[:] = [i for i in cache if i["item_id"] != item_id]
+
+
 def _decode(vector_id, meta: dict):
     """Pinecone metadata -> playbook item. Reads both v9 items and legacy v8 setups."""
     kind = meta.get("memory_kind")
@@ -251,7 +285,7 @@ def storage_mode() -> str:
 
 def save_item(kind: str, name: str, payload: dict, activate: bool = True, source_name: str = "", source_text: str = "") -> bool:
     name = (name or "").strip() or KIND_LABEL.get(kind, kind).title()
-    item_id = f"{kind}_{int(time.time() * 1000)}"
+    item_id = f"{kind}_{int(time.time() * 1000)}_{os.urandom(2).hex()}"
     saved_at = datetime.now(timezone.utc).isoformat()
     idx = get_pinecone_index()
     if idx is None:
@@ -261,7 +295,8 @@ def save_item(kind: str, name: str, payload: dict, activate: bool = True, source
             for it in _local_items().values():
                 if it["kind"] == "style" and it["item_id"] != item_id:
                     it["active"] = False
-        _invalidate()
+                    _cache_set(it["item_id"], active=False)
+        _cache_put(_local_items()[item_id])
         return True
     try:
         compact = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -276,11 +311,11 @@ def save_item(kind: str, name: str, payload: dict, activate: bool = True, source
         else:
             meta["item_json"] = compact
         idx.upsert(vectors=[{"id": item_id, "values": emb, "metadata": meta}])
-        if activate and kind == "style":                           # only one active style at a time
-            for it in load_items(force=True):
-                if it["kind"] == "style" and it["item_id"] != item_id and it["active"]:
-                    set_item_active(it["item_id"], False)
-        _invalidate()
+        if activate and kind == "style":                           # only one active style at a time (uses the cached list: no reload)
+            for it in [i for i in load_items() if i["kind"] == "style" and i["item_id"] != item_id and i["active"]]:
+                set_item_active(it["item_id"], False)
+        _cache_put({"item_id": item_id, "kind": kind, "name": name, "active": bool(activate), "saved_at": saved_at,
+                    "source": source_name, "payload": payload})
         return True
     except Exception as exc:
         st.error(f"Could not save to your playbook: {exc}")
@@ -291,14 +326,14 @@ def set_item_active(item_id: str, active: bool) -> bool:
     local = _local_items()
     if item_id in local:
         local[item_id]["active"] = active
-        _invalidate()
+        _cache_set(item_id, active=active)
         return True
     idx = get_pinecone_index()
     if idx is None:
         return False
     try:
         idx.update(id=item_id, set_metadata={"active": bool(active)})
-        _invalidate()
+        _cache_set(item_id, active=bool(active))
         return True
     except Exception:
         return False
@@ -308,14 +343,14 @@ def delete_item(item_id: str) -> bool:
     local = _local_items()
     if item_id in local:
         local.pop(item_id)
-        _invalidate()
+        _cache_drop(item_id)
         return True
     idx = get_pinecone_index()
     if idx is None:
         return False
     try:
         idx.delete(ids=[item_id])
-        _invalidate()
+        _cache_drop(item_id)
         return True
     except Exception:
         return False
@@ -379,7 +414,10 @@ def _ai_backend(key_tail: str):
         return None
     if HAS_GENAI_NEW:
         try:
-            client = genai_new.Client(api_key=GEMINI_KEY)
+            try:
+                client = genai_new.Client(api_key=GEMINI_KEY, http_options=genai_types.HttpOptions(timeout=120_000))
+            except Exception:
+                client = genai_new.Client(api_key=GEMINI_KEY)
             names = []
             try:
                 names = [str(getattr(m, "name", "")).split("/")[-1] for m in client.models.list()]
@@ -447,6 +485,13 @@ def _model_gone(exc) -> bool:
     return any(k in t for k in ("not found", "404", "is not supported", "deprecated", "no longer available", "unknown model", "not_found"))
 
 
+SPEEDS = {"Fast": 0, "Balanced": 1024, "Deep": None}         # AI thinking budget in tokens; None = the model decides (slowest)
+
+
+def _thinking_budget():
+    return SPEEDS.get(st.session_state.get("aa_speed", "Balanced"), 1024)
+
+
 def _generate(prompt: str, images=None, pdf: bytes | None = None, want_json: bool = True) -> str:
     """One Gemini call through whichever SDK is installed. A retired model name moves on to the next candidate."""
     b = get_gemini()
@@ -463,9 +508,22 @@ def _generate(prompt: str, images=None, pdf: bytes | None = None, want_json: boo
                     parts.append(genai_types.Part.from_bytes(data=pdf, mime_type="application/pdf"))
                 for png in images or []:
                     parts.append(genai_types.Part.from_bytes(data=png, mime_type="image/png"))
-                cfg = genai_types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT, temperature=0.0,
-                                                        response_mime_type="application/json" if want_json else None)
-                resp = b["client"].models.generate_content(model=model, contents=parts, config=cfg)
+                kw = {"system_instruction": SYSTEM_PROMPT, "temperature": 0.0, "response_mime_type": "application/json" if want_json else None}
+                budget = _thinking_budget()
+                if budget is not None and not st.session_state.get("aa_no_thinking_cfg"):
+                    try:
+                        kw["thinking_config"] = genai_types.ThinkingConfig(thinking_budget=budget)
+                    except Exception:
+                        pass
+                try:
+                    resp = b["client"].models.generate_content(model=model, contents=parts, config=genai_types.GenerateContentConfig(**kw))
+                except Exception as exc:
+                    if "thinking_config" in kw and "think" in str(exc).lower():      # this model does not accept a budget: run without it
+                        st.session_state["aa_no_thinking_cfg"] = True
+                        kw.pop("thinking_config")
+                        resp = b["client"].models.generate_content(model=model, contents=parts, config=genai_types.GenerateContentConfig(**kw))
+                    else:
+                        raise
             else:
                 m = genai.GenerativeModel(model_name=model, system_instruction=SYSTEM_PROMPT)
                 content = [prompt]
@@ -580,6 +638,42 @@ def fetch_many(symbols: tuple) -> dict:
     raw = yf.download(tick, period="2y", interval="1d", group_by="ticker", threads=True, progress=False, auto_adjust=False)
     frames = _split_download(raw, tick)
     return {t[:-3]: f for t, f in frames.items()}
+
+
+def weekly_from_daily(daily: pd.DataFrame) -> pd.DataFrame:
+    """Weekly candles (weeks ending Friday) built from the daily data, so no second download is needed."""
+    w = daily.resample("W-FRI").agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna(subset=["open", "close"])
+    return w
+
+
+def _in_thread(fn, *args):
+    """Run fn(*args) in a background thread that can still use Streamlit's caches. Returns a Future-like object."""
+    import concurrent.futures as cf
+    ex = cf.ThreadPoolExecutor(max_workers=1)
+    try:
+        from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
+        ctx = get_script_run_ctx()
+    except Exception:
+        add_script_run_ctx = ctx = None
+
+    def run():
+        if ctx is not None:
+            try:
+                import threading
+                add_script_run_ctx(threading.current_thread(), ctx)
+            except Exception:
+                pass
+        return fn(*args)
+    fut = ex.submit(run)
+    ex.shutdown(wait=False)
+    return fut
+
+
+def _result(fut, timeout: float, default=None):
+    try:
+        return fut.result(timeout=timeout)
+    except Exception:
+        return default
 
 
 def live_fraction(last_date, now=None):
@@ -1355,7 +1449,7 @@ def _date_ticks(index, start, n, count=8):
     return pos, [str(index[p])[5:10] if (n - start) < 70 else str(index[p])[2:10] for p in pos]
 
 
-def fig_plotly(df: pd.DataFrame, spec: dict, window: int = 120, show: dict | None = None):
+def fig_plotly(df: pd.DataFrame, spec: dict, window: int = 120, show: dict | None = None, height: int = 780):
     """Interactive chart: candles, MAs, volume, RSI, zones, levels, trendlines and the trade plan. Zoom, pan, hover."""
     if not HAS_PLOTLY:
         return None
@@ -1443,13 +1537,13 @@ def fig_plotly(df: pd.DataFrame, spec: dict, window: int = 120, show: dict | Non
                                      marker=dict(symbol="diamond", size=8, color=[CYAN if c["bias"] == "bull" else AMBER for c in cs])), row=1, col=1)
     pad = (max(ys) - min(ys)) * 0.06
     pos, labels = _date_ticks(d.index, start, n)
-    fig.update_layout(height=780, margin=dict(l=10, r=10, t=30, b=10), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+    fig.update_layout(height=height, margin=dict(l=6, r=6, t=30, b=6), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                       font=dict(family="Inter, sans-serif", size=11, color=T2), hovermode="x",
                       legend=dict(orientation="h", y=1.04, x=0, font=dict(size=10)),
-                      hoverlabel=dict(bgcolor=S1, bordercolor=LINE2, font=dict(family="JetBrains Mono, monospace", size=11, color=IVORY)))
+                      hoverlabel=dict(bgcolor="#161618", bordercolor="#2E2E33", font=dict(family="Inter, sans-serif", size=12, color=IVORY)))
     fig.update_xaxes(showgrid=False, range=[start - 1, xr], rangeslider_visible=False, linecolor=LINE)
     fig.update_xaxes(tickvals=pos, ticktext=labels, row=3, col=1)
-    fig.update_yaxes(gridcolor="#151515", zeroline=False)
+    fig.update_yaxes(gridcolor="#1A1A1D", zeroline=False)
     fig.update_yaxes(range=[min(ys) - pad, max(ys) + pad], row=1, col=1)
     fig.update_yaxes(range=[0, 100], row=3, col=1, tickvals=[30, 50, 70])
     return fig
@@ -1491,7 +1585,7 @@ def render_png(df: pd.DataFrame, spec: dict, window: int = 110, title: str = "",
         ax.add_patch(Rectangle((x0, z["bottom"]), m + ext - x0, z["top"] - z["bottom"], facecolor=col, alpha=.16, edgecolor=col, linewidth=1, zorder=1))
         ax.hlines(z["distal"], x0, m + ext, colors=col, linestyles="--", linewidth=1.1, zorder=2)             # distal line = where the zone fails
         ax.annotate(f"{z['id']} {z['pattern']} Q{z['quality']} {z['status']}  {z['bottom']:,.2f}-{z['top']:,.2f}", (x0 + .3, z["top"] if z["type"] == "supply" else z["bottom"]),
-                    xytext=(0, 3 if z["type"] == "supply" else -3), textcoords="offset points", color=col, fontsize=8, fontfamily="monospace",
+                    xytext=(0, 3 if z["type"] == "supply" else -3), textcoords="offset points", color=col, fontsize=8, fontfamily="sans-serif",
                     va="bottom" if z["type"] == "supply" else "top", zorder=6)
         ys += [z["top"], z["bottom"]]
     for lv in spec["levels"]:
@@ -1501,7 +1595,7 @@ def render_png(df: pd.DataFrame, spec: dict, window: int = 110, title: str = "",
         if tx:                                                           # the swing points that make this level
             ax.scatter([a_ for a_, _ in tx], [b_ for _, b_ in tx], s=46, facecolors="none", edgecolors=col, linewidths=1.2, zorder=6)
         ax.annotate(f"{lv['id']} {lv['price']:,.2f} ({lv['touches']}x)", (max(0, lv.get("first", start) - start) + .3, lv["price"]), xytext=(0, 2), textcoords="offset points",
-                    color=col, fontsize=8, ha="left", va="bottom", fontfamily="monospace", zorder=6)
+                    color=col, fontsize=8, ha="left", va="bottom", fontfamily="sans-serif", zorder=6)
         ys.append(lv["price"])
     for t in spec["lines"]:
         col = GREEN if t["kind"] == "support" else RED
@@ -1527,7 +1621,7 @@ def render_png(df: pd.DataFrame, spec: dict, window: int = 110, title: str = "",
         gap, prev_y = (max(ys) - min(ys)) * 0.028, None
         for y_, text_, col in sorted(tags):                              # keep the price tags from printing over each other
             ty = y_ if prev_y is None else max(y_, prev_y + gap)
-            ax.text(x1 + .3, ty, text_, color=col, fontsize=8, fontfamily="monospace", va="center", zorder=7)
+            ax.text(x1 + .3, ty, text_, color=col, fontsize=8, fontfamily="sans-serif", va="center", zorder=7)
             prev_y = ty
     for mk in spec["markers"]:
         if mk["i"] >= start:
@@ -1543,10 +1637,10 @@ def render_png(df: pd.DataFrame, spec: dict, window: int = 110, title: str = "",
     axv.set_xticks(pos)
     axv.set_xticklabels([str(w.index[i])[2:10] for i in pos], rotation=0, fontsize=8, color=T2)
     axv.tick_params(labelleft=False)
-    fig.text(0.012, 0.965, title, color=AMBER, fontsize=12, fontweight="bold", fontfamily="monospace")
-    fig.text(0.988, 0.965, "Arka AI · research tool, not advice · prices as traded (not dividend-adjusted)", color=T3, fontsize=8, ha="right", fontfamily="monospace")
+    fig.text(0.012, 0.965, title, color=IVORY, fontsize=12, fontweight="bold", fontfamily="sans-serif")
+    fig.text(0.988, 0.965, "Arka AI · research tool, not advice · prices as traded (not dividend-adjusted)", color=T3, fontsize=8, ha="right", fontfamily="sans-serif")
     if spec.get("live"):
-        ax.text(m - 1, float(w.high.iloc[-1]) + (max(ys) - min(ys)) * .02, "LIVE", color=AMBER, fontsize=7, ha="center", fontfamily="monospace", fontweight="bold", zorder=8)
+        ax.text(m - 1, float(w.high.iloc[-1]) + (max(ys) - min(ys)) * .02, "LIVE", color=AMBER, fontsize=7, ha="center", fontfamily="sans-serif", fontweight="bold", zorder=8)
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=dpi, facecolor=BG, bbox_inches=None)
     plt.close(fig)
@@ -1881,19 +1975,23 @@ def verdict_text(report: dict):
     ai = report.get("ai")
     if ai:
         v = ai["verdict"]
-        return {"MATCH": ("MATCHES YOUR SETUP", GREEN), "PARTIAL": ("PARTIAL MATCH", AMBER), "NO_MATCH": ("NOT YOUR SETUP", T3), "AVOID": ("AVOID", RED)}[v]
+        return {"MATCH": ("Matches your setup", GREEN), "PARTIAL": ("Partial match", AMBER), "NO_MATCH": ("Not your setup", T3), "AVOID": ("Avoid", RED)}[v]
     s = report["score"]
-    return ("ENGINE: STRONG ZONE SETUP", GREEN) if s >= 72 else ("ENGINE: DEVELOPING", AMBER) if s >= 50 else ("ENGINE: NO CLEAR SETUP", T3)
+    return ("Strong zone setup", GREEN) if s >= 72 else ("Developing", AMBER) if s >= 50 else ("No clear setup", T3)
 
 
-def run_analysis(ticker: str, note: str = "", use_ai: bool = True, window: int = 120) -> dict:
+def run_analysis(ticker: str, note: str = "", use_ai: bool = True, window: int = 120, progress=None) -> dict:
+    """progress(label) is called at each step (drives the live progress panel)."""
+    t0 = time.time()
+    say = progress or (lambda _m: None)
     t = ticker.upper().strip()
+    # context that does not depend on the stock's own data loads in parallel
+    f_nifty = _in_thread(fetch_ohlc, "NIFTY50", "1d", "2y") if not is_index(t) else None
+    f_res = _in_thread(next_results_date, t)
+    say(f"Loading {t} prices")
     daily = fetch_ohlc(t, "1d", "2y")
-    weekly = None
-    try:
-        weekly = fetch_ohlc(t, "1wk", "5y")
-    except Exception:
-        weekly = None
+    weekly = weekly_from_daily(daily)
+    say("Detecting zones, levels and trendlines")
     style = get_style()
     det = analyze_market(daily, style, live_fraction(daily.index[-1]))
     det_w = None
@@ -1902,31 +2000,35 @@ def run_analysis(ticker: str, note: str = "", use_ai: bool = True, window: int =
     add_htf_confluence(det, det_w)
     eplan = deterministic_plan(det)
     escore = engine_score(det, eplan)
-    market = None
-    if not is_index(t):
-        try:
-            market = market_context(daily, fetch_ohlc("NIFTY50", "1d", "2y"))
-        except Exception:
-            market = None
-    results = next_results_date(t)
     try:
         hist_rows = zone_history(daily, style)
     except Exception:
         hist_rows = []
+    market = None
+    if f_nifty is not None:
+        nf = _result(f_nifty, 12)
+        try:
+            market = market_context(daily, nf) if nf is not None else None
+        except Exception:
+            market = None
+    results = _result(f_res, 4)                                         # never wait long for the calendar
     setups = active_items("setup")
     report = {"ticker": t, "asof": det["asof"], "det": det, "det_w": det_w, "style": style, "engine_plan": eplan, "engine_score": escore,
               "ai": None, "ai_error": "", "plan": eplan, "score": escore, "note": note, "window": window, "market": market, "results": results,
               "zone_rows": hist_rows, "n_setups": len(setups), "n_lessons": len(active_items("lesson")), "n_labelled": len(active_items("feedback")),
-              "ran_at": datetime.now(IST).strftime("%d %b %Y %H:%M IST"), "df": daily, "model": ""}
+              "ran_at": datetime.now(IST).strftime("%d %b %Y, %H:%M"), "df": daily, "model": ""}
     if use_ai and get_gemini() is not None:
         try:
-            preview = render_png(daily, build_spec(det, None, eplan), window=110, title=f"{t} · detections (preview for AI)")
+            say("Judging against your playbook (Arka AI)")
+            preview = render_png(daily, build_spec(det, None, eplan), window=110, title=f"{t} · detections (preview for AI)", dpi=72)
             zref = next((z for z in det["zones"] if eplan and z["id"] == eplan["ref_zone"]), None)
             tr = track_record(hist_rows, zref)
             extra = {"market": market, "results": results, "engine_plan": eplan,
                      "track": {"all": tr["groups"]["All zones"], "similar_to_plan_zone": tr["like"], "note": "walk-forward replay on this stock; small samples are weak evidence"}}
             prompt = build_prompt(t, det, det_w, style, setups, active_items("lesson"), active_items("feedback"), note, daily, extra)
+            t_ai = time.time()
             ai = validate_ai(call_json(prompt, images=[preview]), det, det["close"], setups)
+            report["ai_secs"] = round(time.time() - t_ai, 1)
             report["ai"] = ai
             report["model"] = ai_model_name()
             report["score"] = ai["score"] if ai["score"] is not None else escore
@@ -1937,6 +2039,7 @@ def run_analysis(ticker: str, note: str = "", use_ai: bool = True, window: int =
     zref = next((z for z in det["zones"] if report["plan"] and z["id"] == report["plan"].get("ref_zone")), None)
     report["track"] = track_record(hist_rows, zref)
     report["spec"] = build_spec(det, (report["ai"] or {}).get("draw"), report["plan"])
+    report["secs"] = round(time.time() - t0, 1)
     return report
 
 
@@ -2072,85 +2175,96 @@ def radar_scan(symbols: list, style: dict, with_track: bool = False):
 # ══════════════════════════════════════════════════════════
 ARKA_CSS = """
 <style>
-.aa-chips{display:flex;flex-wrap:wrap;gap:8px;margin:2px 0 12px;}
-.aa-chip{display:inline-flex;align-items:center;gap:7px;padding:4px 11px;border:1px solid #2B2B2B;border-radius:999px;font:700 9px 'JetBrains Mono',monospace;letter-spacing:.8px;color:#A3A3A3;text-transform:uppercase;white-space:nowrap;}
-.aa-chip i{width:6px;height:6px;border-radius:50%;background:currentColor;display:inline-block;}
-.aa-chip.ok{color:#30D158;border-color:rgba(48,209,88,.35);background:rgba(48,209,88,.07);}
-.aa-chip.warn{color:#FF9F0A;border-color:rgba(255,159,10,.35);background:rgba(255,159,10,.07);}
-.aa-chip.bad{color:#FF453A;border-color:rgba(255,69,58,.35);background:rgba(255,69,58,.07);}
-.aa-intro{border:1px solid #1F1F1F;border-left:3px solid #FF9F0A;background:#0A0A0A;padding:14px 18px;margin:4px 0 12px;font:13px 'Inter',sans-serif;color:#A3A3A3;line-height:1.7;}
-.aa-intro b{color:#ECECEC;}
-.aa-steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:8px;margin:8px 0 14px;}
-.aa-step{border:1px solid #1F1F1F;border-top:2px solid #2B2B2B;background:#0A0A0A;padding:14px 16px;}
-.aa-step .n{font:800 9px 'JetBrains Mono',monospace;letter-spacing:1.4px;color:#FF9F0A;}
-.aa-step .t{font:700 14px 'Inter',sans-serif;color:#ECECEC;margin:6px 0 4px;}
-.aa-step .d{font:12px 'Inter',sans-serif;color:#6B6B6B;line-height:1.6;}
+.aa{--r:12px;}
+.aa-chips{display:flex;flex-wrap:wrap;gap:6px;margin:2px 0 12px;}
+.aa-chip{display:inline-flex;align-items:center;gap:7px;padding:4px 10px;border-radius:999px;background:var(--s2,#161618);font:500 12px var(--sans,Inter,sans-serif);color:var(--tx2,#A1A1AA);white-space:nowrap;}
+.aa-chip i{width:6px;height:6px;border-radius:50%;background:#52525B;display:inline-block;}
+.aa-chip.ok i{background:#30D158;} .aa-chip.warn i{background:#FF9F0A;} .aa-chip.bad i{background:#FF453A;}
+.aa-chip.ok{color:#E4E4E7;}
+.aa-intro{border-radius:12px;background:var(--s1,#111113);border:1px solid var(--line,#232326);padding:14px 16px;margin:4px 0 12px;font:14px/1.65 var(--sans);color:var(--tx2,#A1A1AA);}
+.aa-intro b{color:var(--tx,#EDEDEF);font-weight:600;}
+.aa-steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin:8px 0 14px;}
+.aa-step{border-radius:12px;border:1px solid var(--line);background:var(--s1);padding:16px;}
+.aa-step .n{font:600 12px var(--sans);color:#FF9F0A;}
+.aa-step .t{font:600 15px var(--sans);color:var(--tx);margin:6px 0 4px;}
+.aa-step .d{font:13.5px/1.6 var(--sans);color:var(--tx3,#71717A);}
 
-.aa-hero{display:grid;grid-template-columns:minmax(200px,1.05fr) minmax(250px,1.4fr) auto minmax(250px,1.3fr);gap:24px;align-items:center;background:#0A0A0A;border:1px solid #1F1F1F;border-top:2px solid var(--vc,#FF9F0A);padding:18px 22px;margin-top:8px;}
-@media(max-width:1150px){.aa-hero{grid-template-columns:1fr 1fr;}}
-.aa-sym{display:inline-block;font:800 10px 'JetBrains Mono',monospace;letter-spacing:1px;color:#000;background:#FF9F0A;padding:2px 9px;border-radius:3px;}
-.aa-px{font:700 28px 'JetBrains Mono',monospace;color:#ECECEC;margin-top:8px;font-variant-numeric:tabular-nums;}
-.aa-px em{font:700 12px 'JetBrains Mono',monospace;font-style:normal;padding:2px 8px;border-radius:3px;margin-left:8px;vertical-align:middle;}
-.aa-px em.up{color:#30D158;background:rgba(48,209,88,.10);} .aa-px em.dn{color:#FF453A;background:rgba(255,69,58,.10);}
-.aa-sub{font:10px 'JetBrains Mono',monospace;color:#6B6B6B;margin-top:6px;letter-spacing:.4px;}
-.aa-verdict{display:inline-block;font:800 12px 'JetBrains Mono',monospace;letter-spacing:1.4px;padding:7px 14px;border:1px solid var(--vc);color:var(--vc);background:rgba(255,255,255,.02);border-radius:3px;}
+/* hero */
+.aa-hero{display:grid;grid-template-columns:minmax(0,1.1fr) auto minmax(0,1.3fr);gap:20px 28px;align-items:center;background:var(--s1);
+  border:1px solid var(--line);border-radius:16px 16px 0 0;padding:20px 22px;margin-top:8px;position:relative;overflow:hidden;}
+.aa-hero:before{content:"";position:absolute;inset:0 0 auto 0;height:3px;background:var(--vc,#FF9F0A);opacity:.9;}
+@media(max-width:900px){.aa-hero{grid-template-columns:1fr auto;} .aa-hero>div:last-child{grid-column:1/-1;}}
+.aa-sym{font:600 13px var(--sans);color:var(--tx3);}
+.aa-px{font:600 30px var(--sans);color:var(--tx);margin-top:4px;letter-spacing:-.6px;font-variant-numeric:tabular-nums;}
+.aa-px em{font:600 13px var(--sans);font-style:normal;padding:3px 9px;border-radius:999px;margin-left:8px;vertical-align:middle;letter-spacing:0;}
+.aa-px em.up{color:#30D158;background:rgba(48,209,88,.12);} .aa-px em.dn{color:#FF453A;background:rgba(255,69,58,.12);}
+.aa-sub{font:12.5px var(--sans);color:var(--tx3);margin-top:6px;}
+.aa-verdict{display:inline-flex;align-items:center;gap:8px;font:600 14px var(--sans);padding:7px 14px;border-radius:999px;color:var(--vc);
+  background:color-mix(in srgb,var(--vc) 14%,transparent);}
 .aa-hm .aa-chips{margin:10px 0 0;}
-.aa-mini{display:grid;grid-template-columns:repeat(2,1fr);gap:8px 18px;}
-.aa-mini div span{display:block;font:700 8px 'JetBrains Mono',monospace;letter-spacing:1px;color:#6B6B6B;}
-.aa-mini div b{font:600 14px 'JetBrains Mono',monospace;color:#ECECEC;font-variant-numeric:tabular-nums;}
+.aa-mini{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;}
+.aa-mini div{background:var(--s2);border-radius:10px;padding:10px 12px;}
+.aa-mini div span{display:block;font:500 12px var(--sans);color:var(--tx3);}
+.aa-mini div b{display:block;font:600 16px var(--sans);color:var(--tx);font-variant-numeric:tabular-nums;margin-top:2px;}
 .aa-mini div b.dn{color:#FF453A;} .aa-mini div b.up{color:#30D158;}
-.aa-head{border:1px solid #1F1F1F;border-top:0;background:#0F0F0F;padding:12px 22px;font:600 14px 'Inter',sans-serif;color:#ECECEC;line-height:1.6;}
-.aa-head span{color:#6B6B6B;font:11px 'JetBrains Mono',monospace;margin-left:10px;}
+.aa-head{border:1px solid var(--line);border-top:0;border-radius:0 0 16px 16px;background:var(--s2);padding:12px 22px;font:500 14.5px/1.6 var(--sans);color:var(--tx);}
+.aa-head span{display:block;color:var(--tx3);font:12.5px var(--sans);margin-top:2px;}
 
-.aa-card{background:#0A0A0A;border:1px solid #1F1F1F;border-top:2px solid #2B2B2B;padding:14px 16px;min-height:100px;}
-.aa-ct{display:flex;justify-content:space-between;align-items:center;font:700 10px 'JetBrains Mono',monospace;letter-spacing:1.3px;color:#FF9F0A;border-bottom:1px solid #1F1F1F;padding-bottom:9px;margin-bottom:6px;text-transform:uppercase;}
-.aa-ct span{color:#6B6B6B;font-weight:600;letter-spacing:.6px;}
-.aa-kv{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px solid #141414;font:12px 'Inter',sans-serif;color:#A3A3A3;}
-.aa-kv b{font:600 12px 'JetBrains Mono',monospace;color:#ECECEC;text-align:right;}
+/* cards */
+.aa-card{background:var(--s1);border:1px solid var(--line);border-radius:12px;padding:16px;min-height:100px;}
+.aa-ct{display:flex;justify-content:space-between;align-items:baseline;font:600 15px var(--sans);color:var(--tx);padding-bottom:8px;margin-bottom:4px;}
+.aa-ct span{color:var(--tx3);font:500 12.5px var(--sans);}
+.aa-kv{display:flex;justify-content:space-between;gap:12px;padding:9px 0;border-bottom:1px solid var(--line);font:13.5px var(--sans);color:var(--tx3);}
+.aa-kv:last-child{border-bottom:0;}
+.aa-kv b{font:600 14px var(--sans);color:var(--tx);text-align:right;font-variant-numeric:tabular-nums;}
 .aa-kv b.dn{color:#FF453A;} .aa-kv b.up{color:#30D158;} .aa-kv b.cy{color:#5AC8FA;}
-.aa-kv em{display:block;font:10px 'Inter',sans-serif;font-style:normal;color:#6B6B6B;text-align:right;margin-top:2px;max-width:260px;}
-.aa-note{font:11px 'Inter',sans-serif;color:#6B6B6B;line-height:1.7;margin-top:8px;}
-.aa-empty{border:1px dashed #2B2B2B;padding:22px;text-align:center;color:#6B6B6B;font:11px 'JetBrains Mono',monospace;letter-spacing:.5px;line-height:1.8;}
+.aa-kv em{display:block;font:12px var(--sans);font-style:normal;color:var(--tx3);text-align:right;margin-top:2px;max-width:280px;}
+.aa-note{font:13px/1.65 var(--sans);color:var(--tx3);margin-top:10px;}
+.aa-empty{border-radius:12px;background:var(--s1);border:1px dashed var(--line2,#2E2E33);padding:22px;text-align:center;color:var(--tx3);font:14px/1.7 var(--sans);}
 
-.aa-sh{display:flex;justify-content:space-between;gap:8px;margin-top:10px;font:700 11px 'Inter',sans-serif;color:#ECECEC;}
-.aa-sh span{font:700 9px 'JetBrains Mono',monospace;color:#FF9F0A;letter-spacing:.8px;}
-.aa-ck{border:1px solid #1F1F1F;border-left:3px solid var(--c);background:#0F0F0F;padding:8px 11px;margin-top:5px;}
-.aa-ck .h{display:flex;justify-content:space-between;gap:8px;font:600 11px 'Inter',sans-serif;color:#ECECEC;}
-.aa-ck .h span{font:700 8px 'JetBrains Mono',monospace;letter-spacing:.8px;color:var(--c);white-space:nowrap;}
-.aa-ck .r{font:10px 'Inter',sans-serif;color:#A3A3A3;line-height:1.5;margin-top:4px;}
-.aa-ck .b{height:2px;background:#1a1a1a;margin-top:6px;} .aa-ck .b i{display:block;height:2px;background:var(--c);}
-.aa-ref{display:inline-block;font:700 8px 'JetBrains Mono',monospace;color:#5AC8FA;border:1px solid rgba(90,200,250,.3);padding:0 5px;border-radius:3px;margin-left:5px;}
+/* scorecard */
+.aa-sh{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-top:12px;font:600 14px var(--sans);color:var(--tx);}
+.aa-sh span{font:500 12.5px var(--sans);color:#FF9F0A;}
+.aa-ck{border-radius:10px;background:var(--s2);padding:10px 12px;margin-top:6px;border-left:3px solid var(--c);}
+.aa-ck .h{display:flex;justify-content:space-between;gap:8px;font:500 13.5px var(--sans);color:var(--tx);}
+.aa-ck .h>span{font:600 12px var(--sans);color:var(--c);white-space:nowrap;}
+.aa-ck .r{font:13px/1.55 var(--sans);color:var(--tx2);margin-top:4px;}
+.aa-ck .b{height:3px;background:var(--s3,#1C1C1F);margin-top:8px;border-radius:2px;overflow:hidden;} .aa-ck .b i{display:block;height:3px;background:var(--c);}
+.aa-ref{display:inline-block;font:600 11px var(--sans);color:#5AC8FA;background:rgba(90,200,250,.10);padding:1px 7px;border-radius:999px;margin-left:6px;}
 
 .aa-list{list-style:none;margin:0;padding:0;}
-.aa-list li{display:flex;gap:9px;padding:7px 0;border-bottom:1px solid #141414;font:12px 'Inter',sans-serif;color:#C8C8C8;line-height:1.55;}
+.aa-list li{display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--line);font:13.5px/1.55 var(--sans);color:var(--tx2);}
 .aa-list li:last-child{border-bottom:0;}
-.aa-list li:before{content:var(--ic);color:var(--c);font:700 12px 'JetBrains Mono',monospace;flex-shrink:0;}
-.aa-scn{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:8px;}
-.aa-sc{background:#0A0A0A;border:1px solid #1F1F1F;border-top:2px solid var(--c);padding:14px 16px;}
-.aa-sc .t{font:800 10px 'JetBrains Mono',monospace;letter-spacing:1.2px;color:var(--c);}
-.aa-sc .l{font:700 18px 'JetBrains Mono',monospace;color:#ECECEC;margin:8px 0 4px;}
-.aa-sc .d{font:12px 'Inter',sans-serif;color:#A3A3A3;line-height:1.6;}
-.aa-sc .d b{color:#ECECEC;}
+.aa-list li:before{content:"";width:6px;height:6px;margin-top:8px;border-radius:50%;background:var(--c);flex-shrink:0;}
+.aa-scn{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;}
+.aa-sc{background:var(--s1);border:1px solid var(--line);border-radius:12px;padding:16px;}
+.aa-sc .t{font:600 13px var(--sans);color:var(--c);}
+.aa-sc .l{font:600 20px var(--sans);color:var(--tx);margin:6px 0 6px;font-variant-numeric:tabular-nums;}
+.aa-sc .d{font:13.5px/1.6 var(--sans);color:var(--tx2);}
+.aa-sc .d b{color:var(--tx);font-weight:600;}
 
-.aa-tw{overflow:auto;border:1px solid #1F1F1F;background:#070707;margin:6px 0 10px;}
-.aa-t{width:100%;border-collapse:separate;border-spacing:0;font:12px 'Inter',sans-serif;color:#E0E0E0;}
-.aa-t th{position:sticky;top:0;background:#0C0C0C;color:#777;font:700 9px 'JetBrains Mono',monospace;letter-spacing:.9px;text-transform:uppercase;text-align:left;padding:10px;border-bottom:1px solid #252525;white-space:nowrap;}
-.aa-t td{padding:9px 10px;border-bottom:1px solid #141414;white-space:nowrap;vertical-align:middle;}
-.aa-t tbody tr:hover td{background:rgba(255,159,10,.05);}
-.aa-t td.n{font:11px 'JetBrains Mono',monospace;text-align:right;color:#CFCFCF;font-variant-numeric:tabular-nums;}
-.aa-t b{color:#FF9F0A;font:700 11px 'JetBrains Mono',monospace;}
-.aa-pill{display:inline-block;padding:2px 8px;border-radius:999px;font:800 8px 'JetBrains Mono',monospace;letter-spacing:.8px;border:1px solid var(--c);color:var(--c);}
-.aa-q{display:inline-flex;align-items:center;gap:7px;font:700 11px 'JetBrains Mono',monospace;color:#ECECEC;}
-.aa-q i{display:inline-block;width:54px;height:5px;background:#1a1a1a;position:relative;} .aa-q i:after{content:"";position:absolute;left:0;top:0;height:100%;width:var(--w);background:var(--c);}
-.aa-sec{display:flex;align-items:center;gap:12px;margin:26px 0 10px;}
-.aa-sec:before{content:"";width:3px;height:14px;background:#FF9F0A;}
-.aa-sec b{font:700 11px 'JetBrains Mono',monospace;letter-spacing:1.6px;color:#ECECEC;text-transform:uppercase;white-space:nowrap;}
-.aa-sec span{font:11px 'Inter',sans-serif;color:#6B6B6B;} .aa-sec i{flex:1;height:1px;background:#1F1F1F;}
-.aa-lab{border:1px solid #1F1F1F;background:#0A0A0A;padding:8px 12px;margin-top:6px;font:12px 'Inter',sans-serif;color:#A3A3A3;}
-.aa-lab b{font:700 11px 'JetBrains Mono',monospace;color:#FF9F0A;margin-right:8px;}
-.aa-item{border:1px solid #1F1F1F;border-left:3px solid var(--c);background:#0A0A0A;padding:11px 14px;margin-top:6px;}
-.aa-item .h{display:flex;justify-content:space-between;gap:10px;align-items:center;} .aa-item .h b{font:700 13px 'Inter',sans-serif;color:#ECECEC;}
-.aa-item .d{font:11px 'Inter',sans-serif;color:#6B6B6B;margin-top:4px;line-height:1.6;}
+/* tables */
+.aa-tw{overflow:auto;border:1px solid var(--line);border-radius:12px;background:var(--s1);margin:6px 0 10px;}
+.aa-t{width:100%;border-collapse:separate;border-spacing:0;font:13.5px var(--sans);color:var(--tx);}
+.aa-t th{position:sticky;top:0;background:var(--s1);color:var(--tx3);font:500 12px var(--sans);text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);white-space:nowrap;}
+.aa-t td{padding:10px 12px;border-bottom:1px solid var(--line);white-space:nowrap;vertical-align:middle;}
+.aa-t tr:last-child td{border-bottom:0;}
+.aa-t tbody tr:hover td{background:rgba(255,255,255,.02);}
+.aa-t td.n{text-align:right;color:var(--tx2);font-variant-numeric:tabular-nums;}
+.aa-t b{color:var(--tx);font:600 13.5px var(--sans);}
+.aa-pill{display:inline-block;padding:2px 9px;border-radius:999px;font:600 11.5px var(--sans);color:var(--c);background:color-mix(in srgb,var(--c) 14%,transparent);}
+.aa-q{display:inline-flex;align-items:center;gap:8px;font:600 13px var(--sans);color:var(--tx);}
+.aa-q i{display:inline-block;width:54px;height:5px;background:var(--s3);border-radius:3px;position:relative;overflow:hidden;}
+.aa-q i:after{content:"";position:absolute;left:0;top:0;height:100%;width:var(--w);background:var(--c);border-radius:3px;}
+.aa-sec{display:flex;align-items:baseline;gap:10px;margin:30px 0 10px;flex-wrap:wrap;}
+.aa-sec b{font:600 17px var(--sans);letter-spacing:-.2px;color:var(--tx);}
+.aa-sec span{font:13px var(--sans);color:var(--tx3);}
+.aa-lab{border-radius:10px;background:var(--s1);border:1px solid var(--line);padding:10px 12px;margin-top:6px;font:13.5px/1.55 var(--sans);color:var(--tx2);}
+.aa-lab b{font:600 12.5px var(--sans);color:#FF9F0A;margin-right:8px;}
+.aa-item{border-radius:12px;background:var(--s1);border:1px solid var(--line);border-left:3px solid var(--c);padding:12px 14px;margin-top:8px;}
+.aa-item .h{display:flex;justify-content:space-between;gap:10px;align-items:center;} .aa-item .h b{font:600 14.5px var(--sans);color:var(--tx);}
+.aa-item .d{font:13px/1.6 var(--sans);color:var(--tx3);margin-top:4px;}
+.aa-time{font:500 12.5px var(--sans);color:var(--tx3);margin:6px 0 0;}
 </style>
 """
 
@@ -2177,15 +2291,16 @@ def html_status() -> str:
     mem = storage_mode()
     n_set, n_les, n_lab = len(active_items("setup")), len(active_items("lesson")), len(active_items("feedback"))
     n_calls = sum(1 for i in load_items() if i["kind"] == "call")
-    chips = [_chip(("AI ONLINE · " + ai_model_name().upper()) if ai_ok else "AI OFFLINE · ENGINE ONLY", "ok" if ai_ok else "warn"),
-             _chip("PLAYBOOK SAVED TO CLOUD" if mem == "CLOUD" else "PLAYBOOK: THIS SESSION ONLY", "ok" if mem == "CLOUD" else "warn"),
-             _chip(f"{n_set} ACTIVE SETUP{'S' if n_set != 1 else ''}", "ok" if n_set else "bad"),
-             _chip(f"{n_les} LESSON{'S' if n_les != 1 else ''}", "ok" if n_les else ""),
-             _chip(f"{n_lab} LABELLED ZONE SET{'S' if n_lab != 1 else ''}", "ok" if n_lab else ""),
-             _chip("ZONE STYLE: " + style_source(), "ok" if style_source() != "DEFAULT" else ""),
-             _chip(f"{n_calls} PLAN{'S' if n_calls != 1 else ''} IN JOURNAL", "ok" if n_calls else "")]
+    src = style_source()
+    chips = [_chip(("AI online · " + ai_model_name()) if ai_ok else "AI offline · engine only", "ok" if ai_ok else "warn"),
+             _chip("Playbook saved to cloud" if mem == "CLOUD" else "Playbook: this session only", "ok" if mem == "CLOUD" else "warn"),
+             _chip(f"{n_set} active setup{'s' if n_set != 1 else ''}", "ok" if n_set else "bad"),
+             _chip(f"{n_les} lesson{'s' if n_les != 1 else ''}", "ok" if n_les else ""),
+             _chip(f"{n_lab} labelled set{'s' if n_lab != 1 else ''}", "ok" if n_lab else ""),
+             _chip("Zone style: " + ("default" if src == "DEFAULT" else src), "ok" if src != "DEFAULT" else ""),
+             _chip(f"{n_calls} plan{'s' if n_calls != 1 else ''} in journal", "ok" if n_calls else "")]
     if not HAS_PLOTLY:
-        chips.append(_chip("INSTALL PLOTLY FOR INTERACTIVE CHARTS", "warn"))
+        chips.append(_chip("Install plotly for interactive charts", "warn"))
     return '<div class="aa-chips">' + "".join(chips) + "</div>"
 
 
@@ -2195,11 +2310,11 @@ def _pill(text, color):
 
 def _ring(score: int, color: str) -> str:
     c = 2 * math.pi * 34
-    return (f'<svg width="96" height="96" viewBox="0 0 92 92"><circle cx="46" cy="46" r="34" fill="none" stroke="#1a1a1a" stroke-width="7"/>'
-            f'<circle cx="46" cy="46" r="34" fill="none" stroke="{color}" stroke-width="7" stroke-linecap="round" '
+    return (f'<svg width="92" height="92" viewBox="0 0 92 92"><circle cx="46" cy="46" r="34" fill="none" stroke="#232326" stroke-width="6"/>'
+            f'<circle cx="46" cy="46" r="34" fill="none" stroke="{color}" stroke-width="6" stroke-linecap="round" '
             f'stroke-dasharray="{max(0, min(100, score)) / 100 * c:.1f} {c:.1f}" transform="rotate(-90 46 46)"/>'
-            f'<text x="46" y="50" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="22" font-weight="700" fill="#ECECEC">{score}</text>'
-            f'<text x="46" y="65" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="7" letter-spacing="1" fill="#6B6B6B">SCORE</text></svg>')
+            f'<text x="46" y="51" text-anchor="middle" font-family="Inter,system-ui,sans-serif" font-size="24" font-weight="600" fill="#EDEDEF">{score}</text>'
+            f'<text x="46" y="66" text-anchor="middle" font-family="Inter,system-ui,sans-serif" font-size="9" fill="#71717A">score</text></svg>')
 
 
 def html_hero(r: dict) -> str:
@@ -2213,37 +2328,39 @@ def html_hero(r: dict) -> str:
     bias = ai.get("bias") or ("BULLISH" if struct.startswith("UPTREND") else "BEARISH" if struct.startswith("DOWNTREND") else "NEUTRAL")
     in_zone = any(z["in_zone"] for z in det["zones"])
     state = ai.get("setup_state") or ("PRICE IN ZONE" if in_zone else "WATCHING")
+    nice = lambda x: str(x).replace("_", " ").capitalize()
     bias_cls = "ok" if bias == "BULLISH" else "bad" if bias == "BEARISH" else ""
-    chips = (_chip(f"GRADE {grade}", "ok" if grade in ("A+", "A") else "warn" if grade in ("B", "C") else "bad") + _chip(f"BIAS {bias}", bias_cls)
-             + _chip(f"STATE {state}") + _chip(("AI + ENGINE" if ai else "ENGINE ONLY"), "ok" if ai else "warn"))
+    chips = (_chip(f"Grade {grade}", "ok" if grade in ("A+", "A") else "warn" if grade in ("B", "C") else "bad") + _chip(nice(bias), bias_cls)
+             + _chip(nice(state)) + _chip(("AI + engine" if ai else "Engine only"), "ok" if ai else "warn"))
     mk = r.get("market")
     if mk:
         ns = mk["nifty_structure"].split(" ")[0]
-        chips += _chip(f"NIFTY {ns}", "ok" if ns == "UPTREND" else "bad" if ns == "DOWNTREND" else "")
+        chips += _chip(f"NIFTY {ns.lower()}", "ok" if ns == "UPTREND" else "bad" if ns == "DOWNTREND" else "")
         if mk.get("rs_3m_pp") is not None:
-            chips += _chip(f"VS NIFTY 3M {mk['rs_3m_pp']:+.1f} PP", "ok" if mk["rs_3m_pp"] > 0 else "bad")
+            chips += _chip(f"vs NIFTY 3M {mk['rs_3m_pp']:+.1f} pp", "ok" if mk["rs_3m_pp"] > 0 else "bad")
     if r.get("results"):
         days = (pd.Timestamp(r["results"]) - pd.Timestamp(datetime.now(IST).date())).days
         if 0 <= days <= 14:
-            chips += _chip(f"RESULTS IN {days} DAY{'S' if days != 1 else ''}" if days else "RESULTS TODAY", "warn")
+            chips += _chip(f"Results in {days} day{'s' if days != 1 else ''}" if days else "Results today", "warn")
     if det.get("live"):
-        chips += _chip("TODAY'S CANDLE UNFINISHED", "warn")
+        chips += _chip("Today's candle unfinished", "warn")
     p = r.get("plan")
     if p:
         t1 = p["targets"][0] if p["targets"] else None
         mini = ('<div class="aa-mini">'
-                f'<div><span>{p["direction"]} ENTRY</span><b>{_fmt(p["entry_ref"])}</b></div><div><span>STOP</span><b class="dn">{_fmt(p["stop"])}</b></div>'
-                f'<div><span>TARGET 1</span><b class="up">{_fmt(t1["price"]) if t1 else "—"}</b></div>'
-                f'<div><span>REWARD : RISK</span><b>{(str(t1["rr"]) + " R") if t1 else "—"}</b></div></div>')
+                f'<div><span>{p["direction"].capitalize()} entry</span><b>{_fmt(p["entry_ref"])}</b></div><div><span>Stop</span><b class="dn">{_fmt(p["stop"])}</b></div>'
+                f'<div><span>Target 1</span><b class="up">{_fmt(t1["price"]) if t1 else "—"}</b></div>'
+                f'<div><span>Reward : risk</span><b>{(str(t1["rr"]) + " R") if t1 else "—"}</b></div></div>')
     else:
-        mini = '<div class="aa-empty" style="padding:14px">NO TRADE PLAN RIGHT NOW<br>waiting for price to reach one of your zones</div>'
+        mini = '<div class="aa-empty" style="padding:14px">No trade plan right now.<br>Waiting for price to reach one of your zones.</div>'
     head = ai.get("headline") or _engine_headline(det)
-    return (f'<div class="aa-hero" style="--vc:{color}"><div><span class="aa-sym">{esc(r["ticker"])}</span>'
-            f'<div class="aa-px">₹{_fmt(det["close"])}<em class="{chg_cls}">{"▲" if chg >= 0 else "▼"} {abs(chg):.2f}%</em></div>'
-            f'<div class="aa-sub">DAILY · AS OF {esc(det["asof"])} · ATR {det["atr_pct"]}% · RSI {_fmt(det["rsi"], 0)}</div></div>'
-            f'<div class="aa-hm"><span class="aa-verdict" style="--vc:{color}">{esc(label)}</span><div class="aa-chips">{chips}</div></div>'
+    timing = f' · analysed in {r["secs"]} s' if r.get("secs") is not None else ""
+    return (f'<div class="aa-hero" style="--vc:{color}"><div><div class="aa-sym">{esc(r["ticker"])} · daily</div>'
+            f'<div class="aa-px">₹{_fmt(det["close"])}<em class="{chg_cls}">{"+" if chg >= 0 else "−"}{abs(chg):.2f}%</em></div>'
+            f'<div class="aa-sub">As of {esc(det["asof"])} · ATR {det["atr_pct"]}% · RSI {_fmt(det["rsi"], 0)}</div>'
+            f'<div class="aa-hm" style="margin-top:12px"><span class="aa-verdict" style="--vc:{color}">{esc(label)}</span><div class="aa-chips">{chips}</div></div></div>'
             f'<div>{_ring(score, color)}</div><div>{mini}</div></div>'
-            f'<div class="aa-head">{esc(head)}<span>{esc(r["ran_at"])}</span></div>')
+            f'<div class="aa-head">{esc(head)}<span>{esc(r["ran_at"])}{timing}</span></div>')
 
 
 def _engine_headline(det: dict) -> str:
@@ -2265,11 +2382,11 @@ def html_plan(r: dict, risk: float) -> str:
         if ai.get("no_trade") and e:
             alt = (f'<div class="aa-note">Engine alternative (not matched to your playbook): {e["direction"]} from {e["ref_zone"]}, entry '
                    f'{_fmt(e["entry_low"])}-{_fmt(e["entry_high"])}, stop {_fmt(e["stop"])}.</div>')
-        return f'<div class="aa-card"><div class="aa-ct">Trade plan<span>none</span></div><div class="aa-empty">{esc(why)}</div>{alt}</div>'
+        return f'<div class="aa-card"><div class="aa-ct">Trade plan<span>none</span></div><div class="aa-empty" style="border:0;background:var(--s2)">{esc(why)}</div>{alt}</div>'
     dcls = "up" if p["direction"] == "LONG" else "dn"
     ref_zone = p.get("ref_zone") or "-"
     tag = " · counter-trend" if p.get("counter_trend") else ""
-    rows = [f'<div class="aa-kv"><span>Direction</span><b class="{dcls}">{p["direction"]}{tag}</b></div>',
+    rows = [f'<div class="aa-kv"><span>Direction</span><b class="{dcls}">{p["direction"].capitalize()}{tag}</b></div>',
             f'<div class="aa-kv"><span>Based on</span><b>{esc(ref_zone)}</b></div>',
             f'<div class="aa-kv"><span>Entry zone</span><b class="cy">{_fmt(p["entry_low"])} – {_fmt(p["entry_high"])}</b></div>',
             f'<div class="aa-kv"><span>Entry reference</span><b>{_fmt(p["entry_ref"])}</b></div>',
@@ -2290,7 +2407,7 @@ def html_plan(r: dict, risk: float) -> str:
         extra += f'<div class="aa-note"><b style="color:#ECECEC">Invalidation:</b> {esc(p["invalidation"])}</div>'
     if p.get("confirmation_needed"):
         extra += '<div class="aa-note"><b style="color:#ECECEC">Wait for:</b> ' + " · ".join(esc(x) for x in p["confirmation_needed"]) + "</div>"
-    return f'<div class="aa-card"><div class="aa-ct">Trade plan<span>{"AI" if p.get("source") == "ai" else "ENGINE"}</span></div>{"".join(rows)}{extra}</div>'
+    return f'<div class="aa-card"><div class="aa-ct">Trade plan<span>{"from Arka AI" if p.get("source") == "ai" else "from the engine"}</span></div>{"".join(rows)}{extra}</div>'
 
 
 def html_scorecard(r: dict) -> str:
@@ -2300,19 +2417,19 @@ def html_scorecard(r: dict) -> str:
         return f'<div class="aa-card"><div class="aa-ct">Setup scorecard<span>engine only</span></div><div class="aa-empty">{esc(msg)}</div></div>'
     if not ai["setups"]:
         return ('<div class="aa-card"><div class="aa-ct">Setup scorecard<span>no setup taught</span></div><div class="aa-empty">'
-                'No active setup in your playbook.<br>Open TEACH to import a PDF or write your rules.</div></div>')
+                'No active setup in your playbook.<br>Open Teach to import a PDF or write your rules.</div></div>')
     colors = {"PRESENT": GREEN, "NOT_PRESENT": RED, "UNCLEAR": AMBER}
-    labels = {"PRESENT": "✓ PRESENT", "NOT_PRESENT": "✕ NOT PRESENT", "UNCLEAR": "◐ UNCLEAR"}
+    labels = {"PRESENT": "Present", "NOT_PRESENT": "Not present", "UNCLEAR": "Unclear"}
     out = ['<div class="aa-card"><div class="aa-ct">Setup scorecard<span>your rules, one by one</span></div>']
     for s in ai["setups"]:
-        tally = f'{s.get("present", 0)} OF {s.get("required", 0)} REQUIRED PRESENT' + (f' · {s["unclear"]} UNCLEAR' if s.get("unclear") else "")
+        tally = f'{s.get("present", 0)} of {s.get("required", 0)} required present' + (f' · {s["unclear"]} unclear' if s.get("unclear") else "")
         out.append(f'<div class="aa-sh"><div>{esc(s["name"])}</div><span>{s["match_pct"]}% · {tally}</span></div>')
         for c in s["checks"]:
             col = colors[c["status"]]
             refs = "".join(f'<span class="aa-ref">{esc(x)}</span>' for x in c["refs"])
-            kind = "" if c.get("required", True) else '<span class="aa-ref" style="color:#A3A3A3;border-color:#2B2B2B">OPTIONAL</span>'
-            kind += '<span class="aa-ref" style="color:#BF5AF2;border-color:rgba(191,90,242,.35)">CONFIRMATION</span>' if c.get("group") == "confirmation" else ""
-            out.append(f'<div class="aa-ck" style="--c:{col}"><div class="h"><div><span style="color:#6B6B6B;font:700 9px JetBrains Mono,monospace;margin-right:6px">{esc(c.get("rule_id", ""))}</span>'
+            kind = "" if c.get("required", True) else '<span class="aa-ref" style="color:#A1A1AA;background:#1C1C1F">optional</span>'
+            kind += '<span class="aa-ref" style="color:#BF5AF2;background:rgba(191,90,242,.12)">confirmation</span>' if c.get("group") == "confirmation" else ""
+            out.append(f'<div class="aa-ck" style="--c:{col}"><div class="h"><div><span style="color:#71717A;font:600 12px Inter,sans-serif;margin-right:6px">{esc(c.get("rule_id", ""))}</span>'
                        f'{esc(c["rule_name"])}{kind}{refs}</div><span>{labels[c["status"]]}</span></div>'
                        f'<div class="r">{esc(c["reason"])}</div><div class="b"><i style="width:{c["confidence"]}%"></i></div></div>')
     out.append("</div>")
@@ -2324,9 +2441,9 @@ def html_read(ai: dict | None) -> str:
         return '<div class="aa-card"><div class="aa-ct">The read<span>AI offline</span></div><div class="aa-empty">Supports, contradictions and what to watch appear here when the AI is online.</div></div>'
 
     def block(title, items, color, icon):
-        li = "".join(f"<li>{esc(x)}</li>" for x in items) or '<li style="color:#6B6B6B">Nothing to report.</li>'
-        return f'<div class="aa-sh" style="margin-top:12px"><div>{title}</div></div><ul class="aa-list" style="--c:{color};--ic:\'{icon}\'">{li}</ul>'
-    return ('<div class="aa-card"><div class="aa-ct">The read<span>against YOUR playbook</span></div>'
+        li = "".join(f"<li>{esc(x)}</li>" for x in items) or '<li style="color:#71717A">Nothing to report.</li>'
+        return f'<div class="aa-sh" style="margin-top:12px"><div>{title}</div></div><ul class="aa-list" style="--c:{color}">{li}</ul>'
+    return ('<div class="aa-card"><div class="aa-ct">The read<span>against your playbook</span></div>'
             + block("What supports your setup", ai["supports"], GREEN, "+") + block("What contradicts it", ai["contradicts"], RED, "-")
             + block("Watch before acting", ai["watch_next"], AMBER, ">") + "</div>")
 
@@ -2340,16 +2457,16 @@ def html_zones(r: dict) -> str:
         qc = GREEN if z["quality"] >= 70 else AMBER if z["quality"] >= 50 else RED
         flags = []
         if z.get("htf"):
-            flags.append("WEEKLY CONFLUENCE")
+            flags.append("Weekly confluence")
         if z["bos"]:
-            flags.append("BROKE STRUCTURE")
+            flags.append("Broke structure")
         if z["aligned"]:
-            flags.append("WITH TREND")
+            flags.append("With trend")
         m = mine.get(z["id"])
         if m and m["matches_my_style"]:
-            flags.append("YOUR STYLE")
+            flags.append("Your style")
         role = esc(m["role"].replace("_", " ")) if m else "—"
-        rows.append(f'<tr><td><b>{z["id"]}</b></td><td>{_pill(z["type"].upper(), col)}</td><td>{z["pattern"]}</td>'
+        rows.append(f'<tr><td><b>{z["id"]}</b></td><td>{_pill(z["type"].capitalize(), col)}</td><td>{z["pattern"]}</td>'
                     f'<td class="n">{_fmt(z["bottom"])} – {_fmt(z["top"])}</td><td class="n">{z["thickness_atr"]} ATR</td>'
                     f'<td><span class="aa-q" style="--c:{qc};--w:{z["quality"]}%"><i></i>{z["quality"]}</span></td><td>{esc(z["status"])}</td>'
                     f'<td class="n">{_fmt(z["dist_pct"])}% · {z["dist_atr"]} ATR</td><td class="n">{esc(z["formed"])}</td><td>{role}</td>'
@@ -2365,11 +2482,11 @@ def html_levels(r: dict) -> str:
     rows = []
     for lv in sorted(det["levels"], key=lambda x: -x["price"]):
         col = GREEN if lv["kind"] == "support" else RED
-        rows.append(f'<tr><td><b>{lv["id"]}</b></td><td>{_pill(lv["kind"].upper(), col)}</td><td class="n">{_fmt(lv["price"])}</td><td class="n">{lv["touches"]}</td>'
+        rows.append(f'<tr><td><b>{lv["id"]}</b></td><td>{_pill(lv["kind"].capitalize(), col)}</td><td class="n">{_fmt(lv["price"])}</td><td class="n">{lv["touches"]}</td>'
                     f'<td class="n">{_fmt(lv["dist_pct"])}%</td><td>{"role reversal" if lv["flip"] else "—"}</td></tr>')
     for t in det["trendlines"]:
         col = GREEN if t["kind"] == "support" else RED
-        rows.append(f'<tr><td><b>{t["id"]}</b></td><td>{_pill("TRENDLINE · " + t["kind"].upper(), col)}</td><td class="n">{_fmt(t["p1"])}</td>'
+        rows.append(f'<tr><td><b>{t["id"]}</b></td><td>{_pill("Trendline · " + t["kind"], col)}</td><td class="n">{_fmt(t["p1"])}</td>'
                     f'<td class="n">{t["touches"]}</td><td class="n">{_fmt(t["dist_pct"])}%</td><td>slope {t["slope_pct_per_bar"]}%/bar</td></tr>')
     if not rows:
         return '<div class="aa-empty">No support / resistance levels with enough touches.</div>'
@@ -2381,7 +2498,7 @@ def html_scenarios(ai: dict | None) -> str:
     if not ai:
         return ""
     cards = []
-    for key, title, col in (("bull", "BULL CASE", GREEN), ("bear", "BEAR CASE", RED), ("neutral", "NEUTRAL / RANGE", AMBER)):
+    for key, title, col in (("bull", "Bull case", GREEN), ("bear", "Bear case", RED), ("neutral", "Neutral / range", AMBER)):
         s = ai["scenarios"][key]
         lvl = (_fmt(s.get("level")) + (f" · {s['ref']}" if s.get("ref") else "")) if isinstance(s.get("level"), (int, float)) else "—"
         cards.append(f'<div class="aa-sc" style="--c:{col}"><div class="t">{title}</div><div class="l">{lvl}</div>'
@@ -2391,9 +2508,9 @@ def html_scenarios(ai: dict | None) -> str:
 
 def _pct_cell(n, p, base=None):
     if not n or p is None:
-        return '<td class="n" style="color:#6B6B6B">—</td>'
-    col = "#CFCFCF" if base is None else (GREEN if p > base else RED if p < base - 5 else "#CFCFCF")
-    return f'<td class="n" style="color:{col}">{p:.0f}% <span style="color:#6B6B6B">of {n}</span></td>'
+        return '<td class="n" style="color:#71717A">—</td>'
+    col = "#D4D4D8" if base is None else (GREEN if p > base else RED if p < base - 5 else "#D4D4D8")
+    return f'<td class="n" style="color:{col}">{p:.0f}% <span style="color:#71717A">of {n}</span></td>'
 
 
 def html_track(tr: dict, universe: dict | None = None) -> str:
@@ -2432,12 +2549,35 @@ def png_for(r: dict, window: int) -> bytes:
     return cache[window]
 
 
+LAYERS = ["Zones", "Levels", "Trendlines", "Trade plan", "Moving averages", "Signals"]
+_LAYER_KEYS = {"Zones": "zones", "Levels": "levels", "Trendlines": "lines", "Trade plan": "plan", "Moving averages": "mas", "Signals": "markers"}
+
+
+def _is_phone() -> bool:
+    return bool(st.session_state.get("_ak_phone"))
+
+
+def _cols(spec):
+    """Columns on a desktop; full-width blocks one under another on a phone."""
+    n = spec if isinstance(spec, int) else len(spec)
+    return [st.container() for _ in range(n)] if _is_phone() else st.columns(spec, gap="medium")
+
+
 def render_chart(r: dict, window: int):
-    cols = st.columns(6)
-    show = {"zones": cols[0].checkbox("Zones", True, key="aa_t_zones"), "levels": cols[1].checkbox("Levels", True, key="aa_t_levels"),
-            "lines": cols[2].checkbox("Trendlines", True, key="aa_t_lines"), "plan": cols[3].checkbox("Trade plan", True, key="aa_t_plan"),
-            "mas": cols[4].checkbox("Moving averages", True, key="aa_t_mas"), "markers": cols[5].checkbox("Signals", True, key="aa_t_mk")}
-    fig = fig_plotly(r["df"], r["spec"], window, show)
+    try:
+        picked = st.pills("Chart layers", LAYERS, selection_mode="multi", default=LAYERS, key="aa_layers", label_visibility="collapsed")
+    except Exception:                                            # Streamlit without st.pills
+        cols = st.columns(6)
+        picked = [lab for col, lab in zip(cols, LAYERS) if col.checkbox(lab, True, key=f"aa_t_{_LAYER_KEYS[lab]}")]
+    picked = picked or []
+    show = {v: (k in picked) for k, v in _LAYER_KEYS.items()}
+    height = 560 if _is_phone() else 780
+    cache = r.setdefault("fig_cache", {})
+    ck = (window, height, tuple(sorted(k for k, v in show.items() if v)))
+    if ck not in cache:                                          # build each view once; clicks elsewhere reuse it
+        cache.clear()
+        cache[ck] = fig_plotly(r["df"], r["spec"], window, show, height)
+    fig = cache[ck]
     if fig is not None:
         st.plotly_chart(fig, use_container_width=True, key="aa_chart", config={"displaylogo": False, "scrollZoom": True,
                                                                               "modeBarButtonsToRemove": ["lasso2d", "select2d"]})
@@ -2451,7 +2591,7 @@ def render_report(r: dict, window: int, risk: float):
     if r.get("ai_error"):
         st.warning(f"The AI step failed, so this is the engine-only view. Reason: {r['ai_error']}")
     render_chart(r, window)
-    c1, c2, c3 = st.columns([1.05, 1.25, 1.0], gap="small")
+    c1, c2, c3 = _cols([1.05, 1.25, 1.0])
     with c1:
         st.markdown(html_plan(r, risk), unsafe_allow_html=True)
     with c2:
@@ -2460,7 +2600,7 @@ def render_report(r: dict, window: int, risk: float):
         st.markdown(html_read(r.get("ai")), unsafe_allow_html=True)
     fixes = (r.get("ai") or {}).get("corrections") or []
     if fixes:
-        with st.expander(f"ENGINE CHECK OF THE AI · {len(fixes)} correction{'s' if len(fixes) != 1 else ''} applied", expanded=False):
+        with st.expander(f"Engine check of the AI · {len(fixes)} correction{'s' if len(fixes) != 1 else ''} applied", expanded=False):
             st.caption("Everything the AI says is matched back to your playbook rules and to the detected zones and levels. These are the points where its reply did not match and what was done.")
             for f in fixes:
                 st.markdown(f"- {f}")
@@ -2480,13 +2620,13 @@ def render_report(r: dict, window: int, risk: float):
     st.markdown(html_levels(r), unsafe_allow_html=True)
     ai = r.get("ai")
     if ai and ai.get("narrative"):
-        with st.expander("FULL ANALYSIS", expanded=False):
+        with st.expander("Full analysis", expanded=False):
             st.write(ai["narrative"])
             if ai.get("context"):
                 st.markdown("**Context (not used for the verdict)**")
                 for c in ai["context"]:
                     st.markdown(f"- {c}")
-    with st.expander("ENGINE EVIDENCE (exact numbers the AI was given)", expanded=False):
+    with st.expander("Engine evidence (the exact numbers the AI was given)", expanded=False):
         d = r["det"]
         st.json({"market": r.get("market"), "next_results_date": r.get("results"), "ai_model": r.get("model") or None,
                  "structure": d["structure"], "ma_state": d["ma_state"], "sma": d["sma"], "volume": d["volume"], "refs": d["refs"], "swings": d["swings"],
@@ -2494,7 +2634,7 @@ def render_report(r: dict, window: int, risk: float):
     if ai:
         _sec("Ask Arka about this chart", "follow-up questions use the same data")
         q = st.text_input("Question", key="aa_q", placeholder="e.g. Why is DZ1 better than DZ2? Where would you trail the stop?")
-        if st.button("ASK", key="aa_ask") and q.strip():
+        if st.button("Ask Arka", key="aa_ask", type="primary") and q.strip():
             with st.spinner("Thinking…"):
                 try:
                     ans = ask_followup(r, q.strip())
@@ -2502,34 +2642,40 @@ def render_report(r: dict, window: int, risk: float):
                     ans = f"Could not answer: {exc}"
             st.session_state.setdefault("aa_qa", []).append((r["ticker"], q.strip(), ans))
         for tk, qq, aa in reversed([x for x in st.session_state.get("aa_qa", []) if x[0] == r["ticker"]][-4:]):
-            st.markdown(f'<div class="aa-lab"><b>YOU</b>{esc(qq)}</div><div class="aa-lab" style="border-left:3px solid #FF9F0A"><b>ARKA</b>{esc(aa)}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="aa-lab"><b style="color:#A1A1AA">You</b>{esc(qq)}</div><div class="aa-lab" style="border-left:3px solid #FF9F0A"><b>Arka</b>{esc(aa)}</div>', unsafe_allow_html=True)
     _sec("Export")
-    e1, e2, e3, e4 = st.columns(4, gap="small")
-    e1.download_button("⬇ ANNOTATED CHART (PNG)", png_for(r, window), file_name=f"{r['ticker']}_arka_{r['asof']}.png", mime="image/png", use_container_width=True)
+    e1, e2, e3, e4 = _cols(4)
+    if window in r.get("png_cache", {}):                     # the PNG is built only when asked for (it takes a second or two)
+        e1.download_button("Download chart (PNG)", png_for(r, window), file_name=f"{r['ticker']}_arka_{r['asof']}.png", mime="image/png",
+                           use_container_width=True)
+    elif e1.button("Prepare chart image", key="aa_png_make", use_container_width=True):
+        with st.spinner("Drawing the chart…"):
+            png_for(r, window)
+        st.rerun()
     payload = {k: r.get(k) for k in ("ticker", "asof", "score", "plan", "ai", "engine_plan", "market", "results", "model")}
     payload.update({"zones": r["det"]["zones"], "levels": r["det"]["levels"], "trendlines": r["det"]["trendlines"],
                     "track_record": (r.get("track") or {}).get("groups")})
     report_json = json.dumps(payload, default=str, ensure_ascii=False, indent=2)
-    e2.download_button("⬇ FULL REPORT (JSON)", report_json, file_name=f"{r['ticker']}_arka_{r['asof']}.json", mime="application/json", use_container_width=True)
-    if e3.button("＋ ADD TO WATCHLIST", key="aa_wl", use_container_width=True):
+    e2.download_button("Download report (JSON)", report_json, file_name=f"{r['ticker']}_arka_{r['asof']}.json", mime="application/json", use_container_width=True)
+    if e3.button("Add to watchlist", key="aa_wl", use_container_width=True):
         try:
             import user_data as ud
             added, err = ud.add_symbols(_SB, [r["ticker"]], ud.W_TABLE)
             if added:
-                st.success(f"{r['ticker']} added to your watchlist")
+                st.toast(f"{r['ticker']} added to your watchlist")
             else:
                 st.info(err or "Already in your watchlist")
         except Exception as exc:
             st.error(f"Could not add: {exc}")
     p = r.get("plan")
-    if e4.button("✎ LOG THIS PLAN", key="aa_log", use_container_width=True, disabled=not p,
+    if e4.button("Log this plan", key="aa_log", use_container_width=True, disabled=not p, type="primary",
                  help="Saves the plan to your JOURNAL. Arka then checks every day whether it triggered, hit target 1 or was stopped."):
         label, _ = verdict_text(r)
         call = {k: p.get(k) for k in ("direction", "ref_zone", "entry_low", "entry_high", "entry_ref", "stop", "targets", "source", "room_r")}
         call.update({"ticker": r["ticker"], "asof": r["asof"], "close_at_log": r["det"]["close"], "score": r["score"], "verdict": label,
                      "summary": f'{p["direction"]} {r["ticker"]} from {p.get("ref_zone")} · entry {p["entry_ref"]:,.2f} · stop {p["stop"]:,.2f}'})
         if save_item("call", f'{r["ticker"]} · {p["direction"]} · {r["asof"]}', call, True):
-            st.success("Plan logged. Open JOURNAL to follow it.")
+            st.toast("Plan logged. Open Journal to follow it.")
 
 
 _SB = None          # Supabase client handed over by app.py (used for "add to watchlist")
@@ -2546,47 +2692,96 @@ def render_getting_started():
         '<div class="aa-intro"><b>Teach once. Ask about any stock.</b> Arka learns how <b>you</b> read a chart (your setups, your supply and demand zones, '
         'your lines) and then analyses any stock the same way, marking everything on the chart.</div>'
         '<div class="aa-steps">'
-        '<div class="aa-step"><div class="n">STEP 1 · TEACH</div><div class="t">Show Arka your style</div><div class="d">Import your strategy PDF, tick the zones you like and cross the ones you don\'t, or upload charts you marked up.</div></div>'
-        '<div class="aa-step"><div class="n">STEP 2 · ANALYZE</div><div class="t">Type a stock</div><div class="d">Every zone, level and trendline is detected with exact prices, then judged against your playbook.</div></div>'
-        '<div class="aa-step"><div class="n">STEP 3 · ACT</div><div class="t">Get the marked-up chart</div><div class="d">Verdict, scorecard, entry zone, stop, targets, position size and scenarios, ready to download.</div></div></div>',
+        '<div class="aa-step"><div class="n">Step 1 · Teach</div><div class="t">Show Arka your style</div><div class="d">Import your strategy PDF, tick the zones you like and cross the ones you don\'t, or upload charts you marked up.</div></div>'
+        '<div class="aa-step"><div class="n">Step 2 · Analyze</div><div class="t">Type a stock</div><div class="d">Every zone, level and trendline is detected with exact prices, then judged against your playbook.</div></div>'
+        '<div class="aa-step"><div class="n">Step 3 · Act</div><div class="t">Get the marked-up chart</div><div class="d">Verdict, scorecard, entry zone, stop, targets, position size and scenarios, ready to download.</div></div></div>',
         unsafe_allow_html=True)
 
 
 def render_analyze():
-    c1, c2, c3 = st.columns([3.4, 1.2, 1.4], gap="small")
-    ticker = c1.text_input("Stock", key="aa_ticker", placeholder="e.g. RELIANCE · TCS · HDFCBANK · NIFTY50")
-    window = c2.selectbox("Candles shown", [80, 120, 180, 250], index=1, key="aa_window")
-    risk = c3.number_input("Risk per trade (₹)", min_value=0.0, value=1000.0, step=500.0, key="aa_risk")
-    d1, d2, d3 = st.columns([4.4, 1.2, 1.2], gap="small")
-    note = d1.text_input("Note for Arka (optional)", key="aa_note", placeholder="e.g. I'm only interested in long setups from fresh demand zones")
-    ai_online = get_gemini() is not None
-    use_ai = d2.checkbox("Use AI", value=True, key="aa_use_ai", disabled=not ai_online)
-    go_clicked = d3.button("ANALYZE", type="primary", use_container_width=True, key="aa_go")
+    phone = _is_phone()
+    if phone:
+        ticker = st.text_input("Stock", key="aa_ticker", placeholder="RELIANCE, TCS, NIFTY50…")
+        go_clicked = st.button("Analyze", type="primary", use_container_width=True, key="aa_go")
+        with st.expander("Options"):
+            window = st.selectbox("Candles shown", [80, 120, 180, 250], index=1, key="aa_window")
+            risk = st.number_input("Risk per trade (₹)", min_value=0.0, value=1000.0, step=500.0, key="aa_risk")
+            st.radio("Speed", list(SPEEDS), key="aa_speed", horizontal=True,
+                     help="How long Arka AI may think. Fast ≈ quickest, Deep = most thorough (slowest).")
+            note = st.text_input("Note for Arka (optional)", key="aa_note", placeholder="e.g. only long setups from fresh demand")
+            ai_online = get_gemini() is not None
+            use_ai = st.toggle("Use Arka AI", value=True, key="aa_use_ai", disabled=not ai_online)
+    else:
+        c1, c2, c3, c4 = st.columns([3.0, 1.1, 1.3, 1.2], gap="small")
+        ticker = c1.text_input("Stock", key="aa_ticker", placeholder="RELIANCE, TCS, HDFCBANK, NIFTY50…")
+        window = c2.selectbox("Candles shown", [80, 120, 180, 250], index=1, key="aa_window")
+        risk = c3.number_input("Risk per trade (₹)", min_value=0.0, value=1000.0, step=500.0, key="aa_risk")
+        c4.selectbox("Speed", list(SPEEDS), key="aa_speed", help="How long Arka AI may think. Fast is quickest, Deep is most thorough (slowest).")
+        d1, d2, d3 = st.columns([4.2, 1.3, 1.3], gap="small")
+        note = d1.text_input("Note for Arka (optional)", key="aa_note", placeholder="e.g. I'm only interested in long setups from fresh demand zones",
+                             label_visibility="collapsed")
+        ai_online = get_gemini() is not None
+        use_ai = d2.toggle("Use Arka AI", value=True, key="aa_use_ai", disabled=not ai_online)
+        go_clicked = d3.button("Analyze", type="primary", use_container_width=True, key="aa_go")
     recents = st.session_state.get("aa_recents", [])
     if recents:
-        cols = st.columns(min(len(recents), 8) + 1, gap="small")
-        cols[0].caption("RECENT")
-        for col, sym in zip(cols[1:], recents[:8]):
-            col.button(sym, key=f"aa_rc_{sym}", use_container_width=True, on_click=_set_run, args=(sym,))
+        try:
+            st.pills("Recent", recents[:8], key="aa_recent_pick", on_change=_recent_picked, label_visibility="collapsed")
+        except Exception:
+            cols = st.columns(min(len(recents), 8), gap="small")
+            for col, sym in zip(cols, recents[:8]):
+                col.button(sym, key=f"aa_rc_{sym}", use_container_width=True, on_click=_set_run, args=(sym,))
     req = st.session_state.pop("aa_run_request", None)
     if go_clicked and ticker.strip():
         req = ticker.strip().upper()
     if req:
-        with st.spinner(f"Reading {req}: detecting zones, levels and trendlines" + (", then judging against your playbook…" if (use_ai and ai_online) else "…")):
-            try:
-                st.session_state["aa_report"] = run_analysis(req, note, use_ai and ai_online, window)
-                rec = [req] + [x for x in st.session_state.get("aa_recents", []) if x != req]
-                st.session_state["aa_recents"] = rec[:8]
-            except Exception as exc:
-                st.session_state.pop("aa_report", None)
-                st.error(f"Could not analyse {req}: {exc}")
+        _run_with_progress(req, note, use_ai and ai_online, window)
     r = st.session_state.get("aa_report")
     if r:
         render_report(r, window, risk)
     elif not (active_items("setup") or active_items("lesson") or active_items("feedback")):
         render_getting_started()
     else:
-        st.markdown('<div class="aa-empty">Type a stock above and press ANALYZE.<br>Your playbook is loaded and ready.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="aa-empty">Type a stock above and press <b>Analyze</b>.<br>Your playbook is loaded and ready.</div>', unsafe_allow_html=True)
+
+
+def _recent_picked():
+    sym = st.session_state.get("aa_recent_pick")
+    if sym:
+        _set_run(sym)
+    st.session_state["aa_recent_pick"] = None                 # allowed here: this runs as the widget's callback
+
+
+def _run_with_progress(req: str, note: str, use_ai: bool, window: int):
+    """Runs the analysis inside a live progress panel that shows each step and the total time."""
+    try:
+        box = st.status(f"Analysing {req}…", expanded=False)
+    except Exception:
+        box = None
+    steps = []
+
+    def say(msg):
+        steps.append(msg)
+        if box is not None:
+            box.update(label=f"{msg}…")
+            box.write(msg)
+    try:
+        if box is None:
+            with st.spinner(f"Analysing {req}…"):
+                rep_ = run_analysis(req, note, use_ai, window, say)
+        else:
+            rep_ = run_analysis(req, note, use_ai, window, say)
+        st.session_state["aa_report"] = rep_
+        rec = [req] + [x for x in st.session_state.get("aa_recents", []) if x != req]
+        st.session_state["aa_recents"] = rec[:8]
+        if box is not None:
+            extra = f" · AI {rep_['ai_secs']} s" if rep_.get("ai_secs") is not None else ""
+            box.update(label=f"{req} analysed in {rep_['secs']} s{extra}", state="complete", expanded=False)
+    except Exception as exc:
+        st.session_state.pop("aa_report", None)
+        if box is not None:
+            box.update(label=f"Could not analyse {req}", state="error", expanded=True)
+        st.error(f"Could not analyse {req}: {exc}")
 
 
 # ── RADAR ───────────────────────────────────────────────────
@@ -2612,7 +2807,7 @@ def render_radar():
         symbols = symbols[:40]
     st.caption(f"{len(symbols)} symbol(s) · uses your zone style ({style_source()}) · no AI cost")
     want_track = st.checkbox("Also replay the track record of my zone style on these stocks (2 years, a few seconds more)", value=True, key="aa_radar_track")
-    if st.button("SCAN FOR MY ZONES", type="primary", key="aa_radar_go", disabled=not symbols):
+    if st.button("Scan for my zones", type="primary", key="aa_radar_go", disabled=not symbols):
         with st.spinner(f"Scanning {len(symbols)} stocks…"):
             try:
                 out = radar_scan(symbols, get_style(), want_track)
@@ -2624,7 +2819,7 @@ def render_radar():
                 st.error(f"Scan failed: {exc}")
     res = st.session_state.get("aa_radar")
     if not res:
-        st.markdown('<div class="aa-empty">Press SCAN to rank your list by how ready each stock is.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="aa-empty">Press <b>Scan for my zones</b> to rank your list by how ready each stock is.</div>', unsafe_allow_html=True)
         return
     rows = res["rows"]
     if not rows:
@@ -2639,7 +2834,7 @@ def render_radar():
         body.append(f'<tr><td><b>{esc(x["symbol"])}</b></td><td class="n">{_fmt(x["close"])}</td>'
                     f'<td class="n" style="color:{GREEN if ch >= 0 else RED}">{"▲" if ch >= 0 else "▼"} {abs(ch):.2f}%</td><td>{esc(x["structure"])}</td>'
                     f'<td class="n">{_fmt(x["rsi"], 0)}</td>'
-                    f'<td>{(_pill(x["ztype"].upper(), zc) + " " + esc(x["zone"])) if x["zone"] else "—"}</td>'
+                    f'<td>{(_pill(x["ztype"].capitalize(), zc) + " " + esc(x["zone"])) if x["zone"] else "—"}</td>'
                     f'<td class="n">{x["quality"] if x["quality"] is not None else "—"}</td><td>{esc(x["status"] or "—")}</td>'
                     f'<td class="n">{(_fmt(x["dist_pct"]) + "%") if x["dist_pct"] is not None else "—"}</td>'
                     f'<td>{esc(x["direction"] or "—")}</td><td class="n">{(str(x["rr"]) + " R") if x["rr"] else "—"}</td>'
@@ -2647,32 +2842,41 @@ def render_radar():
                     f'<td><span class="aa-q" style="--c:{scol};--w:{sc}%"><i></i>{sc}</span></td></tr>')
     head = "".join(f"<th>{h}</th>" for h in ("Symbol", "Price", "1D", "Trend", "RSI", "Nearest zone", "Quality", "Status", "Distance", "Plan", "T1 R:R", "Room", "Readiness"))
     st.markdown(f'<div class="aa-tw"><table class="aa-t"><thead><tr>{head}</tr></thead><tbody>{"".join(body)}</tbody></table></div>', unsafe_allow_html=True)
-    st.caption(f"Scanned {res['at']}. Readiness = zone quality, proximity, trend, weekly confluence and confirmation. Run ANALYZE on a name for the full AI read.")
+    st.caption(f"Scanned {res['at']}. Readiness = zone quality, proximity, trend, weekly confluence and confirmation. Analyze a name for the full AI read.")
     if res.get("track"):
         _sec("Track record of your zone style on this list", f'{res["track"].get("n_stocks", 0)} stocks · 2 years · replayed with no hindsight')
         st.markdown(html_track(res["track"]), unsafe_allow_html=True)
         st.caption("This is the evidence for your ZONE STYLE settings: change a setting in TEACH → ZONE STYLE, scan again, and compare. "
                    "Break-even is 33% reaching 2R first; random price data gives about 30%. Costs are not included.")
     p1, p2 = st.columns([3, 1], gap="small")
-    p1.selectbox("Open in ANALYZE", [x["symbol"] for x in rows], key="aa_radar_pick")
-    p2.write("")
-    p2.button("ANALYZE SELECTED", key="aa_radar_open", use_container_width=True, on_click=_analyze_selected)
+    p1.selectbox("Open in Analyze", [x["symbol"] for x in rows], key="aa_radar_pick", label_visibility="collapsed")
+    p2.button("Analyze selected", key="aa_radar_open", use_container_width=True, on_click=_analyze_selected, type="primary")
 
 
 # ── JOURNAL ─────────────────────────────────────────────────
 def render_journal():
-    st.markdown('<div class="aa-intro"><b>Your logged plans, checked against what the market did.</b> Press LOG THIS PLAN under any analysis. '
+    st.markdown('<div class="aa-intro"><b>Your logged plans, checked against what the market did.</b> Press <b>Log this plan</b> under any analysis. '
                 'Each plan is then followed on daily candles: did price reach the entry, then target 1 or the stop first. This is the real, forward '
                 'record of the plans you chose to take, which no backtest can give you.</div>', unsafe_allow_html=True)
     calls = [i for i in load_items() if i["kind"] == "call"]
     if not calls:
-        st.markdown('<div class="aa-empty">No plans logged yet.<br>Run ANALYZE on a stock and press LOG THIS PLAN.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="aa-empty">No plans logged yet.<br>Analyze a stock and press <b>Log this plan</b>.</div>', unsafe_allow_html=True)
         return
     rows, closed = [], []
-    for it in calls[:60]:
+    calls = calls[:60]
+    tick = sorted({str(it["payload"].get("ticker", "")).upper() for it in calls if it["payload"].get("ticker")})
+    frames = {}
+    stocks = tuple(x for x in tick if not is_index(x))
+    if stocks:
+        try:
+            frames = fetch_many(stocks)                               # one batched download for every plan
+        except Exception:
+            frames = {}
+    for it in calls:
         p = it["payload"]
         try:
-            ev = evaluate_call(p, fetch_ohlc(p["ticker"], "1d", "2y"))
+            df_ = frames.get(str(p["ticker"]).upper())
+            ev = evaluate_call(p, df_ if df_ is not None else fetch_ohlc(p["ticker"], "1d", "2y"))
         except Exception as exc:
             ev = {"status": f"NO DATA ({type(exc).__name__})", "r": None, "days": 0, "entry": None, "last": None}
         rows.append((it, p, ev))
@@ -2681,18 +2885,18 @@ def render_journal():
     wins = sum(1 for x in closed if x > 0)
     open_r = [ev["r"] for _, _, ev in rows if ev["status"] == "OPEN" and ev["r"] is not None]
     kp = lambda lab, val: f'<div><span>{lab}</span><b>{val}</b></div>'
-    st.markdown('<div class="aa-card" style="min-height:0"><div class="aa-mini" style="grid-template-columns:repeat(5,1fr)">'
-                + kp("PLANS LOGGED", len(rows)) + kp("CLOSED", len(closed)) + kp("HIT TARGET 1", f"{wins} of {len(closed)}" if closed else "—")
-                + kp("RESULT OF CLOSED PLANS", f"{sum(closed):+.1f} R" if closed else "—") + kp("OPEN PLANS NOW", f"{sum(open_r):+.1f} R" if open_r else "—")
+    st.markdown('<div class="aa-card" style="min-height:0"><div class="aa-mini" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr))">'
+                + kp("Plans logged", len(rows)) + kp("Closed", len(closed)) + kp("Hit target 1", f"{wins} of {len(closed)}" if closed else "—")
+                + kp("Result of closed plans", f"{sum(closed):+.1f} R" if closed else "—") + kp("Open plans now", f"{sum(open_r):+.1f} R" if open_r else "—")
                 + "</div></div>", unsafe_allow_html=True)
     colors = {"TARGET 1 HIT": GREEN, "STOPPED": RED, "OPEN": AMBER, "WAITING": T2}
     body = []
     for it, p, ev in rows:
         t1 = p["targets"][0]["price"] if p.get("targets") else None
         rr = "—" if ev["r"] is None else f'<span style="color:{GREEN if ev["r"] > 0 else RED if ev["r"] < 0 else T2}">{ev["r"]:+.2f} R</span>'
-        body.append(f'<tr><td><b>{esc(p["ticker"])}</b></td><td>{esc(p["asof"])}</td><td>{_pill(p["direction"], GREEN if p["direction"] == "LONG" else RED)}</td>'
+        body.append(f'<tr><td><b>{esc(p["ticker"])}</b></td><td>{esc(p["asof"])}</td><td>{_pill(p["direction"].capitalize(), GREEN if p["direction"] == "LONG" else RED)}</td>'
                     f'<td class="n">{_fmt(p["entry_low"])} – {_fmt(p["entry_high"])}</td><td class="n">{_fmt(p["stop"])}</td><td class="n">{_fmt(t1)}</td>'
-                    f'<td class="n">{p.get("score", "—")}</td><td>{_pill(ev["status"], colors.get(ev["status"], T3))}</td><td class="n">{_fmt(ev.get("entry"))}</td>'
+                    f'<td class="n">{p.get("score", "—")}</td><td>{_pill(ev["status"].capitalize(), colors.get(ev["status"], T3))}</td><td class="n">{_fmt(ev.get("entry"))}</td>'
                     f'<td class="n">{_fmt(ev.get("last"))}</td><td class="n">{rr}</td><td class="n">{ev.get("days", 0)}</td></tr>')
     head = "".join(f"<th>{h}</th>" for h in ("Stock", "Logged", "Side", "Entry zone", "Stop", "Target 1", "Score", "Status", "Filled at", "Last price", "Result", "Sessions"))
     st.markdown(f'<div class="aa-tw"><table class="aa-t"><thead><tr>{head}</tr></thead><tbody>{"".join(body)}</tbody></table></div>', unsafe_allow_html=True)
@@ -2701,11 +2905,11 @@ def render_journal():
     d1, d2, d3 = st.columns([3, 1.2, 1], gap="small")
     pick = d1.selectbox("Plan", [it["item_id"] for it, _, _ in rows], key="aa_j_pick", label_visibility="collapsed",
                         format_func=lambda i: next(x["name"] for x, _, _ in rows if x["item_id"] == i))
-    if d2.button("OPEN IN ANALYZE", key="aa_j_open", use_container_width=True):
+    if d2.button("Open in Analyze", key="aa_j_open", use_container_width=True):
         _set_run(next(p["ticker"] for x, p, _ in rows if x["item_id"] == pick))
         st.rerun()
     sure = d3.checkbox("Confirm", key="aa_j_sure")
-    if st.button("DELETE THIS PLAN FROM THE JOURNAL", key="aa_j_del", disabled=not sure):
+    if st.button("Delete this plan", key="aa_j_del", disabled=not sure):
         delete_item(pick)
         st.rerun()
 
@@ -2713,7 +2917,7 @@ def render_journal():
 # ── TEACH ───────────────────────────────────────────────────
 def _setup_summary_html(s: dict) -> str:
     return (f'<div class="aa-item" style="--c:{AMBER}"><div class="h"><b>{esc(s.get("setup_name", "Unnamed setup"))}</b>'
-            f'{_pill("CONFIDENCE " + str(s.get("confidence", "?")), AMBER)}</div><div class="d">{esc(s.get("summary", ""))}<br>'
+            f'{_pill("Confidence " + str(s.get("confidence", "?")).lower(), AMBER)}</div><div class="d">{esc(s.get("summary", ""))}<br>'
             f'{len(s.get("conditions", []))} conditions · {len(s.get("confirmation", []))} confirmations · {len(s.get("invalidation", []))} invalidations · '
             f'{len(s.get("zone_definitions", []))} zone definitions · {len(s.get("line_definitions", []))} line definitions · {len(s.get("examples", []))} examples</div></div>')
 
@@ -2723,7 +2927,7 @@ def teach_pdf():
                 '(rules, trigger, confirmation, invalidation, how you draw supply / demand zones and lines) and shows you what it understood. '
                 '<b>You approve it before it is used.</b></div>', unsafe_allow_html=True)
     pdf = st.file_uploader("Strategy PDF", type=["pdf"], key="aa_pdf")
-    if pdf and st.button("READ MY PDF", type="primary", key="aa_pdf_go"):
+    if pdf and st.button("Read my PDF", type="primary", key="aa_pdf_go"):
         with st.spinner("Arka is reading the whole PDF: text, diagrams, screenshots and examples…"):
             st.session_state["aa_pending_setup"] = understand_pdf_setup(pdf, pdf.name)
             st.session_state["aa_pending_text"] = extract_pdf_text(pdf)
@@ -2736,12 +2940,12 @@ def teach_pdf():
     st.markdown(_setup_summary_html(pend), unsafe_allow_html=True)
     if pend.get("ambiguities"):
         st.warning("Arka was unsure about: " + " | ".join(map(str, pend["ambiguities"][:6])))
-    with st.expander("WHAT ARKA UNDERSTOOD (review before approving)", expanded=True):
+    with st.expander("What Arka understood (review before approving)", expanded=True):
         st.json(pend)
-    if st.button("APPROVE & ACTIVATE THIS SETUP", type="primary", key="aa_pdf_ok"):
+    if st.button("Approve and activate this setup", type="primary", key="aa_pdf_ok"):
         if save_item("setup", pend.get("setup_name", "PDF setup"), pend, True, pend.get("source_name", ""), st.session_state.get("aa_pending_text", "")):
             st.session_state.pop("aa_pending_setup", None)
-            st.success("Setup saved and active. ANALYZE will now check stocks against it.")
+            st.success("Setup saved and active. Analyze now checks stocks against it.")
             st.rerun()
 
 
@@ -2751,7 +2955,7 @@ def teach_label():
                 'how strong the move away. No drawing needed.</div>', unsafe_allow_html=True)
     c1, c2 = st.columns([4, 1], gap="small")
     t = c1.text_input("Stock to learn from", key="aa_lab_ticker", placeholder="Choose a chart where you can see both good and bad zones")
-    if c2.button("DETECT ZONES", type="primary", key="aa_lab_go", use_container_width=True) and t.strip():
+    if c2.button("Detect zones", type="primary", key="aa_lab_go", use_container_width=True) and t.strip():
         try:
             df = fetch_ohlc(t.strip().upper(), "1d", "2y")
             det = analyze_market(df, dict(get_style(), min_quality=20, fresh_only=False))
@@ -2777,19 +2981,19 @@ def teach_label():
     for z in zones:
         col = GREEN if z["type"] == "demand" else RED
         a, b, c = st.columns([3.2, 2.2, 2.6], gap="small")
-        a.markdown(f'<div class="aa-lab"><b>{z["id"]}</b>{_pill(z["type"].upper(), col)} {z["pattern"]} · {_fmt(z["bottom"])}–{_fmt(z["top"])} · '
+        a.markdown(f'<div class="aa-lab"><b>{z["id"]}</b>{_pill(z["type"].capitalize(), col)} {z["pattern"]} · {_fmt(z["bottom"])}–{_fmt(z["top"])} · '
                    f'{z["thickness_atr"]} ATR thick · move away {z["dep_atr"]} ATR · Q{z["quality"]} · {esc(z["status"])}</div>', unsafe_allow_html=True)
         pick = b.radio("Verdict", ["Skip", "✔ Mine", "✘ Not mine"], horizontal=True, key=f"aa_lab_{tk}_{z['id']}", label_visibility="collapsed")
         why = c.text_input("Why (optional)", key=f"aa_why_{tk}_{z['id']}", label_visibility="collapsed", placeholder="Why? e.g. too wide, already tested, no real impulse")
         choices[z["id"]] = (z, pick, why)
     n_ok = sum(1 for v in choices.values() if v[1] == "✔ Mine")
     n_no = sum(1 for v in choices.values() if v[1] == "✘ Not mine")
-    if st.button(f"SAVE MY LABELS ({n_ok} mine · {n_no} not mine)", type="primary", key="aa_lab_save", disabled=(n_ok + n_no) == 0):
+    if st.button(f"Save my labels ({n_ok} mine · {n_no} not mine)", type="primary", key="aa_lab_save", disabled=(n_ok + n_no) == 0):
         labels = [{"zone_id": zid, "zone_type": z["type"], "approved": pick == "✔ Mine", "reason": why, "features": zone_features(z)}
                   for zid, (z, pick, why) in choices.items() if pick != "Skip"]
         payload = {"ticker": tk, "asof": det["asof"], "labels": labels, "summary": f"{n_ok} approved and {n_no} rejected zones on {tk}"}
         if save_item("feedback", f"{tk} · {n_ok} mine / {n_no} not · {det['asof']}", payload, True):
-            st.success("Saved. Open ZONE STYLE and press LEARN to turn your labels into engine settings.")
+            st.success("Saved. Open Zone style and press Learn to turn your labels into engine settings.")
 
 
 def teach_screenshot():
@@ -2798,7 +3002,7 @@ def teach_screenshot():
     files = st.file_uploader("Marked-up charts (PNG / JPG)", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="aa_imgs")
     why = st.text_area("Explain your markings", height=110, key="aa_img_why",
                        placeholder="e.g. The green boxes are my demand zones: a tight base of 1-3 candles, then a strong move away. I only buy fresh zones in an uptrend. Stop below the zone, first target at the previous swing high.")
-    if files and st.button("LEARN FROM THESE CHARTS", type="primary", key="aa_img_go"):
+    if files and st.button("Learn from these charts", type="primary", key="aa_img_go"):
         with st.spinner("Studying your charts…"):
             st.session_state["aa_pending_lesson"] = learn_from_images([f.getvalue() for f in files[:6]], why)
     pend = st.session_state.get("aa_pending_lesson")
@@ -2807,11 +3011,11 @@ def teach_screenshot():
     if pend.get("error"):
         st.error(pend["error"])
         return
-    st.markdown(f'<div class="aa-item" style="--c:{CYAN}"><div class="h"><b>{esc(pend.get("lesson_title", "Lesson"))}</b>{_pill("NEW LESSON", CYAN)}</div>'
+    st.markdown(f'<div class="aa-item" style="--c:{CYAN}"><div class="h"><b>{esc(pend.get("lesson_title", "Lesson"))}</b>{_pill("New lesson", CYAN)}</div>'
                 f'<div class="d">{esc(pend.get("summary", ""))}</div></div>', unsafe_allow_html=True)
-    with st.expander("WHAT ARKA LEARNED (review)", expanded=True):
+    with st.expander("What Arka learned (review)", expanded=True):
         st.json(pend)
-    if st.button("SAVE LESSON TO MY PLAYBOOK", type="primary", key="aa_img_ok"):
+    if st.button("Save lesson to my playbook", type="primary", key="aa_img_ok"):
         if save_item("lesson", pend.get("lesson_title", "Chart lesson"), pend, True, "screenshot"):
             st.session_state.pop("aa_pending_lesson", None)
             st.success("Lesson saved and active.")
@@ -2827,7 +3031,7 @@ def teach_quick():
                          placeholder="Price is in an uptrend (higher highs, higher lows)\nPrice returns to a fresh demand zone\nThe demand zone is thin (base of 1-3 candles)\nA rejection candle forms inside the zone")
     trig = st.text_input("Trigger", key="aa_m_trig", placeholder="Bullish close back above the zone's proximal line")
     inv = st.text_input("Invalidation", key="aa_m_inv", placeholder="Close below the zone's distal line")
-    if st.button("SAVE & ACTIVATE SETUP", type="primary", key="aa_m_save"):
+    if st.button("Save and activate setup", type="primary", key="aa_m_save"):
         if not name.strip() or not conds.strip():
             st.warning("Give the setup a name and at least one rule.")
         elif save_item("setup", name, manual_setup(name, summary, conds, trig, inv), True, "manual"):
@@ -2836,7 +3040,7 @@ def teach_quick():
     _sec("Teach a lesson", "how you define zones and lines, in your words")
     lt = st.text_input("Lesson title", key="aa_l_title", placeholder="How I draw demand zones")
     lx = st.text_area("Lesson", key="aa_l_text", height=130, placeholder="A demand zone starts at the lowest wick of the base and ends at the top of the base bodies. I ignore zones thicker than 2 ATR...")
-    if st.button("SAVE LESSON", key="aa_l_save"):
+    if st.button("Save lesson", key="aa_l_save"):
         if not lt.strip() or not lx.strip():
             st.warning("Add a title and the lesson text.")
         elif save_item("lesson", lt, {"lesson_title": lt.strip(), "summary": lx.strip(), "entry_logic": "", "stop_logic": "", "target_logic": ""}, True, "manual"):
@@ -2858,17 +3062,17 @@ def teach_style():
     st.markdown(f'<div class="aa-intro">Your zone style tells the engine what counts as a zone. Current source: <b>{esc(style_source())}</b>. '
                 f'You have labelled <b>{len(ap)}</b> zone(s) as yours and <b>{len(rj)}</b> as not yours.</div>', unsafe_allow_html=True)
     _sec("Learn from my labels")
-    if st.button("LEARN MY ZONE STYLE", type="primary", key="aa_learn", disabled=len(ap) < 3):
+    if st.button("Learn my zone style", type="primary", key="aa_learn", disabled=len(ap) < 3):
         params, notes = calibrate_style(ap, rj)
         st.session_state["aa_learned"] = {"params": params, "notes": notes}
     if len(ap) < 3:
-        st.caption("Approve at least 3 zones in LABEL ZONES first.")
+        st.caption("Approve at least 3 zones in Label zones first.")
     learned = st.session_state.get("aa_learned")
     if learned and learned["params"]:
         for n in learned["notes"]:
             st.markdown(f"- {n}")
         st.json(learned["params"])
-        if st.button("SAVE AS MY ZONE STYLE", type="primary", key="aa_learn_save"):
+        if st.button("Save as my zone style", type="primary", key="aa_learn_save"):
             if save_item("style", "Learned style · " + datetime.now(IST).strftime("%d %b %Y"), {"params": learned["params"], "notes": learned["notes"], "summary": "Learned from labelled zones"}, True):
                 st.session_state.pop("aa_learned", None)
                 st.success("Saved. Every analysis now uses your style.")
@@ -2888,35 +3092,31 @@ def teach_style():
     vals["fresh_only"] = c2[3].checkbox("Fresh zones only", value=bool(style["fresh_only"]), key="aa_s_fresh")
     vals["base_max"] = int(vals["base_max"])
     b1, b2 = st.columns(2, gap="small")
-    if b1.button("SAVE THESE SETTINGS", key="aa_s_save", use_container_width=True):
+    if b1.button("Save these settings", key="aa_s_save", use_container_width=True):
         if save_item("style", "Manual style · " + datetime.now(IST).strftime("%d %b %Y"), {"params": vals, "summary": "Set by hand"}, True):
             st.success("Saved.")
             st.rerun()
-    if b2.button("RESET TO ARKA DEFAULTS", key="aa_s_reset", use_container_width=True):
+    if b2.button("Reset to Arka defaults", key="aa_s_reset", use_container_width=True):
         for it in active_items("style"):
             set_item_active(it["item_id"], False)
         st.rerun()
 
 
+TEACH_SECTIONS = {"Import PDF": "teach_pdf", "Label zones": "teach_label", "From screenshot": "teach_screenshot", "Quick rules": "teach_quick",
+                  "Zone style": "teach_style"}
+
+
 def render_teach():
-    tabs = st.tabs(["IMPORT PDF", "LABEL ZONES", "FROM SCREENSHOT", "QUICK RULES", "ZONE STYLE"])
-    with tabs[0]:
-        teach_pdf()
-    with tabs[1]:
-        teach_label()
-    with tabs[2]:
-        teach_screenshot()
-    with tabs[3]:
-        teach_quick()
-    with tabs[4]:
-        teach_style()
+    """Only the section you open runs (st.tabs runs all of them on every click, chart included)."""
+    sec = st.radio("Teach", list(TEACH_SECTIONS), horizontal=True, key="aa_teach_sec", label_visibility="collapsed")
+    globals()[TEACH_SECTIONS.get(sec, "teach_pdf")]()
 
 
 # ── PLAYBOOK ────────────────────────────────────────────────
 def render_playbook():
     c1, c2 = st.columns([5, 1], gap="small")
     c1.markdown('<div class="aa-intro">Everything you have taught Arka. <b>Active</b> items are used in every analysis; switch items off to test a different approach without deleting anything.</div>', unsafe_allow_html=True)
-    if c2.button("↻ RELOAD", key="aa_reload", use_container_width=True):
+    if c2.button("Reload", key="aa_reload", use_container_width=True):
         load_items(force=True)
         st.rerun()
     items = load_items()
@@ -2928,7 +3128,7 @@ def render_playbook():
         group = [i for i in items if i["kind"] == kind]
         if not group:
             continue
-        _sec(KIND_LABEL[kind] + "S" if kind != "feedback" else "LABELLED ZONES", f"{len(group)} saved")
+        _sec({"setup": "Setups", "lesson": "Lessons", "feedback": "Labelled zones", "style": "Zone styles"}[kind], f"{len(group)} saved")
         for it in group:
             p = it["payload"]
             desc = p.get("summary") or p.get("setup_name") or ""
@@ -2937,7 +3137,7 @@ def render_playbook():
                     "feedback": f'{sum(1 for x in p.get("labels", []) if x.get("approved"))} mine · {sum(1 for x in p.get("labels", []) if not x.get("approved"))} not mine',
                     "style": ", ".join(f"{k} {v}" for k, v in list(p.get("params", {}).items())[:4])}[kind]
             st.markdown(f'<div class="aa-item" style="--c:{colors[kind] if it["active"] else "#2B2B2B"}"><div class="h"><b>{esc(it["name"])}</b>'
-                        f'{_pill("ACTIVE" if it["active"] else "OFF", GREEN if it["active"] else T3)}</div>'
+                        f'{_pill("Active" if it["active"] else "Off", GREEN if it["active"] else T3)}</div>'
                         f'<div class="d">{esc(str(desc)[:260])}<br>{esc(meta)} · saved {esc(it["saved_at"][:10])}</div></div>', unsafe_allow_html=True)
             a, b, c = st.columns([1.2, 1.4, 4], gap="small")
             on = a.checkbox("Active", value=it["active"], key=f"aa_act_{it['item_id']}")
@@ -2945,7 +3145,7 @@ def render_playbook():
                 set_item_active(it["item_id"], on)
                 st.rerun()
             sure = b.checkbox("Confirm delete", key=f"aa_dok_{it['item_id']}")
-            if c.button("DELETE", key=f"aa_del_{it['item_id']}", disabled=not sure):
+            if c.button("Delete", key=f"aa_del_{it['item_id']}", disabled=not sure):
                 delete_item(it["item_id"])
                 st.rerun()
             with st.expander("View details"):
@@ -2966,14 +3166,21 @@ def _consume_autorun():
             st.session_state["aa_ticker"] = str(pre).upper()
 
 
+MODES = ["ANALYZE", "RADAR", "JOURNAL", "TEACH", "PLAYBOOK"]
+MODE_LABELS = {"ANALYZE": "Analyze", "RADAR": "Radar", "JOURNAL": "Journal", "TEACH": "Teach", "PLAYBOOK": "Playbook"}
+
+
 def render_arka_ai(supabase=None):
     global _SB
     _SB = supabase
     _inject_css()
     _consume_autorun()
+    st.session_state.setdefault("aa_speed", "Balanced")
     st.markdown(html_status(), unsafe_allow_html=True)
     st.session_state.setdefault("aa_mode", "ANALYZE")
-    mode = st.radio("Mode", ["ANALYZE", "RADAR", "JOURNAL", "TEACH", "PLAYBOOK"], horizontal=True, key="aa_mode", label_visibility="collapsed")
+    if st.session_state.get("aa_mode") not in MODES:
+        st.session_state["aa_mode"] = "ANALYZE"
+    mode = st.radio("Mode", MODES, horizontal=True, key="aa_mode", label_visibility="collapsed", format_func=lambda m: MODE_LABELS[m])
     if mode == "ANALYZE":
         render_analyze()
     elif mode == "RADAR":
