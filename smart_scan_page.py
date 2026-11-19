@@ -1,5 +1,20 @@
 """
-smart_scan_page.py — Arka Trades · Technical Setup Scanner v3 (Nov 2026)
+smart_scan_page.py — Arka Trades · Technical Setup Scanner v4 (Nov 2026)
+
+New in v4 (saved setups open unchanged; their rules now get the two allowances below)
+-------------------------------------------------------------------------------------
+  * CLOSE ENOUGH COUNTS: every setup has a tolerance (Exact · 5% · 10% · 20%; default 5%). A number that misses by less
+    than that still passes, shown as "≈" with the real value: a 17.5% run-up passes "at least 20%" at 15% tolerance,
+    RSI 48 passes "above 50" at 5%. Every result gets a FIT score (100 = every rule passed exactly) and is ranked by it.
+    Change the tolerance for one run on the Scan page, or save it with the setup.
+  * GREEN CANDLES IN A PULLBACK: a pullback candle that closes up by less than X% (default 4%) no longer breaks the pullback;
+    bigger up candles still count against "up candles allowed".
+  * UNDERSTANDS YOU BETTER: the AI reads flexibility words ("3-4% is ok", "roughly", "4 is also fine") into ranges and the
+    tolerance; it explains back every rule in plain words; unclear points become questions you answer in place and the
+    rules are rebuilt with your answers. The built-in reader also understands "x% up is ok" and tolerance phrases.
+  * Redesigned: same look as the rest of the terminal, sentence-case labels, fit bars, phone layout with result cards.
+
+v3 notes follow.
 
 New in v3 (everything in v2 still works; saved setups open unchanged)
 ----------------------------------------------------------------------
@@ -150,7 +165,8 @@ CANDLES = ["hammer", "bullish engulfing", "bearish engulfing", "doji", "strong c
 RULES = {
     "pullback": {"label": "Pullback on low volume", "fields": [
         ("nmin", "Min candles", "i", 2, 1, 10), ("nmax", "Max candles", "i", 4, 1, 10),
-        ("max_up", "Up candles allowed", "i", 0, 0, 5), ("vol", "Avg volume ≤ × 20-day avg", "f", 0.8, 0.1, 2.0),
+        ("max_up", "Up candles allowed", "i", 0, 0, 5), ("small_up", "Ignore up candles smaller than %", "f", 4.0, 0.0, 15.0),
+        ("vol", "Avg volume ≤ × 20-day avg", "f", 0.8, 0.1, 2.0),
         ("each", "Every candle below avg volume", "b", False, None, None),
         ("dmin", "Depth min %", "f", 0.0, 0.0, 50.0), ("dmax", "Depth max % (0 = any)", "f", 0.0, 0.0, 60.0)]},
     "lowvol": {"label": "Consecutive low-volume candles", "fields": [
@@ -295,6 +311,8 @@ def _describe(r):
         s = f'Pullback of {n} candles on avg volume ≤ {r["vol"]:g}× the 20-day average'
         if r["max_up"]:
             s += f', up to {r["max_up"]} up candle{"s" if r["max_up"] > 1 else ""} allowed'
+        if r.get("small_up"):
+            s += f', green candles under {r["small_up"]:g}% are fine'
         if r["each"]:
             s += ", every candle below average volume"
         if r["dmin"] or r["dmax"]:
@@ -490,6 +508,15 @@ def _last(s):
         return None
 
 
+def _count_ups(closes, small_up=0.0):
+    """Up candles inside a pullback. Candles that close up by less than `small_up` % are treated as part of the pullback."""
+    closes = np.asarray(closes, dtype=float)
+    if len(closes) < 2:
+        return 0
+    pct = np.diff(closes) / closes[:-1] * 100
+    return int((pct > (small_up or 0.0)).sum())
+
+
 def _find_pullback(ctx, r):
     c, h, l, v = (x.to_numpy(dtype=float) for x in (ctx.c, ctx.h, ctx.l, ctx.v))
     N = len(c)
@@ -502,7 +529,7 @@ def _find_pullback(ctx, r):
             continue
         if h[piv] < h[max(0, piv - max(5, int(r["nmax"]))):piv].max():
             continue                                    # … and that candle must be a swing high (else a longer pullback slips in)
-        ups = int((np.diff(c[piv:N]) > 0).sum())
+        ups = _count_ups(c[piv:N], r.get("small_up", 0.0))
         if ups > r["max_up"] or c[-1] >= c[piv]:
             continue
         base = v[piv - 19:piv + 1].mean()               # 20 candles up to and including the high
@@ -560,7 +587,7 @@ def _eval_rule(ctx, r):
                 piv = len(c) - k - 1
                 base = float(ctx.v.iloc[max(0, piv - 19):piv + 1].mean())
                 vr = float(ctx.v.iloc[-k:].mean()) / base if base else float("nan")
-                ups = int((c.iloc[-k - 1:].diff().dropna() > 0).sum())
+                ups = _count_ups(c.iloc[-k - 1:].to_numpy(), r.get("small_up", 0.0))
                 why = f"high was {k} candle{'s' if k != 1 else ''} ago, {ups} up candle{'s' if ups != 1 else ''}, volume {vr:.2f}× avg"
             return False, "PB ✗", f'needs a {r["nmin"]}–{r["nmax"]} candle pullback on ≤ {r["vol"]:g}× volume ({why})', {}
         if t == "lowvol":
@@ -593,7 +620,8 @@ def _eval_rule(ctx, r):
             v = _last(rs)
             if v is None or a is None:
                 return False, "RSI/AVG ?", "not enough history", {}
-            ok = v > a if r["dir"] == "above" else v < a
+            sl = float(r.get("_slack") or 0.0)
+            ok = v > a - sl if r["dir"] == "above" else v < a + sl
             return ok, f"RSI {'>' if v > a else '<'} AVG", f'RSI {v:.1f} vs its {r["n"]}-avg {a:.1f} (needs {r["dir"]})', {}
         if t == "ma_pos":
             m = _last(ctx.ma(r["kind"], r["len"]))
@@ -605,8 +633,9 @@ def _eval_rule(ctx, r):
                 lim = r["dmax"] or 2.0
                 ok = r["dmin"] <= abs(dist) <= lim
             else:
-                ok = (dist > 0) if r["dir"] == "above" else (dist < 0)
-                ok = ok and abs(dist) >= r["dmin"] and (not r["dmax"] or abs(dist) <= r["dmax"])
+                sl = float(r.get("_slack") or 0.0)
+                ok = (dist > -sl) if r["dir"] == "above" else (dist < sl)
+                ok = ok and (abs(dist) >= r["dmin"] or sl > 0) and (not r["dmax"] or abs(dist) <= r["dmax"])
             return ok, f"{name} {dist:+.1f}%", f'price {dist:+.2f}% vs {r["kind"]} {r["len"]} ({describe(r).lower()})', {"ma_dist": dist}
         if t in ("ma_stack", "ma_cross"):
             f, s = ctx.ma(r["k1"], r["n1"]), ctx.ma(r["k2"], r["n2"])
@@ -614,7 +643,7 @@ def _eval_rule(ctx, r):
             if a is None or b is None:
                 return False, "MA ?", "not enough history", {}
             if t == "ma_stack":
-                return a > b, f'{r["k1"]}{r["n1"]}{">" if a > b else "<"}{r["k2"]}{r["n2"]}', f'{r["k1"]} {r["n1"]} {a:,.1f} vs {r["k2"]} {r["n2"]} {b:,.1f}', {}
+                return a > b * (1 - float(r.get("_slack") or 0.0) / 100), f'{r["k1"]}{r["n1"]}{">" if a > b else "<"}{r["k2"]}{r["n2"]}', f'{r["k1"]} {r["n1"]} {a:,.1f} vs {r["k2"]} {r["n2"]} {b:,.1f}', {}
             d = (f - s).dropna()
             w = d.iloc[-int(r["within"]) - 1:]
             crossed = bool(((w.shift(1) <= 0) & (w > 0)).any()) and d.iloc[-1] > 0
@@ -655,7 +684,7 @@ def _eval_rule(ctx, r):
             for k in range(amin, amax + 1):
                 e = len(cv) - k                                  # candle e-1 is the breakout candle
                 lvl = float(hv[e - 1 - days:e - 1].max())
-                if cv[e - 1] > lvl:
+                if cv[e - 1] > lvl * (1 - float(r.get("_slack") or 0.0) / 100):
                     when = "today" if k == 0 else f"{k} candle{'s' if k != 1 else ''} ago"
                     return True, f"BO ✓ {lvl:,.0f}" + ("" if k == 0 else f" −{k}c"), f'closed above the {days}-candle high {lvl:,.2f} {when}', {"bo_ago": k}
             lvl = float(hv[-1 - days:-1].max())
@@ -770,6 +799,91 @@ def _eval_rule(ctx, r):
     return False, t, "unknown rule", {}
 
 
+# ═════════════════════════ tolerance: "close enough" ═════════════════════════
+TOLERANCES = {"Exact": 0.0, "Small (5%)": 0.05, "Medium (10%)": 0.10, "Loose (20%)": 0.20}
+DEFAULT_TOL = 0.05
+# how each number may be relaxed: min = a lower bound (relax down), max = an upper bound (relax up), max0 = upper bound where 0 = any,
+# cmin / cmax = candle counts (one candle either way), smin / smax = signed percentages, rmin / rmax = RSI / ADX points
+_TOL_FIELDS = {
+    "pullback": [("nmin", "cmin"), ("nmax", "cmax"), ("max_up", "cmax"), ("vol", "max"), ("dmin", "min"), ("dmax", "max0"), ("small_up", "max")],
+    "lowvol": [("nmin", "cmin"), ("nmax", "cmax0"), ("x", "max")],
+    "runup": [("lo", "min"), ("hi", "max0")],
+    "rsi": [("lo", "rmin"), ("hi", "rmax")],
+    "ma_pos": [("dmin", "min"), ("dmax", "max0")],
+    "vol_spike": [("lo", "min"), ("hi", "max0")],
+    "atr": [("lo", "min"), ("hi", "max0")],
+    "day_move": [("lo", "min"), ("hi", "max0")],
+    "change": [("lo", "smin"), ("hi", "smax")],
+    "near_high": [("lo", "min"), ("hi", "max")],
+    "tight": [("max", "max")],
+    "gap": [("lo", "smin"), ("hi", "smax")],
+    "rs": [("lo", "smin")],
+    "adx": [("lo", "rmin"), ("hi", "rmax0")],
+    "ma_touch": [("tol", "max"), ("within", "cmax")],
+    "vol_fall": [("skip", "cmax")],
+    "delivery": [("lo", "min"), ("x", "min")],
+}
+
+
+def relax_rule(r, t):
+    """A copy of rule r with every number widened by tolerance t (0.05 = 5%). Used only when the exact rule fails."""
+    if not t:
+        return r
+    x = dict(r)
+    for name, how in _TOL_FIELDS.get(r["type"], []):
+        v = x.get(name)
+        if v is None:
+            continue
+        if how == "min" and v > 0:
+            x[name] = v * (1 - t)
+        elif how in ("max", "max0") and v > 0:
+            x[name] = v * (1 + t)
+        elif how == "cmin":
+            x[name] = max(1, v - 1)
+        elif how == "cmax" or (how == "cmax0" and v):
+            x[name] = v + 1
+        elif how == "smin":
+            x[name] = v - t * max(abs(v), 10.0)
+        elif how == "smax":
+            x[name] = v + t * max(abs(v), 10.0)
+        elif how == "rmin" and v > 0:
+            x[name] = max(0.0, v - 50 * t)
+        elif how in ("rmax", "rmax0") and (v or how == "rmax") and v < 100:
+            x[name] = min(100.0, v + 50 * t)
+    if r["type"] in ("ma_pos", "ma_stack", "rsi_avg", "breakout"):
+        x["_slack"] = 20 * t                    # 5% tolerance -> price may sit up to 1% on the wrong side of the average / level
+    return x
+
+
+def evaluate_rule_tol(ctx, r, t):
+    """-> (ok, close, chip, detail, metrics). close = failed exactly but passes within tolerance t."""
+    ok, chip, detail, m = evaluate_rule(ctx, r)
+    if ok or not t or r["type"] not in set(_TOL_FIELDS) | {"ma_pos", "ma_stack", "rsi_avg", "breakout"}:
+        return ok, False, chip, detail, m
+    ok2, chip2, detail2, m2 = evaluate_rule(ctx, relax_rule(r, t))
+    if ok2:
+        return True, True, "≈ " + chip2, f"{detail2} · passes within the {t * 100:g}% tolerance (exact rule: {detail})", m2
+    return False, False, chip, detail, m
+
+
+def setup_tol(setup):
+    cfg = setup.get("rule_config")
+    if isinstance(cfg, str):
+        try:
+            cfg = json.loads(cfg)
+        except Exception:
+            cfg = None
+    try:
+        v = (cfg or {}).get("tol") if isinstance(cfg, dict) else None
+        return DEFAULT_TOL if v is None else max(0.0, min(0.3, float(v)))
+    except (TypeError, ValueError):
+        return DEFAULT_TOL
+
+
+def tol_label(t):
+    return next((k for k, v in TOLERANCES.items() if abs(v - t) < 1e-9), f"{t * 100:g}%")
+
+
 def verdict(checks, min_pass=0):
     """Either-or groups count as one rule. -> dict(passed, total, need, status 'match' | 'near' | 'no', fails, miss)."""
     units, groups = [], {}
@@ -801,7 +915,7 @@ def verdict(checks, min_pass=0):
     return {"passed": passed, "total": total, "need": need, "status": status, "fails": fails, "miss": miss}
 
 
-def evaluate_stock(sym, df, rules, live_frac=None, nifty=None, ctx=None, min_pass=0, extra=None):
+def evaluate_stock(sym, df, rules, live_frac=None, nifty=None, ctx=None, min_pass=0, extra=None, tol=0.0):
     """All enabled rules on one stock -> result dict (or None when there is too little data).
     Pass `ctx` (a Ctx or a view from Ctx.at) to evaluate a past date without rebuilding indicators."""
     if ctx is None:
@@ -815,15 +929,18 @@ def evaluate_stock(sym, df, rules, live_frac=None, nifty=None, ctx=None, min_pas
     for r in rules:
         if not r.get("on", True):
             continue
-        ok, chip, detail, m = evaluate_rule(ctx, r)
-        checks.append({"ok": bool(ok), "chip": chip, "detail": detail, "label": RULES[r["type"]]["label"], "desc": describe(r),
+        ok, close, chip, detail, m = evaluate_rule_tol(ctx, r, tol)
+        checks.append({"ok": bool(ok), "close": bool(close), "chip": chip, "detail": detail, "label": RULES[r["type"]]["label"], "desc": describe(r),
                        "grp": r.get("grp", "—"), "must": bool(r.get("must")), "type": r["type"]})
         metrics.update(m)
     av = _last(ctx.avg_vol())
     v = verdict(checks, min_pass)
+    n_chk = len(checks) or 1
+    fit = round(100 * sum(1.0 if (c_["ok"] and not c_["close"]) else 0.6 if c_["ok"] else 0.0 for c_ in checks) / n_chk)
     return {"symbol": sym, "close": cur, "chg": (cur / prev - 1) * 100 if prev else 0.0, "turnover": ctx.turnover_cr(),
             "vol_x": float(ctx.v.iloc[-1]) / av if av else None, "rsi": _last(ctx.rsi(14)), "checks": checks,
-            "fails": v["fails"], "status": v["status"], "passed": v["passed"], "total": v["total"], "miss": v["miss"],
+            "fails": v["fails"], "status": v["status"], "passed": v["passed"], "total": v["total"], "miss": v["miss"], "fit": fit,
+            "close_n": sum(1 for c_ in checks if c_["close"]),
             "m": metrics, "date": ctx.c.index[-1], "projected": ctx.projected,
             "chart": ctx.df.tail(120)[["Open", "High", "Low", "Close", "Volume"]]}
 
@@ -909,12 +1026,12 @@ def setup_rules(setup):
 
 # ═════════════════════════ plain English -> rules ═════════════════════════
 _AI_PROMPT = """You turn a trader's {source} into scanner rules. Reply with ONLY JSON:
-{{"price_min": number or null, "price_max": number or null, "rules": [ ... ],
+{{"price_min": number or null, "price_max": number or null, "tolerance": 0 | 5 | 10 | 20, "rules": [ ... ],
   "assumptions": [short sentences: every number you had to choose because the trader did not state it],
   "questions": [at most 3 short questions about things that are genuinely unclear and would change the rules]}}
 
 Use ONLY these rule objects (fields exactly as shown; numbers are examples):
-{{"type":"pullback","nmin":2,"nmax":4,"max_up":0,"vol":0.8,"each":false,"dmin":0,"dmax":0}}   last nmin–nmax candles pull back from the recent high; average volume of those candles ≤ vol × 20-day average; max_up = up candles tolerated; each = every candle below average volume; dmin/dmax = pullback depth % (0 = any)
+{{"type":"pullback","nmin":2,"nmax":4,"max_up":0,"small_up":4,"vol":0.8,"each":false,"dmin":0,"dmax":0}}   last nmin–nmax candles pull back from the recent high; average volume of those candles ≤ vol × 20-day average; max_up = bigger up candles tolerated; small_up = an up candle that closes up by less than this % is still part of the pullback ("a 3-4% green candle is ok" -> 4); each = every candle below average volume; dmin/dmax = pullback depth % (0 = any)
 {{"type":"lowvol","nmin":3,"nmax":0,"x":1.0}}   at least nmin (to nmax, 0 = no max) consecutive latest candles with volume below x × 20-day average
 {{"type":"runup","days":30,"lo":20,"hi":0}}   rose at least lo % from a low to a later high in the last `days` candles (prior momentum)
 {{"type":"rsi","lo":50,"hi":100,"n":14}}
@@ -949,6 +1066,11 @@ Optional fields allowed on ANY rule (leave them out when not needed):
 
 Rules:
 - Flexible numbers become ranges: "3 low-volume candles, 4 is also fine" -> nmin 3, nmax 4.
+- "tolerance" = how far a number may miss and still count, in %: 0 when the trader wants exact numbers, 5 by default, 10 when they say
+  "roughly / around / about / approximately / 3-4% off is ok", 20 when they say "loosely / give or take a lot". Small up candles inside a pullback
+  ("a green candle of 3-4% is fine") go into the pullback's small_up, not into the tolerance.
+- Read the trader's intent, not just the words: a "pullback" is price easing back from a recent swing high; "momentum" before it is a run-up;
+  "above the 20" means price above the 20 EMA unless SMA is said; "dry volume" means volume clearly below average.
 - A pullback "with volume dry-up / decreasing volume" -> pullback rule (vol 0.8 unless stated).
 - "low volume candles" without a pullback -> lowvol.
 - Only include what the trader describes{or_shows}. Never invent rules or prices. price_min/max null when not given.
@@ -1000,13 +1122,25 @@ def parse_with_ai(text, key, image=None):
         parts = [prompt]
         if image:
             parts.append(genai_types.Part.from_bytes(data=image, mime_type="image/png"))
-        resp = client.models.generate_content(model=gemini_model(client), contents=parts,
-                                              config=genai_types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1))
+        kw = {"response_mime_type": "application/json", "temperature": 0.1}
+        try:
+            kw["thinking_config"] = genai_types.ThinkingConfig(thinking_budget=1024)
+        except Exception:
+            pass
+        try:
+            resp = client.models.generate_content(model=gemini_model(client), contents=parts, config=genai_types.GenerateContentConfig(**kw))
+        except Exception as exc:
+            if "think" not in str(exc).lower():
+                raise
+            kw.pop("thinking_config", None)
+            resp = client.models.generate_content(model=gemini_model(client), contents=parts, config=genai_types.GenerateContentConfig(**kw))
         data = json.loads(resp.text)
         rules = [x for x in (clean_rule(dict(r)) for r in data.get("rules", []) if isinstance(r, dict)) if x]
         pm = lambda v: float(v) if isinstance(v, (int, float)) and v >= 0 else None
         notes = lambda k: [str(x)[:220] for x in (data.get(k) or []) if isinstance(x, str) and x.strip()][:6]
-        return {"price_min": pm(data.get("price_min")), "price_max": pm(data.get("price_max")), "rules": rules,
+        tol = data.get("tolerance")
+        tol = (max(0.0, min(30.0, float(tol))) / 100) if isinstance(tol, (int, float)) else None
+        return {"price_min": pm(data.get("price_min")), "price_max": pm(data.get("price_max")), "rules": rules, "tol": tol,
                 "assumptions": notes("assumptions"), "questions": notes("questions")[:3]}
     except Exception as e:
         st.warning(f"AI could not read the {'picture' if image else 'description'} ({type(e).__name__})."
@@ -1049,7 +1183,9 @@ def parse_locally(text):
     if "pullback" in d or "pull back" in d or "retrace" in d:
         a, b = lo_hi or (2, 4)
         vol = 0.8 if any(k in d for k in ("dry", "low volume", "low-volume", "decreas", "declin")) else 1.0
-        rules.append(new_rule("pullback", nmin=a, nmax=b, vol=vol, max_up=1 if "mostly" in d else 0))
+        mu = re.search(r"(\d+(?:\.\d+)?)\s*(?:-|to)?\s*(\d+(?:\.\d+)?)?\s*%\s*(?:up|green|gain|rise)[^.]{0,30}?(?:ok|okay|fine|allowed|acceptable)", d)
+        small = float(mu.group(2) or mu.group(1)) if mu else 4.0
+        rules.append(new_rule("pullback", nmin=a, nmax=b, vol=vol, max_up=1 if "mostly" in d else 0, small_up=small))
     elif lo_hi and "volume" in d:
         rules.append(new_rule("lowvol", nmin=lo_hi[0], nmax=lo_hi[1], x=1.0))
     m = re.search(r"volume[^.]{0,25}?(\d+(?:\.\d+)?)\s*(?:x|times)", d)
@@ -1073,6 +1209,12 @@ def parse_locally(text):
     if m:
         rules.append(new_rule("delivery", lo=float(m.group(1))))
     out["rules"] = rules
+    if re.search(r"\b(exact|exactly|strict)\b", d):
+        out["tol"] = 0.0
+    elif re.search(r"\b(loose|loosely|give or take)\b", d):
+        out["tol"] = 0.20
+    elif re.search(r"\b(roughly|around|about|approximately|approx)\b|\d\s*%?\s*(?:off|less|short)[^.]{0,20}?(?:ok|okay|fine)", d):
+        out["tol"] = 0.10
     out["assumptions"] = ["Built-in reader used (no AI): it only understands common phrasings — check every rule below."] if rules else []
     out["questions"] = []
     return out
@@ -1597,7 +1739,7 @@ def _needs(rules):
                                                     max(r.get("len", 0), r.get("n1", 0), r.get("n2", 0)) > 150) for r in on)}
 
 
-def run_scan(universe, rules, pmin, pmax, min_turnover, want_near=True, progress=None, min_pass=0, asof=None):
+def run_scan(universe, rules, pmin, pmax, min_turnover, want_near=True, progress=None, min_pass=0, asof=None, tol=0.0):
     """asof: a past date -> the scan as it would have looked at that day's close (plus what the price did since)."""
     t0 = time.time()
     stats = {"universe": len(universe)}
@@ -1616,11 +1758,11 @@ def run_scan(universe, rules, pmin, pmax, min_turnover, want_near=True, progress
             no_data.append(sym)
             continue
         if asof is None:
-            res = evaluate_stock(sym, df, on, _live_fraction(df.index[-1]), nifty, min_pass=min_pass, extra=_extra_for(sym, deliv))
+            res = evaluate_stock(sym, df, on, _live_fraction(df.index[-1]), nifty, min_pass=min_pass, extra=_extra_for(sym, deliv), tol=tol)
         else:
             root = Ctx(sym, df, None, nifty, _extra_for(sym, deliv))
             view = _ctx_on(root, asof)
-            res = evaluate_stock(sym, None, on, ctx=view, min_pass=min_pass) if view is not None else None
+            res = evaluate_stock(sym, None, on, ctx=view, min_pass=min_pass, tol=tol) if view is not None else None
             if res is not None:
                 if not (pmin <= res["close"] <= pmax):
                     continue
@@ -1643,18 +1785,21 @@ def run_scan(universe, rules, pmin, pmax, min_turnover, want_near=True, progress
             near.append(res)
         if i % 100 == 0:
             prog(0.85 + 0.15 * (i + 1) / max(1, len(band)), f"Checking rules · {i + 1}/{len(band)}")
-    stats.update(liquid=liquid, no_data=len(no_data), match=len(match), near=len(near), secs=time.time() - t0)
+    match.sort(key=lambda r: -r["fit"])
+    near.sort(key=lambda r: -r["fit"])
+    stats.update(liquid=liquid, no_data=len(no_data), match=len(match), near=len(near), secs=time.time() - t0,
+                 exact=sum(1 for r in match if not r["close_n"]))
     asof_d = max((r["date"] for r in match + near), default=None)
     return {"match": match, "near": near, "stats": stats, "no_data": no_data[:200], "asof": asof_d, "funnel": funnel,
             "past": asof is not None, "deliv_missing": need["deliv"] and deliv is None,
-            "live": any(r["projected"] for r in match + near), "at": datetime.now(IST)}
+            "live": any(r["projected"] for r in match + near), "at": datetime.now(IST), "tol": tol}
 
 
 # ═════════════════════════ backtest: what happened after past signals ═════════════════════════
 HORIZONS = (5, 10, 20)
 
 
-def backtest(hist, rules, pmin, pmax, min_turnover=0.0, sessions=120, min_pass=0, nifty=None, deliv=None, gap=5, progress=None):
+def backtest(hist, rules, pmin, pmax, min_turnover=0.0, sessions=120, min_pass=0, nifty=None, deliv=None, gap=5, progress=None, tol=0.0):
     """Replays the setup on every one of the last `sessions` candles of every stock in `hist`.
     A signal is taken at the close; entry is the NEXT candle's open. The same stock is not counted again for `gap` candles.
     -> {"signals": [...], "summary": {h: {...}}, "base": {h: mean % of every stock-day in the same sample}, "stats": {...}}"""
@@ -1687,9 +1832,9 @@ def backtest(hist, rules, pmin, pmax, min_turnover=0.0, sessions=120, min_pass=0
                 continue
             days_checked += 1
             view = root.at(end)
-            if simple and not all(evaluate_rule(view, r)[0] for r in quick):
+            if simple and not all(evaluate_rule_tol(view, r, tol)[0] for r in quick):
                 continue
-            res = evaluate_stock(sym, None, on, ctx=view, min_pass=min_pass)
+            res = evaluate_stock(sym, None, on, ctx=view, min_pass=min_pass, tol=tol)
             if res is None or res["status"] != "match" or res["turnover"] < min_turnover:
                 continue
             last_sig = end - 1
@@ -1780,7 +1925,7 @@ def save_setup(supabase, draft, rules, img_b64, is_admin):
     row = {"name": draft["name"].strip(), "price_min": float(draft["pmin"]), "price_max": float(draft["pmax"]),
            "rsi_min": 0.0, "rsi_max": 100.0, "volume_multiplier": 0.0, "atr_pct_min": 0.0, "atr_pct_max": 0.0,
            "move_pct_min": 0.0, "move_pct_max": 0.0, "visual_rules": draft.get("desc", ""),
-           "rule_config": {"version": 2, "min_pass": int(draft.get("min_pass") or 0),
+           "rule_config": {"version": 2, "min_pass": int(draft.get("min_pass") or 0), "tol": float(draft.get("tol", DEFAULT_TOL)),
                            "rules": [{k: v for k, v in r.items() if k != "_id"} for r in rules]}}
     if img_b64:
         row["reference_image_b64"] = img_b64
@@ -1924,43 +2069,113 @@ def _audit(sym, png, rules_text, ref_b64, key):
 
 
 # ═════════════════════════ rendering helpers ═════════════════════════
-_CSS = f"""<style>
-.ss-hero{{display:flex;justify-content:space-between;align-items:flex-end;gap:14px;padding:4px 2px 10px;border-bottom:1px solid var(--line,#1f1f1f);margin-bottom:8px;}}
-.ss-hero .t{{font:800 13px {MONO};letter-spacing:2px;color:{IVORY};}} .ss-hero .t em{{font-style:normal;color:#000;background:{AMBER};padding:2px 7px;margin-right:10px;border-radius:2px;font-size:10px;}}
-.ss-hero .d{{font:11px Inter,sans-serif;color:{T2};margin-top:5px;}}
-.ss-card{{background:{DARK2};border:1px solid {BORDER};border-top:2px solid {AMBER};padding:12px 14px;margin:6px 0 10px;}}
-.ss-card .n{{font:800 15px Inter,sans-serif;color:{IVORY};}} .ss-card .o{{font:700 8px {MONO};letter-spacing:1px;color:{T3};margin-left:8px;}}
-.ss-rules{{margin-top:8px;display:flex;flex-direction:column;gap:3px;}}
-.ss-rule{{font:11.5px Inter,sans-serif;color:{T2};}} .ss-rule b{{font:700 9px {MONO};color:{AMBER};margin-right:7px;}}
-.ss-kpis{{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:6px;margin:8px 0;}}
-.ss-kpi{{background:{DARK2};border:1px solid {BORDER};border-top:2px solid var(--a,#333);padding:9px 11px;}}
-.ss-kpi small{{display:block;font:700 7.5px {MONO};letter-spacing:1px;color:{T3};text-transform:uppercase;}} .ss-kpi b{{display:block;font:700 17px {MONO};color:{IVORY};margin-top:4px;}}
-.ss-tw{{border:1px solid {BORDER};background:#080808;}}
-.ss-t{{width:100%;border-collapse:separate;border-spacing:0;font:11px {MONO};font-variant-numeric:tabular-nums;}}
-.ss-t th{{background:#0e0e0e;font:700 8px {MONO};letter-spacing:.8px;color:{T2};text-align:left;padding:7px 8px;border-bottom:1px solid {BORDER};text-transform:uppercase;white-space:nowrap;}}
-.ss-t td{{padding:7px 8px;border-bottom:1px solid #151515;color:{IVORY};vertical-align:middle;}}
-.ss-t td.r,.ss-t th.r{{text-align:right;white-space:nowrap;}}
-.ss-t tr:hover td{{background:rgba(255,159,10,.035);}}
-.ss-chip{{display:inline-block;margin:2px 3px 2px 0;padding:1px 6px;border:1px solid;border-radius:2px;font:700 8.5px {MONO};letter-spacing:.3px;white-space:nowrap;}}
-.ss-chip.ok{{color:{GREEN};border-color:rgba(48,209,88,.35);background:rgba(48,209,88,.06);}}
-.ss-chip.no{{color:{RED};border-color:rgba(255,69,58,.45);background:rgba(255,69,58,.08);}}
-.ss-miss{{color:{AMBER};font:600 10.5px Inter,sans-serif;white-space:normal;max-width:300px;}}
-.ss-ai{{display:inline-block;padding:1px 7px;border-radius:999px;font:800 9px {MONO};border:1px solid currentColor;}}
-.hc-wrap{{position:relative;display:inline-block;font:800 12px {MONO};color:{AMBER};cursor:default;border-bottom:1px dotted {AMBER}88;}}
-.hc-pop{{display:none;position:absolute;top:-8px;left:calc(100% + 12px);width:344px;background:{DARK2};border:1px solid {BORDER};border-top:2px solid {AMBER};
-  padding:10px;z-index:99999;box-shadow:0 12px 34px rgba(0,0,0,.85);}}
-.hc-wrap:hover .hc-pop{{display:block;}}
-.hc-pop-h{{display:flex;justify-content:space-between;font:700 9px {MONO};color:{T2};letter-spacing:.5px;margin-bottom:6px;}}
-.ss-wl{{color:{GREEN};font:800 10px {MONO};}}
-div[data-testid="stMarkdown"]:has(.hc-wrap:hover),div[data-testid="stElementContainer"]:has(.hc-wrap:hover){{position:relative;z-index:9999;overflow:visible !important;}}
-div[class*="st-key-ss_rule_"]{{background:{DARK2};border:1px solid {BORDER};border-left:3px solid {AMBER};padding:8px 10px 2px;}}
-div[class*="st-key-ss_rule_"].off{{opacity:.5;}}
-.ss-rh{{font:700 10px {MONO};letter-spacing:1px;color:{IVORY};padding-top:6px;}} .ss-rh span{{font:11px Inter,sans-serif;color:{T2};letter-spacing:0;margin-left:8px;}}
+_CSS = """<style>
+.ss-hero{display:flex;justify-content:space-between;align-items:flex-end;gap:14px;padding:22px 0 10px;}
+.ss-hero .t{font:600 17px var(--sans,Inter,sans-serif);letter-spacing:-.2px;color:var(--tx,#EDEDEF);}
+.ss-hero .t em{font:600 12px var(--sans);font-style:normal;color:#FF9F0A;display:block;margin-bottom:4px;letter-spacing:0;}
+.ss-hero .d{font:13.5px/1.6 var(--sans);color:var(--tx3,#71717A);margin-top:4px;max-width:880px;}
+.ss-card{background:var(--s1,#111113);border:1px solid var(--line,#232326);border-radius:12px;padding:14px 16px;margin:6px 0 10px;}
+.ss-card .n{font:600 15px var(--sans);color:var(--tx);} .ss-card .o{font:500 12.5px var(--sans);color:var(--tx3);margin-left:10px;}
+.ss-rules{margin-top:10px;display:flex;flex-direction:column;gap:6px;}
+.ss-rule{font:13.5px/1.55 var(--sans);color:var(--tx2,#A1A1AA);display:flex;gap:10px;align-items:baseline;}
+.ss-rule b{font:600 11.5px var(--sans);color:#FF9F0A;background:rgba(255,159,10,.10);border-radius:999px;padding:1px 8px;flex-shrink:0;}
+.ss-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin:8px 0 12px;}
+.ss-kpi{background:var(--s1);border:1px solid var(--line);border-radius:12px;padding:12px 14px;position:relative;overflow:hidden;}
+.ss-kpi:before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--a,transparent);}
+.ss-kpi small{display:block;font:500 12px var(--sans);color:var(--tx3);} .ss-kpi b{display:block;font:600 20px var(--sans);color:var(--tx);margin-top:4px;font-variant-numeric:tabular-nums;}
+.ss-tw{border:1px solid var(--line);border-radius:12px;background:var(--s1);overflow:auto;}
+.ss-t{width:100%;border-collapse:separate;border-spacing:0;font:13.5px var(--sans);font-variant-numeric:tabular-nums;}
+.ss-t th{background:var(--s1);font:500 12px var(--sans);color:var(--tx3);text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);white-space:nowrap;position:sticky;top:0;}
+.ss-t td{padding:10px 12px;border-bottom:1px solid var(--line);color:var(--tx);vertical-align:middle;}
+.ss-t tr:last-child td{border-bottom:0;}
+.ss-t td.r,.ss-t th.r{text-align:right;white-space:nowrap;}
+.ss-t tr:hover td{background:rgba(255,255,255,.02);}
+.ss-chip{display:inline-block;margin:2px 4px 2px 0;padding:2px 8px;border-radius:999px;font:500 11.5px var(--sans);white-space:nowrap;}
+.ss-chip.ok{color:#30D158;background:rgba(48,209,88,.10);}
+.ss-chip.cl{color:#FFB340;background:rgba(255,159,10,.12);}
+.ss-chip.no{color:#FF453A;background:rgba(255,69,58,.10);}
+.ss-miss{color:#FFB340;font:500 13px var(--sans);white-space:normal;max-width:320px;}
+.ss-ai{display:inline-block;padding:2px 9px;border-radius:999px;font:600 12px var(--sans);background:rgba(255,255,255,.05);}
+.ss-fit{display:inline-flex;align-items:center;gap:8px;font:600 13px var(--sans);}
+.ss-fit i{display:inline-block;width:46px;height:5px;border-radius:3px;background:#232326;position:relative;overflow:hidden;}
+.ss-fit i:after{content:"";position:absolute;left:0;top:0;bottom:0;width:var(--w);background:var(--c);border-radius:3px;}
+.hc-wrap{position:relative;display:inline-block;font:600 14px var(--sans);color:var(--tx);cursor:default;border-bottom:1px dashed #52525B;}
+.hc-pop{display:none;position:absolute;top:-8px;left:calc(100% + 12px);width:344px;background:#161618;border:1px solid #2E2E33;border-radius:12px;
+  padding:10px;z-index:99999;box-shadow:0 18px 40px rgba(0,0,0,.6);}
+.hc-wrap:hover .hc-pop{display:block;}
+.hc-pop-h{display:flex;justify-content:space-between;font:500 12px var(--sans);color:var(--tx3);margin-bottom:6px;}
+.ss-wl{color:#30D158;font:600 12px var(--sans);}
+div[data-testid="stMarkdown"]:has(.hc-wrap:hover),div[data-testid="stElementContainer"]:has(.hc-wrap:hover){position:relative;z-index:9999;overflow:visible !important;}
+div[class*="st-key-ss_rule_"]{background:var(--s1);border:1px solid var(--line);border-radius:12px;padding:12px 14px 4px;}
+.ss-rh{font:600 14px var(--sans);color:var(--tx);padding-top:2px;} .ss-rh span{display:block;font:13px/1.5 var(--sans);color:var(--tx3);margin:3px 0 0;}
+.ss-plain{background:linear-gradient(180deg,rgba(255,159,10,.06),rgba(255,159,10,.02));border:1px solid rgba(255,159,10,.22);border-radius:14px;padding:16px 18px;margin:8px 0 12px;}
+.ss-plain .h{font:600 15px var(--sans);color:var(--tx);} .ss-plain .h span{font:500 12.5px var(--sans);color:var(--tx3);margin-left:8px;}
+.ss-plain ol{margin:10px 0 0 18px;padding:0;} .ss-plain li{font:14px/1.6 var(--sans);color:var(--tx2);margin:3px 0;}
+.ss-plain .f{font:13px/1.6 var(--sans);color:var(--tx3);margin-top:10px;}
+/* phone result cards */
+.ss-cards{display:flex;flex-direction:column;gap:10px;}
+.ss-rc{background:var(--s1);border:1px solid var(--line);border-radius:14px;padding:14px;}
+.ss-rc .top{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;}
+.ss-rc .sym{font:600 16px var(--sans);color:var(--tx);} .ss-rc .sub{font:12.5px var(--sans);color:var(--tx3);margin-top:2px;}
+.ss-rc .px{text-align:right;font:600 15px var(--sans);color:var(--tx);} .ss-rc .px small{display:block;font:500 12.5px var(--sans);}
+.ss-rc .chips{margin-top:10px;}
+.ss-rc .miss{margin-top:8px;font:13px/1.5 var(--sans);color:#FFB340;}
 </style>"""
 
 
 def _e(s):
     return html.escape("" if s is None else str(s))
+
+
+def _fit_html(fit):
+    c = GREEN if fit >= 90 else "#8AD66B" if fit >= 75 else AMBER if fit >= 55 else RED
+    return f'<span class="ss-fit" style="--w:{fit}%;--c:{c}"><i></i>{fit}</span>'
+
+
+def _chip_html(ck):
+    cls = "cl" if ck.get("close") else ("ok" if ck["ok"] else "no")
+    mark = "≈" if ck.get("close") else ("✓" if ck["ok"] else "✗")
+    chip = ck["chip"][2:] if ck.get("close") and ck["chip"].startswith("≈ ") else ck["chip"]
+    return f'<span class="ss-chip {cls}" title="{_e(ck["label"] + ": " + ck["detail"])}">{mark} {_e(chip)}</span>'
+
+
+def _is_phone():
+    return bool(st.session_state.get("_ak_phone"))
+
+
+def _results_cards(rows, near, wl, past=False):
+    """Phone layout: one card per stock."""
+    out = []
+    for r in rows:
+        cc = GREEN if r["chg"] >= 0 else RED
+        miss = ""
+        if near and r["fails"]:
+            f = r["fails"][0]
+            miss = f'<div class="miss">Missed: {_e(f["label"])} · {_e(f["detail"])}</div>'
+        since = ""
+        if past and r.get("since") is not None:
+            since = f' · since then <span style="color:{GREEN if r["since"] >= 0 else RED}">{r["since"]:+.1f}%</span>'
+        out.append(f'<div class="ss-rc"><div class="top"><div><div class="sym">{_e(r["symbol"])}{" <span class=ss-wl>· in watchlist</span>" if r["symbol"] in wl else ""}</div>'
+                   f'<div class="sub">Fit {_fit_html(r.get("fit", 0))} · RSI {"—" if r["rsi"] is None else format(r["rsi"], ".0f")} · ₹{r["turnover"]:,.1f} Cr/day{since}</div></div>'
+                   f'<div class="px">₹{r["close"]:,.2f}<small style="color:{cc}">{r["chg"]:+.2f}%</small></div></div>'
+                   f'<div class="chips">{"".join(_chip_html(ck) for ck in r["checks"])}</div>{miss}</div>')
+    return '<div class="ss-cards">' + "".join(out) + "</div>"
+
+
+def plain_summary(rules, tol, min_pass=0):
+    """The setup read back in plain words, so the trader can confirm it was understood."""
+    on = [r for r in rules if r.get("on", True)]
+    if not on:
+        return ""
+    need = "all of these" if not min_pass or min_pass >= len(on) else f"at least {min_pass} of these {len(on)}"
+    items = "".join(f"<li>{_e(describe(r))}</li>" for r in on)
+    tol_txt = ("Numbers must be met exactly." if not tol else
+               f"Close enough counts: a number that misses by less than {tol * 100:g}% still passes (shown as ≈), so a stock is not dropped for a tiny miss.")
+    pb = next((r for r in on if r["type"] == "pullback"), None)
+    pb_txt = (f" Inside the pullback, green candles that close up by less than {pb['small_up']:g}% are treated as part of the pullback."
+              if pb and pb.get("small_up") else "")
+    return (f'<div class="ss-plain"><div class="h">How the scanner reads your setup<span>a stock must pass {need}</span></div><ol>{items}</ol>'
+            f'<div class="f">{_e(tol_txt + pb_txt)}</div></div>')
 
 
 def _kpi(label, value, accent="#333"):
@@ -2012,20 +2227,19 @@ def _svg_chart(df, width=324, height=176, n=60):
 
 
 def _results_table(rows, near, wl, ai, past=False):
-    head = (["#", "Stock", "Close" if past else "LTP", "Day", "Turnover", "Vol×", "RSI"] + (["Since then"] if past else []) + ["Rule checks"]
+    head = (["#", "Stock", "Fit", "Close" if past else "LTP", "Day", "Turnover", "Vol×", "RSI"] + (["Since then"] if past else []) + ["Rule checks"]
             + (["Missed rule"] if near else []) + (["AI"] if ai else []) + [""])
-    right = {2, 3, 4, 5, 6} | ({7} if past else set())
+    right = {3, 4, 5, 6, 7} | ({8} if past else set())
     th = "".join(f'<th class="{"r" if i in right else ""}">{h}</th>' for i, h in enumerate(head))
     body = []
     for i, r in enumerate(rows, 1):
         cc = GREEN if r["chg"] >= 0 else RED
-        pop = (f'<span class="hc-pop"><div class="hc-pop-h"><span>{_e(r["symbol"])} · 60 CANDLES · <span style="color:{CYAN}">EMA20</span> · '
-               f'<span style="color:{AMBER}">SMA50</span></span><span>NSE</span></div>{_svg_chart(r["chart"])}</span>')
-        chips = "".join(f'<span class="ss-chip {"ok" if ck["ok"] else "no"}" title="{_e(ck["label"] + ": " + ck["detail"])}">'
-                        f'{"✓" if ck["ok"] else "✗"} {_e(ck["chip"])}</span>' for ck in r["checks"])
+        pop = (f'<span class="hc-pop"><div class="hc-pop-h"><span>{_e(r["symbol"])} · 60 candles · <span style="color:{CYAN}">EMA 20</span> · '
+               f'<span style="color:{AMBER}">SMA 50</span></span><span>NSE</span></div>{_svg_chart(r["chart"])}</span>')
+        chips = "".join(_chip_html(ck) for ck in r["checks"])
         if r.get("total") and (near or r["passed"] != r["total"]):
-            chips = f'<span class="ss-chip" style="color:{AMBER};border-color:{AMBER}66">{r["passed"]}/{r["total"]}</span>' + chips
-        cells = [f'<td style="color:{T3}">{i}</td>', f'<td><span class="hc-wrap">{_e(r["symbol"])}{pop}</span></td>',
+            chips = f'<span class="ss-chip cl">{r["passed"]}/{r["total"]}</span>' + chips
+        cells = [f'<td style="color:{T3}">{i}</td>', f'<td><span class="hc-wrap">{_e(r["symbol"])}{pop}</span></td>', f'<td>{_fit_html(r.get("fit", 0))}</td>',
                  f'<td class="r">₹{r["close"]:,.2f}</td>', f'<td class="r" style="color:{cc}">{"▲" if r["chg"] >= 0 else "▼"} {abs(r["chg"]):.2f}%</td>',
                  f'<td class="r">₹{r["turnover"]:,.1f} Cr</td>',
                  f'<td class="r">{"—" if r["vol_x"] is None else format(r["vol_x"], ".2f") + "×"}{"*" if r["projected"] else ""}</td>',
@@ -2046,7 +2260,7 @@ def _results_table(rows, near, wl, ai, past=False):
                 cells.append(f'<td><span class="ss-ai" style="color:{col}" title="{_e(a["caption"])}">{a["score"]}/10</span></td>')
             else:
                 cells.append(f'<td style="color:{T3}">—</td>')
-        cells.append(f'<td class="ss-wl">{"✓ WL" if r["symbol"] in wl else ""}</td>')
+        cells.append(f'<td class="ss-wl">{"In watchlist" if r["symbol"] in wl else ""}</td>')
         body.append("<tr>" + "".join(cells) + "</tr>")
     return f'<div class="ss-tw"><table class="ss-t"><thead><tr>{th}</tr></thead><tbody>{"".join(body)}</tbody></table></div>'
 
@@ -2061,7 +2275,7 @@ def _pc(v, d=1):
     return f'<span style="color:{T3}">—</span>' if v is None else f'<span style="color:{GREEN if v >= 0 else RED}">{v:+.{d}f}%</span>'
 
 
-SORTS = {"Liquidity (turnover)": (lambda r: -r["turnover"]), "Day % (best first)": (lambda r: -r["chg"]),
+SORTS = {"Best fit": (lambda r: (-r.get("fit", 0), -r["turnover"])), "Liquidity (turnover)": (lambda r: -r["turnover"]), "Day % (best first)": (lambda r: -r["chg"]),
          "Lowest pullback volume": (lambda r: r["m"].get("pb_vol", 9)), "Strongest run-up": (lambda r: -r["m"].get("runup", -1e9)),
          "Closest to moving average": (lambda r: abs(r["m"].get("ma_dist", 1e9))), "RSI (high first)": (lambda r: -(r["rsi"] or 0)),
          "Relative strength vs NIFTY": (lambda r: -r["m"].get("rs", -1e9)), "Most rules passed": (lambda r: -(r.get("passed") or 0)),
@@ -2077,10 +2291,11 @@ def _load_draft(setup=None):
         rules = setup_rules(setup)
         d = {"id": setup.get("id"), "name": setup.get("name", ""), "desc": setup.get("visual_rules") or "",
              "pmin": float(setup.get("price_min") or 0), "pmax": float(setup.get("price_max") or 99999), "owner": setup.get("owner"),
-             "min_pass": setup_min_pass(setup)}
+             "min_pass": setup_min_pass(setup), "tol": setup_tol(setup)}
     else:
         rules = []
-        d = {"id": None, "name": "", "desc": "", "pmin": 0.0, "pmax": 99999.0, "owner": None, "min_pass": 0}
+        d = {"id": None, "name": "", "desc": "", "pmin": 0.0, "pmax": 99999.0, "owner": None, "min_pass": 0, "tol": DEFAULT_TOL}
+    st.session_state["ssd_tol"] = tol_label(d["tol"]) if tol_label(d["tol"]) in TOLERANCES else "Small (5%)"
     st.session_state["ssd_minpass"] = int(d["min_pass"])
     for k in ("ss_ai_notes", "ss_learn"):
         st.session_state.pop(k, None)
@@ -2094,7 +2309,7 @@ def _rule_editor(r, i):
     meta = RULES[r["type"]]
     with st.container(key=f"ss_rule_{r['_id']}"):
         h1, h2, h3, h4, h5 = st.columns([6, 1.1, 0.6, 0.6, 0.6], gap="small")
-        h1.markdown(f'<div class="ss-rh">{i + 1}. {_e(meta["label"].upper())}<span>{_e(describe(r))}</span></div>', unsafe_allow_html=True)
+        h1.markdown(f'<div class="ss-rh">{i + 1}. {_e(meta["label"])}<span>{_e(describe(r))}</span></div>', unsafe_allow_html=True)
         r["on"] = h2.toggle("On", value=r.get("on", True), key=f"ssf_{r['_id']}_on")
         if h3.button("↑", key=f"ssf_{r['_id']}_up", help="Move up", disabled=i == 0):
             st.session_state["ss_rules"].insert(i - 1, st.session_state["ss_rules"].pop(i))
@@ -2141,6 +2356,8 @@ def _apply_parsed(parsed, src):
     # the price boxes may already be on screen in this run, so their new values are applied at the start of the next run
     st.session_state["_ss_pending_price"] = (parsed.get("price_min"), parsed.get("price_max"))
     st.session_state["ss_ai_notes"] = {"src": src, "assumptions": parsed.get("assumptions") or [], "questions": parsed.get("questions") or []}
+    if parsed.get("tol") is not None:
+        st.session_state["_ss_pending_tol"] = tol_label(float(parsed["tol"])) if tol_label(float(parsed["tol"])) in TOLERANCES else "Medium (10%)"
     st.toast(f'{len(parsed["rules"])} rules built — check the numbers below.')
     st.rerun()
     return True
@@ -2156,13 +2373,13 @@ def _fmt_meas(v):
 
 def _learn_panel(supabase, editable):
     """Give 3–6 past examples (symbol + date); the scanner measures them and proposes rules that cover all of them."""
-    st.markdown('<div class="ss-hero"><div><div class="t"><em>EXAMPLES</em>SHOW THE SCANNER YOUR SETUP</div>'
+    st.markdown('<div class="ss-hero"><div><div class="t"><em>Examples</em>Show the scanner your setup</div>'
                 '<div class="d">Not sure about the numbers? List past cases of your setup, one per line, as symbol and date (the day you would have '
                 'bought). The scanner measures each one and proposes rules whose ranges cover all of them.</div></div></div>', unsafe_allow_html=True)
     with st.expander("Learn from examples", expanded=bool(st.session_state.get("ss_learn"))):
         st.text_area("Examples", key="ss_ex_text", height=110, label_visibility="collapsed",
                      placeholder="TATAPOWER 12 Aug 2026\nBEL 3 Sep 2026\nHAL 2026-10-07")
-        if st.button("MEASURE THESE EXAMPLES", key="ss_ex_btn", type="primary"):
+        if st.button("Measure these examples", key="ss_ex_btn", type="primary"):
             ex, bad = parse_examples(st.session_state.get("ss_ex_text", ""))
             out = {"bad": bad, "missing": [], "labels": [], "meas": {}, "rules": [], "cur": []}
             if ex:
@@ -2196,19 +2413,19 @@ def _learn_panel(supabase, editable):
             st.warning("No price history on that date for: " + " · ".join(L["missing"]))
         if not L["labels"]:
             return
-        st.markdown(f'<div class="ss-rh">WHAT THE SCANNER MEASURED ON EACH EXAMPLE</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="ss-rh">What the scanner measured on each example</div>', unsafe_allow_html=True)
         st.markdown(_simple_table(["Measure"] + L["labels"], [[_e(t)] + [_fmt_meas(row.get(lab)) for lab in L["labels"]] for t, row in L["meas"].items()]),
                     unsafe_allow_html=True)
         if L["cur"]:
-            st.markdown(f'<div class="ss-rh" style="margin-top:10px">YOUR CURRENT RULES ON THESE EXAMPLES</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="ss-rh" style="margin-top:10px">Your current rules on these examples</div>', unsafe_allow_html=True)
             st.markdown(_simple_table(["Rule"] + L["labels"], [[_e(d)] + [f'<span style="color:{GREEN if ok else RED}" title="{_e(why)}">{"✓ pass" if ok else "✗ fail"}</span>'
                                                                          for ok, why in zip(oks, whys)] for d, oks, whys in L["cur"]]), unsafe_allow_html=True)
             st.caption("A ✗ here means your current rule rejects one of your own examples — hover it for the actual value, then widen that rule.")
-        st.markdown(f'<div class="ss-rh" style="margin-top:10px">PROPOSED RULES · {len(L["rules"])} · EVERY EXAMPLE PASSES ALL OF THEM</div>'
+        st.markdown(f'<div class="ss-rh" style="margin-top:10px">Proposed rules · {len(L["rules"])} · every example passes all of them</div>'
                     + "".join(f'<div class="ss-rule"><b>{i + 1}</b>{_e(describe(r))}</div>' for i, r in enumerate(L["rules"])), unsafe_allow_html=True)
         st.caption("Ranges are stretched a little beyond your examples. With few examples they can still be too narrow or too wide: "
                    "remove rules that are not part of your idea, then check the setup in BACKTEST.")
-        if editable and L["rules"] and st.button(f"USE THESE {len(L['rules'])} RULES (replaces the rules below)", key="ss_ex_use"):
+        if editable and L["rules"] and st.button(f"Use these {len(L['rules'])} rules (replaces the rules below)", key="ss_ex_use"):
             for k in [k for k in st.session_state if k.startswith("ssf_")]:
                 del st.session_state[k]
             st.session_state["ss_rules"] = [dict(r, _id=uuid.uuid4().hex[:8]) for r in L["rules"]]
@@ -2232,6 +2449,9 @@ def _view_setups(supabase, is_admin, gemini_key):
         _load_draft(sel)
         st.session_state["ss_loaded_for"] = sel_id
     d = st.session_state["ss_draft"]
+    pt = st.session_state.pop("_ss_pending_tol", None)
+    if pt in TOLERANCES:
+        st.session_state["ssd_tol"] = pt
     lo_, hi_ = st.session_state.pop("_ss_pending_price", (None, None))
     if lo_ is not None:
         st.session_state["ssd_pmin"] = float(lo_)
@@ -2244,7 +2464,7 @@ def _view_setups(supabase, is_admin, gemini_key):
         k1, k2 = st.columns([3, 1])
         tname = k1.selectbox("Start from a ready-made setup", list(TEMPLATES), key="ss_tpl", label_visibility="collapsed",
                              format_func=lambda n: f"Template · {n}")
-        if k2.button("LOAD TEMPLATE", key="ss_tpl_btn", use_container_width=True, help="Replaces the rules below. Nothing is saved until you press SAVE."):
+        if k2.button("Load template", key="ss_tpl_btn", use_container_width=True, help="Replaces the rules below. Nothing is saved until you press SAVE."):
             trules, tdesc = template_rules(tname)
             for k in [k for k in st.session_state if k.startswith("ssf_")]:
                 del st.session_state[k]
@@ -2257,7 +2477,7 @@ def _view_setups(supabase, is_admin, gemini_key):
             st.session_state.pop("ss_ai_notes", None)
             st.toast(f"Template loaded: {len(trules)} rules. Change any number, then save.")
             st.rerun()
-    if c2.button("DUPLICATE", key="ss_dup", use_container_width=True, disabled=sel is None):
+    if c2.button("Duplicate", key="ss_dup", use_container_width=True, disabled=sel is None):
         d["id"], d["owner"] = None, None
         st.session_state["ss_draft"] = d
         st.session_state["ssd_name"] = (d["name"] + " (copy)")[:80]
@@ -2265,9 +2485,9 @@ def _view_setups(supabase, is_admin, gemini_key):
         st.session_state["ss_loaded_for"] = None
         st.rerun()
 
-    st.markdown('<div class="ss-hero"><div><div class="t"><em>SETUP</em>DESCRIBE IT · CHECK THE RULES · SAVE</div>'
-                '<div class="d">Write how you trade the setup in plain English, press BUILD RULES, then fine-tune any number. '
-                'Every number is a range, so "3 low-volume candles — 4 is also fine" becomes 3 to 4.</div></div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="ss-hero"><div><div class="t"><em>Setup</em>Describe it, check how it was understood, save</div>'
+                '<div class="d">Write it the way you would explain it to a friend, including what is "ok" (e.g. "a 3-4% green candle in the pullback is fine", '
+                '"4 candles is also fine"). Press <b>Build rules</b>, read how it was understood, answer any question, then save.</div></div></div>', unsafe_allow_html=True)
     a, b = st.columns([1.6, 1])
     with a:
         st.text_input("Setup name", key="ssd_name", placeholder="e.g. Momentum pullback on dry volume", disabled=not editable)
@@ -2275,7 +2495,7 @@ def _view_setups(supabase, is_admin, gemini_key):
                      placeholder="e.g. Stock gained 20%+ in the last 30 days. RSI above 50 and above its 14 SMA. Price above EMA 20 and SMA 50. "
                                  "Then a pullback of 3 candles on low volume (4 candles is also fine).")
         x1, x2 = st.columns([1.3, 1])
-        if x1.button("✦ BUILD RULES FROM DESCRIPTION", key="ss_build", type="primary", use_container_width=True, disabled=not editable):
+        if x1.button("Build rules from my description", key="ss_build", type="primary", use_container_width=True, disabled=not editable):
             text = st.session_state.get("ssd_desc", "")
             if not text.strip():
                 st.warning("Write the description first.")
@@ -2284,19 +2504,34 @@ def _view_setups(supabase, is_admin, gemini_key):
                     parsed = parse_with_ai(text, gemini_key) or parse_locally(text)
                 if not _apply_parsed(parsed, "your description"):
                     st.warning("No rules could be read from that description. Add rules by hand below.")
-        x2.caption("Uses Gemini when GEMINI_KEY is set, otherwise the built-in reader. It replaces the rules below.")
+        x2.caption("Uses Arka AI (Gemini) when GEMINI_KEY is set, otherwise the built-in reader. It replaces the rules below.")
         notes = st.session_state.get("ss_ai_notes")
         if notes and (notes["assumptions"] or notes["questions"]):
-            body = "".join(f'<div class="ss-rule"><b>ASSUMED</b>{_e(x)}</div>' for x in notes["assumptions"]) + \
-                   "".join(f'<div class="ss-rule" style="color:{AMBER}"><b>UNCLEAR</b>{_e(x)}</div>' for x in notes["questions"])
-            st.markdown(f'<div class="ss-card"><span class="n">How {_e(notes["src"])} was read</span><span class="o">CHECK THESE BEFORE YOU SAVE</span>'
+            body = "".join(f'<div class="ss-rule"><b>Assumed</b>{_e(x)}</div>' for x in notes["assumptions"])
+            st.markdown(f'<div class="ss-card"><span class="n">How {_e(notes["src"])} was read</span><span class="o">check these before you save</span>'
                         f'<div class="ss-rules">{body}</div></div>', unsafe_allow_html=True)
-            if notes["questions"]:
-                st.caption("Answer the unclear points in your description and press BUILD RULES again, or fix the numbers by hand below.")
+            if notes["questions"] and editable:
+                st.markdown('<div class="ss-rh" style="margin-top:6px">A few questions so the rules match what you mean</div>', unsafe_allow_html=True)
+                answers = []
+                for qi, q in enumerate(notes["questions"]):
+                    ans = st.text_input(q, key=f"ss_qa_{qi}", placeholder="Your answer")
+                    if ans.strip():
+                        answers.append(f"Q: {q} A: {ans.strip()}")
+                if st.button("Rebuild with my answers", key="ss_qa_go", type="primary", disabled=not answers):
+                    text = (st.session_state.get("ssd_desc", "") + "\n\nClarifications from the trader:\n" + "\n".join(answers)).strip()
+                    with st.spinner("Rebuilding your rules…"):
+                        parsed = parse_with_ai(text, gemini_key) or parse_locally(text)
+                    for qi in range(len(notes["questions"])):
+                        st.session_state.pop(f"ss_qa_{qi}", None)
+                    if not _apply_parsed(parsed, "your description and answers"):
+                        st.warning("No rules could be read. Fix the numbers by hand below.")
     with b:
         p1, p2 = st.columns(2)
         p1.number_input("Price from (₹)", min_value=0.0, max_value=999999.0, step=10.0, key="ssd_pmin", disabled=not editable)
         p2.number_input("Price to (₹)", min_value=0.0, max_value=999999.0, step=10.0, key="ssd_pmax", disabled=not editable)
+        st.selectbox("Close enough", list(TOLERANCES), key="ssd_tol", disabled=not editable,
+                     help="How far a number may miss and still pass. 5%: a 19% run-up passes 'at least 20%', RSI 48 passes 'above 50'. "
+                          "Results show these as ≈ and rank exact matches first.")
         img = st.file_uploader("Reference chart (optional, for the AI check)", type=["png", "jpg", "jpeg"], key="ssd_img", disabled=not editable)
         b64 = None
         if img is None and sel is not None:
@@ -2306,7 +2541,7 @@ def _view_setups(supabase, is_admin, gemini_key):
         elif img is not None:
             st.image(img, caption="New reference chart", use_container_width=True)
         pic = img.getvalue() if img is not None else (base64.b64decode(b64) if sel is not None and img is None and b64 else None)
-        if st.button("✦ BUILD RULES FROM THE CHART PICTURE", key="ss_build_pic", use_container_width=True,
+        if st.button("Build rules from the chart picture", key="ss_build_pic", use_container_width=True,
                      disabled=not (editable and pic and HAS_GEMINI and gemini_key),
                      help="Gemini looks at the right edge of your chart and proposes rules. Needs GEMINI_KEY and a picture. Replaces the rules below."):
             with st.spinner("Looking at your chart…"):
@@ -2318,9 +2553,10 @@ def _view_setups(supabase, is_admin, gemini_key):
 
     n_on = sum(1 for r in st.session_state["ss_rules"] if r.get("on", True))
     mp = int(st.session_state.get("ssd_minpass") or 0)
-    st.markdown(f'<div class="ss-hero"><div><div class="t"><em>RULES</em>{len(st.session_state["ss_rules"])} RULES · A STOCK MUST PASS '
-                f'{"ALL" if not mp or mp >= n_on else f"AT LEAST {mp} OF {n_on}"}</div>'
-                '<div class="d">Turn a rule off to keep it but skip it. Stocks that miss by exactly one rule are shown as NEAR MATCHES.</div></div></div>',
+    st.markdown(plain_summary(st.session_state["ss_rules"], TOLERANCES.get(st.session_state.get("ssd_tol"), DEFAULT_TOL), mp), unsafe_allow_html=True)
+    st.markdown(f'<div class="ss-hero"><div><div class="t"><em>Rules</em>{len(st.session_state["ss_rules"])} rules · a stock must pass '
+                f'{"all of them" if not mp or mp >= n_on else f"at least {mp} of {n_on}"}</div>'
+                '<div class="d">Change any number. Turn a rule off to keep it but skip it. Stocks that miss by exactly one rule are shown as near matches.</div></div></div>',
                 unsafe_allow_html=True)
     if editable:
         st.number_input("A stock must pass at least this many rules (0 = all of them)", min_value=0, max_value=40, step=1, key="ssd_minpass",
@@ -2335,17 +2571,17 @@ def _view_setups(supabase, is_admin, gemini_key):
     if editable:
         r1, r2 = st.columns([3, 1])
         add = r1.selectbox("Add a rule", RULE_ORDER, format_func=lambda t: RULES[t]["label"], key="ss_add_type", label_visibility="collapsed")
-        if r2.button("＋ ADD RULE", key="ss_add_btn", use_container_width=True):
+        if r2.button("Add rule", key="ss_add_btn", use_container_width=True):
             st.session_state["ss_rules"].append(new_rule(add))
             st.rerun()
 
     # test on one stock
-    st.markdown('<div class="ss-hero"><div><div class="t"><em>TEST</em>CHECK A STOCK AGAINST THESE RULES</div>'
+    st.markdown('<div class="ss-hero"><div><div class="t"><em>Test</em>Check one stock against these rules</div>'
                 '<div class="d">See exactly which rule a stock passes or fails — e.g. why it did not show up in a scan.</div></div></div>', unsafe_allow_html=True)
     t1, t3, t2 = st.columns([2, 1.4, 1])
     tsym = t1.text_input("Symbol to test", key="ss_test_sym", placeholder="e.g. TATAPOWER", label_visibility="collapsed").strip().upper()
     tdate = t3.text_input("On date", key="ss_test_date", placeholder="date (blank = latest), e.g. 12 Aug 2026", label_visibility="collapsed").strip()
-    if t2.button("TEST", key="ss_test_btn", use_container_width=True) and tsym:
+    if t2.button("Test", key="ss_test_btn", use_container_width=True) and tsym:
         when = pd.to_datetime(tdate, errors="coerce", dayfirst=True) if tdate else None
         res = None
         if tdate and pd.isna(when):
@@ -2362,7 +2598,8 @@ def _view_setups(supabase, is_admin, gemini_key):
                            nifty_close() if need["nifty"] else None, _extra_for(tsym, deliv))
                 view = root if when is None else _ctx_on(root, when)
                 if view is not None:
-                    res = evaluate_stock(tsym, None, rules, ctx=view, min_pass=int(st.session_state.get("ssd_minpass") or 0))
+                    res = evaluate_stock(tsym, None, rules, ctx=view, min_pass=int(st.session_state.get("ssd_minpass") or 0),
+                                         tol=TOLERANCES.get(st.session_state.get("ssd_tol"), DEFAULT_TOL))
         if res is None and when is not None and tsym in hist:
             st.error(f"{tsym} has no candle near {when:%d %b %Y} in the stored history "
                      f"({hist[tsym].index[0]:%d %b %Y} – {hist[tsym].index[-1]:%d %b %Y}).")
@@ -2371,15 +2608,16 @@ def _view_setups(supabase, is_admin, gemini_key):
         else:
             ok = res["status"] == "match"
             nfail = sum(1 for ck in res["checks"] if not ck["ok"])
-            verdict_ = ("MATCH" if ok else "NEAR MATCH" if res["status"] == "near" else f'{nfail} RULES FAILED') + f' · {res["passed"]}/{res["total"]} passed'
+            verdict_ = ("Match" if ok else "Near match" if res["status"] == "near" else f'{nfail} rules failed') + f' · {res["passed"]}/{res["total"]} passed'
             verdict_ += f' · as of {res["date"]:%d %b %Y}'
             col = GREEN if ok else AMBER if res["status"] == "near" else RED
-            rows = "".join(f'<tr><td>{"✓" if ck["ok"] else "✗"}</td><td>{_e(ck["desc"])}</td><td style="color:{GREEN if ck["ok"] else RED}">{_e(ck["detail"])}</td></tr>'
+            rows = "".join(f'<tr><td>{"≈" if ck.get("close") else "✓" if ck["ok"] else "✗"}</td><td>{_e(ck["desc"])}</td>'
+                           f'<td style="color:{AMBER if ck.get("close") else GREEN if ck["ok"] else RED}">{_e(ck["detail"])}</td></tr>'
                            for ck in res["checks"])
             pmin, pmax = float(st.session_state.get("ssd_pmin", 0)), float(st.session_state.get("ssd_pmax", 99999))
             price_ok = pmin <= res["close"] <= pmax
             st.markdown(f'<div class="ss-card"><span class="n">{_e(tsym)}</span><span class="o" style="color:{col}">{verdict_}</span>'
-                        f'<span class="o">₹{res["close"]:,.2f} · {res["chg"]:+.2f}% · {"inside" if price_ok else "OUTSIDE"} the ₹{pmin:,.0f}–{pmax:,.0f} band · '
+                        f'<span class="o">₹{res["close"]:,.2f} · {res["chg"]:+.2f}% · {"inside" if price_ok else "outside"} the ₹{pmin:,.0f}–{pmax:,.0f} band · '
                         f'turnover ₹{res["turnover"]:,.1f} Cr/day</span></div>'
                         f'<div class="ss-tw"><table class="ss-t"><thead><tr><th></th><th>Rule</th><th>Result</th></tr></thead><tbody>{rows}</tbody></table></div>',
                         unsafe_allow_html=True)
@@ -2387,7 +2625,7 @@ def _view_setups(supabase, is_admin, gemini_key):
     # save
     st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
     s1, s2, s3 = st.columns([1.4, 1, 1])
-    if editable and s1.button("SAVE SETUP" if not d.get("id") else "SAVE CHANGES", type="primary", key="ss_save", use_container_width=True):
+    if editable and s1.button("Save setup" if not d.get("id") else "Save changes", type="primary", key="ss_save", use_container_width=True):
         name = st.session_state.get("ssd_name", "").strip()
         pmin, pmax = float(st.session_state.get("ssd_pmin", 0)), float(st.session_state.get("ssd_pmax", 99999))
         rules = [r for r in st.session_state["ss_rules"]]
@@ -2400,7 +2638,8 @@ def _view_setups(supabase, is_admin, gemini_key):
         else:
             imgf = st.session_state.get("ssd_img")
             b64 = base64.b64encode(imgf.getvalue()).decode() if imgf is not None else None
-            d.update(name=name, desc=st.session_state.get("ssd_desc", ""), pmin=pmin, pmax=pmax, min_pass=int(st.session_state.get("ssd_minpass") or 0))
+            d.update(name=name, desc=st.session_state.get("ssd_desc", ""), pmin=pmin, pmax=pmax, min_pass=int(st.session_state.get("ssd_minpass") or 0),
+                     tol=TOLERANCES.get(st.session_state.get("ssd_tol"), DEFAULT_TOL))
             sid, err = save_setup(supabase, d, rules, b64, is_admin)
             if err:
                 st.error(f"Could not save: {err}")
@@ -2411,12 +2650,12 @@ def _view_setups(supabase, is_admin, gemini_key):
                 st.session_state["ss_loaded_for"] = "reload"
                 st.toast(f"Setup “{name}” saved.")
                 st.rerun()
-    if sel is not None and editable and s3.button("DELETE SETUP", key="ss_del", use_container_width=True):
+    if sel is not None and editable and s3.button("Delete setup", key="ss_del", use_container_width=True):
         st.session_state["ss_confirm_del"] = sel["id"]
     if st.session_state.get("ss_confirm_del") == sel_id and sel is not None:
         st.warning(f'Delete “{sel["name"]}” permanently?')
         y, n_ = st.columns(2)
-        if y.button("YES, DELETE", key="ss_del_yes", type="primary", use_container_width=True):
+        if y.button("Yes, delete", key="ss_del_yes", type="primary", use_container_width=True):
             err = delete_setup(supabase, sel_id)
             st.session_state.pop("ss_confirm_del", None)
             if err:
@@ -2426,7 +2665,7 @@ def _view_setups(supabase, is_admin, gemini_key):
                 st.session_state["_ss_pending_pick"] = "new"
                 st.session_state["ss_loaded_for"] = "reload"
                 st.rerun()
-        if n_.button("CANCEL", key="ss_del_no", use_container_width=True):
+        if n_.button("Cancel", key="ss_del_no", use_container_width=True):
             st.session_state.pop("ss_confirm_del", None)
             st.rerun()
 
@@ -2440,19 +2679,19 @@ def _view_setups(supabase, is_admin, gemini_key):
 def _view_scan(supabase, is_admin, gemini_key):
     setups = load_setups(supabase)
     if not setups:
-        st.info("No setups yet. Open SETUPS, describe your setup, press BUILD RULES and save it.")
+        st.info("No setups yet. Open My setups, describe your setup, press Build rules and save it.")
         return
     ids = [s["id"] for s in setups]
     cur = st.session_state.get("ss_sel")
     idx = ids.index(cur) if cur in ids else 0
     c1, c2 = st.columns([2.2, 1])
     i = c1.selectbox("Setup", range(len(setups)), index=idx, key="ss_scan_pick",
-                     format_func=lambda k: f'{setups[k]["name"]}{"  ·  DESK" if (setups[k].get("owner") or "admin") == "admin" and not is_admin else ""}')
+                     format_func=lambda k: f'{setups[k]["name"]}{"  ·  desk" if (setups[k].get("owner") or "admin") == "admin" and not is_admin else ""}')
     setup = setups[i]
     st.session_state["ss_sel"] = setup["id"]
     rules = setup_rules(setup)
     if not rules:
-        st.warning("This setup has no rules yet — open SETUPS and build them.")
+        st.warning("This setup has no rules yet. Open My setups and build them.")
         return
     with c2:
         b64 = setup_image(supabase, setup["id"]) if st.session_state.get("ss_show_ref") else None
@@ -2461,9 +2700,9 @@ def _view_scan(supabase, is_admin, gemini_key):
         st.image(base64.b64decode(b64), width=420)
 
     # rules in this run
-    st.markdown(f'<div class="ss-card"><span class="n">{_e(setup["name"])}</span><span class="o">{len(rules)} RULES · '
+    st.markdown(f'<div class="ss-card"><span class="n">{_e(setup["name"])}</span><span class="o">{len(rules)} rules · '
                 f'₹{float(setup.get("price_min") or 0):,.0f}–{float(setup.get("price_max") or 99999):,.0f}</span>'
-                f'<div class="ss-rules">' + "".join(f'<div class="ss-rule"><b>{k + 1}</b>{_e(describe(r))}{"" if r.get("on", True) else " · OFF"}</div>'
+                f'<div class="ss-rules">' + "".join(f'<div class="ss-rule"><b>{k + 1}</b>{_e(describe(r))}{"" if r.get("on", True) else " · off"}</div>'
                                                      for k, r in enumerate(rules)) + "</div></div>", unsafe_allow_html=True)
     with st.expander("Skip rules for this run only"):
         for k, r in enumerate(rules):
@@ -2486,6 +2725,11 @@ def _view_scan(supabase, is_admin, gemini_key):
                          help="Average daily traded value over 20 days. Removes stocks that barely trade.")
     near = d.checkbox("Show near matches", value=True, key="ss_near", help="Stocks that miss by exactly one rule")
     min_pass = setup_min_pass(setup)
+    tkey = f"ss_tol_run_{setup['id']}"
+    if tkey not in st.session_state:
+        st.session_state[tkey] = tol_label(setup_tol(setup)) if tol_label(setup_tol(setup)) in TOLERANCES else "Small (5%)"
+    tol = TOLERANCES[st.selectbox("Close enough", list(TOLERANCES), key=tkey,
+                                  help="How far a number may miss and still pass (shown as ≈, ranked below exact matches). Saved per setup on the Setups page.")]
     asof = None
     z1, z2 = st.columns([1.6, 3])
     if z1.checkbox("Scan a past date", key="ss_past", help="Shows what this scan would have found at that day's close, and what the price did since."):
@@ -2498,7 +2742,7 @@ def _view_scan(supabase, is_admin, gemini_key):
     if pmin > pmax:
         st.error("The price band is reversed.")
         return
-    if st.button(f"▶ RUN SCAN · {setup['name']}", type="primary", use_container_width=True, key="ss_run"):
+    if st.button(f"Run scan · {setup['name']}", type="primary", use_container_width=True, key="ss_run"):
         universe, src = get_universe(uni)
         if not universe:
             st.warning(f"{uni} is empty. Add stocks in the WATCHLIST workspace first." if is_list else "No stocks to scan.")
@@ -2509,7 +2753,7 @@ def _view_scan(supabase, is_admin, gemini_key):
             bar.progress(max(0.0, min(1.0, float(p))))
             msg.caption(m)
         prog(0.02, f"Universe: {src}")
-        res = run_scan(universe, rules, pmin, pmax, float(liq), near, prog, min_pass=min_pass, asof=asof)
+        res = run_scan(universe, rules, pmin, pmax, float(liq), near, prog, min_pass=min_pass, asof=asof, tol=tol)
         res.update(setup_id=setup["id"], setup_name=setup["name"], source=src, band=(pmin, pmax), rules=[describe(r) for r in rules if r.get("on", True)])
         st.session_state["ss_res"] = res
         st.session_state.pop("ss_ai", None)
@@ -2521,14 +2765,15 @@ def _view_scan(supabase, is_admin, gemini_key):
     if not res:
         return
     S = res["stats"]
-    st.markdown(f'<div class="ss-hero"><div><div class="t"><em>RESULTS</em>{_e(res["setup_name"]).upper()}</div>'
+    st.markdown(f'<div class="ss-hero"><div><div class="t"><em>Results</em>{_e(res["setup_name"])}</div>'
                 f'<div class="d">{_e(res["source"])} · ₹{res["band"][0]:,.0f}–{res["band"][1]:,.0f} · scanned {res["at"]:%d %b %H:%M IST} in {S["secs"]:.0f}s'
                 f'{(" · PAST-DATE SCAN as of " if res.get("past") else " · prices as of ") + format(res["asof"], "%d %b %Y") if res["asof"] is not None else ""}'
                 f'{" · * volume projected to a full day (market open)" if res["live"] else ""}</div></div></div>', unsafe_allow_html=True)
     st.markdown('<div class="ss-kpis">' + _kpi("Universe", f'{S["universe"]:,}') + _kpi("Priced", f'{S["priced"]:,}') +
                 _kpi("In price band", f'{S["in_band"]:,}') + _kpi("Liquid & checked", f'{S["liquid"]:,}') +
-                _kpi("MATCHES", f'<span style="color:{GREEN}">{S["match"]}</span>', GREEN) +
-                _kpi("NEAR MATCHES", f'<span style="color:{AMBER}">{S["near"]}</span>', AMBER) + '</div>', unsafe_allow_html=True)
+                _kpi("Matches", f'<span style="color:{GREEN}">{S["match"]}</span>'
+                     + (f'<span style="font:500 12px var(--sans);color:var(--tx3);margin-left:8px">{S.get("exact", 0)} exact</span>' if res.get("tol") else ""), GREEN) +
+                _kpi("Near matches", f'<span style="color:{AMBER}">{S["near"]}</span>', AMBER) + '</div>', unsafe_allow_html=True)
     if S["no_data"]:
         st.caption(f'{S["no_data"]} stocks had too little price history (new listings or suspended) and were skipped.')
     if res.get("deliv_missing"):
@@ -2545,8 +2790,8 @@ def _view_scan(supabase, is_admin, gemini_key):
                        "is usually the number to look at first.")
 
     v1, v2, v3 = st.columns([1.6, 1.3, 1])
-    tab = v1.radio("Show", [f"MATCHES ({S['match']})", f"NEAR MATCHES ({S['near']})"], horizontal=True, key="ss_tab", label_visibility="collapsed")
-    is_near = tab.startswith("NEAR")
+    tab = v1.radio("Show", [f"Matches ({S['match']})", f"Near matches ({S['near']})"], horizontal=True, key="ss_tab", label_visibility="collapsed")
+    is_near = tab.startswith("Near")
     rows = res["near"] if is_near else res["match"]
     sort = v2.selectbox("Sort", list(SORTS), key="ss_sort", label_visibility="collapsed")
     psize = v3.selectbox("Rows", [30, 60, 100], key="ss_psize", label_visibility="collapsed", format_func=lambda n: f"{n} per page")
@@ -2561,8 +2806,11 @@ def _view_scan(supabase, is_admin, gemini_key):
     chunk = rows[(page - 1) * psize: page * psize]
     wl = set(st.session_state.get("watchlist", []) or [])
     ai = st.session_state.get("ss_ai")
-    st.markdown(_results_table(chunk, is_near, wl, ai if ai and not is_near else None, past=bool(res.get("past"))), unsafe_allow_html=True)
-    st.caption("Hover a symbol for its chart · hover a chip for the exact value · ✓ WL = already in your watchlist"
+    if _is_phone():
+        st.markdown(_results_cards(chunk, is_near, wl, past=bool(res.get("past"))), unsafe_allow_html=True)
+    else:
+        st.markdown(_results_table(chunk, is_near, wl, ai if ai and not is_near else None, past=bool(res.get("past"))), unsafe_allow_html=True)
+    st.caption("Fit 100 = every rule passed exactly · ≈ = passed within the tolerance · hover a symbol for its chart and a chip for the exact value"
                + (" · Vol× * = projected to a full day" if res["live"] else ""))
 
     # action bar
@@ -2571,7 +2819,7 @@ def _view_scan(supabase, is_admin, gemini_key):
         e1, e2 = st.columns([3, 1.2])
         chosen = e1.multiselect("Add to watchlist", [s for s in syms if s not in wl], key=f"ss_pick_{is_near}",
                                 placeholder="Tick stocks to add to your watchlist…", label_visibility="collapsed")
-        if e2.button(f"＋ ADD {len(chosen)} TO WATCHLIST" if chosen else "＋ ADD SELECTED", key=f"ss_add_sel_{is_near}",
+        if e2.button(f"Add {len(chosen)} to watchlist" if chosen else "Add selected", key=f"ss_add_sel_{is_near}",
                      use_container_width=True, type="primary", disabled=not chosen):
             n, err = add_to_watchlist(supabase, chosen)
             st.error(f"Could not save: {err}") if err else st.toast(f"{n} stock(s) added to your watchlist")
@@ -2583,16 +2831,16 @@ def _view_scan(supabase, is_admin, gemini_key):
                 st.rerun()
         f1, f2, f3, f4, f5 = st.columns([1.6, 1, 1, 1, 1.3])
         new_all = [s for s in syms if s not in wl]
-        if f1.button(f"＋ ADD ALL {len(new_all)} {'NEAR ' if is_near else ''}MATCHES", key=f"ss_add_all_{is_near}",
+        if f1.button(f"Add all {len(new_all)} {'near ' if is_near else ''}matches", key=f"ss_add_all_{is_near}",
                      use_container_width=True, disabled=not new_all):
             n, err = add_to_watchlist(supabase, new_all)
             st.error(f"Could not save: {err}") if err else st.toast(f"{n} stock(s) added to your watchlist")
             if not err:
                 st.rerun()
         one = f2.selectbox("Stock", syms, key=f"ss_one_{is_near}", label_visibility="collapsed")
-        if f3.button("ANALYSIS", key=f"ss_an_{is_near}", use_container_width=True, help="Open in Arka AI and start the analysis"):
+        if f3.button("Arka AI", key=f"ss_an_{is_near}", use_container_width=True, help="Open in Arka AI and start the analysis"):
             _goto(one, "analysis")
-        if f4.button("RESEARCH", key=f"ss_rs_{is_near}", use_container_width=True):
+        if f4.button("Research", key=f"ss_rs_{is_near}", use_container_width=True):
             _goto(one, "research")
         with f5:
             out = pd.DataFrame([{"symbol": r["symbol"], "ltp": round(r["close"], 2), "chg_pct": round(r["chg"], 2),
@@ -2601,10 +2849,10 @@ def _view_scan(supabase, is_admin, gemini_key):
                                  "checks": " | ".join(("OK " if ck["ok"] else "NO ") + ck["detail"] for ck in r["checks"])} for r in rows])
             fmt = st.selectbox("Export", ["CSV", "TradingView list"], key="ss_exp_fmt", label_visibility="collapsed")
             if fmt == "CSV":
-                st.download_button("⤓ DOWNLOAD", out.to_csv(index=False), f"arka_scan_{datetime.now(IST):%Y%m%d}.csv", "text/csv",
+                st.download_button("Download", out.to_csv(index=False), f"arka_scan_{datetime.now(IST):%Y%m%d}.csv", "text/csv",
                                    key="ss_dl_csv", use_container_width=True)
             else:
-                st.download_button("⤓ DOWNLOAD", "\n".join(f"NSE:{s}" for s in syms), f"arka_scan_{datetime.now(IST):%Y%m%d}.txt",
+                st.download_button("Download", "\n".join(f"NSE:{s}" for s in syms), f"arka_scan_{datetime.now(IST):%Y%m%d}.txt",
                                    "text/plain", key="ss_dl_tv", use_container_width=True, help="Import into a TradingView watchlist")
 
     # optional AI chart check (matches only)
@@ -2617,7 +2865,7 @@ def _view_scan(supabase, is_admin, gemini_key):
                 n = g1.number_input("Check the top", 1, min(40, len(rows)), min(10, len(rows)), 1, key="ss_ai_n")
                 g2.caption("Uses one Gemini call per stock, in the current sort order. Results are kept for the day, so a stock is never "
                            "paid for twice. The AI score never overrides a failed rule.")
-                if st.button(f"RUN AI CHECK ON {int(n)} STOCKS", key="ss_ai_run"):
+                if st.button(f"Run AI check on {int(n)} stocks", key="ss_ai_run"):
                     ref = setup_image(supabase, res["setup_id"])
                     cache = st.session_state.setdefault("_ss_ai_cache", {})
                     todo = [r for r in rows[:int(n)]]
@@ -2658,11 +2906,11 @@ def _view_scan(supabase, is_admin, gemini_key):
 def _view_backtest(supabase, is_admin):
     setups = load_setups(supabase)
     if not setups:
-        st.info("No setups yet. Open SETUPS and save one first.")
+        st.info("No setups yet. Open My setups and save one first.")
         return
     ids = [s["id"] for s in setups]
     cur = st.session_state.get("ss_sel")
-    st.markdown('<div class="ss-hero"><div><div class="t"><em>BACKTEST</em>WHAT HAPPENED AFTER THIS SETUP APPEARED BEFORE</div>'
+    st.markdown('<div class="ss-hero"><div><div class="t"><em>Backtest</em>What happened after this setup appeared before</div>'
                 '<div class="d">Replays the setup on every past day for every stock. A signal is read at the close and bought at the next day\'s open. '
                 'Use it to see whether the rules you wrote find what you meant — and whether it was worth finding.</div></div></div>', unsafe_allow_html=True)
     a, b, c, d = st.columns([2, 1.4, 1, 1])
@@ -2673,12 +2921,14 @@ def _view_backtest(supabase, is_admin):
     sessions = c.selectbox("Look back", [60, 120, 200], index=1, key="ss_bt_n", format_func=lambda n: f"{n} sessions")
     liq = d.number_input("Min turnover ₹ Cr/day", 0.0, 500.0, 1.0, 0.5, key="ss_bt_liq")
     pmin, pmax = float(setup.get("price_min") or 0), float(setup.get("price_max") or 99999)
+    tol = TOLERANCES[st.selectbox("Close enough", list(TOLERANCES), index=list(TOLERANCES).index(tol_label(setup_tol(setup)))
+                                  if tol_label(setup_tol(setup)) in TOLERANCES else 1, key=f"ss_bt_tol_{setup['id']}")]
     if not rules:
         st.warning("This setup has no rules yet.")
         return
     st.caption(f'{len(rules)} rules · price band ₹{pmin:,.0f}–{pmax:,.0f} (checked on each past day) · about half a minute per 500 stocks at 120 sessions (a few times longer with either-or groups or pass-K-of-N setups), '
                "plus the price download the first time.")
-    if st.button(f"▶ RUN BACKTEST · {setup['name']}", type="primary", use_container_width=True, key="ss_bt_run"):
+    if st.button(f"Run backtest · {setup['name']}", type="primary", use_container_width=True, key="ss_bt_run"):
         universe, src = get_universe(uni)
         if not universe:
             st.warning(f"{uni} is empty.")
@@ -2692,7 +2942,7 @@ def _view_backtest(supabase, is_admin):
         snaps, band, hist = _candidates(universe, pmin, pmax, float(liq), lambda p, m: prog(p * 0.5, m), widen=2.0, long=need["long"])
         bt = backtest({x: hist[x] for x in band if x in hist}, rules, pmin, pmax, float(liq), int(sessions), setup_min_pass(setup),
                       nifty_close() if need["nifty"] else None, delivery_table() if need["deliv"] else None,
-                      progress=lambda p, m: prog(0.5 + 0.5 * p, m))
+                      progress=lambda p, m: prog(0.5 + 0.5 * p, m), tol=tol)
         bt.update(setup_name=setup["name"], source=src, band=(pmin, pmax), deliv=need["deliv"])
         st.session_state["ss_bt"] = bt
         bar.empty()
@@ -2702,7 +2952,7 @@ def _view_backtest(supabase, is_admin):
     if not bt:
         return
     S = bt["stats"]
-    st.markdown(f'<div class="ss-hero"><div><div class="t"><em>RESULT</em>{_e(bt["setup_name"]).upper()}</div><div class="d">{_e(bt["source"])} · '
+    st.markdown(f'<div class="ss-hero"><div><div class="t"><em>Result</em>{_e(bt["setup_name"])}</div><div class="d">{_e(bt["source"])} · '
                 f'{S["stocks"]:,} stocks · last {S["sessions"]} sessions · {S["days"]:,} stock-days checked in {S["secs"]:.0f}s</div></div></div>', unsafe_allow_html=True)
     per_month = S["signals"] / max(1, S["sessions"]) * 21
     st.markdown('<div class="ss-kpis">' + _kpi("Signals", f'{S["signals"]:,}', AMBER) + _kpi("Different stocks", f'{S["names"]:,}') +
@@ -2729,7 +2979,7 @@ def _view_backtest(supabase, is_admin):
                "useful if it beats that. " + (f"Only {n20} completed signals: too few to trust the percentages. " if n20 < 30 else "")
                + "Not included: brokerage, slippage, and stocks that were delisted. One period of one market — the next one can differ."
                + (" Delivery data only covers recent sessions, so older days could not trigger." if bt.get("deliv") else ""))
-    st.markdown('<div class="ss-rh" style="margin:12px 0 6px">EVERY SIGNAL · NEWEST FIRST</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ss-rh" style="margin:12px 0 6px">Every signal, newest first</div>', unsafe_allow_html=True)
     sig = bt["signals"]
     show = sig[:150]
     st.markdown(_simple_table(["Stock", "Signal date", "Close", "Entry (next open)", "+5", "+10", "+20", "Worst dip 20d", "Till now"],
@@ -2742,7 +2992,7 @@ def _view_backtest(supabase, is_admin):
                          "entry_next_open": None if x["entry"] is None else round(x["entry"], 2),
                          **{f"ret_{h}d_pct": None if x.get(f"r{h}") is None else round(x[f"r{h}"], 2) for h in HORIZONS},
                          "worst_dip_20d_pct": None if x.get("worst") is None else round(x["worst"], 2)} for x in sig])
-    st.download_button("⤓ DOWNLOAD ALL SIGNALS (CSV)", out.to_csv(index=False), f"arka_backtest_{datetime.now(IST):%Y%m%d}.csv", "text/csv", key="ss_bt_dl")
+    st.download_button("Download all signals (CSV)", out.to_csv(index=False), f"arka_backtest_{datetime.now(IST):%Y%m%d}.csv", "text/csv", key="ss_bt_dl")
 
 
 # ═════════════════════════ entry point ═════════════════════════
@@ -2758,7 +3008,10 @@ def render_smart_scanner(supabase, is_admin=None, on_open=None):
     if st.session_state.get("ss_loaded_for") == "reload":
         st.session_state.pop("ss_loaded_for", None)
         st.session_state.pop("ss_draft", None)
-    view = st.radio("Screener view", ["RUN SCAN", "SETUPS", "BACKTEST"], horizontal=True, key="ss_view", label_visibility="collapsed")
+    if st.session_state.get("ss_view") not in ("RUN SCAN", "SETUPS", "BACKTEST"):
+        st.session_state["ss_view"] = "RUN SCAN"
+    view = st.radio("Screener view", ["RUN SCAN", "SETUPS", "BACKTEST"], horizontal=True, key="ss_view", label_visibility="collapsed",
+                    format_func=lambda v: {"RUN SCAN": "Scan", "SETUPS": "My setups", "BACKTEST": "Backtest"}[v])
     if view == "RUN SCAN":
         _view_scan(supabase, is_admin, gemini_key)
     elif view == "BACKTEST":
