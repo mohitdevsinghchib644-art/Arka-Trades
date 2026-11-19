@@ -14,10 +14,11 @@ HOW v2 WORKS
   * Changing AUTH_SECRET, or any login in Streamlit secrets, signs out every device.
   * The cookie is still written and read too, so self-hosted / local runs restore even faster.
 
-SITE ICON
-  The same component replaces Streamlit's icon with yours: browser tab, iPhone "Add to Home Screen"
-  (apple-touch-icon) and Android home screen (web manifest). It uses arka_logo.png from the repo root (or
-  logo.png / assets/logo.png); without one it draws the Arka mark. A square PNG of at least 512 x 512 is best.
+LOGO AND SITE ICON (v2.1)
+  * arka_logo.png  the wordmark shown in the header and on the landing / sign-in pages (white on transparent).
+  * arka_icon.png  the square app icon: browser tab, iPhone "Add to Home Screen" and Android home screen.
+  The component replaces Streamlit's icon with arka_icon.png and hides Streamlit Cloud's floating badges for
+  visitors. Without the files a text wordmark / icon is drawn.
 
 Public API used by app.py
   derive_key(secret, *parts) · same(a, b) · make_token · verify_token
@@ -51,7 +52,7 @@ RENEW_BELOW_DAYS = 25
 COOKIE_MAX_AGE = COOKIE_DAYS * 86400
 VALID_ROLES = {"admin", "member"}
 APP_NAME, SHORT_NAME = "Arka Trades", "Arka"
-THEME_BG = "#0B0B0C"
+THEME_BG = "#000000"
 WAIT_S = 4.0                         # longest the app waits for the browser before showing the sign-in page
 
 
@@ -108,31 +109,30 @@ def days_left(token, now: float | None = None):
 
 
 # ═════════════════════════ logo ═════════════════════════
-_LOGO_FILES = ("arka_logo.png", "logo.png", "assets/logo.png", "assets/arka_logo.png", "static/logo.png", "arka_logo.jpg", "logo.jpg")
+_LOGO_FILES = ("arka_icon.png", "assets/arka_icon.png", "icon.png", "arka_logo.png", "logo.png", "assets/logo.png")   # square app icon
+_WORDMARK_FILES = ("arka_logo.png", "assets/arka_logo.png", "logo.png", "assets/logo.png")
 
 
 def _default_mark(size: int):
-    """The Arka mark: an 'A' drawn as a rising chart line with a crossbar, amber on near-black."""
-    from PIL import Image, ImageDraw
-    S = size * 4
-    im = Image.new("RGBA", (S, S), (11, 11, 12, 255))
+    """Fallback app icon: ARKA / TRADES in white on black."""
+    from PIL import Image, ImageDraw, ImageFont
+    S = 512
+    im = Image.new("RGBA", (S, S), (0, 0, 0, 255))
     d = ImageDraw.Draw(im)
-    fg, w = (255, 159, 10, 255), int(S * 0.085)
-    xy = [(0.20 * S, 0.80 * S), (0.50 * S, 0.20 * S), (0.80 * S, 0.80 * S)]
-    d.line(xy, fill=fg, width=w, joint="curve")
-    for x, y in xy:
-        d.ellipse([x - w / 2, y - w / 2, x + w / 2, y + w / 2], fill=fg)
-    y, bw = 0.60 * S, int(w * 0.8)
-    d.line([(0.37 * S, y), (0.63 * S, y)], fill=fg, width=bw)
-    for x in (0.37 * S, 0.63 * S):
-        d.ellipse([x - bw / 2, y - bw / 2, x + bw / 2, y + bw / 2], fill=fg)
+    for txt, px, y in (("ARKA", 132, 190), ("TRADES", 54, 318)):
+        try:
+            f = ImageFont.load_default(size=px)
+        except Exception:
+            f = ImageFont.load_default()
+        w = d.textlength(txt, font=f)
+        d.text(((S - w) / 2, y - px / 2), txt, font=f, fill=(255, 255, 255, 255))
     return im.resize((size, size), Image.LANCZOS)
 
 
-def _logo_source():
+def _logo_source(names=_LOGO_FILES):
     from PIL import Image
     here = Path(__file__).resolve().parent
-    for name in _LOGO_FILES:
+    for name in names:
         for base in (Path.cwd(), here):
             p = base / name
             if p.exists():
@@ -156,7 +156,7 @@ def logo_image(size: int):
         im = _default_mark(size)
     else:
         side = max(src.size)
-        canvas = Image.new("RGBA", (side, side), (11, 11, 12, 255))
+        canvas = Image.new("RGBA", (side, side), (0, 0, 0, 255))
         canvas.alpha_composite(src, ((side - src.width) // 2, (side - src.height) // 2))
         im = canvas.resize((size, size), Image.LANCZOS)
     _ICON_CACHE[size] = im
@@ -169,6 +169,25 @@ def page_icon():
         return logo_image(64)
     except Exception:
         return "📈"
+
+
+def wordmark_html(height: int = 18) -> str:
+    """The ARKA TRADES wordmark: arka_logo.png as an <img>, or crisp HTML text when the file is missing."""
+    try:
+        src, _ = _logo_source(_WORDMARK_FILES)
+    except Exception:
+        src = None
+    if src is not None and src.width > src.height * 2:            # a real wordmark (wide), not a square icon
+        if "wm" not in _ICON_CACHE:
+            im = src.copy()
+            if im.height > 160:
+                im = im.resize((int(im.width * 160 / im.height), 160), 1)
+            buf = io.BytesIO()
+            im.save(buf, format="PNG")
+            _ICON_CACHE["wm"] = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+        return f'<img class="ak-wm" src="{_ICON_CACHE["wm"]}" alt="Arka Trades" style="height:{height}px;width:auto;display:block">'
+    return (f'<span class="ak-wm" style="font:700 {height}px Inter,system-ui,sans-serif;letter-spacing:.14em;color:#fff;white-space:nowrap">'
+            f'ARKA<span style="font-weight:500;margin-left:.42em">TRADES</span></span>')
 
 
 def logo_data_uri(px: int = 64) -> str:
@@ -229,6 +248,10 @@ _BRIDGE_HTML = r"""<!doctype html><html><head><meta charset="utf-8"></head><body
         put('link[rel="icon"],link[rel="shortcut icon"]', "link", {rel: "icon", type: "image/png", href: abs("icon-64.png")});
         put('link[rel="apple-touch-icon"],link[rel="apple-touch-icon-precomposed"]', "link", {rel: "apple-touch-icon", sizes: "180x180", href: abs("icon-180.png")});
         put('meta[name="theme-color"]', "meta", {name: "theme-color", content: b.theme});
+        put('style[data-arka-css]', "style", {"data-arka-css": "1"});
+        d.querySelector('style[data-arka-css]').textContent =
+          '[class*="viewerBadge"],[class*="profileContainer"],[class*="profilePreview"],[data-testid="stAppDeployButton"],' +
+          '[data-testid="manage-app-button"]{display:none !important;}html,body{background:' + b.theme + ';}';
         put('meta[name="apple-mobile-web-app-title"]', "meta", {name: "apple-mobile-web-app-title", content: b.short});
         put('meta[name="application-name"]', "meta", {name: "application-name", content: b.short});
         put('meta[name="apple-mobile-web-app-capable"]', "meta", {name: "apple-mobile-web-app-capable", content: "yes"});
