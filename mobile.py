@@ -42,11 +42,12 @@ div[class*="st-key-tabbar"] [data-testid="stVerticalBlock"]{gap:0 !important;wid
 div[class*="st-key-tabbar"] [data-testid="stElementContainer"],div[class*="st-key-tabbar"] .element-container,
 div[class*="st-key-tabbar"] .stButton,div[class*="st-key-tabbar"] [data-testid="stPopover"]{flex:1 1 0 !important;width:auto !important;min-width:0 !important;}
 div[class*="st-key-tabbar"] button{width:100% !important;min-height:54px !important;padding:4px 0 !important;background:transparent !important;border:0 !important;
-  box-shadow:none !important;color:#8E8E96 !important;border-radius:10px !important;}
+  box-shadow:none !important;filter:none !important;color:#8E8E96 !important;border-radius:10px !important;}
 div[class*="st-key-tabbar"] button>div,div[class*="st-key-tabbar"] button>span{display:flex !important;flex-direction:column !important;align-items:center !important;gap:3px !important;}
 div[class*="st-key-tabbar"] button p{font:500 11px var(--sans) !important;letter-spacing:.1px;white-space:nowrap !important;margin:0 !important;color:inherit !important;}
 div[class*="st-key-tabbar"] button [data-testid="stIconMaterial"]{font-size:22px !important;margin:0 !important;color:inherit !important;}
-div[class*="st-key-tabbar"] button[kind="primary"],div[class*="st-key-tabbar"] button[data-testid="stBaseButton-primary"]{color:#fff !important;background:transparent !important;}
+div[class*="st-key-tabbar"] button[kind="primary"],div[class*="st-key-tabbar"] button[data-testid="stBaseButton-primary"]{color:#fff !important;background:transparent !important;box-shadow:none !important;border:0 !important;}
+div[class*="st-key-tabbar"] button[kind="primary"] p,div[class*="st-key-tabbar"] button[data-testid="stBaseButton-primary"] p{color:#fff !important;}
 div[class*="st-key-tabbar"] button[kind="primary"] [data-testid="stIconMaterial"],
 div[class*="st-key-tabbar"] button[data-testid="stBaseButton-primary"] [data-testid="stIconMaterial"]{color:var(--amber) !important;}
 div[class*="st-key-tabbar"] [data-testid="stPopover"] button svg{display:none !important;}
