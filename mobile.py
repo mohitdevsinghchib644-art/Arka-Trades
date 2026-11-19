@@ -1,60 +1,74 @@
-"""mobile.py — phone layout for the Arka terminal (v2).
+"""
+mobile.py — Arka Trades phone layout (v3, for app.py v9.1)
 
-app.py injects MOBILE_CSS on every page (it applies below 820 px through a media query) and, when the device is a
-phone, PHONE_CSS too (the same rules without the media query, so they apply even if the browser reports an odd
-width). Every rule degrades gracefully: if Streamlit changes its markup, the page simply falls back to Streamlit's
-own stacked layout instead of breaking.
+PHONE_CSS is injected when app.py decides the device is a phone (real screen width < 820 px, or forced in
+ACCOUNT → Display). MOBILE_CSS holds a small safety subset that applies on narrow screens even before the width
+is known. Selectors avoid Streamlit internals that change between versions: keyed containers (st-key-*),
+data-testid hooks and plain roles.
 """
 
-_RULES = """
-.block-container{padding:0 12px 56px !important;}
-[data-testid="stVerticalBlock"]{gap:.7rem;}
-[data-testid="stHorizontalBlock"]{gap:.6rem !important;}
-[data-testid="stMarkdownContainer"]{overflow-x:auto;}                       /* wide tables scroll inside their box */
-iframe{max-width:100%;}
-
-/* header: logo, name and market dot only */
-.ak-hdr{padding:10px 0 8px;} .ak-hdr .sub,.ak-hdr .clk,.ak-hdr .det{display:none !important;}
-.ak-hdr .nm{font-size:15px;}
-
-/* main navigation: one row that scrolls sideways, pinned to the top while you scroll */
-div[class*="st-key-navbar"]{position:sticky;top:0;z-index:60;background:var(--bg);margin:0 -12px !important;padding:4px 12px 8px;
-  border-bottom:1px solid var(--line);}
-div[class*="st-key-navbar"] [role="radiogroup"]{flex-wrap:nowrap !important;overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch;
-  padding-bottom:2px;}
-div[class*="st-key-navbar"] [role="radiogroup"]::-webkit-scrollbar{display:none;}
-div[class*="st-key-navbar"] label[data-baseweb="radio"]{flex:0 0 auto !important;padding:8px 12px !important;}
-div[class*="st-key-navbar"] label[data-baseweb="radio"] p{font-size:14px !important;}
-
-/* every view switcher (radio pills) and tab bar scrolls sideways instead of wrapping into a block */
-[data-testid="stRadio"] [role="radiogroup"]{flex-wrap:nowrap !important;overflow-x:auto;scrollbar-width:none;}
+_SAFE = """
+.block-container{padding-left:14px !important;padding-right:14px !important;}
+input,textarea,select,[data-baseweb="select"] input{font-size:16px !important;}          /* no iOS zoom on focus */
+[data-testid="stRadio"] [role="radiogroup"]{flex-wrap:nowrap !important;overflow-x:auto;scrollbar-width:none;padding-bottom:2px;}
 [data-testid="stRadio"] [role="radiogroup"]::-webkit-scrollbar{display:none;}
-[data-testid="stRadio"] label[data-baseweb="radio"]{flex:0 0 auto !important;}
+[data-testid="stRadio"] [role="radiogroup"]>*{flex:0 0 auto !important;}
+[data-testid="stRadio"] [role="radiogroup"] p{white-space:nowrap !important;}
 .stTabs [data-baseweb="tab-list"]{overflow-x:auto;flex-wrap:nowrap;scrollbar-width:none;}
-
-/* touch targets; 16 px text stops iOS zooming into a field */
-.stTextInput input,.stNumberInput input,.stTextArea textarea,[data-baseweb="select"] input,.stDateInput input{font-size:16px !important;}
-.stButton>button,.stDownloadButton>button,[data-testid="stFormSubmitButton"]>button{min-height:42px !important;}
-[data-testid="stPopover"]{width:100%;}
-
-/* page header and footer */
-.ak-ph{padding:12px 0 8px;} .ak-ph .t{font-size:19px;} .ak-ph .d{display:none;}
-.ak-status{flex-direction:column;gap:4px;}
-
-/* security page */
-.ak-sh{flex-direction:column;gap:10px;padding:14px;} .ak-sh .px{text-align:left;} .ak-sh .px .v{font-size:26px;} .ak-sh .nm{font-size:19px;}
-.ak-stats{grid-template-columns:repeat(3,minmax(0,1fr)) !important;}
-
-/* home (market monitor) */
-.hm-head .t small{display:none;} .hm-head .t{font-size:14px;} .hm-hv{font-size:32px;}
-.hm-stats{grid-template-columns:repeat(2,minmax(0,1fr));}
-.hm-tiles{max-width:100%;} .hm-tile{width:calc(25% - 3px);min-width:70px;height:54px;}
-.hm-pb{padding:12px 12px 10px;} .hm-pt{padding:0 12px;} .hm-t td{padding:7px 10px;}
-.hm-fhead,div[class*="st-key-hm_fn_"]{display:none !important;}           /* function cards: the nav bar replaces them */
-
-/* landing + sign-in */
-.lp-hero{padding:56px 4px 28px !important;} .lp-nav .links a:not(.go){display:none;}
+.stTabs [data-baseweb="tab"]{flex:0 0 auto;}
 """
 
-MOBILE_CSS = "<style>@media (max-width:820px){" + _RULES + "}</style>"
-PHONE_CSS = "<style>" + _RULES + "</style>"
+_PHONE = _SAFE + """
+.block-container{padding-top:0 !important;padding-bottom:calc(96px + env(safe-area-inset-bottom)) !important;}
+[data-testid="stVerticalBlock"]{gap:.7rem;}
+
+/* top app bar */
+.ak-phdr{min-height:52px;padding:4px 0 0;}
+.ak-phdr .ak-meta{min-height:52px;gap:10px;}
+.ak-phdr .ak-av{width:30px;height:30px;}
+
+/* page header: title only */
+.ak-ph{padding:6px 0 2px;}
+.ak-ph .t{font-size:20px;}
+.ak-ph .d{display:none;}
+.ak-ph .r{display:none;}
+
+/* bottom tab bar */
+div[class*="st-key-tabbar"]{position:fixed !important;left:0 !important;right:0 !important;bottom:0 !important;z-index:999990 !important;
+  margin:0 !important;width:100% !important;gap:0 !important;justify-content:space-around !important;
+  padding:4px 4px calc(4px + env(safe-area-inset-bottom)) !important;
+  background:rgba(12,12,13,.94);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);border-top:1px solid #222225;}
+div[class*="st-key-tabbar"] [data-testid="stVerticalBlock"]{gap:0 !important;width:100% !important;justify-content:space-around !important;}
+div[class*="st-key-tabbar"] [data-testid="stElementContainer"],div[class*="st-key-tabbar"] .element-container,
+div[class*="st-key-tabbar"] .stButton,div[class*="st-key-tabbar"] [data-testid="stPopover"]{flex:1 1 0 !important;width:auto !important;min-width:0 !important;}
+div[class*="st-key-tabbar"] button{width:100% !important;min-height:54px !important;padding:4px 0 !important;background:transparent !important;border:0 !important;
+  box-shadow:none !important;color:#8E8E96 !important;border-radius:10px !important;}
+div[class*="st-key-tabbar"] button>div,div[class*="st-key-tabbar"] button>span{display:flex !important;flex-direction:column !important;align-items:center !important;gap:3px !important;}
+div[class*="st-key-tabbar"] button p{font:500 11px var(--sans) !important;letter-spacing:.1px;white-space:nowrap !important;margin:0 !important;color:inherit !important;}
+div[class*="st-key-tabbar"] button [data-testid="stIconMaterial"]{font-size:22px !important;margin:0 !important;color:inherit !important;}
+div[class*="st-key-tabbar"] button[kind="primary"],div[class*="st-key-tabbar"] button[data-testid="stBaseButton-primary"]{color:#fff !important;background:transparent !important;}
+div[class*="st-key-tabbar"] button[kind="primary"] [data-testid="stIconMaterial"],
+div[class*="st-key-tabbar"] button[data-testid="stBaseButton-primary"] [data-testid="stIconMaterial"]{color:var(--amber) !important;}
+div[class*="st-key-tabbar"] [data-testid="stPopover"] button svg{display:none !important;}
+div[class*="st-key-tabbar"] button:active{background:rgba(255,255,255,.05) !important;}
+[data-testid="stPopoverBody"]{min-width:240px;}
+[data-testid="stPopoverBody"] .stButton>button{justify-content:flex-start !important;min-height:46px !important;font-size:15px !important;}
+
+/* buttons, cards, stock page */
+.stButton>button,.stDownloadButton>button,[data-testid="stFormSubmitButton"]>button{min-height:44px !important;}
+div[class*="st-key-search"] [data-baseweb="select"]>div{min-height:44px;}
+.ak-status{flex-direction:column;gap:4px;margin-top:20px;}
+.ak-sh{flex-direction:column;gap:10px;padding:14px;} .ak-sh .px{text-align:left;} .ak-sh .nm{font-size:20px;} .ak-sh .px .v{font-size:26px;}
+.ak-stats{grid-template-columns:repeat(3,minmax(0,1fr));} .ak-st{padding:9px 10px;border-bottom:1px solid var(--line);}
+.ak-rng{padding:10px 14px 14px;}
+[data-testid="stMetricValue"]{font-size:17px !important;}
+[data-testid="stDataFrame"]{font-size:13px;}
+
+/* landing / sign-in on phones */
+.lp-hero{padding:56px 0 24px !important;} .lp-h{margin:56px 0 18px !important;} .lp-nav .links a:not(.go){display:none;}
+.lp-end{margin-top:56px !important;}
+div[class*="st-key-signin"]{margin-top:28px !important;}
+"""
+
+MOBILE_CSS = "<style>@media (max-width:820px){" + _SAFE + "}</style>"
+PHONE_CSS = "<style>" + _PHONE + "</style>"
