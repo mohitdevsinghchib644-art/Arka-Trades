@@ -267,8 +267,35 @@ _BRIDGE_HTML = r"""<!doctype html><html><head><meta charset="utf-8"></head><body
       } catch (e) {}
     });
   }
+  function fx(w) {                                  // premium tap: ripple + light haptic on every button
+    try {
+      var d = w.document;
+      if (d.__arkaFx) return;
+      d.__arkaFx = 1;
+      var css = d.createElement("style");
+      css.setAttribute("data-arka-fx", "1");
+      css.textContent = ".ak-ripple{position:absolute;border-radius:50%;pointer-events:none;background:rgba(255,255,255,.16);transform:scale(0);" +
+        "animation:akrip .55s ease-out forwards}@keyframes akrip{to{transform:scale(1);opacity:0}}" +
+        "button{-webkit-tap-highlight-color:transparent}@media (prefers-reduced-motion:reduce){.ak-ripple{display:none}}";
+      d.head.appendChild(css);
+      d.addEventListener("pointerdown", function (e) {
+        var b = e.target && e.target.closest ? e.target.closest("button") : null;
+        if (!b || b.disabled) return;
+        try { if (e.pointerType !== "mouse" && w.navigator.vibrate) w.navigator.vibrate(8); } catch (_) {}
+        try {
+          var r = b.getBoundingClientRect(), z = Math.max(r.width, r.height) * 2.2, s = d.createElement("span");
+          s.className = "ak-ripple";
+          s.style.cssText = "width:" + z + "px;height:" + z + "px;left:" + (e.clientX - r.left - z / 2) + "px;top:" + (e.clientY - r.top - z / 2) + "px";
+          if (w.getComputedStyle(b).position === "static") b.style.position = "relative";
+          b.style.overflow = "hidden";
+          b.appendChild(s);
+          setTimeout(function () { if (s.parentNode) s.parentNode.removeChild(s); }, 650);
+        } catch (_) {}
+      }, {passive: true, capture: true});
+    } catch (e) {}
+  }
   function handle(args) {
-    if (!branded && args.brand) { brand(args.brand); branded = true; }
+    if (!branded && args.brand) { brand(args.brand); branded = true; try { fx(window.parent); } catch (e) {} }
     var nonce = args.nonce;
     if (!nonce || nonce === lastNonce) return;          // nothing new to do
     lastNonce = nonce;
