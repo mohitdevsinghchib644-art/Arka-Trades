@@ -1,5 +1,8 @@
 """
-Arka Trades — Market Terminal v9.1
+Arka Trades — Market Terminal v9.2
+
+v9.2: premium buttons everywhere: soft depth, press-in on tap, glow on primary actions, a tap ripple and a light haptic
+      tick on Android (from auth.py). Respects "reduce motion".
 
 v9.1 (after testing on a phone)
   * Phone layout rebuilt like a trading app: slim top bar with the ARKA TRADES wordmark, a fixed bottom tab bar
@@ -59,7 +62,7 @@ except Exception:  # pragma: no cover
     create_client = None
 
 IST = timezone(timedelta(hours=5, minutes=30))
-APP_VERSION = "v9.1"
+APP_VERSION = "v9.2"
 
 
 def _secret(name: str, default=""):
@@ -216,17 +219,31 @@ a{color:var(--amber);text-decoration:none;} a:hover{color:var(--amber2);}
   text-transform:none !important;color:var(--tx2) !important;}
 hr{border-color:var(--line) !important;} iframe{border:none;}
 
-/* buttons */
-.stButton>button,.stDownloadButton>button,[data-testid^="stBaseButton-secondary"],[data-testid="stFormSubmitButton"]>button,[data-testid="stPopover"]>div>button{
-  background:var(--s2) !important;color:var(--tx) !important;border:1px solid var(--line2) !important;border-radius:var(--r-sm) !important;
-  font:500 13px var(--sans) !important;letter-spacing:0;min-height:36px !important;box-shadow:none !important;
-  transition:border-color .12s ease,background .12s ease,color .12s ease;}
-.stButton>button:hover,.stDownloadButton>button:hover,[data-testid="stPopover"]>div>button:hover{border-color:#45454d !important;background:var(--s3) !important;color:#fff !important;}
+/* buttons: soft depth, a quick press-in on tap, a glow on the primary action (tap ripple + haptic come from auth.py) */
+.stButton>button,.stDownloadButton>button,[data-testid^="stBaseButton-secondary"],[data-testid="stFormSubmitButton"]>button,[data-testid="stPopover"]>div>button,
+[data-testid="stPopover"] button{
+  background:linear-gradient(180deg,#1C1C1F 0%,#161618 100%) !important;color:var(--tx) !important;border:1px solid var(--line2) !important;
+  border-radius:10px !important;font:500 13.5px var(--sans) !important;letter-spacing:0;min-height:38px !important;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 1px 2px rgba(0,0,0,.35) !important;
+  transition:transform .14s cubic-bezier(.2,.8,.2,1),background .18s ease,border-color .18s ease,box-shadow .2s ease,color .15s ease !important;
+  -webkit-tap-highlight-color:transparent;touch-action:manipulation;user-select:none;-webkit-user-select:none;}
+.stButton>button:hover,.stDownloadButton>button:hover,[data-testid="stPopover"] button:hover{border-color:#4A4A52 !important;
+  background:linear-gradient(180deg,#232327 0%,#1B1B1E 100%) !important;color:#fff !important;}
+.stButton>button:active,.stDownloadButton>button:active,[data-testid="stFormSubmitButton"]>button:active,[data-testid="stPopover"] button:active{
+  transform:scale(.965) !important;box-shadow:inset 0 2px 6px rgba(0,0,0,.45) !important;transition-duration:.06s !important;}
 .stButton>button:focus-visible{outline:2px solid var(--amber) !important;outline-offset:2px;}
-.stButton>button:disabled{opacity:.4 !important;cursor:not-allowed;}
+.stButton>button:disabled{opacity:.4 !important;cursor:not-allowed;transform:none !important;}
 .stButton>button[kind="primary"],button[data-testid^="stBaseButton-primary"],[data-testid="stFormSubmitButton"]>button[kind="primary"]{
-  background:var(--amber) !important;color:#111 !important;border-color:var(--amber) !important;font-weight:600 !important;}
-.stButton>button[kind="primary"]:hover,button[data-testid^="stBaseButton-primary"]:hover{background:var(--amber2) !important;border-color:var(--amber2) !important;color:#111 !important;}
+  background:linear-gradient(180deg,#FFB547 0%,#FF9F0A 55%,#F59200 100%) !important;color:#1A1200 !important;border:1px solid rgba(255,190,90,.6) !important;
+  font-weight:600 !important;box-shadow:inset 0 1px 0 rgba(255,255,255,.38),0 1px 2px rgba(0,0,0,.4),0 10px 26px -12px rgba(255,159,10,.85) !important;}
+.stButton>button[kind="primary"] p,button[data-testid^="stBaseButton-primary"] p{color:#1A1200 !important;font-weight:600 !important;}
+.stButton>button[kind="primary"]:hover,button[data-testid^="stBaseButton-primary"]:hover{filter:brightness(1.06);color:#1A1200 !important;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.42),0 1px 2px rgba(0,0,0,.4),0 14px 32px -12px rgba(255,159,10,.95) !important;}
+.stButton>button[kind="primary"]:active,button[data-testid^="stBaseButton-primary"]:active{transform:scale(.965) !important;filter:brightness(.97);
+  box-shadow:inset 0 2px 8px rgba(120,60,0,.45) !important;}
+.ak-ripple{position:absolute;border-radius:50%;pointer-events:none;background:rgba(255,255,255,.16);transform:scale(0);animation:akrip .55s ease-out forwards;}
+@keyframes akrip{to{transform:scale(1);opacity:0;}}
+@media (prefers-reduced-motion:reduce){.stButton>button,.stButton>button:active{transition:none !important;transform:none !important;}.ak-ripple{display:none;}}
 
 /* inputs */
 .stTextInput input,.stNumberInput input,.stDateInput input,.stTextArea textarea{
@@ -297,11 +314,11 @@ div[class*="st-key-tabbar"],div[class*="st-key-tabbar"] [data-testid="stVertical
 div[class*="st-key-tabs"] [data-testid="stElementContainer"],div[class*="st-key-tabs"] .element-container,div[class*="st-key-tabs"] .stButton{width:auto !important;flex:0 0 auto !important;}
 div[class*="st-key-tabs"]{gap:4px !important;overflow-x:auto;scrollbar-width:none;padding:10px 0 !important;border-bottom:1px solid var(--line);}
 div[class*="st-key-tabs"] [data-testid="stVerticalBlock"]{gap:4px !important;}
-div[class*="st-key-tabs"] button{background:transparent !important;border:0 !important;border-radius:8px !important;min-height:36px !important;padding:0 14px !important;
+div[class*="st-key-tabs"] button{background:transparent !important;border:0 !important;border-radius:8px !important;box-shadow:none !important;filter:none !important;min-height:36px !important;padding:0 14px !important;
   color:var(--tx3) !important;font:500 14px var(--sans) !important;width:auto !important;}
 div[class*="st-key-tabs"] button p{font:500 14px var(--sans) !important;white-space:nowrap !important;}
 div[class*="st-key-tabs"] button:hover{background:var(--s1) !important;color:var(--tx) !important;}
-div[class*="st-key-tabs"] button[kind="primary"],div[class*="st-key-tabs"] button[data-testid="stBaseButton-primary"]{background:var(--s2) !important;color:#fff !important;}
+div[class*="st-key-tabs"] button[kind="primary"],div[class*="st-key-tabs"] button[data-testid="stBaseButton-primary"]{background:var(--s2) !important;color:#fff !important;box-shadow:inset 0 1px 0 rgba(255,255,255,.05) !important;border:0 !important;}
 div[class*="st-key-tabs"] button[kind="primary"] p,div[class*="st-key-tabs"] button[data-testid="stBaseButton-primary"] p{color:#fff !important;}
 div[class*="st-key-search"] [data-baseweb="select"]>div{min-height:40px;background:var(--s1) !important;border-radius:10px !important;}
 div[class*="st-key-search"] [data-baseweb="select"] input,div[class*="st-key-search"] .stTextInput input{font:500 14px var(--sans) !important;}
