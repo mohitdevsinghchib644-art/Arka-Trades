@@ -1,33 +1,17 @@
 """
-home_page.py — Arka Trades · Market Monitor (the HOME page), v1.1
+home_page.py — Arka Trades · Market overview (the HOME page), v2
 
-A Bloomberg Launchpad-style monitor for Indian markets. Every block is plain HTML / SVG (no Plotly, no
-per-row widgets), so the whole page is built in milliseconds once data is cached.
+v2 is a visual redesign; the data, calendar and caching code is unchanged from v1.1.
+  * App-style look: Inter everywhere with tabular numbers, sentence-case labels, soft 12 px cards, no code
+    badges, no scrolling tape, no uppercase monospace.
+  * Index cards strip at the top (NIFTY 50, SENSEX, BANK NIFTY, VIX, USD/INR, gold, crude, S&P 500) that swipes
+    sideways on phones.
+  * Phones get their own layout (render_home(..., compact=True), set by app.py v9.1): lists instead of wide
+    tables, a 4-across heatmap, and the most useful blocks first (NIFTY, movers, your book, heatmap, sectors).
+  * The function launcher cards are gone; navigation lives in the app's tab bar.
 
-  TAPE   scrolling cross-asset ticker (pauses on hover)
-  NIFTY  hero: last, change, 3-month chart, day range, 52-week range, 1W / 1M / YTD, 50 / 200-DMA, RSI
-  REGM   market regime: six transparent checks -> RISK-ON ... RISK-OFF
-  SESS   NSE session with progress bar, 2026 holiday calendar, next session, Muhurat trading
-  MOOD   Market Mood Index (Tickertape) + India VIX with its 1-year percentile
-  WEI    world equity indices by region: last, change, 1D / 1W / 1M / YTD, 1-month trend, date
-  XA     cross-asset: commodities, currencies (vs INR), US yields (in basis points), volatility, crypto
-  IMAP   NIFTY 50 heatmap grouped by sector + advance / decline breadth
-  SECT   NSE sectoral indices heat matrix 1D / 1W / 1M / YTD
-  MOV    NIFTY 50 top gainers / losers
-  BOOK   your portfolio (same split-adjusted FIFO engine as the Portfolio page) and watchlist
-  ROT    sector rotation snapshot from Money Flow (when it has been loaded this session)
-  WCLK   world market clock (open / closed by local exchange hours)
-  FUNC   function launcher (the same codes work in the command line: MF, RES, PORT, WL, NEWS, EQS, AI)
-
-What changed in v1.1 (readability)
-  * Larger type everywhere: table text 11 -> 12.5 px, labels 8-9 -> 10-11 px, NIFTY price 30 -> 40 px.
-  * More room: 14 px gaps between panels, roomier panel padding and table rows, taller tape and chart.
-  * Layout follows the width actually available to the page (CSS container queries), not the browser
-    width. The four top panels sit 2 x 2 unless the page is very wide, and the two big quote tables stack
-    instead of squeezing their columns (the cross-asset DATE column was being cut off).
-  * Panel titles no longer truncate ("MARKET …", "NSE SES…"): the right-hand note shrinks instead.
-  * Bigger heatmap tiles, sparklines and function cards.
-  * Fix: a heatmap tile with no price could raise a format error.
+Public API unchanged: render_home(supabase, on_open, nav[, compact]) · render_tape() · nse_session() · get_mmi()
+· mmi_zone_color() · market_data().
 
 Data: Yahoo Finance (delayed). Two batched downloads for ~60 instruments: last 5 days every 90 s while NSE
 is open (15 min when closed) and 1 year of history every 6 h. Stale-while-error via data_engine._guarded.
@@ -229,140 +213,141 @@ FUNCS = [("MF", "MONEY FLOW", "flow", "Rotation desk: where money is moving, sec
 
 
 # ═════════════════════════ CSS ═════════════════════════
-# Layout rules use container queries (@container) so the grid reacts to the width the HOME column really has
-# (news rail open or closed), not to the browser window. Browsers without support fall back to one column.
+# Calm, app-like styling (Inter everywhere, tabular numbers, 12 px corners). Layout uses container queries so the
+# grid follows the width the HOME column really has; phones (and narrow columns) get one column.
 _CSS = """<style>
-.hm-cq{container-type:inline-size;width:100%;}
-.hm-head{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;padding:14px 2px 12px;border-bottom:1px solid var(--line);margin-top:6px;}
-.hm-head .t{font:800 17px var(--mono);letter-spacing:2.4px;color:var(--tx);white-space:nowrap;}
-.hm-head .t em{font-style:normal;color:#000;background:var(--amber);padding:3px 9px;margin-right:12px;border-radius:2px;font-size:12px;letter-spacing:1.4px;}
-.hm-head .t small{font:500 13px var(--sans);letter-spacing:0;color:var(--tx3);margin-left:14px;}
-.hm-head .m{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end;}
-.hm-tag{display:inline-flex;align-items:center;gap:7px;padding:5px 11px;border:1px solid var(--line2);border-radius:3px;font:700 10.5px var(--mono);letter-spacing:.8px;color:var(--tx2);white-space:nowrap;}
-.hm-tag i{width:7px;height:7px;border-radius:50%;background:currentColor;display:inline-block;}
-.hm-tag.live{color:var(--green);border-color:rgba(48,209,88,.4);background:rgba(48,209,88,.07);} .hm-tag.live i{box-shadow:0 0 8px var(--green);animation:hmpulse 2s infinite;}
-.hm-tag.pre{color:var(--amber);border-color:rgba(255,159,10,.4);background:rgba(255,159,10,.07);}
-@keyframes hmpulse{0%,100%{opacity:1}50%{opacity:.3}}
-.hm-tape{position:relative;overflow:hidden;height:40px;border:1px solid var(--line);border-left:3px solid var(--amber);background:#000;margin-top:12px;}
-.hm-tape .tr{display:inline-flex;white-space:nowrap;padding:11px 0;animation:hmtape 150s linear infinite;will-change:transform;}
-.hm-tape:hover .tr{animation-play-state:paused;}
-.hm-tape span{font:600 13px var(--mono);font-variant-numeric:tabular-nums;color:var(--tx);margin-right:38px;}
-.hm-tape span b{font-weight:700;color:var(--amber);margin-right:8px;letter-spacing:.4px;}
-.hm-tape span em{font-style:normal;margin-left:8px;}
-@keyframes hmtape{from{transform:translateX(0)}to{transform:translateX(-50%)}}
-@media (prefers-reduced-motion:reduce){.hm-tape .tr{animation:none;}}
+.hm{--hm-r:12px;font-family:var(--sans,'Inter',system-ui,sans-serif);font-variant-numeric:tabular-nums;container-type:inline-size;width:100%;}
+.hm *{box-sizing:border-box;}
+.hm-head{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;flex-wrap:wrap;padding:18px 0 4px;}
+.hm-head .t{font:600 22px var(--sans);letter-spacing:-.4px;color:var(--tx);}
+.hm-head .s{font:13px var(--sans);color:var(--tx3);margin-top:4px;}
+.hm-chip{display:inline-flex;align-items:center;gap:7px;padding:5px 11px;border-radius:999px;background:var(--s2);font:500 12.5px var(--sans);color:var(--tx2);white-space:nowrap;}
+.hm-chip i{width:7px;height:7px;border-radius:50%;background:var(--tx4,#52525B);display:inline-block;}
+.hm-chip.live i{background:var(--green);box-shadow:0 0 0 3px rgba(48,209,88,.18);} .hm-chip.pre i{background:var(--amber);}
 
-/* grid: one column by default, more columns only when the HOME column is wide enough */
-.hm-row{display:grid;gap:14px;margin-top:14px;align-items:stretch;grid-template-columns:minmax(0,1fr);}
-@container (min-width:980px){
-  .hm-r1{grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);}
-  .hm-r4{grid-template-columns:minmax(0,1fr) minmax(0,1fr);}
-  .hm-r4>.hm-p:last-child{grid-column:1/-1;}
+/* index cards strip */
+.hm-cards{display:flex;gap:10px;overflow-x:auto;scroll-snap-type:x mandatory;padding:12px 0 4px;margin:0;scrollbar-width:none;-webkit-overflow-scrolling:touch;}
+.hm-cards::-webkit-scrollbar{display:none;}
+.hm-card{flex:1 0 158px;scroll-snap-align:start;background:var(--s1);border:1px solid var(--line);border-radius:var(--hm-r);padding:12px 14px 10px;min-width:158px;}
+.hm-card .n{font:500 12.5px var(--sans);color:var(--tx3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.hm-card .v{font:600 17px var(--sans);color:var(--tx);margin-top:6px;letter-spacing:-.2px;white-space:nowrap;}
+.hm-card .c{font:500 12.5px var(--sans);margin-top:2px;white-space:nowrap;}
+.hm-card svg{display:block;margin-top:8px;width:100%;}
+
+/* grid */
+.hm-row{display:grid;gap:12px;margin-top:12px;grid-template-columns:minmax(0,1fr);align-items:stretch;}
+@container (min-width:760px){
+  .hm-r1{grid-template-columns:minmax(0,1fr) minmax(0,1fr);} .hm-r1>.hm-p:first-child{grid-column:1/-1;}
+  .hm-r2,.hm-r3,.hm-r5{grid-template-columns:minmax(0,1fr) minmax(0,1fr);}
 }
-@container (min-width:1450px){
-  .hm-r3{grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);}
-  .hm-r4{grid-template-columns:minmax(0,1fr) minmax(0,1.25fr) minmax(0,1fr);}
-  .hm-r4>.hm-p:last-child{grid-column:auto;}
+@container (min-width:1120px){
+  .hm-r1{grid-template-columns:minmax(0,1.7fr) minmax(0,1fr) minmax(0,1fr);} .hm-r1>.hm-p:first-child{grid-column:auto;}
+  .hm-r2{grid-template-columns:minmax(0,1fr) minmax(0,2fr);}
+  .hm-r5{grid-template-columns:repeat(3,minmax(0,1fr));}
 }
-@container (min-width:1750px){ .hm-r2{grid-template-columns:minmax(0,1.12fr) minmax(0,1fr);} }
-@container (min-width:2050px){ .hm-r1{grid-template-columns:minmax(0,1.5fr) repeat(3,minmax(0,1fr));} }
-@media(max-width:720px){.hm-head{flex-direction:column;align-items:flex-start;}.hm-head .m{justify-content:flex-start;}}
+@container (min-width:1500px){ .hm-r4{grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);} }
 
 /* panels */
-.hm-p{background:var(--s1);border:1px solid var(--line);border-radius:3px;min-width:0;display:flex;flex-direction:column;overflow:hidden;}
-.hm-pt{height:42px;flex-shrink:0;padding:0 16px;display:flex;align-items:center;justify-content:space-between;gap:14px;border-bottom:1px solid var(--line);background:var(--s2);}
-.hm-pt b{font:700 11.5px var(--mono);letter-spacing:1.3px;color:var(--tx);white-space:nowrap;flex-shrink:0;}
-.hm-pt b i{font-style:normal;color:#000;background:var(--amber);padding:2px 7px;margin-right:10px;border-radius:2px;font-size:10px;letter-spacing:.8px;}
-.hm-pt span{font:600 10.5px var(--mono);letter-spacing:.6px;color:var(--tx3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;text-align:right;}
-.hm-pb{padding:16px 18px 14px;flex:1;min-width:0;}
-.hm-pb.np{padding:0;}
-.hm-sub{font:700 10.5px var(--mono);letter-spacing:1.3px;color:var(--tx3);padding:18px 0 8px;text-transform:uppercase;}
+.hm-p{background:var(--s1);border:1px solid var(--line);border-radius:var(--hm-r);min-width:0;display:flex;flex-direction:column;overflow:hidden;}
+.hm-pt{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:14px 16px 4px;}
+.hm-pt b{font:600 15px var(--sans);color:var(--tx);white-space:nowrap;}
+.hm-pt span{font:12.5px var(--sans);color:var(--tx3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;text-align:right;}
+.hm-pb{padding:8px 16px 16px;flex:1;min-width:0;}
+.hm-pb.np{padding:6px 0 8px;}
+.hm-sub{font:600 13px var(--sans);color:var(--tx2);padding:16px 0 4px;}
 .hm-up{color:var(--green) !important;} .hm-dn{color:var(--red) !important;} .hm-fl{color:var(--tx3) !important;}
 
 /* tables */
-.hm-t{width:100%;border-collapse:collapse;font:12.5px var(--mono);font-variant-numeric:tabular-nums;}
-.hm-t th{font:700 10px var(--mono);letter-spacing:.8px;color:var(--tx3);text-align:right;padding:11px 14px;border-bottom:1px solid var(--line2);text-transform:uppercase;white-space:nowrap;background:#0c0c0c;position:sticky;top:0;}
+.hm-t{width:100%;border-collapse:collapse;font:13.5px var(--sans);}
+.hm-t th{font:500 12px var(--sans);color:var(--tx3);text-align:right;padding:8px 16px;border-bottom:1px solid var(--line);white-space:nowrap;}
 .hm-t th:first-child,.hm-t td:first-child{text-align:left;}
-.hm-t td{padding:8px 14px;line-height:1.4;border-bottom:1px solid #141414;text-align:right;color:var(--tx2);white-space:nowrap;}
-.hm-t td.n{color:var(--tx);font-weight:600;font-family:var(--mono);}
-.hm-t td.l{color:var(--tx);font-weight:700;}
+.hm-t td{padding:9px 16px;border-bottom:1px solid var(--line);text-align:right;color:var(--tx2);white-space:nowrap;}
+.hm-t tr:last-child td{border-bottom:0;}
+.hm-t td.n{color:var(--tx);font-weight:500;}
+.hm-t td.l{color:var(--tx);font-weight:500;}
 .hm-t td.st{opacity:.45;}
-.hm-t tr.g td{font:700 10px var(--mono);letter-spacing:1.3px;color:var(--amber);background:#0b0b0b;padding:13px 14px 7px;text-align:left;border-bottom:1px solid var(--line);}
-.hm-t tbody tr:not(.g):hover td{background:rgba(255,159,10,.05);}
+.hm-t tr.g td{font:600 12px var(--sans);color:var(--tx3);padding:14px 16px 6px;border-bottom:0;}
+.hm-t tbody tr:not(.g):hover td{background:rgba(255,255,255,.02);}
 .hm-t svg{vertical-align:middle;}
-.hm-t+.hm-t{margin-top:12px;}
+.hm-hm td.c{font-weight:600;color:#fff !important;text-align:center !important;min-width:64px;border-left:2px solid var(--s1);}
+
+/* compact list rows (phones) */
+.hm-li{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 16px;border-bottom:1px solid var(--line);}
+.hm-li:last-child{border-bottom:0;}
+.hm-li .a{min-width:0;} .hm-li .a b{display:block;font:500 14px var(--sans);color:var(--tx);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.hm-li .a small{display:block;font:12px var(--sans);color:var(--tx3);margin-top:2px;}
+.hm-li .z{text-align:right;flex-shrink:0;} .hm-li .z b{display:block;font:500 14px var(--sans);color:var(--tx);}
+.hm-li .z small{display:block;font:500 12.5px var(--sans);margin-top:2px;}
+.hm-lg{font:600 12px var(--sans);color:var(--tx3);padding:14px 16px 4px;}
+.hm-pct{display:inline-block;min-width:64px;padding:4px 8px;border-radius:6px;font:600 12.5px var(--sans);text-align:center;}
 
 /* NIFTY hero */
-.hm-hv{font:700 40px var(--mono);font-variant-numeric:tabular-nums;color:var(--tx);letter-spacing:-.5px;line-height:1.05;}
-.hm-hc{font:700 15px var(--mono);font-variant-numeric:tabular-nums;margin-top:7px;}
+.hm-hv{font:600 34px var(--sans);color:var(--tx);letter-spacing:-.8px;line-height:1.1;}
+.hm-hc{font:500 14px var(--sans);margin-top:4px;}
 .hm-hrow{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;}
-.hm-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px 20px;margin-top:14px;}
-.hm-stats div{display:flex;justify-content:space-between;gap:8px;font:12px var(--mono);color:var(--tx3);border-bottom:1px dotted #242424;padding:7px 0;}
-.hm-stats b{color:var(--tx);font-weight:600;font-variant-numeric:tabular-nums;}
-.hm-rng{margin-top:16px;}
-.hm-rng .t{display:flex;justify-content:space-between;gap:10px;font:600 10.5px var(--mono);letter-spacing:.5px;color:var(--tx3);margin-bottom:7px;}
-.hm-rng .b{position:relative;height:6px;background:linear-gradient(90deg,rgba(255,69,58,.45),#2a2a2a 50%,rgba(48,209,88,.45));border-radius:3px;}
-.hm-rng .b i{position:absolute;top:-4px;width:4px;height:14px;background:var(--amber);border-radius:1px;transform:translateX(-2px);box-shadow:0 0 6px rgba(255,159,10,.7);}
+.hm-per{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;}
+.hm-per span{font:500 12px var(--sans);padding:4px 9px;border-radius:999px;background:var(--s2);color:var(--tx2);white-space:nowrap;}
+.hm-per span b{font-weight:600;margin-left:4px;}
+.hm-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0 20px;margin-top:10px;}
+@container (max-width:520px){.hm-stats{grid-template-columns:repeat(2,minmax(0,1fr));} .hm-hv{font-size:30px;}}
+.hm-stats div{display:flex;justify-content:space-between;gap:8px;font:13px var(--sans);color:var(--tx3);border-bottom:1px solid var(--line);padding:8px 0;}
+.hm-stats b{color:var(--tx);font-weight:500;}
+.hm-rng{margin-top:14px;}
+.hm-rng .t{display:flex;justify-content:space-between;gap:10px;font:12px var(--sans);color:var(--tx3);margin-bottom:7px;}
+.hm-rng .t b{color:var(--tx2);font-weight:500;}
+.hm-rng .b{position:relative;height:4px;background:var(--s3);border-radius:2px;}
+.hm-rng .b i{position:absolute;top:-4px;width:12px;height:12px;background:var(--tx);border:2px solid var(--s1);border-radius:50%;transform:translateX(-6px);}
 
 /* regime, session, mood */
-.hm-big{font:800 28px var(--mono);letter-spacing:.5px;line-height:1.1;}
-.hm-cap{font:13px var(--sans);color:var(--tx3);margin-top:6px;line-height:1.55;}
-.hm-chk{display:flex;justify-content:space-between;align-items:center;gap:14px;font:13px var(--sans);color:var(--tx2);padding:9px 0;border-bottom:1px solid #161616;line-height:1.45;}
+.hm-big{font:600 24px var(--sans);letter-spacing:-.4px;line-height:1.15;}
+.hm-cap{font:13px var(--sans);color:var(--tx3);margin-top:4px;line-height:1.55;}
+.hm-chk{display:flex;justify-content:space-between;align-items:center;gap:14px;font:13px var(--sans);color:var(--tx2);padding:8px 0;border-bottom:1px solid var(--line);line-height:1.45;}
 .hm-chk:last-child{border-bottom:0;}
-.hm-chk b{font:700 12px var(--mono);white-space:nowrap;}
-.hm-meter{display:flex;gap:4px;margin:14px 0 8px;} .hm-meter i{flex:1;height:7px;background:#1d1d1d;border-radius:1px;}
-.hm-prog{position:relative;height:8px;background:#161616;margin:16px 0 6px;border-radius:2px;}
-.hm-prog i{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,rgba(48,209,88,.5),var(--green));border-radius:2px;}
-.hm-prog s{position:absolute;top:-3px;width:1px;height:14px;background:#3a3a3a;}
-.hm-ticks{display:flex;justify-content:space-between;font:600 10px var(--mono);color:var(--tx3);}
-.hm-kv{display:flex;justify-content:space-between;align-items:center;gap:14px;padding:8px 0;border-bottom:1px solid #161616;font:13px var(--sans);color:var(--tx3);line-height:1.45;}
+.hm-chk b{font:600 12.5px var(--sans);white-space:nowrap;}
+.hm-meter{display:flex;gap:4px;margin:12px 0 6px;} .hm-meter i{flex:1;height:6px;background:var(--s3);border-radius:3px;}
+.hm-prog{position:relative;height:6px;background:var(--s3);margin:14px 0 6px;border-radius:3px;overflow:hidden;}
+.hm-prog i{position:absolute;left:0;top:0;bottom:0;background:var(--green);border-radius:3px;}
+.hm-ticks{display:flex;justify-content:space-between;font:12px var(--sans);color:var(--tx3);}
+.hm-kv{display:flex;justify-content:space-between;align-items:center;gap:14px;padding:8px 0;border-bottom:1px solid var(--line);font:13px var(--sans);color:var(--tx3);line-height:1.45;}
 .hm-kv:last-child{border-bottom:0;}
-.hm-kv b{font:600 13px var(--mono);color:var(--tx);font-variant-numeric:tabular-nums;white-space:nowrap;}
-.hm-gauge{position:relative;height:10px;border-radius:3px;margin:14px 0 6px;background:linear-gradient(90deg,#FF453A 0%,#FF9F0A 30%,#FF9F0A 50%,#84CC16 50%,#30D158 70%,#30D158 100%);opacity:.85;}
-.hm-gauge i{position:absolute;top:-4px;width:5px;height:18px;background:#fff;border-radius:1px;transform:translateX(-2px);box-shadow:0 0 6px #000;}
-.hm-gl{display:flex;justify-content:space-between;font:600 9.5px var(--mono);color:var(--tx3);letter-spacing:.5px;}
+.hm-kv b{font:500 13px var(--sans);color:var(--tx);white-space:nowrap;}
+.hm-gauge{position:relative;height:6px;border-radius:3px;margin:14px 0 6px;background:linear-gradient(90deg,#FF453A,#FF9F0A 40%,#B5D334 60%,#30D158);}
+.hm-gauge i{position:absolute;top:-5px;width:16px;height:16px;background:#fff;border:3px solid var(--s1);border-radius:50%;transform:translateX(-8px);}
+.hm-gl{display:flex;justify-content:space-between;font:12px var(--sans);color:var(--tx3);}
 
 /* NIFTY 50 heatmap */
-.hm-imap{display:flex;flex-wrap:wrap;gap:16px 18px;padding:16px 18px 12px;}
-.hm-leg{display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:4px 18px 16px;font:600 10px var(--mono);color:var(--tx3);letter-spacing:.5px;}
-.hm-leg i{width:180px;height:7px;border-radius:2px;background:linear-gradient(90deg,rgba(255,69,58,.78),rgba(255,69,58,.16) 48%,#262626 50%,rgba(48,209,88,.16) 52%,rgba(48,209,88,.78));}
-.hm-grp{display:flex;flex-direction:column;gap:5px;}
-.hm-grp>small{font:700 9.5px var(--mono);letter-spacing:1px;color:var(--tx3);white-space:nowrap;}
-.hm-tiles{display:flex;flex-wrap:wrap;gap:3px;max-width:546px;}
-.hm-tile{width:88px;height:62px;display:flex;flex-direction:column;justify-content:center;align-items:center;border-radius:3px;color:#fff;overflow:hidden;}
-.hm-tile b{font:700 11.5px var(--mono);letter-spacing:.2px;max-width:82px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.hm-tile span{font:600 11px var(--mono);opacity:.92;margin-top:3px;font-variant-numeric:tabular-nums;}
-.hm-ad{display:flex;height:8px;margin:0 18px;background:#151515;border-radius:2px;overflow:hidden;}
+.hm-imap{display:flex;flex-wrap:wrap;gap:14px 16px;padding:12px 16px 8px;}
+.hm-grp{display:flex;flex-direction:column;gap:6px;min-width:0;}
+.hm-grp>small{font:500 12px var(--sans);color:var(--tx3);white-space:nowrap;}
+.hm-tiles{display:flex;flex-wrap:wrap;gap:3px;max-width:520px;}
+.hm-tile{width:84px;height:54px;display:flex;flex-direction:column;justify-content:center;align-items:center;border-radius:6px;color:#fff;overflow:hidden;}
+.hm-tile b{font:600 11.5px var(--sans);max-width:78px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.hm-tile span{font:500 11.5px var(--sans);opacity:.92;margin-top:2px;}
+@container (max-width:620px){.hm-grp{width:100%;} .hm-tiles{max-width:none;} .hm-tile{width:calc((100% - 9px)/4);}}
+.hm-ad{display:flex;height:6px;margin:0 16px;background:var(--s3);border-radius:3px;overflow:hidden;gap:2px;}
 .hm-ad i{display:block;height:100%;}
-.hm-adl{display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px 14px;font:700 11px var(--mono);padding:14px 18px 8px;color:var(--tx3);letter-spacing:.6px;}
-.hm-hm td.c{font-weight:700;color:#fff !important;text-align:center !important;min-width:72px;}
+.hm-adl{display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px 14px;font:500 12.5px var(--sans);padding:8px 16px 8px;color:var(--tx3);}
+.hm-leg{display:flex;align-items:center;gap:10px;padding:2px 16px 12px;font:12px var(--sans);color:var(--tx3);}
+.hm-leg i{width:140px;height:6px;border-radius:3px;background:linear-gradient(90deg,rgba(255,69,58,.8),#2a2a2e 50%,rgba(48,209,88,.8));}
+
+/* movers */
+.hm-mv{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);}
+.hm-mv>div+div{border-left:1px solid var(--line);}
 
 /* your book */
-.hm-kp{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line);border-bottom:1px solid var(--line);}
-.hm-kp div{background:var(--s1);padding:13px 16px;}
-.hm-kp small{display:block;font:700 9.5px var(--mono);letter-spacing:1px;color:var(--tx3);}
-.hm-kp b{display:block;font:700 19px var(--mono);font-variant-numeric:tabular-nums;color:var(--tx);margin-top:5px;white-space:nowrap;}
-.hm-kp em{font:600 11px var(--mono);font-style:normal;}
-.hm-empty{font:13px var(--sans);color:var(--tx3);line-height:1.7;padding:18px;}
+.hm-kp{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line);border-top:1px solid var(--line);border-bottom:1px solid var(--line);margin-top:6px;}
+.hm-kp div{background:var(--s1);padding:12px 16px;}
+.hm-kp small{display:block;font:12px var(--sans);color:var(--tx3);}
+.hm-kp b{display:block;font:600 18px var(--sans);color:var(--tx);margin-top:4px;white-space:nowrap;letter-spacing:-.2px;}
+.hm-kp em{font:500 12px var(--sans);font-style:normal;}
+.hm-empty{font:13.5px var(--sans);color:var(--tx3);line-height:1.65;padding:12px 16px;}
 .hm-pb .hm-empty{padding:4px 0;}
-.hm-empty b{color:var(--tx2);}
-.hm-pill{display:inline-block;padding:2px 9px;border-radius:999px;font:800 9.5px var(--mono);letter-spacing:.7px;border:1px solid currentColor;white-space:nowrap;}
-.hm-clk{display:grid;grid-template-columns:1fr auto auto;gap:6px 14px;align-items:center;font:12.5px var(--mono);padding:8px 0;border-bottom:1px solid #161616;}
+.hm-empty b{color:var(--tx2);font-weight:600;}
+.hm-pill{display:inline-block;padding:3px 9px;border-radius:999px;font:500 12px var(--sans);background:var(--s2);white-space:nowrap;}
+.hm-clk{display:grid;grid-template-columns:1fr auto auto;gap:6px 14px;align-items:center;font:13px var(--sans);padding:8px 0;border-bottom:1px solid var(--line);}
 .hm-clk:last-child{border-bottom:0;}
-.hm-clk span{color:var(--tx2);} .hm-clk b{color:var(--tx);font-weight:600;font-variant-numeric:tabular-nums;}
-
-/* footer + function launcher */
-.hm-foot{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;font:600 10.5px var(--mono);letter-spacing:.5px;color:var(--tx3);padding:16px 2px 0;line-height:1.6;}
-.hm-fhead{display:flex;align-items:center;gap:12px;margin:28px 0 12px;}
-.hm-fhead b{font:700 12px var(--mono);letter-spacing:1.6px;color:var(--tx);} .hm-fhead i{flex:1;height:1px;background:var(--line);}
-.hm-fhead span{font:11px var(--mono);color:var(--tx3);letter-spacing:.5px;}
-div[class*="st-key-hm_fn_"]{background:var(--s1);border:1px solid var(--line);border-top:2px solid var(--line2);border-radius:3px;padding:14px 16px 4px;gap:.2rem;transition:border-color .12s ease,background .12s ease;min-height:168px;}
-div[class*="st-key-hm_fn_"]:hover{border-top-color:var(--amber);background:var(--s2);}
-div[class*="st-key-hm_fn_"] .stButton>button{background:transparent !important;border:0 !important;border-top:1px solid var(--line) !important;border-radius:0 !important;
-  color:var(--amber) !important;justify-content:flex-start !important;padding:9px 0 6px !important;font:700 10.5px var(--mono) !important;letter-spacing:1px;min-height:38px !important;}
-.hm-fn .c{display:inline-block;font:800 10.5px var(--mono);letter-spacing:.8px;color:#000;background:var(--amber);padding:2px 7px;border-radius:2px;}
-.hm-fn .t{font:700 13px var(--mono);letter-spacing:1px;color:var(--tx);margin-top:9px;}
-.hm-fn .d{font:12.5px var(--sans);color:var(--tx3);line-height:1.55;margin-top:6px;min-height:40px;}
+.hm-clk span{color:var(--tx2);} .hm-clk b{color:var(--tx);font-weight:500;}
+.hm-foot{font:12px var(--sans);color:var(--tx3);padding:18px 0 0;line-height:1.6;}
 </style>"""
 
 
@@ -476,13 +461,26 @@ def _area(values, uid, h=150):
 
 
 def _panel(code, title, right, body, cls="hm-pb"):
-    return (f'<div class="hm-p"><div class="hm-pt"><b><i>{_e(code)}</i>{title}</b><span title="{_e(re.sub(r"<[^>]+>", "", right))}">{right}</span></div>'
+    """`code` is kept for compatibility and no longer shown."""
+    return (f'<div class="hm-p"><div class="hm-pt"><b>{title}</b><span title="{_e(re.sub(r"<[^>]+>", "", right))}">{right}</span></div>'
             f'<div class="{cls}">{body}</div></div>')
 
 
 def _row(cls, inner):
-    """One grid row inside a size container, so its columns follow the HOME column width."""
-    return f'<div class="hm-cq"><div class="hm-row {cls}">{inner}</div></div>'
+    return f'<div class="hm-row {cls}">{inner}</div>'
+
+
+_KEEP = {"NIFTY", "SENSEX", "VIX", "USD", "INR", "EUR", "GBP", "JPY", "US", "S&P", "DAX", "FTSE", "CAC", "ASX", "KOSPI", "TAIEX",
+         "WTI", "CBOE", "NSE", "BSE", "PSU", "IT", "FMCG", "MNC", "PSE", "10Y", "30Y", "EURO", "STOXX", "FIN", "/", "·", "&"}
+
+
+def _nm(label) -> str:
+    """'BRENT CRUDE' -> 'Brent Crude'; index names and tickers (NIFTY 50, USD / INR, S&P 500) stay as they are."""
+    s = str(label or "")
+    if "NIFTY" in s or "SENSEX" in s:
+        return s
+    return " ".join(w if (w in _KEEP or any(ch.isdigit() for ch in w)) else "-".join(p.capitalize() for p in w.split("-"))
+                    for w in s.split(" "))
 
 
 # ═════════════════════════ market data ═════════════════════════
@@ -746,57 +744,62 @@ def _book_holdings(base, quotes):
 
 
 # ═════════════════════════ blocks ═════════════════════════
-def _tape(M):
-    items = []
-    for label in TAPE:
+# ═════════════════════════ blocks ═════════════════════════
+CARDS = ["NIFTY 50", "SENSEX", "BANK NIFTY", "INDIA VIX", "USD / INR", "GOLD", "BRENT CRUDE", "S&P 500"]
+
+
+def _cards(M, labels=CARDS):
+    out = []
+    for label in labels:
         m = M.get(label)
         if not m:
             continue
         kind = m.get("kind", "idx")
-        ch = f'{m["pts"] * 100:+.1f}bp' if kind == "yld" else _pct(m["chg"])
-        items.append(f'<span><b>{_e(label)}</b>{_px(m["price"], kind)}<em class="{_cls(m["chg"])}">{_arrow(m["chg"])} {ch}</em></span>')
-    if not items:
-        return ""
-    run = "".join(items)
-    return f'<div class="hm-tape"><div class="tr">{run}{run}</div></div>'
+        ch = f'{m["pts"] * 100:+.1f} bp' if kind == "yld" else f'{_chg_txt(m, kind)} ({_pct(m["chg"])})'
+        out.append(f'<div class="hm-card"><div class="n">{_e(_nm(label))}</div><div class="v">{_px(m["price"], kind)}</div>'
+                   f'<div class="c {_cls(m["chg"])}">{ch}</div>{_spark(m.get("spark", [])[-20:], 130, 26)}</div>')
+    return f'<div class="hm-cards">{"".join(out)}</div>' if out else ""
+
+
+def _tape(M):
+    """Kept for compatibility: now the index cards strip."""
+    return _cards(M)
 
 
 def render_tape():
-    """Ticker tape alone (used on the security page)."""
+    """Index cards strip alone (used on the stock page)."""
     st.markdown(_CSS, unsafe_allow_html=True)
-    st.markdown(_tape(market_data()), unsafe_allow_html=True)
+    st.markdown(f'<div class="hm">{_cards(market_data())}</div>', unsafe_allow_html=True)
 
 
 def _hero(M):
     m = M.get("NIFTY 50")
     if not m:
-        return _panel("NIFTY", "NIFTY 50 · NSE", "", '<div class="hm-empty">NIFTY 50 data is unavailable right now. It retries automatically.</div>')
+        return _panel("", "NIFTY 50", "", '<div class="hm-empty">NIFTY 50 data is unavailable right now. It retries automatically.</div>')
     s = m.get("series")
-    rng_html = ""
+    rng = ""
     if _ok(m.get("low")) and _ok(m.get("high")) and m["high"] > m["low"]:
         p = max(0.0, min(100.0, (m["price"] - m["low"]) / (m["high"] - m["low"]) * 100))
-        rng_html += (f'<div class="hm-rng"><div class="t"><span>DAY LOW {m["low"]:,.2f}</span><span>DAY RANGE</span><span>DAY HIGH {m["high"]:,.2f}</span></div>'
-                     f'<div class="b"><i style="left:{p:.1f}%"></i></div></div>')
+        rng += (f'<div class="hm-rng"><div class="t"><span>Day low <b>{m["low"]:,.2f}</b></span><span>Day high <b>{m["high"]:,.2f}</b></span></div>'
+                f'<div class="b"><i style="left:{p:.1f}%"></i></div></div>')
     if _ok(m.get("hi52")) and _ok(m.get("lo52")) and m["hi52"] > m["lo52"]:
         p = max(0.0, min(100.0, (m["price"] - m["lo52"]) / (m["hi52"] - m["lo52"]) * 100))
         off = (m["price"] / m["hi52"] - 1) * 100
-        rng_html += (f'<div class="hm-rng"><div class="t"><span>52W LOW {m["lo52"]:,.2f}</span><span>{off:+.1f}% FROM 52W HIGH</span>'
-                     f'<span>52W HIGH {m["hi52"]:,.2f}</span></div><div class="b"><i style="left:{p:.1f}%"></i></div></div>')
+        rng += (f'<div class="hm-rng"><div class="t"><span>52W low <b>{m["lo52"]:,.0f}</b></span><span>{off:+.1f}% from high</span>'
+                f'<span>52W high <b>{m["hi52"]:,.0f}</b></span></div><div class="b"><i style="left:{p:.1f}%"></i></div></div>')
     dma50 = float(s.tail(50).mean()) if s is not None and len(s) >= 50 else None
     dma200 = float(s.tail(200).mean()) if s is not None and len(s) >= 200 else None
     rsi = _rsi(s) if s is not None and len(s) > 30 else None
-    st_ = [("1W", _pct(m["w1"]), _cls(m["w1"])), ("1M", _pct(m["m1"]), _cls(m["m1"])), ("YTD", _pct(m["ytd"]), _cls(m["ytd"])),
-           ("50-DMA", f"{dma50:,.0f}" if dma50 else "—", _cls(m["price"] - dma50) if dma50 else ""),
+    per = "".join(f'<span>{k}<b class="{_cls(v)}">{_pct(v, 1)}</b></span>' for k, v in (("1W", m["w1"]), ("1M", m["m1"]), ("YTD", m["ytd"])))
+    st_ = [("50-DMA", f"{dma50:,.0f}" if dma50 else "—", _cls(m["price"] - dma50) if dma50 else ""),
            ("200-DMA", f"{dma200:,.0f}" if dma200 else "—", _cls(m["price"] - dma200) if dma200 else ""),
            ("RSI 14", f"{rsi:.0f}" if rsi else "—", "")]
     stats = "".join(f'<div><span>{k}</span><b class="{c}">{v}</b></div>' for k, v, c in st_)
-    chart = _area(s.tail(66).tolist() if s is not None else [], "nifty")
+    chart = _area(s.tail(66).tolist() if s is not None else [], "nifty", 140)
     body = (f'<div class="hm-hrow"><div><div class="hm-hv">{m["price"]:,.2f}</div>'
-            f'<div class="hm-hc {_cls(m["chg"])}">{_arrow(m["chg"])} {m["pts"]:+,.2f} ({_pct(m["chg"])})</div></div>'
-            f'<div style="text-align:right;font:600 11px var(--mono);color:var(--tx3);line-height:1.8">3-MONTH TREND<br>'
-            f'<span class="{_cls(m["m1"])}">1M {_pct(m["m1"], 1)}</span></div></div>'
-            f'{chart}<div class="hm-stats">{stats}</div>{rng_html}')
-    return _panel("NIFTY", "NIFTY 50 · NSE", f'{m["date"]:%d %b %Y} · DELAYED', body)
+            f'<div class="hm-hc {_cls(m["chg"])}">{m["pts"]:+,.2f} ({_pct(m["chg"])}) today</div></div><div class="hm-per">{per}</div></div>'
+            f'{chart}<div class="hm-stats">{stats}</div>{rng}')
+    return _panel("", "NIFTY 50", f'NSE · {m["date"]:%d %b} · 3 months', body)
 
 
 def _regime(M, breadth):
@@ -805,27 +808,27 @@ def _regime(M, breadth):
     s = n.get("series") if n else None
     if s is not None and len(s) >= 200:
         d50, d200 = float(s.tail(50).mean()), float(s.tail(200).mean())
-        checks += [("NIFTY above its 50-day average", n["price"] > d50), ("NIFTY above its 200-day average", n["price"] > d200),
-                   ("50-day average above 200-day (uptrend)", d50 > d200)]
+        checks += [("NIFTY above 50-day average", n["price"] > d50), ("NIFTY above 200-day average", n["price"] > d200),
+                   ("50-day above 200-day average", d50 > d200)]
     if n and _ok(n.get("hi52")):
-        checks.append(("Within 10% of the 52-week high", n["price"] >= 0.9 * n["hi52"]))
+        checks.append(("Within 10% of 52-week high", n["price"] >= 0.9 * n["hi52"]))
     if breadth and breadth["n"] >= 30:
-        checks.append((f'More NIFTY 50 stocks up than down ({breadth["adv"]}/{breadth["dec"]})', breadth["adv"] > breadth["dec"]))
+        checks.append((f'More stocks up than down ({breadth["adv"]} / {breadth["dec"]})', breadth["adv"] > breadth["dec"]))
     vs = v.get("series") if v else None
     if vs is not None and len(vs) >= 100:
         med = float(vs.median())
-        checks.append((f"India VIX below its 1-year median ({med:.1f})", v["price"] < med))
+        checks.append((f"India VIX below 1-year median ({med:.1f})", v["price"] < med))
     if not checks:
-        return _panel("REGM", "MARKET REGIME", "", '<div class="hm-empty">Needs NIFTY 50 history — retries automatically.</div>')
+        return _panel("", "Market regime", "", '<div class="hm-empty">Needs NIFTY 50 history. Retries automatically.</div>')
     score, tot = sum(1 for _, ok in checks if ok), len(checks)
     r = score / tot
-    lab, c = (("RISK-ON", GREEN) if r >= 0.83 else ("CONSTRUCTIVE", "#84CC16") if r >= 0.66 else ("NEUTRAL", YELLOW) if r >= 0.5
-              else ("CAUTIOUS", AMBER) if r >= 0.33 else ("RISK-OFF", RED))
-    meter = "".join(f'<i style="background:{c if i < score else "#1d1d1d"}"></i>' for i in range(tot))
-    rows = "".join(f'<div class="hm-chk"><span>{_e(t)}</span><b style="color:{GREEN if ok else RED}">{"✓ YES" if ok else "✗ NO"}</b></div>' for t, ok in checks)
+    lab, c = (("Risk-on", GREEN) if r >= 0.83 else ("Constructive", "#84CC16") if r >= 0.66 else ("Neutral", YELLOW) if r >= 0.5
+              else ("Cautious", AMBER) if r >= 0.33 else ("Risk-off", RED))
+    meter = "".join(f'<i style="background:{c if i < score else ""}"></i>' for i in range(tot))
+    rows = "".join(f'<div class="hm-chk"><span>{_e(t)}</span><b style="color:{GREEN if ok else RED}">{"Yes" if ok else "No"}</b></div>' for t, ok in checks)
     body = (f'<div class="hm-big" style="color:{c}">{lab}</div><div class="hm-cap">{score} of {tot} trend, breadth and volatility checks pass</div>'
             f'<div class="hm-meter">{meter}</div>{rows}')
-    return _panel("REGM", "MARKET REGIME", "RULE-BASED · NOT ADVICE", body)
+    return _panel("", "Market regime", "Rule-based", body)
 
 
 def _session_block(S):
@@ -834,35 +837,34 @@ def _session_block(S):
     p = S.get("progress")
     prog = ""
     if p is not None:
-        ticks = "".join(f'<s style="left:{(m - OPEN) / (CLOSE - OPEN) * 100:.1f}%"></s>' for m in (10 * 60, 11 * 60, 12 * 60, 13 * 60, 14 * 60, 15 * 60))
-        prog = (f'<div class="hm-prog"><i style="width:{max(0.0, min(1.0, p)) * 100:.1f}%"></i>{ticks}</div>'
-                '<div class="hm-ticks"><span>09:15</span><span>11:00</span><span>13:00</span><span>15:30</span></div>')
+        prog = (f'<div class="hm-prog"><i style="width:{max(0.0, min(1.0, p)) * 100:.1f}%"></i></div>'
+                '<div class="hm-ticks"><span>09:15</span><span>12:00</span><span>15:30</span></div>')
     special = SPECIAL_SESSIONS.get(now.date())
-    hol = "".join(f'<div class="hm-kv"><span>{d:%a %d %b}</span><b style="color:{AMBER if k == "SPECIAL" else T2};font-family:var(--sans);font-weight:600">'
-                  f'{_e(nm.split(" · ")[0])}</b></div>' for d, nm, k in upcoming_holidays(3, now.date()))
+    hol = "".join(f'<div class="hm-kv"><span>{d:%a %d %b}</span><b>{_e(nm.split(" · ")[0])}</b></div>'
+                  for d, nm, k in upcoming_holidays(3, now.date()))
 
     def dd(d):
         k = (d - now.date()).days
         return f'{d:%a %d %b}' + (" · today" if k == 0 else " · tomorrow" if k == 1 else f" · in {k}d")
-    exp = (f'<div class="hm-kv"><span>NIFTY weekly expiry · Tue</span><b>{dd(next_expiry(now, 1))}</b></div>'
-           f'<div class="hm-kv"><span>NSE monthly F&amp;O expiry</span><b>{dd(next_expiry(now, 1, True))}</b></div>'
-           f'<div class="hm-kv"><span>SENSEX weekly · Thu</span><b>{dd(next_expiry(now, 3))}</b></div>'
+    exp = (f'<div class="hm-kv"><span>NIFTY weekly expiry</span><b>{dd(next_expiry(now, 1))}</b></div>'
+           f'<div class="hm-kv"><span>Monthly F&amp;O expiry</span><b>{dd(next_expiry(now, 1, True))}</b></div>'
+           f'<div class="hm-kv"><span>SENSEX weekly expiry</span><b>{dd(next_expiry(now, 3))}</b></div>'
            f'<div class="hm-kv"><span>Trading days left in {now.year}</span><b>{trading_days_left(now.date())}</b></div>')
-    body = (f'<div class="hm-big" style="color:{col}">{_e(S["short"])}</div><div class="hm-cap">{_e(S["detail"])}</div>{prog}'
+    body = (f'<div class="hm-big" style="color:{col}">{_e(S["short"].capitalize())}</div><div class="hm-cap">{_e(S["detail"])}</div>{prog}'
             + (f'<div class="hm-cap" style="color:{AMBER};margin-top:8px">{_e(special)}</div>' if special else "")
-            + f'<div class="hm-sub">Derivatives &amp; calendar</div>{exp}'
-            + f'<div class="hm-sub">Upcoming exchange calendar</div>{hol or "<div class=hm-cap>No more holidays listed this year.</div>"}')
-    return _panel("SESS", "NSE SESSION", now.strftime("%a %d %b · %H:%M IST"), body)
+            + f'<div class="hm-sub">Expiries</div>{exp}'
+            + f'<div class="hm-sub">Upcoming holidays</div>{hol or "<div class=hm-cap>No more holidays listed this year.</div>"}')
+    return _panel("", "NSE session", now.strftime("%a %d %b · %H:%M"), body)
 
 
 def _mood(M, mmi, B=None):
     parts = []
     if mmi.get("status") in ("live", "stale"):
         sc, zone = float(mmi["score"]), mmi["zone"]
-        parts.append(f'<div class="hm-hrow"><div><div class="hm-big" style="color:{mmi_zone_color(zone)}">{sc:.0f}</div>'
-                     f'<div class="hm-cap">{_e(zone)} · Tickertape MMI{" · cached" if mmi["status"] == "stale" else ""}</div></div></div>'
+        parts.append(f'<div class="hm-big" style="color:{mmi_zone_color(zone)}">{sc:.0f} <span style="font:500 15px var(--sans)">{_e(str(zone).capitalize())}</span></div>'
+                     f'<div class="hm-cap">Tickertape Market Mood Index{" · cached" if mmi["status"] == "stale" else ""}</div>'
                      f'<div class="hm-gauge"><i style="left:{max(0, min(100, sc)):.1f}%"></i></div>'
-                     '<div class="hm-gl"><span>EXT FEAR</span><span>FEAR</span><span>GREED</span><span>EXT GREED</span></div>')
+                     '<div class="hm-gl"><span>Extreme fear</span><span>Greed</span><span>Extreme greed</span></div>')
     else:
         parts.append('<div class="hm-cap">Market Mood Index is unavailable right now.</div>')
     v = M.get("INDIA VIX")
@@ -873,24 +875,18 @@ def _mood(M, mmi, B=None):
         parts.append('<div class="hm-sub">Volatility</div>'
                      f'<div class="hm-kv"><span>India VIX</span><b>{v["price"]:.2f} <span class="{_cls(v["chg"])}">{_pct(v["chg"], 1)}</span></b></div>'
                      + (f'<div class="hm-kv"><span>1-year percentile</span><b>{pctl:.0f}th · {lvl}</b></div>' if pctl is not None else "")
-                     + (f'<div class="hm-kv"><span>Implied NIFTY move / day (≈VIX÷√252)</span><b>±{v["price"] / math.sqrt(252):.2f}%</b></div>'))
+                     + f'<div class="hm-kv"><span>Expected NIFTY move / day</span><b>±{v["price"] / math.sqrt(252):.2f}%</b></div>')
     if B and B["n"]:
-        parts.append('<div class="hm-sub">NIFTY 50 internals</div>'
-                     f'<div class="hm-kv"><span>Advance / decline</span><b><span class="hm-up">{B["adv"]}</span> / <span class="hm-dn">{B["dec"]}</span>'
-                     f' · A/D {(B["adv"] / B["dec"]) if B["dec"] else float(B["adv"]):.2f}</b></div>'
-                     f'<div class="hm-kv"><span>Average / median stock move</span><b><span class="{_cls(B["avg"])}">{_pct(B["avg"])}</span> · '
-                     f'<span class="{_cls(B["med"])}">{_pct(B["med"])}</span></b></div>')
-    u = M.get("CBOE VIX")
-    if u:
-        parts.append(f'<div class="hm-kv"><span>CBOE VIX (US)</span><b>{u["price"]:.2f} <span class="{_cls(u["chg"])}">{_pct(u["chg"], 1)}</span></b></div>')
+        parts.append(f'<div class="hm-kv"><span>Advance / decline</span><b><span class="hm-up">{B["adv"]}</span> / '
+                     f'<span class="hm-dn">{B["dec"]}</span></b></div>')
     fx = M.get("USD / INR")
     if fx:
         parts.append(f'<div class="hm-kv"><span>USD / INR</span><b>{fx["price"]:.2f} <span class="{_cls(-fx["chg"])}">{_pct(fx["chg"], 2)}</span></b></div>')
-    return _panel("MOOD", "SENTIMENT & VOLATILITY", "", "".join(parts))
+    return _panel("", "Sentiment", "", "".join(parts))
 
 
 def _table(rows_spec, M, cols, show_date=True):
-    """rows_spec: [(group, label, chain, kind)] -> grouped quote table."""
+    """Desktop grouped quote table."""
     head = "".join(f"<th>{c}</th>" for c in cols)
     body, last_g = [], None
     newest = max((M[l]["date"] for _, l, _, _ in rows_spec if l in M), default=None)
@@ -899,30 +895,46 @@ def _table(rows_spec, M, cols, show_date=True):
         if not m:
             continue
         if g != last_g:
-            body.append(f'<tr class="g"><td colspan="{len(cols)}">{_e(g)}</td></tr>')
+            body.append(f'<tr class="g"><td colspan="{len(cols)}">{_e(_nm(g))}</td></tr>')
             last_g = g
         stale = newest is not None and (newest - m["date"]).days > 4
         yl = kind == "yld"
 
         def cell(pct, pts):
             if yl:
-                return f'<td class="{_cls(pts)}">{pts * 100:+.0f}bp</td>' if _ok(pts) else "<td>—</td>"
+                return f'<td class="{_cls(pts)}">{pts * 100:+.0f} bp</td>' if _ok(pts) else "<td>—</td>"
             return f'<td class="{_cls(pct)}">{_pct(pct, 1)}</td>'
-        tds = [f'<td class="l">{_e(label)}</td>', f'<td class="n">{_px(m["price"], kind)}</td>',
-               f'<td class="{_cls(m["pts"])}">{_chg_txt(m, kind)}</td>']
-        if not yl:
-            tds.append(f'<td class="{_cls(m["chg"])}">{_pct(m["chg"])}</td>')
-        else:
-            tds.append(f'<td class="{_cls(m["pts"])}">{_arrow(m["pts"])}</td>')
+        tds = [f'<td class="l">{_e(_nm(label))}</td>', f'<td class="n">{_px(m["price"], kind)}</td>',
+               cell(m["chg"], m["pts"]) if not yl else f'<td class="{_cls(m["pts"])}">{m["pts"] * 100:+.1f} bp</td>']
         if "1W" in cols:
             tds.append(cell(m["w1"], m["w1_pts"]))
-        tds += [cell(m["m1"], m["m1_pts"]), cell(m["ytd"], m["ytd_pts"]), f'<td>{_spark(m["spark"])}</td>']
+        tds += [cell(m["m1"], m["m1_pts"]), cell(m["ytd"], m["ytd_pts"]), f'<td>{_spark(m["spark"], 80, 22)}</td>']
         if show_date:
             tds.append(f'<td class="{"st" if stale else ""}" style="color:var(--tx3)">{m["date"]:%d %b}</td>')
         body.append(f'<tr>{"".join(tds)}</tr>')
     if not body:
-        return '<div class="hm-empty">Quotes are unavailable right now (Yahoo Finance did not respond). They retry automatically.</div>'
+        return '<div class="hm-empty">Quotes are unavailable right now. They retry automatically.</div>'
     return f'<div style="overflow-x:auto"><table class="hm-t"><thead><tr>{head}</tr></thead><tbody>{"".join(body)}</tbody></table></div>'
+
+
+def _qlist(rows_spec, M, groups=True, limit_per_group=None):
+    """Phone quote list: name · date on the left, price · 1D change on the right."""
+    out, last_g, n_in_g = [], None, 0
+    for g, label, _, kind in rows_spec:
+        m = M.get(label)
+        if not m:
+            continue
+        if g != last_g:
+            last_g, n_in_g = g, 0
+            if groups:
+                out.append(f'<div class="hm-lg">{_e(_nm(g))}</div>')
+        n_in_g += 1
+        if limit_per_group and n_in_g > limit_per_group:
+            continue
+        ch = f'{m["pts"] * 100:+.1f} bp' if kind == "yld" else _pct(m["chg"])
+        out.append(f'<div class="hm-li"><div class="a"><b>{_e(_nm(label))}</b><small>1M {_pct(m["m1"], 1)} · {m["date"]:%d %b}</small></div>'
+                   f'<div class="z"><b>{_px(m["price"], kind)}</b><small class="{_cls(m["chg"] if kind != "yld" else m["pts"])}">{ch}</small></div></div>')
+    return "".join(out) or '<div class="hm-empty">Quotes are unavailable right now.</div>'
 
 
 def _breadth(nq):
@@ -939,37 +951,41 @@ def _imap(groups, nq, B):
         tiles = []
         for s in syms:
             q = nq.get(s) or {}
-            c = q.get("chg")
-            px = q.get("price")
+            c, px = q.get("chg"), q.get("price")
             tip = f"{s} · ₹{px:,.2f}" if _ok(px) else f"{s} · no price"
-            tiles.append(f'<div class="hm-tile" style="background:{_heat(c)}" title="{_e(tip)}">'
-                         f'<b>{_e(s)}</b><span>{_pct(c, 1)}</span></div>')
-        blocks.append(f'<div class="hm-grp"><small>{_e(g)}</small><div class="hm-tiles">{"".join(tiles)}</div></div>')
+            tiles.append(f'<div class="hm-tile" style="background:{_heat(c)}" title="{_e(tip)}"><b>{_e(s)}</b><span>{_pct(c, 1)}</span></div>')
+        blocks.append(f'<div class="hm-grp"><small>{_e(_nm(g))}</small><div class="hm-tiles">{"".join(tiles)}</div></div>')
     tot = max(B["n"], 1)
-    ad = (f'<div class="hm-adl"><span class="hm-up">▲ {B["adv"]} ADVANCING</span><span>{B["flat"]} UNCHANGED · A/D '
-          f'{(B["adv"] / B["dec"]) if B["dec"] else float(B["adv"]):.2f} · MEDIAN {_pct(B["med"])}</span><span class="hm-dn">{B["dec"]} DECLINING ▼</span></div>'
+    ad = (f'<div class="hm-adl"><span class="hm-up">{B["adv"]} advancing</span><span>{B["flat"]} unchanged</span>'
+          f'<span class="hm-dn">{B["dec"]} declining</span></div>'
           f'<div class="hm-ad"><i style="width:{B["adv"] / tot * 100:.1f}%;background:{GREEN}"></i>'
-          f'<i style="width:{B["flat"] / tot * 100:.1f}%;background:#3a3a3a"></i><i style="width:{B["dec"] / tot * 100:.1f}%;background:{RED}"></i></div>')
-    leg = '<div class="hm-leg"><span>−3%</span><i></i><span>+3%</span><span style="margin-left:auto">GREY = UNCHANGED / NO PRICE · HOVER A TILE FOR ITS PRICE</span></div>'
+          f'<i style="width:{B["flat"] / tot * 100:.1f}%;background:#3a3a3e"></i><i style="width:{B["dec"] / tot * 100:.1f}%;background:{RED}"></i></div>')
+    leg = '<div class="hm-leg"><span>−3%</span><i></i><span>+3%</span></div>'
     return ad + f'<div class="hm-imap">{"".join(blocks)}</div>' + leg
 
 
 def _sector_matrix(M):
-    rows = []
-    for label, _ in SECTORS:
-        m = M.get("SEC::" + label)
-        if m:
-            rows.append((label, m))
+    rows = [(label, M["SEC::" + label]) for label, _ in SECTORS if M.get("SEC::" + label)]
     if not rows:
         return '<div class="hm-empty">Sector indices are unavailable right now.</div>'
     rows.sort(key=lambda x: -(x[1]["chg"] if _ok(x[1]["chg"]) else -99))
     body = "".join(
-        f'<tr><td class="l">{_e(l)}</td><td class="n">{m["price"]:,.0f}</td>'
+        f'<tr><td class="l">{_e(_nm(l))}</td><td class="n">{m["price"]:,.0f}</td>'
         + "".join(f'<td class="c" style="background:{_heat(v, lim)}">{_pct(v, 1)}</td>' for v, lim in
                   ((m["chg"], 2.5), (m["w1"], 5), (m["m1"], 9), (m["ytd"], 25)))
-        + f'<td>{_spark(m["spark"], 84)}</td></tr>' for l, m in rows)
-    return ('<div style="overflow-x:auto"><table class="hm-t hm-hm"><thead><tr><th>Sector index</th><th>Last</th><th>1D</th><th>1W</th>'
+        + f'<td>{_spark(m["spark"], 76, 22)}</td></tr>' for l, m in rows)
+    return ('<div style="overflow-x:auto"><table class="hm-t hm-hm"><thead><tr><th>Sector</th><th>Last</th><th>1D</th><th>1W</th>'
             f'<th>1M</th><th>YTD</th><th>1M trend</th></tr></thead><tbody>{body}</tbody></table></div>')
+
+
+def _sector_list(M):
+    rows = [(label, M["SEC::" + label]) for label, _ in SECTORS if M.get("SEC::" + label)]
+    if not rows:
+        return '<div class="hm-empty">Sector indices are unavailable right now.</div>'
+    rows.sort(key=lambda x: -(x[1]["chg"] if _ok(x[1]["chg"]) else -99))
+    return "".join(f'<div class="hm-li"><div class="a"><b>{_e(_nm(l))}</b><small>1W {_pct(m["w1"], 1)} · 1M {_pct(m["m1"], 1)}</small></div>'
+                   f'<div class="z"><span class="hm-pct" style="background:{_heat(m["chg"], 2.5)};color:#fff">{_pct(m["chg"], 2)}</span></div></div>'
+                   for l, m in rows)
 
 
 def _movers(nq):
@@ -977,14 +993,15 @@ def _movers(nq):
     if not ranked:
         return '<div class="hm-empty">NIFTY 50 quotes are unavailable right now.</div>'
 
-    def tbl(items, title):
-        rows = "".join(f'<tr><td class="l">{_e(s)}</td><td class="n">₹{q["price"]:,.2f}</td>'
-                       f'<td class="{_cls(q["chg"])}">{_arrow(q["chg"])} {abs(q["chg"]):.2f}%</td></tr>' for s, q in items)
-        return f'<table class="hm-t"><thead><tr><th>{title}</th><th>LTP</th><th>Chg</th></tr></thead><tbody>{rows}</tbody></table>'
+    def col(items, title):
+        if not items:
+            return f'<div><div class="hm-lg">{title}</div><div class="hm-empty">None today.</div></div>'
+        rows = "".join(f'<div class="hm-li"><div class="a"><b>{_e(s)}</b><small>₹{q["price"]:,.2f}</small></div>'
+                       f'<div class="z"><small class="{_cls(q["chg"])}" style="font-size:13.5px">{_pct(q["chg"])}</small></div></div>' for s, q in items)
+        return f'<div><div class="hm-lg">{title}</div>{rows}</div>'
     g = [x for x in ranked[:5] if x[1]["chg"] > 0]
     l = [x for x in ranked[::-1][:5] if x[1]["chg"] < 0]
-    return (tbl(g, "Top gainers") if g else '<div class="hm-empty">No gainers.</div>') + \
-        (tbl(l, "Top losers") if l else '<div class="hm-empty">No losers.</div>')
+    return f'<div class="hm-mv">{col(g, "Top gainers")}{col(l, "Top losers")}</div>'
 
 
 def _book(holds, realised, wl, wl_label, quotes):
@@ -998,26 +1015,25 @@ def _book(holds, realised, wl, wl_label, quotes):
         dp = day / (val - day) * 100 if (val - day) else None
         pp = pnl / inv * 100 if inv else None
         out.append('<div class="hm-kp">'
-                   f'<div><small>VALUE</small><b>{_inr(val)}</b><em style="color:var(--tx3)">{len(holds)} holdings</em></div>'
-                   f'<div><small>DAY P&amp;L</small><b class="{_cls(day)}">{_inr(day)}</b><em class="{_cls(dp)}">{_pct(dp)}</em></div>'
-                   f'<div><small>UNREALISED</small><b class="{_cls(pnl)}">{_inr(pnl)}</b><em class="{_cls(pp)}">{_pct(pp)} on cost</em></div>'
-                   f'<div><small>REALISED</small><b class="{_cls(realised) if realised else ""}">{_inr(realised)}</b><em style="color:var(--tx3)">FIFO, all time</em></div></div>')
-        rows = "".join(f'<tr><td class="l">{_e(h["symbol"])}</td><td class="n">{"₹" + format(h["ltp"], ",.2f") if _ok(h.get("ltp")) else "—"}</td>'
-                       f'<td class="{_cls(h.get("chg"))}">{_pct(h.get("chg"))}</td><td class="{_cls(h.get("pnl_pct"))}">{_pct(h.get("pnl_pct"), 1)}</td>'
-                       f'<td>{_pct(h.get("weight"), 1, False)}</td></tr>' for h in holds[:7])
-        more = f'<tr><td colspan="5" style="color:var(--tx3);text-align:left">+ {len(holds) - 7} more · open PORT</td></tr>' if len(holds) > 7 else ""
-        out.append(f'<table class="hm-t"><thead><tr><th>Holding</th><th>LTP</th><th>Day</th><th>P&amp;L</th><th>Weight</th></tr></thead><tbody>{rows}{more}</tbody></table>')
+                   f'<div><small>Current value</small><b>{_inr(val)}</b><em style="color:var(--tx3)">{len(holds)} holdings</em></div>'
+                   f'<div><small>Today</small><b class="{_cls(day)}">{_inr(day)}</b><em class="{_cls(dp)}">{_pct(dp)}</em></div>'
+                   f'<div><small>Unrealised P&amp;L</small><b class="{_cls(pnl)}">{_inr(pnl)}</b><em class="{_cls(pp)}">{_pct(pp)}</em></div>'
+                   f'<div><small>Realised P&amp;L</small><b class="{_cls(realised) if realised else ""}">{_inr(realised)}</b><em style="color:var(--tx3)">all time</em></div></div>')
+        rows = "".join(f'<div class="hm-li"><div class="a"><b>{_e(h["symbol"])}</b><small>{"₹" + format(h["ltp"], ",.2f") if _ok(h.get("ltp")) else "—"}'
+                       f' · {_pct(h.get("weight"), 1, False)} of book</small></div>'
+                       f'<div class="z"><b class="{_cls(h.get("pnl_pct"))}">{_pct(h.get("pnl_pct"), 1)}</b><small class="{_cls(h.get("chg"))}">{_pct(h.get("chg"))} today</small></div></div>'
+                       for h in holds[:6])
+        more = f'<div class="hm-empty">+ {len(holds) - 6} more in Portfolio</div>' if len(holds) > 6 else ""
+        out.append(rows + more)
     else:
-        out.append('<div class="hm-empty"><b>No holdings yet.</b> Add buys in PORTFOLIO → TRANSACTIONS to see value, P&amp;L and tax here.</div>')
+        out.append('<div class="hm-empty"><b>No holdings yet.</b> Add buys in Portfolio to see value and P&amp;L here.</div>')
     if wl:
         rows = []
-        for s in wl[:8]:
+        for s in wl[:6]:
             q = quotes.get(s) or {}
-            rows.append(f'<tr><td class="l">{_e(s)}</td><td class="n">{"₹" + format(q["price"], ",.2f") if _ok(q.get("price")) else "—"}</td>'
-                        f'<td class="{_cls(q.get("chg"))}">{_arrow(q.get("chg"))} {_pct(abs(q["chg"]) if _ok(q.get("chg")) else None, 2, False)}</td></tr>')
-        more = f'<tr><td colspan="3" style="color:var(--tx3);text-align:left">+ {len(wl) - 8} more · open WL</td></tr>' if len(wl) > 8 else ""
-        out.append(f'<table class="hm-t" style="margin-top:12px"><thead><tr><th>{_e(wl_label)}</th><th>LTP</th><th>Day</th></tr></thead>'
-                   f'<tbody>{"".join(rows)}{more}</tbody></table>')
+            rows.append(f'<div class="hm-li"><div class="a"><b>{_e(s)}</b></div><div class="z"><b>{"₹" + format(q["price"], ",.2f") if _ok(q.get("price")) else "—"}</b>'
+                        f'<small class="{_cls(q.get("chg"))}">{_pct(q.get("chg"))}</small></div></div>')
+        out.append(f'<div class="hm-lg">{_e(wl_label)}</div>{"".join(rows)}')
     return "".join(out)
 
 
@@ -1025,27 +1041,22 @@ def _rotation():
     """Snapshot published by MONEY FLOW (money_flow._publish) into st.session_state['mf_rot']."""
     snap = st.session_state.get("mf_rot")
     if not snap or snap.get("table") is None:
-        return ('<div class="hm-empty">Open <b>MONEY FLOW</b> (code <b>MF</b>) and press <b>LOAD SECTOR DATA</b> once this session: '
-                'the rotation desk — which sectors money is moving into — appears here.</div>')
+        return '<div class="hm-empty">Open <b>Money flow</b> and load sector data once this session to see where money is rotating.</div>'
     tbl = snap["table"]
     colors = {"ROTATING IN": GREEN, "LEADING": "#8AD66B", "STRETCHED": YELLOW, "WATCH": CYAN, "WEAKENING": AMBER, "LAGGING": RED}
-    counts = tbl["action"].value_counts().to_dict()
-    chips = " ".join(f'<span class="hm-pill" style="color:{c}">{_e(k)} {counts[k]}</span>' for k, c in colors.items() if k in counts)
     rows = []
-    for r in tbl.sort_values("score", ascending=False).head(7).to_dict("records"):
+    for r in tbl.sort_values("score", ascending=False).head(6).to_dict("records"):
         sc, ex = r.get("score"), r.get("ex1m")
-        rows.append(f'<tr><td class="l">{_e(str(r["sector"])[:24])}</td><td><span class="hm-pill" style="color:{colors.get(r["action"], T2)}">'
-                    f'{_e(r["action"])}</span></td><td class="n">{(f"{sc:.0f}" if _ok(sc) else "—")}</td>'
-                    f'<td class="{_cls(ex)}">{_pct(ex, 1)}</td></tr>')
-    return (f'<div style="padding:2px 0 12px;line-height:2.3">{chips}</div><table class="hm-t"><thead><tr><th>Top sectors</th>'
-            f'<th>Action</th><th>Score</th><th>RS 1M</th></tr></thead><tbody>{"".join(rows)}</tbody></table>'
-            f'<div class="hm-cap" style="margin-top:6px">vs {_e(snap.get("bench", "MARKET"))} · as of {_e(snap.get("asof", ""))}</div>')
+        rows.append(f'<div class="hm-li"><div class="a"><b>{_e(str(r["sector"])[:26])}</b><small>Score {(f"{sc:.0f}" if _ok(sc) else "—")} · RS 1M '
+                    f'<span class="{_cls(ex)}">{_pct(ex, 1)}</span></small></div>'
+                    f'<div class="z"><span class="hm-pill" style="color:{colors.get(r["action"], T2)}">{_e(str(r["action"]).capitalize())}</span></div></div>')
+    return "".join(rows) + f'<div class="hm-empty" style="padding-top:6px">vs {_e(snap.get("bench", "market"))} · {_e(snap.get("asof", ""))}</div>'
 
 
-WORLD = [("TOKYO", "Asia/Tokyo", (9, 0), (15, 30)), ("HONG KONG", "Asia/Hong_Kong", (9, 30), (16, 0)),
-         ("SHANGHAI", "Asia/Shanghai", (9, 30), (15, 0)), ("MUMBAI · NSE", "Asia/Kolkata", (9, 15), (15, 30)),
-         ("FRANKFURT", "Europe/Berlin", (9, 0), (17, 30)), ("LONDON", "Europe/London", (8, 0), (16, 30)),
-         ("NEW YORK", "America/New_York", (9, 30), (16, 0))]
+WORLD = [("Tokyo", "Asia/Tokyo", (9, 0), (15, 30)), ("Hong Kong", "Asia/Hong_Kong", (9, 30), (16, 0)),
+         ("Shanghai", "Asia/Shanghai", (9, 30), (15, 0)), ("Mumbai · NSE", "Asia/Kolkata", (9, 15), (15, 30)),
+         ("Frankfurt", "Europe/Berlin", (9, 0), (17, 30)), ("London", "Europe/London", (8, 0), (16, 30)),
+         ("New York", "America/New_York", (9, 30), (16, 0))]
 
 
 def _world_clock():
@@ -1063,13 +1074,13 @@ def _world_clock():
             opened = nse_session(lt.astimezone(IST))["cls"] == "live"
         else:
             opened = lt.weekday() < 5 and o[0] * 60 + o[1] <= t < c[0] * 60 + c[1]
-        tag = (f'<span class="hm-pill" style="color:{GREEN}">OPEN</span>' if opened else f'<span class="hm-pill" style="color:{T3}">CLOSED</span>')
+        tag = f'<span class="hm-pill" style="color:{GREEN if opened else T3}">{"Open" if opened else "Closed"}</span>'
         rows.append(f'<div class="hm-clk"><span>{_e(name)}</span><b>{lt:%a %H:%M}</b>{tag}</div>')
     return "".join(rows)
 
 
 # ═════════════════════════ page ═════════════════════════
-def _body(supabase):
+def _body(supabase, compact=False):
     M = market_data()
     groups = _nifty50()
     n50 = [s for v in groups.values() for s in v]
@@ -1088,70 +1099,60 @@ def _body(supabase):
         mmi = get_mmi()
     except Exception:
         mmi = {"status": "unavailable"}
-
-    # header strip
-    n = M.get("NIFTY 50")
-    tag_cls = {"live": "live", "pre": "pre"}.get(S["cls"], "")
-    stamp = datetime.now(IST).strftime("%a %d %b %Y · %H:%M IST")
-    asof = f'NIFTY {n["date"]:%d %b}' if n else "NO DATA"
-    st.markdown(f'<div class="hm-head"><div class="t"><em>HOME</em>MARKET MONITOR<small>India first · global context · your book</small></div>'
-                f'<div class="m"><span class="hm-tag {tag_cls}"><i></i>{_e(S["label"])}</span><span class="hm-tag">{stamp}</span>'
-                f'<span class="hm-tag">LAST CLOSE · {asof}</span><span class="hm-tag">YAHOO · DELAYED</span></div></div>', unsafe_allow_html=True)
-    st.markdown(_tape(M), unsafe_allow_html=True)
-
-    # row 1 — NIFTY hero · regime · session · mood (2 x 2 unless the page is very wide)
-    st.markdown(_row("hm-r1", f"{_hero(M)}{_regime(M, B)}{_session_block(S)}{_mood(M, mmi, B)}"), unsafe_allow_html=True)
-
-    # row 2 — world equity indices · cross-asset (stacked unless there is room for both tables in full)
-    wei = _table(WEI, M, ["Index", "Last", "Chg", "1D", "1W", "1M", "YTD", "1M trend", "Date"])
-    xa = _table(XASSET, M, ["Instrument", "Last", "Chg", "1D", "1M", "YTD", "1M trend", "Date"])
-    st.markdown(_row("hm-r2", f'{_panel("WEI", "WORLD EQUITY INDICES", "LOCAL CURRENCY · CLOSE-TO-CLOSE", wei, "hm-pb np")}'
-                              f'{_panel("XA", "CROSS-ASSET MONITOR", "COMMODITIES · FX · RATES · VOL · CRYPTO", xa, "hm-pb np")}'),
-                unsafe_allow_html=True)
-
-    # row 3 — NIFTY 50 heatmap · sectors
-    imap_note = f"{B['n']} PRICED · COLOUR = 1-DAY % (±3%)"
-    st.markdown(_row("hm-r3", f'{_panel("IMAP", "NIFTY 50 HEATMAP · BY SECTOR", imap_note, _imap(groups, nq, B), "hm-pb np")}'
-                              f'{_panel("SECT", "NSE SECTOR PERFORMANCE", "SORTED BY 1-DAY MOVE", _sector_matrix(M), "hm-pb np")}'),
-                unsafe_allow_html=True)
-
-    # row 4 — movers · your book · rotation + world clock
     holds, realised = _book_holdings(base, quotes)
-    rot_clock = _rotation() + '<div class="hm-sub">World markets · local time</div>' + _world_clock()
-    st.markdown(_row("hm-r4", f'{_panel("MOV", "NIFTY 50 MOVERS", "1-DAY", _movers(nq), "hm-pb np")}'
-                              f'{_panel("BOOK", "YOUR BOOK", "SPLIT-ADJUSTED · FIFO", _book(holds, realised, wl, wl_label, quotes), "hm-pb np")}'
-                              f'{_panel("ROT", "SECTOR ROTATION · MONEY FLOW", "LIVE WHEN MF IS LOADED", rot_clock)}'),
-                unsafe_allow_html=True)
+
+    chip_cls = {"live": "live", "pre": "pre"}.get(S["cls"], "")
+    n = M.get("NIFTY 50")
+    asof = f'Prices as of {n["date"]:%d %b}, delayed' if n else "Prices delayed"
+    head = (f'<div class="hm-head"><div><div class="t">Markets</div><div class="s">{asof}</div></div>'
+            f'<span class="hm-chip {chip_cls}"><i></i>{_e(S["detail"])}</span></div>')
+    imap = _panel("", "NIFTY 50 heatmap", f"{B['n']} stocks · 1-day change", _imap(groups, nq, B), "hm-pb np")
+    movers = _panel("", "Top movers", "NIFTY 50 · today", _movers(nq), "hm-pb np")
+    book = _panel("", "Your portfolio", "", _book(holds, realised, wl, wl_label, quotes), "hm-pb np")
+
+    if compact:
+        html_ = (head + _cards(M)
+                 + _row("", _hero(M) + movers + book + imap
+                        + _panel("", "Sectors", "Sorted by today", _sector_list(M), "hm-pb np")
+                        + _mood(M, mmi, B) + _regime(M, B)
+                        + _panel("", "Global markets", "", _qlist(WEI, M), "hm-pb np")
+                        + _panel("", "Commodities, currencies & more", "", _qlist(XASSET, M), "hm-pb np")
+                        + _session_block(S)))
+        st.markdown(f'<div class="hm hm-compact">{html_}</div>', unsafe_allow_html=True)
+        return
+
+    wei = _table(WEI, M, ["Index", "Last", "1D", "1W", "1M", "YTD", "1M trend", "Date"])
+    xa = _table(XASSET, M, ["Instrument", "Last", "1D", "1M", "YTD", "1M trend", "Date"])
+    html_ = (head + _cards(M)
+             + _row("hm-r1", _hero(M) + _mood(M, mmi, B) + _regime(M, B))
+             + _row("hm-r2", movers + imap)
+             + _row("hm-r3", _panel("", "Sectors", "Sorted by today", _sector_matrix(M), "hm-pb np") + book)
+             + _row("hm-r4", _panel("", "Global indices", "Local currency", wei, "hm-pb np")
+                    + _panel("", "Commodities, currencies & more", "", xa, "hm-pb np"))
+             + _row("hm-r5", _session_block(S) + _panel("", "Sector rotation", "From Money flow", _rotation(), "hm-pb np")
+                    + _panel("", "World markets", "Local time", _world_clock())))
+    st.markdown(f'<div class="hm">{html_}</div>', unsafe_allow_html=True)
 
 
-def _body_live(supabase):
-    _body(supabase)
+def _body_live(supabase, compact=False):
+    _body(supabase, compact)
 
 
-def _body_closed(supabase):
-    _body(supabase)
+def _body_closed(supabase, compact=False):
+    _body(supabase, compact)
 
 
 _frag_live = st.fragment(run_every=60)(_body_live) if hasattr(st, "fragment") else _body_live
 _frag_closed = st.fragment(_body_closed) if hasattr(st, "fragment") else _body_closed
 
 
-def render_home(supabase=None, on_open=None, nav=None):
-    """HOME page. `nav(target)` switches workspace (used by the function launcher buttons)."""
+def render_home(supabase=None, on_open=None, nav=None, compact=None):
+    """HOME page. compact=True gives the phone layout (app.py passes it; default: st.session_state['_ak_phone'])."""
+    if compact is None:
+        compact = bool(st.session_state.get("_ak_phone", False))
     st.markdown(_CSS, unsafe_allow_html=True)
     S = nse_session()
     with st.spinner("Loading markets…"):
-        (_frag_live if S["cls"] in ("live", "pre") else _frag_closed)(supabase)
-
-    st.markdown('<div class="hm-fhead"><b>FUNCTIONS</b><span>type the code in the command line above, or click</span><i></i></div>', unsafe_allow_html=True)
-    cols = st.columns(len(FUNCS), gap="small")
-    for col, (code, title, target, desc) in zip(cols, FUNCS):
-        with col:
-            with st.container(key=f"hm_fn_{target}"):
-                st.markdown(f'<div class="hm-fn"><span class="c">{code}</span><div class="t">{title}</div><div class="d">{desc}</div></div>',
-                            unsafe_allow_html=True)
-                if nav is not None:
-                    st.button("GO  →", key=f"hm_go_{target}", use_container_width=True, on_click=nav, args=(target,))
-    st.markdown('<div class="hm-foot"><span>Prices: Yahoo Finance, delayed; changes are close-to-close. Regime, mood and heatmap are '
-                'information, not advice.</span><span>NIFTY 50 list as of 30 Sep 2026 · NSE holidays 2026 · Market Mood Index © Tickertape</span></div>',
-                unsafe_allow_html=True)
+        (_frag_live if S["cls"] in ("live", "pre") else _frag_closed)(supabase, compact)
+    st.markdown('<div class="hm-foot">Prices from Yahoo Finance, delayed; changes are close-to-close. Regime, mood and heatmap are information, '
+                'not advice. NIFTY 50 list as of 30 Sep 2026 · Market Mood Index © Tickertape.</div>', unsafe_allow_html=True)
