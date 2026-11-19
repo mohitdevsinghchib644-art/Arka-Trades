@@ -797,7 +797,7 @@ def _css():
     details.ev>summary{{list-style:none;cursor:pointer;display:inline-flex;align-items:center;flex-wrap:wrap;border-radius:10px;padding:2px;margin:-2px;
                        transition:background .15s ease;-webkit-tap-highlight-color:transparent;outline:none}}
     details.ev>summary::-webkit-details-marker{{display:none}} details.ev>summary::marker{{content:""}}
-    details.ev>summary:hover{{background:rgba(255,255,255,.04)}} details.ev>summary:active{{transform:scale(.97)}}
+    details.ev:not([open])>summary:hover{{background:rgba(255,255,255,.04)}} details.ev:not([open])>summary:active .chip{{transform:scale(.97)}}
     details.ev>summary:hover .chip{{filter:brightness(1.18)}}
     details.ev>summary .tap{{font:500 11px {SANS};color:var(--tx3,{TX3});margin-left:2px;opacity:0;transition:opacity .15s}}
     details.ev>summary:hover .tap{{opacity:1}}
