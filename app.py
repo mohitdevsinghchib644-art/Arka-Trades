@@ -1,5 +1,13 @@
 """
-Arka Trades — Market Terminal v9
+Arka Trades — Market Terminal v9.1
+
+v9.1 (after testing on a phone)
+  * Phone layout rebuilt like a trading app: slim top bar with the ARKA TRADES wordmark, a fixed bottom tab bar
+    (Home, Watchlist, Portfolio, Research, More) and a phone version of the Home page. Navigation no longer uses
+    st.radio (Streamlit Cloud rendered it as wrapped letters); it is plain buttons in flex rows.
+  * Desktop: wordmark + search + status on one line, a pill tab bar below, wider pages.
+  * Logo: arka_logo.png = white ARKA TRADES wordmark (transparent); arka_icon.png = home-screen / tab icon.
+  * Streamlit Cloud's floating badges are hidden for visitors; empty style blocks no longer add top spacing.
 
 What changed vs v8.1
 --------------------
@@ -51,7 +59,7 @@ except Exception:  # pragma: no cover
     create_client = None
 
 IST = timezone(timedelta(hours=5, minutes=30))
-APP_VERSION = "v9"
+APP_VERSION = "v9.1"
 
 
 def _secret(name: str, default=""):
@@ -143,7 +151,8 @@ if not st.session_state.db_loaded:
     st.session_state.db_loaded = True
 
 # Restore this device's sign-in (and set the site icon) BEFORE deciding what to show. Must run on every rerun.
-auth.bridge(_AUTH_KEY)
+with st.container(key="akbridge"):
+    auth.bridge(_AUTH_KEY)
 
 name = st.session_state.profile.get("name", "Trader") or "Trader"
 initial = name[0].upper()
@@ -166,6 +175,7 @@ def _is_phone() -> bool:
 
 
 IS_PHONE = _is_phone()
+st.session_state["_ak_phone"] = IS_PHONE          # read by home_page v2 for its phone layout
 
 
 # ═══════════════════════════════ DESIGN SYSTEM ═══════════════════════════════
@@ -190,7 +200,11 @@ header[data-testid="stHeader"],[data-testid="stToolbar"],[data-testid="stDecorat
 [data-testid="stSidebar"],[data-testid="stSidebarCollapsedControl"],[data-testid="stStatusWidget"]{display:none !important;}
 .block-container{padding:0 24px 40px !important;max-width:1680px !important;}
 [data-testid="stVerticalBlock"]{gap:.85rem;}
-/* the sign-in bridge is invisible and takes no space */
+/* the sign-in bridge and style-only blocks are invisible and take no space */
+div[class*="st-key-akbridge"]{position:absolute !important;width:0 !important;height:0 !important;overflow:hidden !important;margin:0 !important;padding:0 !important;}
+[data-testid="stElementContainer"]:has([data-testid="stMarkdownContainer"] > style:only-child),
+.element-container:has([data-testid="stMarkdownContainer"] > style:only-child){display:none !important;}
+[class*="viewerBadge"],[class*="profileContainer"],[data-testid="stAppDeployButton"]{display:none !important;}
 [data-testid="stElementContainer"]:has(iframe[title*="arka_bridge"]),.element-container:has(iframe[title*="arka_bridge"]){
   position:absolute !important;width:0 !important;height:0 !important;overflow:hidden !important;margin:0 !important;padding:0 !important;}
 [data-testid="stElementContainer"]:has(iframe[height="0"]){display:none !important;}
@@ -231,15 +245,14 @@ input::placeholder,textarea::placeholder{color:#5c5c66 !important;}
 [data-testid="stForm"]{border:1px solid var(--line) !important;border-radius:var(--r) !important;background:var(--s1);padding:16px !important;}
 [data-testid="stCheckbox"] label p,[data-testid="stToggle"] label p{font:14px var(--sans) !important;color:var(--tx) !important;}
 
-/* radio = segmented control (the view switcher in every workspace) */
-[data-testid="stRadio"] [role="radiogroup"]{gap:4px !important;flex-wrap:wrap;}
-[data-testid="stRadio"] label[data-baseweb="radio"]{background:transparent;border:1px solid var(--line2);border-radius:var(--r-sm);padding:6px 12px;margin:0 !important;
-  transition:border-color .12s ease,background .12s ease;}
-[data-testid="stRadio"] label[data-baseweb="radio"]:hover{border-color:#45454d;}
-[data-testid="stRadio"] label[data-baseweb="radio"]>div:first-child{display:none !important;}
-[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked){border-color:var(--amber);background:rgba(255,159,10,.10);}
-[data-testid="stRadio"] label[data-baseweb="radio"] p{font:500 12.5px var(--sans) !important;letter-spacing:.1px;color:var(--tx2) !important;white-space:nowrap;}
-[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p{color:var(--amber) !important;}
+/* radio = segmented control (the view switcher in every workspace); works with any Streamlit radio markup */
+[data-testid="stRadio"] [role="radiogroup"]{gap:6px !important;flex-wrap:wrap;}
+[data-testid="stRadio"] [role="radiogroup"]>label{flex:0 0 auto;margin:0 !important;padding:5px 12px 5px 8px;border:1px solid var(--line2);border-radius:999px;
+  white-space:nowrap;transition:border-color .12s ease,background .12s ease;accent-color:var(--amber);}
+[data-testid="stRadio"] [role="radiogroup"]>label:hover{border-color:#45454d;}
+[data-testid="stRadio"] [role="radiogroup"]>label:has(input:checked){border-color:rgba(255,159,10,.6);background:rgba(255,159,10,.08);}
+[data-testid="stRadio"] [role="radiogroup"]>label p{font:500 13px var(--sans) !important;color:var(--tx2) !important;white-space:nowrap !important;}
+[data-testid="stRadio"] [role="radiogroup"]>label:has(input:checked) p{color:var(--tx) !important;}
 
 /* tabs */
 .stTabs [data-baseweb="tab-list"]{background:transparent !important;border:0 !important;border-bottom:1px solid var(--line) !important;gap:4px !important;}
@@ -265,31 +278,32 @@ input::placeholder,textarea::placeholder{color:#5c5c66 !important;}
 .stProgress>div>div>div>div{background:var(--amber) !important;}
 
 /* ═════ shell ═════ */
-.ak-hdr{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 0 10px;}
-.ak-id{display:flex;align-items:center;gap:10px;min-width:0;}
-.ak-id img{width:28px;height:28px;border-radius:7px;display:block;}
-.ak-id .nm{font:600 16px var(--sans);color:var(--tx);letter-spacing:-.2px;white-space:nowrap;}
-.ak-id .sub{font:500 12px var(--sans);color:var(--tx3);padding-left:10px;margin-left:2px;border-left:1px solid var(--line2);white-space:nowrap;}
-.ak-meta{display:flex;align-items:center;gap:14px;font:500 12.5px var(--sans);color:var(--tx3);white-space:nowrap;}
+.ak-hdr{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:56px;}
+.ak-id{display:flex;align-items:center;gap:12px;min-width:0;}
+.ak-meta{display:flex;align-items:center;justify-content:flex-end;gap:14px;font:500 12.5px var(--sans);color:var(--tx3);white-space:nowrap;min-height:56px;}
 .ak-mkt{display:inline-flex;align-items:center;gap:7px;color:var(--tx2);}
 .ak-mkt i{width:7px;height:7px;border-radius:50%;background:var(--tx4);display:inline-block;}
 .ak-mkt.live i{background:var(--green);box-shadow:0 0 0 3px rgba(48,209,88,.15);} .ak-mkt.live{color:var(--tx);}
 .ak-mkt.pre i{background:var(--amber);}
-.ak-av{width:28px;height:28px;border-radius:50%;background:var(--s3);border:1px solid var(--line2);display:inline-flex;align-items:center;justify-content:center;
-  font:600 12px var(--sans);color:var(--tx);}
-.ak-av.adm{border-color:rgba(255,159,10,.5);color:var(--amber);}
+.ak-av{width:30px;height:30px;border-radius:50%;background:var(--s3);border:1px solid var(--line2);display:inline-flex;align-items:center;justify-content:center;
+  font:600 12.5px var(--sans);color:var(--tx);flex-shrink:0;}
+div[class*="st-key-toprow"] [data-testid="stHorizontalBlock"]{align-items:center;}
+div[class*="st-key-toprow"]{border-bottom:1px solid var(--line);margin:0 -24px;padding:0 24px;}
 
-/* navigation: radio rendered as a tab bar */
-div[class*="st-key-navbar"]{border-bottom:1px solid var(--line);}
-div[class*="st-key-navbar"] [role="radiogroup"]{display:flex !important;flex-direction:row !important;gap:2px !important;flex-wrap:wrap;}
-div[class*="st-key-navbar"] label[data-baseweb="radio"]{border:0 !important;border-radius:var(--r-sm) var(--r-sm) 0 0 !important;padding:9px 12px 10px !important;
-  background:transparent !important;box-shadow:inset 0 -2px 0 transparent;}
-div[class*="st-key-navbar"] label[data-baseweb="radio"]:hover{background:var(--s1) !important;}
-div[class*="st-key-navbar"] label[data-baseweb="radio"]:has(input:checked){background:transparent !important;box-shadow:inset 0 -2px 0 var(--amber);}
-div[class*="st-key-navbar"] label[data-baseweb="radio"] p{font:500 13.5px var(--sans) !important;color:var(--tx3) !important;}
-div[class*="st-key-navbar"] label[data-baseweb="radio"]:has(input:checked) p{color:var(--tx) !important;}
-div[class*="st-key-navrow"] [data-testid="stHorizontalBlock"]{align-items:flex-end;}
-div[class*="st-key-search"] [data-baseweb="select"]>div{min-height:38px;background:var(--s1) !important;}
+/* row of buttons (desktop tabs, phone tab bar): forced into one flex row whatever the Streamlit version */
+div[class*="st-key-tabs"],div[class*="st-key-tabs"] [data-testid="stVerticalBlock"],div[class*="st-key-tabs"] [data-testid="stHorizontalBlock"],
+div[class*="st-key-tabbar"],div[class*="st-key-tabbar"] [data-testid="stVerticalBlock"],div[class*="st-key-tabbar"] [data-testid="stHorizontalBlock"]{
+  display:flex !important;flex-direction:row !important;flex-wrap:nowrap !important;align-items:center !important;}
+div[class*="st-key-tabs"] [data-testid="stElementContainer"],div[class*="st-key-tabs"] .element-container,div[class*="st-key-tabs"] .stButton{width:auto !important;flex:0 0 auto !important;}
+div[class*="st-key-tabs"]{gap:4px !important;overflow-x:auto;scrollbar-width:none;padding:10px 0 !important;border-bottom:1px solid var(--line);}
+div[class*="st-key-tabs"] [data-testid="stVerticalBlock"]{gap:4px !important;}
+div[class*="st-key-tabs"] button{background:transparent !important;border:0 !important;border-radius:8px !important;min-height:36px !important;padding:0 14px !important;
+  color:var(--tx3) !important;font:500 14px var(--sans) !important;width:auto !important;}
+div[class*="st-key-tabs"] button p{font:500 14px var(--sans) !important;white-space:nowrap !important;}
+div[class*="st-key-tabs"] button:hover{background:var(--s1) !important;color:var(--tx) !important;}
+div[class*="st-key-tabs"] button[kind="primary"],div[class*="st-key-tabs"] button[data-testid="stBaseButton-primary"]{background:var(--s2) !important;color:#fff !important;}
+div[class*="st-key-tabs"] button[kind="primary"] p,div[class*="st-key-tabs"] button[data-testid="stBaseButton-primary"] p{color:#fff !important;}
+div[class*="st-key-search"] [data-baseweb="select"]>div{min-height:40px;background:var(--s1) !important;border-radius:10px !important;}
 div[class*="st-key-search"] [data-baseweb="select"] input,div[class*="st-key-search"] .stTextInput input{font:500 14px var(--sans) !important;}
 
 /* page header */
@@ -371,11 +385,11 @@ div[class*="st-key-cta"] button{padding:0 30px !important;min-height:46px !impor
 .lp-shot .bar i{width:10px;height:10px;border-radius:50%;background:#2a2a2e;}
 .lp-shot .grid{display:grid;grid-template-columns:1.4fr 1fr;gap:1px;background:var(--line);}
 .lp-shot .grid>div{background:var(--s1);padding:18px 20px;min-height:150px;}
-.lp-shot .k{font:500 12px var(--sans);color:var(--tx3);} .lp-shot .v{font:600 30px var(--mono);color:#fff;margin-top:6px;letter-spacing:-.5px;}
-.lp-shot .c{font:600 13px var(--mono);color:var(--green);margin-top:4px;}
+.lp-shot .k{font:500 12px var(--sans);color:var(--tx3);} .lp-shot .v{font:600 30px var(--sans);color:#fff;margin-top:6px;letter-spacing:-.5px;}
+.lp-shot .c{font:500 13px var(--sans);color:var(--green);margin-top:4px;}
 .lp-shot svg{margin-top:12px;display:block;width:100%;}
 .lp-shot .row{display:flex;justify-content:space-between;font:13px var(--sans);color:var(--tx2);padding:8px 0;border-bottom:1px solid var(--line);}
-.lp-shot .row:last-child{border-bottom:0;} .lp-shot .row b{font:500 13px var(--mono);}
+.lp-shot .row:last-child{border-bottom:0;} .lp-shot .row b{font:500 13px var(--sans);}
 @media(max-width:720px){.lp-shot .grid{grid-template-columns:1fr;}}
 .lp-h{margin:96px 0 28px;} .lp-h .e{font:500 13px var(--sans);color:var(--amber);}
 .lp-h .t{font:700 30px var(--sans);letter-spacing:-.6px;color:var(--tx);margin-top:8px;line-height:1.2;max-width:640px;}
@@ -482,12 +496,13 @@ def _run(module: str, fn, *args, **kwargs):
 
 
 LOGO = auth.logo_data_uri(128)
+WM = auth.wordmark_html(17)
 
 
 # ═══════════════════════════════ OPENING SCREEN · LANDING · SIGN-IN ═══════════════════════════════
 def _render_opening():
     """Shown for the fraction of a second the browser needs to hand back a saved sign-in."""
-    st.markdown(f'<div class="sp"><img src="{LOGO}" alt=""><div class="t">Opening Arka Trades</div><div class="bar"><i></i></div></div>',
+    st.markdown(f'<div class="sp">{auth.wordmark_html(22)}<div class="bar"><i></i></div></div>',
                 unsafe_allow_html=True)
     with st.container(key="spskip"):
         if st.button("Go to sign in", key="sp_skip"):
@@ -503,7 +518,7 @@ def _render_opening():
 
 
 def _lp_nav():
-    st.markdown(f'<div class="lp-nav"><div class="id"><img src="{LOGO}" alt="">Arka Trades</div>'
+    st.markdown(f'<div class="lp-nav"><div class="id">{WM}</div>'
                 '<div class="links"><a href="#features">Features</a><a href="#how">How it works</a>'
                 '<a class="go" href="?login=1" target="_self">Sign in</a></div></div>', unsafe_allow_html=True)
 
@@ -511,7 +526,7 @@ def _lp_nav():
 def _render_login():
     _lp_nav()
     with st.container(key="signin"):
-        st.markdown(f'<div class="si-h"><img src="{LOGO}" alt=""><div class="t">Sign in to Arka Trades</div>'
+        st.markdown(f'<div class="si-h"><div style="display:flex;justify-content:center">{auth.wordmark_html(20)}</div><div class="t">Sign in</div>'
                     '<div class="s">Your watchlists, portfolio and research, synced.</div></div>', unsafe_allow_html=True)
         with st.form("lf"):
             u = st.text_input("Username", placeholder="Username", autocomplete="username")
@@ -742,57 +757,107 @@ def _cmd_cb(key):
         _goto_symbol(sym)
 
 
-def _render_header():
+def _btn(label, key, icon=None, primary=False, on_click=None, args=(), full=False):
+    kw = {"key": key, "type": "primary" if primary else "secondary", "on_click": on_click, "args": args}
+    if full:
+        kw["use_container_width"] = True
+    if icon:
+        try:
+            return st.button(label, icon=icon, **kw)
+        except TypeError:                                  # Streamlit without button icons
+            pass
+    return st.button(label, **kw)
+
+
+def _hbox(key):
+    """A container whose children sit in one row (native horizontal containers when available, CSS otherwise)."""
+    try:
+        return st.container(key=key, horizontal=True)
+    except TypeError:
+        return st.container(key=key)
+
+
+def _status_html(with_clock=True):
     label, cls, detail = _market_status()
-    clock = datetime.now(IST).strftime("%a %d %b · %H:%M IST")
-    av_cls = "ak-av adm" if IS_ADMIN else "ak-av"
-    st.markdown(f'<div class="ak-hdr"><div class="ak-id"><img src="{LOGO}" alt=""><span class="nm">Arka Trades</span>'
-                f'<span class="sub">Market terminal</span></div>'
-                f'<div class="ak-meta"><span class="ak-mkt {cls}" title="{_esc(detail)}"><i></i>{_esc(_nice(label))}'
-                f'<span class="det" style="color:var(--tx3)">&nbsp;· {_esc(detail)}</span></span>'
-                f'<span class="clk">{clock}</span><span class="{av_cls}" title="{_esc(name)} · {"admin" if IS_ADMIN else "member"}">{_esc(initial)}</span>'
-                '</div></div>', unsafe_allow_html=True)
-
-
-def _render_nav():
-    pg = st.session_state.page
-    labels = [l for l, _ in NAV]
-    current = NAV_LABEL.get(pg)
-    key = f"ak_nav_{pg}"                                   # a fresh widget per page keeps the highlight in sync with any navigation
-    with st.container(key="navbar"):
-        st.radio("Navigation", labels, index=labels.index(current) if current else None, key=key, horizontal=True,
-                 label_visibility="collapsed", on_change=_nav_radio_cb, args=(key,))
+    clock = datetime.now(IST).strftime("%a %d %b, %H:%M")
+    return (f'<span class="ak-mkt {cls}" title="{_esc(detail)}"><i></i>{_esc(_nice(label))}</span>'
+            + (f'<span class="clk">{clock}</span>' if with_clock else "")
+            + f'<span class="ak-av" title="{_esc(name)} · {"admin" if IS_ADMIN else "member"}">{_esc(initial)}</span>')
 
 
 def _render_search():
     with st.container(key="search"):
         try:
             st.selectbox("Search", _security_candidates(), index=None, key="ak_cmd", on_change=_cmd_cb, args=("ak_cmd",),
-                         accept_new_options=True, label_visibility="collapsed",
-                         placeholder="Search stock or code (TCS RES, MF)")
+                         accept_new_options=True, label_visibility="collapsed", placeholder="Search stocks, or type MF, PORT, TCS RES")
         except TypeError:                                  # Streamlit older than accept_new_options
             st.text_input("Search", key="ak_cmd_txt", on_change=_cmd_cb, args=("ak_cmd_txt",), label_visibility="collapsed",
                           placeholder="Search a stock and press Enter")
 
 
-def _render_shell_top():
-    _render_header()
-    if IS_PHONE:
-        _render_nav()
+TABS_DESKTOP = [("Home", "home"), ("Money flow", "flow"), ("Watchlist", "watchlist"), ("Portfolio", "portfolio"), ("News", "news"),
+                ("Screener", "smart_scan"), ("Research", "research"), ("Arka AI", "analysis"), ("Account", "account")]
+TABS_PHONE = [("Home", "home", ":material/home:"), ("Watchlist", "watchlist", ":material/bookmark:"),
+              ("Portfolio", "portfolio", ":material/pie_chart:"), ("Research", "research", ":material/query_stats:")]
+MORE_PHONE = [("Money flow", "flow", ":material/swap_vert:"), ("News", "news", ":material/newspaper:"),
+              ("Screener", "smart_scan", ":material/filter_alt:"), ("Arka AI", "analysis", ":material/auto_awesome:"),
+              ("Account", "account", ":material/person:")]
+
+
+def _render_desktop_top():
+    pg = st.session_state.page
+    with st.container(key="toprow"):
+        a, b, c = st.columns([1.3, 2.2, 1.5], gap="medium")
+        with a:
+            st.markdown(f'<div class="ak-hdr"><div class="ak-id">{WM}</div></div>', unsafe_allow_html=True)
+        with b:
+            _render_search()
+        with c:
+            st.markdown(f'<div class="ak-meta">{_status_html()}</div>', unsafe_allow_html=True)
+    with _hbox("tabs"):
+        for label, target in TABS_DESKTOP:
+            _btn(label, f"tab_{target}", primary=(pg == target), on_click=_nav_cb, args=(target,))
+
+
+def _render_phone_top():
+    pg = st.session_state.page
+    st.markdown(f'<div class="ak-hdr ak-phdr"><div class="ak-id">{auth.wordmark_html(15)}</div>'
+                f'<div class="ak-meta">{_status_html(with_clock=False)}</div></div>', unsafe_allow_html=True)
+    if pg in ("home", "watchlist", "research", "security", "news", "analysis"):
         _render_search()
+
+
+def _render_phone_tabbar():
+    pg = st.session_state.page
+    more_pages = {t for _, t, _ in MORE_PHONE}
+    with _hbox("tabbar"):
+        for label, target, ic in TABS_PHONE:
+            _btn(label, f"tb_{target}", icon=ic, primary=(pg == target), on_click=_nav_cb, args=(target,))
+        kw = {"use_container_width": True}
+        try:
+            pop = st.popover("More", icon=":material/menu:", **kw)
+        except TypeError:
+            pop = st.popover("More", **kw)
+        with pop:
+            for label, target, ic in MORE_PHONE:
+                _btn(label, f"tbm_{target}", icon=ic, primary=(pg == target), on_click=_nav_cb, args=(target,), full=True)
+    if pg in more_pages:
+        st.markdown('<style>div[class*="st-key-tabbar"] [data-testid="stPopover"] button{color:#fff !important;}</style>', unsafe_allow_html=True)
+
+
+def _render_shell_top():
+    if IS_PHONE:
+        _render_phone_top()
     else:
-        with st.container(key="navrow"):
-            a, b = st.columns([5.2, 1.8], gap="medium")
-            with a:
-                _render_nav()
-            with b:
-                _render_search()
+        _render_desktop_top()
 
 
 def _page_header(pg_key):
     title, desc = PAGE_META.get(pg_key, (pg_key.title(), ""))
     sym = st.session_state.get("active_security")
     ctx = f'<span class="ak-chip">Active <b>{_esc(sym)}</b></span>' if sym and pg_key in ("research", "analysis", "news") else ""
+    if IS_PHONE:
+        desc = ""
     st.markdown(f'<div class="ak-ph"><div><div class="t">{_esc(title)}</div><div class="d">{_esc(desc)}</div></div>'
                 f'<div class="r">{ctx}</div></div>', unsafe_allow_html=True)
 
@@ -1000,7 +1065,15 @@ else:
 
 with center:
     if pg == "home" or (pg == "security" and not st.session_state.get("active_security")):
-        _run("home_page", _load("home_page", "render_home"), supabase, on_open=_open_security, nav=_nav_cb)
+        _home = _load("home_page", "render_home")
+        try:
+            _compact_ok = _home is not None and "compact" in inspect.signature(_home).parameters
+        except (TypeError, ValueError):
+            _compact_ok = False
+        if _compact_ok:
+            _run("home_page", _home, supabase, on_open=_open_security, nav=_nav_cb, compact=IS_PHONE)
+        else:
+            _run("home_page", _home, supabase, on_open=_open_security, nav=_nav_cb)
     elif pg == "security":
         _render_security_workspace(st.session_state["active_security"])
     elif pg == "watchlist":
@@ -1032,3 +1105,6 @@ if right_rail is not None:
     with right_rail:
         with st.container(key="newsrail"):
             _news_rail_fragment()
+
+if IS_PHONE:
+    _render_phone_tabbar()
