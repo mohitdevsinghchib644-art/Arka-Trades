@@ -1,5 +1,9 @@
 """
-Arka Trades — quant_data.py (v1)
+Arka Trades — quant_data.py (v1.1)
+
+v1.1 fixes (audit): today's unfinished candle is never used before 16:00 IST; a failed NSE list download is no longer
+remembered for a day; rolling measures tolerate a few missing days instead of going blank; extra symbols can be added
+to a universe (Backtest lab stock picker).
 
 Shared end-of-day data layer for the Regime dashboard and the Backtest lab.
 
@@ -134,7 +138,7 @@ def _constituents_cached(fname: str, day: str) -> dict:
                     return out
         except Exception:
             continue
-    return {}
+    raise RuntimeError("constituent list unreachable")        # raising keeps the failure out of the cache
 
 
 def universe(name: str, watchlist=None) -> tuple[dict, str]:
@@ -143,7 +147,10 @@ def universe(name: str, watchlist=None) -> tuple[dict, str]:
         syms = [str(s).upper().strip() for s in (watchlist or []) if str(s).strip()]
         return {s: FALLBACK.get(s, "") for s in dict.fromkeys(syms)}, f"{len(syms)} stocks from your lists"
     fname = UNIVERSES.get(name, UNIVERSES["Nifty 500"])
-    got = _constituents_cached(fname, _now().strftime("%Y-%m-%d"))
+    try:
+        got = _constituents_cached(fname, _now().strftime("%Y-%m-%d"))
+    except Exception:
+        got = {}
     if got:
         return got, f"{len(got)} stocks · today's {name} members (NSE Indices)"
     return dict(FALLBACK), f"NSE list unreachable · using the built-in list of {len(FALLBACK)} large and liquid stocks"
@@ -215,10 +222,19 @@ def download(symbols: list, years: int, progress=None, chunk: int = 60) -> tuple
                 frames[t] = f
         if progress:
             progress(min(1.0, (i + len(part)) / len(wanted)), f"Downloaded {min(i + len(part), len(wanted))} of {len(wanted)}")
+    frames = {t: g for t, g in ((t, drop_unfinished(f)) for t, f in frames.items()) if len(g) >= 60}
     for s, t in tick.items():
         if t not in frames:
             missing.append(s)
     return frames, missing
+
+
+def drop_unfinished(f: pd.DataFrame, now: datetime | None = None) -> pd.DataFrame:
+    """Remove today's candle while it is still forming (before 16:00 IST): a half-day bar would fake signals and volume."""
+    now = now or _now()
+    if now.hour < 16:
+        return f[f.index < pd.Timestamp(now.date())]
+    return f
 
 
 # ═════════════════════════ panel ═════════════════════════
@@ -248,13 +264,17 @@ def build_panel(frames: dict, symbols: list, industries: dict, years: int, name:
 def _cache_key(name: str, symbols: list, years: int) -> str:
     import hashlib
     h = hashlib.md5(",".join(sorted(symbols)).encode()).hexdigest()[:8]
-    stamp = _now() - timedelta(hours=18, minutes=30)     # a new file after ~18:30 IST, when the day's EOD data is final
+    stamp = _now() - timedelta(hours=16)                 # a new file after 16:00 IST, once the day's candle is complete
     return f"{name.replace(' ', '_')}_{years}y_{h}_{stamp:%Y%m%d}"
 
 
-def load_panel(name: str, watchlist=None, years: int = 10, progress=None, force: bool = False) -> dict:
-    """The panel for a universe: memory → disk → Yahoo. Raises RuntimeError with a readable message on failure."""
+def load_panel(name: str, watchlist=None, years: int = 10, progress=None, force: bool = False, extra=()) -> dict:
+    """The panel for a universe (+ extra symbols): memory → disk → Yahoo. Raises RuntimeError with a readable message."""
     inds, note = universe(name, watchlist)
+    for s in extra or ():
+        s = str(s).upper().strip()
+        if s and s not in inds:
+            inds[s] = FALLBACK.get(s, "")
     symbols = list(inds)
     if not symbols:
         raise RuntimeError("This universe is empty. Add stocks to your watchlist or pick an index.")
@@ -307,16 +327,28 @@ def ema(x: np.ndarray, n: int) -> np.ndarray:
     return out
 
 
+def _mp(n: int) -> int:
+    """A rolling window needs 90% of its days: a couple of missing candles must not blank the measure for months."""
+    return n if n <= 5 else max(5, int(n * 0.9))
+
+
 def sma(x: np.ndarray, n: int) -> np.ndarray:
-    return pd.DataFrame(x).rolling(n, min_periods=n).mean().to_numpy()
+    return pd.DataFrame(x).rolling(n, min_periods=_mp(n)).mean().to_numpy()
 
 
 def roll_max(x: np.ndarray, n: int) -> np.ndarray:
-    return pd.DataFrame(x).rolling(n, min_periods=n).max().to_numpy()
+    return pd.DataFrame(x).rolling(n, min_periods=_mp(n)).max().to_numpy()
 
 
 def roll_min(x: np.ndarray, n: int) -> np.ndarray:
-    return pd.DataFrame(x).rolling(n, min_periods=n).min().to_numpy()
+    return pd.DataFrame(x).rolling(n, min_periods=_mp(n)).min().to_numpy()
+
+
+def rsi(c: np.ndarray, n: int = 14) -> np.ndarray:
+    d = pd.DataFrame(c).diff()
+    up = d.clip(lower=0).ewm(alpha=1.0 / n, adjust=False, min_periods=n).mean()
+    dn = (-d.clip(upper=0)).ewm(alpha=1.0 / n, adjust=False, min_periods=n).mean()
+    return (100 - 100 / (1 + up / dn.replace(0, np.nan))).fillna(100).where(up.notna()).to_numpy()
 
 
 def shift(x: np.ndarray, k: int = 1) -> np.ndarray:
@@ -360,6 +392,7 @@ def add_indicators(p: dict) -> dict:
     p["vavg50"] = f32(shift(sma(v, 50), 1))                    # average of the 50 sessions BEFORE today
     p["turn_cr"] = f32(sma(c * v, 20) / 1e7)                  # 20-day average turnover, ₹ crore
     p["hh52"] = f32(roll_max(h, 252))
+    p["ll52"] = f32(roll_min(l, 252))
     p["rs"] = f32(rs_rating(c))
     p["idx_ema21"] = f32(ema(p["idx_c"][:, None].astype(np.float64), 21)[:, 0])
     p["idx_ema50"] = f32(ema(p["idx_c"][:, None].astype(np.float64), 50)[:, 0])
