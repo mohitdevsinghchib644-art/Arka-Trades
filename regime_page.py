@@ -34,7 +34,7 @@ def _regime_for(p: dict) -> pd.DataFrame:
     return p["_regime"]
 
 
-def get_panel(universe: str, years: int = 10, force: bool = False):
+def get_panel(universe: str, years: int = 10, force: bool = False, extra=()):
     """Load with a progress bar; returns (panel, error message)."""
     bar = None
 
@@ -44,7 +44,7 @@ def get_panel(universe: str, years: int = 10, force: bool = False):
             bar = st.progress(0.0, text="Downloading prices: the first load of the day takes a minute or two.")
         bar.progress(min(1.0, f), text=f"{msg}. First load of the day; later visits are instant.")
     try:
-        p = qd.load_panel(universe, st.session_state.get("watchlist", []), years, prog, force)
+        p = qd.load_panel(universe, st.session_state.get("watchlist", []), years, prog, force, tuple(extra))
         return p, None
     except Exception as exc:  # pragma: no cover - network
         return None, str(exc) or type(exc).__name__
@@ -99,6 +99,11 @@ def render_regime(on_open=None):
         st.info("Not enough history to read the regime yet.")
         return
     row = df.iloc[-1]
+    age = (qd._now().date() - df.index[-1].date()).days
+    if age > 4:
+        st.warning(f"The latest candle is from {df.index[-1]:%d %b %Y} ({age} days ago). Yahoo may be behind: press Refresh, and do not act on this reading until it updates.")
+    if len(p["symbols"]) < 80 and uni != "Nifty 100":
+        st.warning(f"Only {len(p['symbols'])} stocks loaded, so breadth is thin. The NSE list or Yahoo may have failed: press Refresh.")
     state = row["state"]
     col = ui.STATE_COLOR[state]
     eps = rg.episodes(df)
