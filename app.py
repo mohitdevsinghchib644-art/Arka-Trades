@@ -1,5 +1,7 @@
 """
-Arka Trades — Market Terminal v9.4
+Arka Trades — Market Terminal v9.4.1
+
+v9.4.1: with the news column hidden, Home uses the full width (no empty side strip); "Show news" is a small button on the right.
 
 v9.4: the Arka mark (arka_icon.png) sits next to the wordmark in the header, on the opening and sign-in screens, and is
       the browser-tab / home-screen icon. Pages no longer fade to grey while Streamlit re-runs (smoother tab switches).
@@ -1097,8 +1099,17 @@ elif pg in PAGE_META and pg != "home":
 rail = (not IS_PHONE) and pg in {"home", "security"}
 if rail and st.session_state.show_news_rail:
     center, right_rail = st.columns([4.55, 1.15], gap="medium")
-elif rail:
-    center, right_rail = st.columns([5.6, 0.45], gap="small")
+elif rail:                                   # news hidden: full width, a small "Show news" button on the right
+    _sp, _bt = st.columns([8.6, 1.1], gap="small")
+    with _bt:
+        try:
+            _show = st.button("Show news", key="toggle_news_rail_show", use_container_width=True, icon=":material/newspaper:")
+        except TypeError:                                      # Streamlit without button icons
+            _show = st.button("Show news", key="toggle_news_rail_show", use_container_width=True)
+        if _show:
+            st.session_state.show_news_rail = True
+            st.rerun()
+    center, right_rail = st.container(), None
 else:
     center, right_rail = st.container(), None
 
