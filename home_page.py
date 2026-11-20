@@ -1,5 +1,12 @@
 """
-home_page.py — Arka Trades · Market overview (the HOME page), v3
+home_page.py — Arka Trades · Market overview (the HOME page), v3.1
+
+v3.1 (fixes v3)
+  * v3 downloaded from Yahoo in parallel. yfinance is not safe to call from several threads at once, so results got
+    mixed up: NIFTY 50 "unavailable", half the heatmap blank, sectors without history, and constant re-downloads
+    (the lag). Downloads are one at a time again, behind a process-wide lock, and an incomplete download is never cached.
+  * Index cards keep a fixed width instead of stretching when some are missing; stocks without a quote are dimmed.
+  * Continuous animations removed (pulsing dot, entrance animation, edge mask) to keep scrolling light.
 
 v3
   * A morning-brief header: greeting, one sentence on the market (NIFTY, breadth, leading and lagging sector, VIX)
@@ -32,8 +39,8 @@ import json
 import math
 import re
 import sys
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -239,7 +246,7 @@ _CSS = """<style>
 /* index cards strip */
 .hm-cards{display:flex;gap:10px;overflow-x:auto;scroll-snap-type:x mandatory;padding:12px 0 4px;margin:0;scrollbar-width:none;-webkit-overflow-scrolling:touch;}
 .hm-cards::-webkit-scrollbar{display:none;}
-.hm-card{flex:1 0 158px;scroll-snap-align:start;background:var(--s1);border:1px solid var(--line);border-radius:var(--hm-r);padding:12px 14px 10px;min-width:158px;}
+.hm-card{flex:0 0 172px;scroll-snap-align:start;background:var(--s1);border:1px solid var(--line);border-radius:var(--hm-r);padding:12px 14px 10px;min-width:158px;}
 .hm-card .n{font:500 12.5px var(--sans);color:var(--tx3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .hm-card .v{font:600 17px var(--sans);color:var(--tx);margin-top:6px;letter-spacing:-.2px;white-space:nowrap;}
 .hm-card .c{font:500 12.5px var(--sans);margin-top:2px;white-space:nowrap;}
@@ -372,24 +379,17 @@ _CSS = """<style>
 @container (max-width:620px){.hm-brief .t{font-size:22px;} .hm-chips{justify-content:flex-start;}}
 
 /* v3: depth, hover, glow */
-.hm-card,.hm-p{box-shadow:0 1px 0 rgba(255,255,255,.025) inset;transition:border-color .18s ease,transform .18s ease,background .18s ease;}
-.hm-card:hover{border-color:#2f2f35;transform:translateY(-2px);background:#121215;}
+.hm-card,.hm-p{transition:border-color .18s ease,background .18s ease;}
+.hm-card:hover{border-color:#2f2f35;background:#121215;}
 .hm-p:hover{border-color:#26262b;}
-.hm-cards{-webkit-mask-image:linear-gradient(90deg,#000 0,#000 calc(100% - 36px),transparent);mask-image:linear-gradient(90deg,#000 0,#000 calc(100% - 36px),transparent);padding-right:30px;}
 .hm-p.hero{position:relative;}
 .hm-p.hero::before{content:"";position:absolute;inset:0 0 auto 0;height:170px;pointer-events:none;
   background:radial-gradient(60% 120% at 12% 0%,color-mix(in srgb,var(--hg,#30D158) 16%,transparent),transparent 70%);}
 .hm-p.hero>*{position:relative;}
-.hm-tile{transition:transform .15s ease,filter .15s ease;} .hm-tile:hover{transform:scale(1.06);filter:brightness(1.15);z-index:1;}
+.hm-tile:hover{filter:brightness(1.15);}
 .hm-li,.hm-t tbody tr:not(.g) td{transition:background .15s ease;} .hm-li:hover{background:rgba(255,255,255,.025);}
-@keyframes hmpulse{0%{r:3.5;opacity:.9}70%{r:10;opacity:0}100%{r:10;opacity:0}}
-.hm-dot{animation:hmpulse 2s ease-out infinite;}
-
-/* v3: first-load entrance (only once per session) */
-@keyframes hmin{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
-.hm-in .hm-brief,.hm-in .hm-cards,.hm-in .hm-row{animation:hmin .45s cubic-bezier(.2,.8,.2,1) both;}
-.hm-in .hm-cards{animation-delay:.05s} .hm-in .hm-row:nth-of-type(1){animation-delay:.1s} .hm-in .hm-row:nth-of-type(2){animation-delay:.16s}
-.hm-in .hm-row:nth-of-type(3){animation-delay:.22s} .hm-in .hm-row:nth-of-type(n+4){animation-delay:.28s}
+.hm-dot{opacity:.25;}
+.hm-tile.nq{opacity:.38;}
 
 /* v3: loading skeleton */
 .hm-load{display:flex;align-items:center;gap:14px;padding:22px 0 14px;}
@@ -405,7 +405,7 @@ _CSS = """<style>
 .sk-grid{display:grid;gap:12px;grid-template-columns:minmax(0,1.7fr) minmax(0,1fr) minmax(0,1fr);} .sk-grid .sk{height:330px;}
 .sk-grid2{display:grid;gap:12px;grid-template-columns:minmax(0,1fr) minmax(0,2fr);margin-top:12px;} .sk-grid2 .sk{height:220px;}
 @container (max-width:900px){.sk-grid,.sk-grid2{grid-template-columns:minmax(0,1fr);} .sk-grid .sk{height:220px;} .sk-grid .sk+.sk{height:150px;}}
-@media (prefers-reduced-motion:reduce){.hm-in .hm-brief,.hm-in .hm-cards,.hm-in .hm-row,.sk,.hm-load img,.hm-dot{animation:none !important;}}
+@media (prefers-reduced-motion:reduce){.sk,.hm-load img{animation:none !important;}}
 </style>"""
 
 
@@ -517,7 +517,7 @@ def _area(values, uid, h=150):
             f'<path d="{line} L{w},{h} L0,{h} Z" fill="url(#hmg{uid})"/>'
             f'<path d="{line}" fill="none" stroke="{color}" stroke-width="1.8" vector-effect="non-scaling-stroke"/></svg>'
             f'<div style="position:relative;height:0"><svg width="22" height="22" viewBox="-11 -11 22 22" style="position:absolute;right:-11px;'
-            f'top:{xy[-1][1] - h - 11:.1f}px;overflow:visible"><circle class="hm-dot" r="3.5" fill="{color}"/><circle r="3.5" fill="{color}" '
+            f'top:{xy[-1][1] - h - 11:.1f}px;overflow:visible"><circle class="hm-dot" r="8" fill="{color}"/><circle r="3.5" fill="{color}" '
             f'stroke="#0E0E10" stroke-width="1.5"/></svg></div>')
 
 
@@ -559,8 +559,27 @@ def _norm(series):
     return s[~s.index.duplicated(keep="last")].sort_index()
 
 
-def _download(tickers, period):
+_YF_GUARD = threading.Lock()
+
+
+def _lock_yfinance():
+    """yfinance keeps shared state inside yf.download, so two downloads at the same time corrupt each other.
+    Wrap yf.download once per process so every caller (this page, data_engine, the Regime page) takes turns."""
     import yfinance as yf
+    with _YF_GUARD:
+        if not getattr(yf, "_arka_serial", False):
+            lock, orig = threading.RLock(), yf.download
+
+            def download(*a, **k):
+                with lock:
+                    return orig(*a, **k)
+            yf.download = download
+            yf._arka_serial = True
+    return yf
+
+
+def _download(tickers, period):
+    yf = _lock_yfinance()
     raw = yf.download(list(tickers), period=period, interval="1d", group_by="ticker", progress=False, threads=True, auto_adjust=False)
     return de._parse_download(raw, list(tickers))
 
@@ -572,8 +591,8 @@ def _hist_cached(tickers: tuple, bucket: int) -> dict:
         s = _norm(df["Close"])
         if len(s) >= 20:
             out[t] = s
-    if not out:
-        raise RuntimeError("history unavailable")      # never cached
+    if "^NSEI" not in out or len(out) < 0.5 * len(tickers):
+        raise RuntimeError("history incomplete")       # never cached: the next run tries again
     return out
 
 
@@ -594,8 +613,8 @@ def _live_cached(tickers: tuple, bucket: int) -> dict:
         out[t] = {"price": float(last["Close"]), "prev": float(prev["Close"]), "date": idx[-1].normalize(),
                   "high": float(last["High"]) if "High" in d and _ok(last.get("High")) else None,
                   "low": float(last["Low"]) if "Low" in d and _ok(last.get("Low")) else None}
-    if not out:
-        raise RuntimeError("quotes unavailable")
+    if "^NSEI" not in out or len(out) < 0.5 * len(tickers):
+        raise RuntimeError("quotes incomplete")        # never cached
     return out
 
 
@@ -635,8 +654,8 @@ def _metrics(t, live, hist):
 def market_data() -> dict:
     """{label: metrics} for every WEI / cross-asset / sector row. Never raises."""
     tick = _all_tickers()
-    live, hist = _parallel([lambda: de._guarded(("hm_live", tick), lambda: _live_cached(tick, de._bucket(90, 900)), {}),
-                            lambda: de._guarded(("hm_hist", tick), lambda: _hist_cached(tick, int(time.time() // (6 * 3600))), {})])
+    live = de._guarded(("hm_live31", tick), lambda: _live_cached(tick, de._bucket(90, 900)), {})
+    hist = de._guarded(("hm_hist31", tick), lambda: _hist_cached(tick, int(time.time() // (6 * 3600))), {})
     out = {}
     for _, label, chain, kind in WEI + XASSET:
         for t in chain:
@@ -1015,7 +1034,7 @@ def _imap(groups, nq, B):
             q = nq.get(s) or {}
             c, px = q.get("chg"), q.get("price")
             tip = f"{s} · ₹{px:,.2f}" if _ok(px) else f"{s} · no price"
-            tiles.append(f'<div class="hm-tile" style="background:{_heat(c)}" title="{_e(tip)}"><b>{_e(s)}</b><span>{_pct(c, 1)}</span></div>')
+            tiles.append(f'<div class="hm-tile{"" if _ok(c) else " nq"}" style="background:{_heat(c)}" title="{_e(tip)}"><b>{_e(s)}</b><span>{_pct(c, 1)}</span></div>')
         blocks.append(f'<div class="hm-grp"><small>{_e(_nm(g))}</small><div class="hm-tiles">{"".join(tiles)}</div></div>')
     tot = max(B["n"], 1)
     ad = (f'<div class="hm-adl"><span class="hm-up">{B["adv"]} advancing</span><span>{B["flat"]} unchanged</span>'
@@ -1081,10 +1100,14 @@ def _book(holds, realised, wl, wl_label, quotes):
                    f'<div><small>Today</small><b class="{_cls(day)}">{_inr(day)}</b><em class="{_cls(dp)}">{_pct(dp)}</em></div>'
                    f'<div><small>Unrealised P&amp;L</small><b class="{_cls(pnl)}">{_inr(pnl)}</b><em class="{_cls(pp)}">{_pct(pp)}</em></div>'
                    f'<div><small>Realised P&amp;L</small><b class="{_cls(realised) if realised else ""}">{_inr(realised)}</b><em style="color:var(--tx3)">all time</em></div></div>')
-        rows = "".join(f'<div class="hm-li"><div class="a"><b>{_e(h["symbol"])}</b><small>{"₹" + format(h["ltp"], ",.2f") if _ok(h.get("ltp")) else "—"}'
-                       f' · {_pct(h.get("weight"), 1, False)} of book</small></div>'
-                       f'<div class="z"><b class="{_cls(h.get("pnl_pct"))}">{_pct(h.get("pnl_pct"), 1)}</b><small class="{_cls(h.get("chg"))}">{_pct(h.get("chg"))} today</small></div></div>'
-                       for h in holds[:6])
+        def hrow(h):
+            if not _ok(h.get("ltp")):
+                return (f'<div class="hm-li" style="opacity:.6"><div class="a"><b>{_e(h["symbol"])}</b><small>Price not available right now</small></div>'
+                        '<div class="z"></div></div>')
+            return (f'<div class="hm-li"><div class="a"><b>{_e(h["symbol"])}</b><small>₹{h["ltp"]:,.2f} · {_pct(h.get("weight"), 1, False)} of book</small></div>'
+                    f'<div class="z"><b class="{_cls(h.get("pnl_pct"))}">{_pct(h.get("pnl_pct"), 1)}</b>'
+                    f'<small class="{_cls(h.get("chg"))}">{_pct(h.get("chg"))} today</small></div></div>')
+        rows = "".join(hrow(h) for h in holds[:6])
         more = f'<div class="hm-empty">+ {len(holds) - 6} more in Portfolio</div>' if len(holds) > 6 else ""
         out.append(rows + more)
     else:
@@ -1142,31 +1165,6 @@ def _world_clock():
 
 
 # ═════════════════════════ page ═════════════════════════
-def _parallel(fns):
-    """Run independent downloads side by side. Falls back to one-by-one if threads are not possible here."""
-    if len(fns) < 2:
-        return [f() for f in fns]
-    try:
-        try:
-            from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
-            ctx = get_script_run_ctx()
-        except Exception:
-            add_script_run_ctx = ctx = None
-
-        def wrap(f):
-            def run():
-                if ctx is not None:
-                    import threading
-                    add_script_run_ctx(threading.current_thread(), ctx)
-                return f()
-            return run
-        with ThreadPoolExecutor(max_workers=len(fns)) as pool:
-            futs = [pool.submit(wrap(f)) for f in fns]
-            return [f.result() for f in futs]
-    except Exception:
-        return [f() for f in fns]
-
-
 def _safe_mmi():
     try:
         return get_mmi()
@@ -1198,7 +1196,7 @@ def _brief(M, B, S):
         word = "up" if n["chg"] > 0.05 else "down" if n["chg"] < -0.05 else "flat"
         bits.append(f'NIFTY 50 is <b class="{_cls(n["chg"])}">{word}{"" if word == "flat" else " " + _pct(abs(n["chg"]), 2, False)}</b> at <b>{n["price"]:,.0f}</b>.')
     if B and B.get("n"):
-        bits.append(f'<b>{B["adv"]}</b> of {B["n"]} NIFTY stocks are up.')
+        bits.append(f'<b>{B["adv"]}</b> of {B["n"]} NIFTY stocks are up' + ("." if B["n"] >= 45 else " (quotes for the rest have not arrived yet)."))
     secs = [(l, M["SEC::" + l]["chg"]) for l, _ in SECTORS if M.get("SEC::" + l) and _ok(M["SEC::" + l].get("chg"))]
     if len(secs) >= 4:
         secs.sort(key=lambda x: x[1])
@@ -1242,7 +1240,9 @@ def _gather(supabase):
     held = sorted({l["symbol"] for l in base.get("alots", []) if l.get("open", 0) > 1e-9} if base.get("engine")
                   else {l["symbol"] for l in base.get("lots", [])})
     want = tuple(dict.fromkeys(n50 + wl[:8] + held))
-    M, quotes, mmi = _parallel([market_data, lambda: get_quotes(want) or {}, _safe_mmi])
+    M = market_data()
+    quotes = get_quotes(want) or {}
+    mmi = _safe_mmi()
     return M, groups, n50, wl, wl_label, base, quotes, mmi
 
 
@@ -1252,9 +1252,7 @@ def _body(supabase, compact=False):
 
 
 def _draw(M, groups, n50, wl, wl_label, base, quotes, mmi, compact):
-    first = not st.session_state.get("_hm_shown")
-    st.session_state["_hm_shown"] = True
-    root = "hm hm-in" if first else "hm"
+    root = "hm"
     n50 = [s for v in groups.values() for s in v]
     nq = {s: quotes.get(s) for s in n50}
     B = _breadth(nq)
@@ -1308,15 +1306,15 @@ def render_home(supabase=None, on_open=None, nav=None, compact=None):
         compact = bool(st.session_state.get("_ak_phone", False))
     st.markdown(_CSS, unsafe_allow_html=True)
     S = nse_session()
-    if not st.session_state.get("_hm_warm"):                 # first visit: skeleton while the caches fill, then the page fades in
+    ph = None
+    if not st.session_state.get("_hm_warm"):                 # first visit only: a skeleton while the data loads (loaded once, below)
         ph = st.empty()
         ph.markdown(_skeleton(), unsafe_allow_html=True)
-        try:
-            _gather(supabase)
-        except Exception:
-            pass
-        ph.empty()
+    try:
+        (_frag_live if S["cls"] in ("live", "pre") else _frag_closed)(supabase, compact)
+    finally:
+        if ph is not None:
+            ph.empty()
         st.session_state["_hm_warm"] = True
-    (_frag_live if S["cls"] in ("live", "pre") else _frag_closed)(supabase, compact)
     st.markdown('<div class="hm-foot">Prices from Yahoo Finance, delayed; changes are close-to-close. Regime, mood and heatmap are information, '
                 'not advice. NIFTY 50 list as of 30 Sep 2026 · Market Mood Index © Tickertape.</div>', unsafe_allow_html=True)
