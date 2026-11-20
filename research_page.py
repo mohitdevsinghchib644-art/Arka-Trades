@@ -1,4 +1,15 @@
-"""Arka Trades — Research Terminal v14.
+"""Arka Trades — Research Terminal v15.
+
+v15: redesign and a new function.
+* PB  Price behaviour: in the last 20 / 60 / 90 / 120 / 250 sessions (or any number) how many up and down days or
+      green and red candles, average and median up / down move, biggest days, up/down volume ratio, delivered
+      quantity on up vs down days (NSE), streaks, gaps, move-size buckets, range and ATR, and the same window for
+      NIFTY 50, with a bar per session. Also a 60-session card on the dashboard.
+* New look: Inter throughout, sentence case, soft rounded cards with more room, a security header card, section pills
+  instead of two rows of code buttons, clean tables, charts that match the app. Function codes still work in the
+  command bar (now with an "All codes" list).
+
+v14: new terminal design (security bar, two-row function menu, dashboard as the default screen, class-based tables
 
 v14: new terminal design (security bar, two-row function menu, dashboard as the default screen, class-based tables
 with automatic green / red) and 11 new functions: OV dashboard, GP chart, HP price history, COMP comparison,
@@ -63,6 +74,8 @@ import html
 import json
 import math
 import re
+
+import numpy as np
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
@@ -88,6 +101,11 @@ try:
     import research_data as rd
 except Exception:  # pragma: no cover
     rd = None
+
+try:
+    import sector_map as _smap
+except Exception:  # pragma: no cover
+    _smap = None
 
 IST = timezone(timedelta(hours=5, minutes=30))
 BENCHMARK = ("^NSEI", "NIFTY 50")
@@ -127,6 +145,7 @@ GROUPS = [
     ]),
     ("PRICE", [
         ("GP", "Chart", "Full-size price chart"),
+        ("PB", "Price behaviour", "Up vs down days, average moves, biggest days, volume and delivery on up vs down days, streaks and gaps"),
         ("HP", "Price History", "Daily open / high / low / close / volume table with CSV export"),
         ("TECH", "Technicals", "Trend, momentum, moving averages and pivot levels"),
         ("SEAS", "Seasonality", "Monthly return heatmap, average month and win rate"),
@@ -155,7 +174,16 @@ GROUPS = [
         ("SRC", "Sources", "Where every number on this screen comes from"),
     ]),
 ]
+def _sent(name: str) -> str:
+    """'Income Statement' -> 'Income statement'; acronyms and brand words stay."""
+    w = name.split(" ")
+    return " ".join([w[0]] + [x if (x.isupper() or x in ("DuPont",) or any(c.isdigit() for c in x)) else x.lower() for x in w[1:]])
+
+
+GROUPS = [(g, [(c, _sent(n), d) for c, n, d in items]) for g, items in GROUPS]
 FN = {code: (name, desc, grp) for grp, items in GROUPS for code, name, desc in items}
+GROUP_LABEL = {"OVERVIEW": "Overview", "FINANCIALS": "Financials", "QUALITY": "Quality", "VALUATION": "Valuation", "PRICE": "Price",
+               "RISK": "Risk & quant", "OWNERSHIP": "Ownership", "EVENTS": "Events & news", "WORKSPACE": "Workspace"}
 FUNCS = list(FN)
 
 ALIASES = {
@@ -167,7 +195,7 @@ ALIASES = {
     "ANALYST": "ANR", "TARGET": "ANR", "DIVIDENDS": "DVD", "NEWS": "CN", "ANNOUNCEMENTS": "CACS",
     "FILINGS": "CACS", "THESIS": "NOTE", "NOTES": "NOTE", "SOURCES": "SRC",
     "DELIVERY": "DLV", "DELIVERIES": "DLV", "DEL": "DLV", "FINHEALTH": "FH", "EARNINGS": "ERN", "EE": "ERN",
-    "QUANT": "QR", "RS": "QR", "MOMENTUM": "QR", "INTEL": "SYN", "AI": "SYN", "SYNTHESIS": "SYN", "EVIDENCE": "SYN",
+    "QUANT": "QR", "BEHAVIOUR": "PB", "BEHAVIOR": "PB", "CANDLES": "PB", "UPDOWN": "PB", "RS": "QR", "MOMENTUM": "QR", "INTEL": "SYN", "AI": "SYN", "SYNTHESIS": "SYN", "EVIDENCE": "SYN",
 }
 
 
@@ -255,6 +283,38 @@ _POS_WORDS = {"ABOVE", "OUTPERFORM", "PASS", "UP", "UPTREND", "BULLISH", "GOLDEN
 _NEG_WORDS = {"BELOW", "UNDERPERFORM", "FAIL", "DOWN", "DOWNTREND", "BEARISH", "DEATH CROSS", "OVERBOUGHT"}
 
 
+_ACR = {"P/E", "P/B", "EPS", "ROE", "ROCE", "TTM", "CSV", "SMA", "EMA", "RSI", "ATR", "NIFTY", "MF", "BSE", "NSE", "FII", "DII",
+        "FIIS", "DIIS", "MACD", "CAGR", "DMA", "R²", "AI", "IT", "BANK", "₹", "PE", "PB", "ID", "AGM", "EGM", "EBITDA", "ISIN"}
+_ACR_FIX = {"YOY": "YoY", "QOQ": "QoQ", "FIIS": "FIIs", "DIIS": "DIIs"}
+_STATE_WORDS = {"ABOVE", "BELOW", "OUTPERFORM", "UNDERPERFORM", "PASS", "FAIL", "UP", "DOWN", "UPTREND", "DOWNTREND", "MIXED", "BULLISH",
+                "BEARISH", "GOLDEN CROSS", "DEATH CROSS", "OVERBOUGHT", "OVERSOLD", "NEUTRAL", "STRONG", "AVERAGE", "WEAK", "MARGIN",
+                "ASSET TURNOVER", "LEVERAGE", "NEXT RESULTS", "DIVIDEND", "SPLIT / BONUS"}
+
+
+def _hd(s) -> str:
+    """Sentence case for an ALL-CAPS label, keeping acronyms, numbers and the current symbol."""
+    s = str(s)
+    if not s.isupper():
+        return s
+    keep = {str(st.session_state.get("_rp_sym", "")).upper()}
+    out = []
+    for i, w in enumerate(s.split(" ")):
+        if w in _ACR_FIX:
+            out.append(_ACR_FIX[w])
+        elif w in _ACR or w in keep or any(ch.isdigit() for ch in w):
+            out.append(w)
+        else:
+            out.append(w.lower())
+    t = " ".join(out)
+    return t[:1].upper() + t[1:] if t else t
+
+
+def _val(v):
+    """State words shown as values (UPTREND, GOLDEN CROSS…) in sentence case; everything else unchanged."""
+    s = str(v)
+    return s[:1] + s[1:].lower() if s.upper() in _STATE_WORDS and s.isupper() else s
+
+
 def _cls(v) -> str:
     """Colour class for a table cell: signed numbers and a few state words."""
     s = str(v).strip()
@@ -272,8 +332,8 @@ def _mini(title, rows, T, code=""):
     for r in rows:
         c = r[2] if len(r) > 2 and r[2] else ""
         cls = _cls(r[1]) if not c else ""
-        body += f'<div class="rp-mr"><span>{_esc(r[0])}</span><b class="{cls.strip()}" style="{"color:" + c if c else ""}">{_esc(r[1])}</b></div>'
-    hint = f'<em>{_esc(code)} ▸</em>' if code else ""
+        body += f'<div class="rp-mr"><span>{_esc(r[0])}</span><b class="{cls.strip()}" style="{"color:" + c if c else ""}">{_esc(_val(r[1]))}</b></div>'
+    hint = f'<em>{_esc(code)}</em>' if code else ""
     st.markdown(f'<div class="rp-panel"><div class="t">{_esc(title)}{hint}</div><div class="b tight">{body}</div></div>', unsafe_allow_html=True)
 
 
@@ -290,11 +350,11 @@ def _spark(values, color, w=220, h=44):
 
 def _tag(status, T, text=None):
     if status == "live":
-        label, color = text or "● LIVE", T["green"]
+        label, color = text or "Live", T["green"]
     elif status == "stale":
-        label, color = text or "◐ CACHED", T["amber"]
+        label, color = text or "Cached", T["amber"]
     else:
-        label, color = text or "✕ N/A", T["t3"]
+        label, color = text or "Not available", T["t3"]
     return f'<span class="rp-tag" style="color:{color}">{_esc(label)}</span>'
 
 
@@ -310,7 +370,7 @@ def _panel(title, body, T, dashed=False):
 
 def _unavailable(title, requirement, T, detail=None):
     detail = detail or "No verified dataset returned this field."
-    _panel(title, f'<span class="rp-mut">STATUS</span> DATA UNAVAILABLE &nbsp;·&nbsp; <span class="rp-mut">NEEDS</span> {_esc(requirement)}'
+    _panel(title, f'<b style="color:var(--rp-tx);font-weight:600">Not available.</b> Needs {_esc(requirement)}.'
                   f'<div style="margin-top:4px">{_esc(detail)}</div>', T, dashed=True)
 
 
@@ -320,7 +380,7 @@ def _kpis(items, T, cols=4):
     for it in items:
         label, value, sub = it[:3]
         color = it[3] if len(it) > 3 and it[3] else T["ivory"]
-        tiles += (f'<div class="rp-k"><div class="l">{_esc(label)}</div><div class="v" style="color:{color}">{_esc(value)}</div>'
+        tiles += (f'<div class="rp-k"><div class="l">{_esc(label)}</div><div class="v" style="color:{color}">{_esc(_val(value))}</div>'
                   f'<div class="s">{_esc(sub or "")}</div></div>')
     st.markdown(f'<div class="rp-kg" style="--n:{max(1, min(cols, len(items) or 1))}">{tiles}</div>', unsafe_allow_html=True)
 
@@ -329,12 +389,12 @@ def _table(periods, rows, T, highlights=(), dl=None):
     if not rows:
         _unavailable("No rows returned", "Selected dataset", T)
         return
-    heads = "".join(f"<th>{_esc(p)}</th>" for p in periods)
+    heads = "".join(f"<th>{_esc(_hd(p))}</th>" for p in periods)
     out = []
     for r in rows:
         label = str(r.get("label", ""))
         hl = any(x.lower() in label.lower() for x in highlights if x)
-        cells = "".join(f'<td class="n{_cls(v)}">{_esc(v)}</td>' for v in r.get("values", []))
+        cells = "".join(f'<td class="n{_cls(v)}">{_esc(_val(v))}</td>' for v in r.get("values", []))
         out.append(f'<tr class="{"hl" if hl else ""}"><td class="l">{_esc(label)}</td>{cells}</tr>')
     st.markdown(f'<div class="rp-tw"><table class="rp-t"><thead><tr><th class="l">&nbsp;</th>{heads}</tr></thead>'
                 f'<tbody>{"".join(out)}</tbody></table></div>', unsafe_allow_html=True)
@@ -342,7 +402,7 @@ def _table(periods, rows, T, highlights=(), dl=None):
         n = len(periods)
         data = [[r.get("label", "")] + (list(r.get("values", [])) + [""] * n)[:n] for r in rows]
         csv = pd.DataFrame(data, columns=["METRIC"] + [str(p) for p in periods]).to_csv(index=False)
-        st.download_button("⤓ CSV", csv, file_name=f"{dl}.csv", mime="text/csv", key=f"dl_{dl}")
+        st.download_button("Download CSV", csv, file_name=f"{dl}.csv", mime="text/csv", key=f"dl_{dl}")
 
 
 def _rec_table(rec, T, highlights=(), last_n=None, dl=None):
@@ -380,7 +440,7 @@ def _df_table(df, T, max_rows=40, max_cols=8, highlights=(), dl=None):
     _table(periods, rows, T, highlights, dl)
 
 
-def _checklist(items, T, labels=("PASS", "FAIL", "N/A")):
+def _checklist(items, T, labels=("Pass", "Fail", "N/A")):
     """items: (text, ok: True/False/None, detail)."""
     body = ""
     for text, ok, detail in items:
@@ -390,11 +450,12 @@ def _checklist(items, T, labels=("PASS", "FAIL", "N/A")):
 
 
 def _fig(fig, T, h=300, key=None, **layout):
-    fig.update_layout(height=h, margin=dict(l=0, r=10, t=10, b=0), paper_bgcolor=T["bg"], plot_bgcolor=T["bg"],
-                      font=dict(color="#B4B4B4", family="JetBrains Mono, Consolas, monospace", size=11),
-                      legend=dict(orientation="h", y=1.12, x=0), **layout)
-    fig.update_xaxes(showgrid=False, linecolor="#232323")
-    fig.update_yaxes(showgrid=True, gridcolor="#161616", zeroline=False)
+    fig.update_layout(height=h, margin=dict(l=4, r=12, t=34, b=4), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                      font=dict(color="#A9A9B0", family="Inter, -apple-system, Segoe UI, sans-serif", size=12),
+                      legend=dict(orientation="h", y=1.1, x=0, font=dict(size=12)), hoverlabel=dict(font_family="Inter, sans-serif"),
+                      **layout)
+    fig.update_xaxes(showgrid=False, linecolor="#26262B", tickfont=dict(size=11))
+    fig.update_yaxes(showgrid=True, gridcolor="#1A1A1E", zeroline=False, tickfont=dict(size=11))
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=key)
 
 
@@ -497,23 +558,32 @@ def _snapshot(sym, B, T, show_quote=True):
         pos = None if hi == lo else max(0.0, min(100.0, (price - lo) / (hi - lo) * 100))
     bv, de = _f(s.get("book_value")), _debt_equity(B)
     sc = B.get("sector") or {}
-    sub = " · ".join(x for x in (sym, "NSE", sc.get("Sector") or sc.get("Broad Sector"), sc.get("Industry")) if x)
+    grp = None
+    if _smap is not None:
+        try:
+            grp = _smap.classify(sym, B.get("name") or "", sc.get("Sector") or sc.get("Broad Sector") or "", "", sc.get("Industry") or "")
+            grp = None if grp == "Unclassified" else grp
+        except Exception:
+            grp = None
+    chips = [sym, "NSE"] + [x for x in dict.fromkeys((sc.get("Sector") or sc.get("Broad Sector"), sc.get("Industry"))) if x]
+    sub = "".join(f"<span>{_esc(x)}</span>" for x in chips) + (f'<span class="g" title="Money flow rotation group">{_esc(grp)}</span>'
+                                                             if grp and grp.lower() not in {str(c).lower() for c in chips} else "")
     cc = T["green"] if (chg or 0) >= 0 else T["red"]
     quote = ""
     if show_quote:
         quote = (f'<div class="q"><div class="px">{_rs(price)}</div>'
-                 f'<div class="ch" style="color:{cc}">{"▲" if (chg or 0) >= 0 else "▼"} {abs(pts):,.2f} ({chg:+.2f}%)</div></div>' if price else
+                 f'<div class="ch" style="color:{cc}">{pts:+,.2f} ({chg:+.2f}%)</div></div>' if price else
                  '<div class="q"><div class="px">N/A</div></div>')
-    stats = [("MCAP", f'₹{s["market_cap"]} Cr' if s.get("market_cap") else "N/A"), ("P/E", f'{s["pe_ratio"]}x' if s.get("pe_ratio") else "N/A"),
+    stats = [("Market cap", f'₹{s["market_cap"]} Cr' if s.get("market_cap") else "N/A"), ("P/E", f'{s["pe_ratio"]}x' if s.get("pe_ratio") else "N/A"),
              ("P/B", f"{price / bv:.2f}x" if price and bv else "N/A"), ("ROE", f'{s["roe"]}%' if s.get("roe") else "N/A"),
-             ("ROCE", f'{s["roce"]}%' if s.get("roce") else "N/A"), ("D/E", f"{de}x" if de is not None else "N/A"),
-             ("DIV YLD", f'{s["dividend_yield"]}%' if s.get("dividend_yield") else "N/A")]
+             ("ROCE", f'{s["roce"]}%' if s.get("roce") else "N/A"), ("Debt / equity", f"{de}x" if de is not None else "N/A"),
+             ("Dividend yield", f'{s["dividend_yield"]}%' if s.get("dividend_yield") else "N/A")]
     cells = "".join(f'<div class="st"><span>{l}</span><b>{_esc(v)}</b></div>' for l, v in stats)
     rng = ""
     if pos is not None:
-        rng = (f'<div class="st rg"><span>52W RANGE · {pos:.0f}%</span><div class="bar"><i style="width:{pos:.1f}%"></i><u style="left:{pos:.1f}%"></u></div>'
+        rng = (f'<div class="st rg"><span>52-week range · {pos:.0f}% of the way from low to high</span><div class="bar"><i style="width:{pos:.1f}%"></i><u style="left:{pos:.1f}%"></u></div>'
                f'<div class="ends"><em>{lo:,.2f}</em><em>{hi:,.2f}</em></div></div>')
-    st.markdown(f'<div class="rp-sec"><div class="id"><div class="nm">{_esc(B.get("name") or sym)}</div><div class="sb">{_esc(sub)}</div></div>'
+    st.markdown(f'<div class="rp-sec"><div class="id"><div class="nm">{_esc(B.get("name") or sym)}</div><div class="sb">{sub}</div></div>'
                 f'{quote}<div class="sts">{cells}{rng}</div></div>', unsafe_allow_html=True)
 
 
@@ -697,7 +767,7 @@ def _health(sym, B, T, key, nf):
     _header("Automatic flags", T, "live" if flags else None)
     if flags:
         _panel(f"{sum(1 for f in flags if f[1] is False)} warning(s) · {sum(1 for f in flags if f[1])} positive(s)",
-               _checklist(flags, T, ("✓ GOOD", "⚠ WARN", "—")), T)
+               _checklist(flags, T, ("Good", "Warning", "—")), T)
     else:
         _panel("No flags triggered", f'<div style="font:12.5px/1.65 var(--rp-s);color:{T["t2"]}">None of the rule thresholds were crossed, or the data needed was not available.</div>', T)
     st.caption("Rule-based screen for research only — not investment advice. Thresholds: promoter ±2/1 pp, debt +50% in 3y, "
@@ -1449,7 +1519,7 @@ def _filings(sym, B, T, key, nf):
         st.markdown(f'<div style="padding:8px 0;border-bottom:1px solid {T["border"]};font:12.5px/1.65 var(--rp-s)">'
                     f'<a href="{url}" target="_blank" style="color:{T["ivory"]};text-decoration:none">{_esc(a["title"])}</a>'
                     f'<div style="color:{T["t3"]};margin-top:3px">{_esc(a["dt"])} · <span style="color:{T["cyan"]}">{_esc(a["category"])}</span>'
-                    f'{" · " + _esc(a["sub"]) if a["sub"] else ""} · OPEN DOCUMENT ↗</div></div>', unsafe_allow_html=True)
+                    f'{" · " + _esc(a["sub"]) if a["sub"] else ""} · Open document ↗</div></div>', unsafe_allow_html=True)
 
 
 # ---------- SYN: research intelligence ----------
@@ -1483,7 +1553,7 @@ def _synthesis(sym, B, T, key, nf):
 
     _header("AI synthesis · Gemini reads the evidence sheet above, nothing else", T)
     sk = f"rp_syn_{sym}"
-    if st.button("GENERATE SYNTHESIS", key=f"{key}_syn_btn", type="primary"):
+    if st.button("Generate synthesis", key=f"{key}_syn_btn", type="primary"):
         payload = {"company": B.get("name", sym), "symbol": sym, "as_of": datetime.now(IST).strftime("%d %b %Y"),
                    "facts": E["facts"], "contradictions": con, "unknown": E["unknown"]}
         with st.spinner("Asking Gemini…"):
@@ -1510,7 +1580,7 @@ def _announcements_scanx(sym, B, T, key, nf):
     for a in anns[:60]:
         url = html.escape(str(a.get("url", "")), quote=True)
         st.markdown(f'<div style="padding:8px 0;border-bottom:1px solid {T["border"]};font:12.5px/1.65 var(--rp-s)"><a href="{url}" target="_blank" style="color:{T["ivory"]};text-decoration:none">{_esc(a.get("title"))}</a>'
-                    f'<div style="color:{T["t3"]};margin-top:3px">OPEN SOURCE DOCUMENT ↗</div></div>', unsafe_allow_html=True)
+                    f'<div style="color:{T["t3"]};margin-top:3px">Open source document ↗</div></div>', unsafe_allow_html=True)
 
 
 def _mf(sym, B, T, key, nf):
@@ -1568,9 +1638,9 @@ def _thesis(sym, B, T, key, nf):
             f"Stance: {ss.get(f'{key}_note_stance_{sym}', '—')} · Target: ₹{ss.get(f'{key}_note_tp_{sym}', 0):,.2f} · "
             f"Conviction: {ss.get(f'{key}_note_conv_{sym}', 3)}/5\n")
     txt = head + "\n\n".join(f"{t.upper()}\n{ss.get(f'{key}_note_{k}_{sym}', '')}" for t, k in fields)
-    st.download_button("⤓ DOWNLOAD NOTE (.txt)", txt, file_name=f"{sym}_research_note.txt", key=f"{key}_note_dl_{sym}")
+    st.download_button("Download note (.txt)", txt, file_name=f"{sym}_research_note.txt", key=f"{key}_note_dl_{sym}")
     if store:
-        if st.button("SAVE NOTE", key=f"{key}_note_save_{sym}", type="primary"):
+        if st.button("Save note", key=f"{key}_note_save_{sym}", type="primary"):
             try:
                 rd.note_save(uid, sym, {k2: ss.get(f"{key}_note_{k2}_{sym}") for k2 in ("stance", "tp", "conv", "bull", "bear", "cat", "risk")})
                 st.session_state[f"{key}_note_at_{sym}"] = datetime.now(IST).strftime("%Y-%m-%d %H:%M")
@@ -1674,6 +1744,7 @@ def _dashboard(sym, B, T, key, nf):
                 if len(c_) >= n:
                     trade.append((f"vs {n}-day average", f"{(c_.iloc[-1] / c_.tail(n).mean() - 1) * 100:+.1f}%"))
             _mini("Trading", trade, T, "TECH")
+        _pb_mini(sym, T)
 
     a, b, c = st.columns(3, gap="small")
     with a:
@@ -1743,7 +1814,7 @@ def _hist_prices(sym, B, T, key, nf):
             for i, r in show.iterrows()], T)
     out = d[["Open", "High", "Low", "Close", "Volume"]].copy()
     out.index = [str(i)[:10] for i in out.index]
-    st.download_button("⤓ CSV · full range", out.to_csv(index_label="Date"), file_name=f"{sym}_prices_{rng}.csv", mime="text/csv", key=f"{key}_hp_dl")
+    st.download_button("Download CSV · full range", out.to_csv(index_label="Date"), file_name=f"{sym}_prices_{rng}.csv", mime="text/csv", key=f"{key}_hp_dl")
 
 
 # ---------- COMP: comparative returns ----------
@@ -1957,7 +2028,7 @@ def _dupont(sym, B, T, key, nf):
     _header("DuPont · what return on equity is made of", T, "live", "ROE = net margin × asset turnover × leverage. Year-end balances.")
     _kpis([("Return on equity", f"{roe[-1]:.1f}%", f"{roe[0]:.1f}% in {yrs[0]}", T["green"] if roe[-1] >= roe[0] else T["red"]),
            ("Net margin", f"{m[-1]:.1f}%", f"{m[0]:.1f}% in {yrs[0]}"), ("Asset turnover", f"{t[-1]:.2f}x", f"{t[0]:.2f}x in {yrs[0]}"),
-           ("Leverage", f"{l[-1]:.2f}x", f"{l[0]:.2f}x in {yrs[0]}"), ("Biggest change", drv[0].upper(), f"{(drv[1] - 1) * 100:+.0f}% since {yrs[0]}")], T, 5)
+           ("Leverage", f"{l[-1]:.2f}x", f"{l[0]:.2f}x in {yrs[0]}"), ("Biggest change", drv[0].capitalize(), f"{(drv[1] - 1) * 100:+.0f}% since {yrs[0]}")], T, 5)
     _table(yrs, [{"label": "Net margin %", "values": [f"{v:.1f}" for v in m]}, {"label": "Asset turnover x", "values": [f"{v:.2f}" for v in t]},
                  {"label": "Leverage x", "values": [f"{v:.2f}" for v in l]}, {"label": "Return on equity %", "values": [f"{v:.1f}" for v in roe]}],
            T, ["Return on equity"], dl=f"{sym}_dupont_{key}")
@@ -2074,6 +2145,309 @@ def _pe_band_chart(sym, B, T, key, close):
     _fig(fig, T, 320, f"{key}_val_band")
 
 
+def _choice(label, options, key, fmt=None):
+    """Segmented control on newer Streamlit, a horizontal radio otherwise. Never returns None."""
+    fmt = fmt or (lambda o: o)
+    if st.session_state.get(key) not in options:
+        st.session_state[key] = options[0]
+
+    def _keep():
+        if st.session_state.get(key) not in options:
+            st.session_state[key] = options[0]
+    fn = getattr(st, "segmented_control", None)
+    if fn is not None:
+        try:
+            v = fn(label, options, key=key, format_func=fmt, label_visibility="collapsed", on_change=_keep)
+            return v if v in options else options[0]
+        except TypeError:
+            pass
+    return st.radio(label, options, key=key, format_func=fmt, horizontal=True, label_visibility="collapsed")
+
+
+# ═══════════════════════════ v15: PB · price behaviour ═══════════════════════════
+def _svg_moves(dates, moves, vols, ups, T, h=170):
+    """One bar per session: height = the day's move, colour = up / down; thin volume bars underneath."""
+    n = len(moves)
+    if n < 2:
+        return ""
+    W = 1000
+    top_h, gap, vol_h = h, 10, 46
+    mx = max(1e-9, max(abs(m) for m in moves if m == m))
+    vmx = max(1e-9, max(v for v in vols if v == v)) if any(v == v for v in vols) else 1
+    bw = W / n
+    mid = top_h / 2
+    parts = [f'<line x1="0" x2="{W}" y1="{mid}" y2="{mid}" stroke="#2A2A30" stroke-width="1"/>']
+    for i, (d, m, v, u) in enumerate(zip(dates, moves, vols, ups)):
+        if m != m:
+            continue
+        col = T["green"] if u else T["red"] if u is False else "#5A5A60"
+        hh = abs(m) / mx * (mid - 6)
+        y = mid - hh if m >= 0 else mid
+        x = i * bw + bw * 0.14
+        tip = f"{pd.Timestamp(d):%a %d %b %Y} · {m:+.2f}%" + (f" · vol {_qty(v)}" if v == v else "")
+        parts.append(f'<rect x="{x:.2f}" y="{y:.2f}" width="{max(0.8, bw * 0.72):.2f}" height="{max(0.8, hh):.2f}" rx="1.2" fill="{col}"><title>{_esc(tip)}</title></rect>')
+        if v == v:
+            vh = v / vmx * vol_h
+            parts.append(f'<rect x="{x:.2f}" y="{top_h + gap + vol_h - vh:.2f}" width="{max(0.8, bw * 0.72):.2f}" height="{max(0.6, vh):.2f}" '
+                         f'rx="1" fill="{col}" opacity=".38"><title>{_esc(tip)}</title></rect>')
+    H = top_h + gap + vol_h
+    return (f'<svg viewBox="0 0 {W} {H}" width="100%" height="{H}" preserveAspectRatio="none" style="display:block">{"".join(parts)}</svg>'
+            f'<div class="rp-axis"><span>{pd.Timestamp(dates[0]):%d %b %Y}</span><span>daily move · volume underneath · hover a bar</span>'
+            f'<span>{pd.Timestamp(dates[-1]):%d %b %Y}</span></div>')
+
+
+def _streaks(flags):
+    """(longest up, longest down, current run length, current run is up?) over a sequence of True / False / None."""
+    best_u = best_d = cur = 0
+    last = None
+    for f in flags:
+        if f is None:
+            cur, last = 0, None
+            continue
+        cur = cur + 1 if f == last else 1
+        last = f
+        if f:
+            best_u = max(best_u, cur)
+        else:
+            best_d = max(best_d, cur)
+    return best_u, best_d, cur, last
+
+
+def behaviour_stats(h: pd.DataFrame, n: int, mode: str = "day", splits=None, bench: pd.Series | None = None,
+                    deliv: pd.DataFrame | None = None) -> dict | None:
+    """Everything the PB screen shows, from daily OHLCV. mode: 'day' = close vs previous close, 'candle' = close vs open."""
+    if h is None or len(h) < 3:
+        return None
+    d = h[["Open", "High", "Low", "Close", "Volume"]].astype(float).copy()
+    idx = pd.to_datetime(d.index)
+    if getattr(idx, "tz", None) is not None:
+        idx = idx.tz_localize(None)
+    d.index = idx.normalize()
+    d = d[~d.index.duplicated(keep="last")].sort_index().dropna(subset=["Close"])
+    d = d[d["Close"] > 0]
+    prev = d["Close"].shift(1)
+    d["chg"] = (d["Close"] / prev - 1) * 100
+    d["body"] = (d["Close"] / d["Open"] - 1) * 100
+    d["gap"] = (d["Open"] / prev - 1) * 100
+    d["range"] = (d["High"] - d["Low"]) / prev * 100
+    tr = pd.concat([d["High"] - d["Low"], (d["High"] - prev).abs(), (d["Low"] - prev).abs()], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1 / 14, adjust=False).mean()
+    d["vavg50"] = d["Volume"].shift(1).rolling(50, min_periods=10).mean()
+    # unadjusted prices: a split / bonus day looks like a crash, so leave those days out
+    bad = (d["chg"].abs() > 45)
+    if splits is not None and len(splits):
+        sd = pd.to_datetime(pd.Index(splits.index))
+        if getattr(sd, "tz", None) is not None:
+            sd = sd.tz_localize(None)
+        bad |= d.index.isin(sd.normalize())
+    w = d.iloc[-int(n):].copy()
+    w["bad"] = bad.reindex(w.index).fillna(False)
+    if len(w) < 3:
+        return None
+    if mode == "candle":
+        w["move"] = w["body"]
+        w["up"] = np.where(w["Close"] > w["Open"], True, np.where(w["Close"] < w["Open"], False, None))
+    else:
+        w["move"] = w["chg"]
+        w["up"] = np.where(w["chg"] > 0, True, np.where(w["chg"] < 0, False, None))
+    w.loc[w["bad"] | w["move"].isna(), "up"] = None
+    good = w[~w["bad"] & w["move"].notna()]
+    U, D = good[good["up"] == True], good[good["up"] == False]  # noqa: E712
+    flat = len(good) - len(U) - len(D)
+    su, sd_ = U["Volume"].sum(), D["Volume"].sum()
+    bu, bd, cur, cur_up = _streaks(list(w["up"]))
+    out = {
+        "n": len(w), "used": len(good), "excluded": int(w["bad"].sum()), "mode": mode,
+        "first": w.index[0], "last": w.index[-1],
+        "up": len(U), "down": len(D), "flat": flat, "up_pct": len(U) / len(good) * 100 if len(good) else None,
+        "avg_up": float(U["move"].mean()) if len(U) else None, "avg_dn": float(D["move"].mean()) if len(D) else None,
+        "med_up": float(U["move"].median()) if len(U) else None, "med_dn": float(D["move"].median()) if len(D) else None,
+        "best": (good["move"].idxmax(), float(good["move"].max())) if len(good) else None,
+        "worst": (good["move"].idxmin(), float(good["move"].min())) if len(good) else None,
+        "vol_ratio": float(su / sd_) if sd_ > 0 else None,
+        "avg_vol_up": float(U["Volume"].mean()) if len(U) else None, "avg_vol_dn": float(D["Volume"].mean()) if len(D) else None,
+        "streak_up": bu, "streak_dn": bd, "streak_now": cur, "streak_now_up": cur_up,
+        "ret": float((w["Close"].iloc[-1] / d["Close"].shift(1).reindex(w.index).iloc[0] - 1) * 100)
+        if pd.notna(d["Close"].shift(1).reindex(w.index).iloc[0]) else None,
+        "atr_pct": float(atr.iloc[-1] / d["Close"].iloc[-1] * 100), "avg_range": float(good["range"].mean()) if len(good) else None,
+        "frame": w,
+    }
+    if out["avg_up"] is not None and out["avg_dn"]:
+        out["payoff"] = out["avg_up"] / abs(out["avg_dn"])
+    gu = good[good["gap"] >= 1.0]
+    gd = good[good["gap"] <= -1.0]
+    out.update(gap_up=len(gu), gap_up_held=int((gu["Close"] > gu["Open"]).sum()),
+               gap_dn=len(gd), gap_dn_held=int((gd["Close"] < gd["Open"]).sum()))
+    buckets = [(0, 1), (1, 2), (2, 3), (3, 5), (5, 1e9)]
+    out["buckets"] = [(lo, hi, int(((U["move"] >= lo) & (U["move"] < hi)).sum()), int(((-D["move"] >= lo) & (-D["move"] < hi)).sum()))
+                      for lo, hi in buckets]
+    if bench is not None and len(bench) > 3:
+        b = bench.copy()
+        bi = pd.to_datetime(b.index)
+        if getattr(bi, "tz", None) is not None:
+            bi = bi.tz_localize(None)
+        b.index = bi.normalize()
+        b = b[~b.index.duplicated(keep="last")].sort_index()
+        bc = (b / b.shift(1) - 1) * 100
+        bw = bc.reindex(w.index).dropna()
+        if len(bw) >= 3:
+            bu_, bd_ = bw[bw > 0], bw[bw < 0]
+            out["bench"] = {"up_pct": len(bu_) / len(bw) * 100, "avg_up": float(bu_.mean()) if len(bu_) else None,
+                            "avg_dn": float(bd_.mean()) if len(bd_) else None,
+                            "ret": float((b.reindex(w.index).dropna().iloc[-1] / b.shift(1).reindex(w.index).dropna().iloc[0] - 1) * 100)}
+    if deliv is not None and len(deliv):
+        dv = deliv.copy()
+        di = pd.to_datetime(pd.Index(dv.index))
+        if getattr(di, "tz", None) is not None:
+            di = di.tz_localize(None)
+        dv.index = di.normalize()
+        j = good.join(dv[["deliv_qty", "deliv_pct"]], how="inner")
+        ju, jd = j[j["up"] == True], j[j["up"] == False]  # noqa: E712
+        if len(ju) >= 3 and len(jd) >= 3 and ju["deliv_qty"].sum() > 0 and jd["deliv_qty"].sum() > 0:
+            out["deliv"] = {"days": len(j), "up_days": len(ju), "dn_days": len(jd),
+                            "qty_ratio": float(ju["deliv_qty"].sum() / jd["deliv_qty"].sum()),
+                            "pct_up": float(ju["deliv_pct"].mean()), "pct_dn": float(jd["deliv_pct"].mean())}
+    return out
+
+
+def _pb_reading(S, sym) -> str:
+    """One plain sentence. Descriptive, not a forecast."""
+    vr, po = S.get("vol_ratio"), S.get("payoff")
+    if vr is None or po is None:
+        return ""
+    if vr >= 1.25 and po >= 1.0:
+        tone = "buyers have had the upper hand: up days were bigger and carried more volume."
+    elif vr <= 0.8 and po <= 1.0:
+        tone = "sellers have had the upper hand: down days were bigger and carried more volume."
+    elif vr >= 1.25:
+        tone = "volume favoured up days even though down days moved further: quiet demand under choppy price."
+    elif vr <= 0.8:
+        tone = "volume favoured down days even though up days moved further: rallies came on thin volume."
+    else:
+        tone = "neither side has clearly dominated."
+    return (f"Over the last {S['n']} sessions {_esc(sym)} {'closed higher' if S['mode'] == 'day' else 'printed a green candle'} on "
+            f"<b>{S['up']} days ({S['up_pct']:.0f}%)</b>. Up days averaged <b class='pos'>{S['avg_up']:+.2f}%</b>, down days "
+            f"<b class='neg'>{S['avg_dn']:+.2f}%</b>, and up days carried <b>{vr:.2f}×</b> the volume of down days, so {tone}")
+
+
+def _price_behaviour(sym, B, T, key, nf):
+    h = _hist(sym, "2y", "1y")
+    if h is None or len(h) < 25:
+        _unavailable("Price behaviour", "Yahoo daily price history", T)
+        return
+    c1, c2, c3 = st.columns([2.2, 1.0, 2.0], gap="small")
+    presets = ["20", "60", "90", "120", "250", "Custom"]
+    with c1:
+        pick = _choice("Window", presets, f"{key}_pb_win", lambda v: f"{v} days" if v != "Custom" else "Custom")
+    if pick == "Custom":
+        n = int(c2.number_input("Sessions", min_value=5, max_value=min(1000, len(h) - 1), value=min(45, len(h) - 1), step=5, key=f"{key}_pb_n"))
+    else:
+        n = min(int(pick), len(h) - 1)
+        c2.markdown('<div style="height:2px"></div>', unsafe_allow_html=True)
+    with c3:
+        mode_l = _choice("Count", ["Close vs previous close", "Candle colour"], f"{key}_pb_mode")
+    mode = "candle" if mode_l == "Candle colour" else "day"
+    deliv = st.session_state.get(f"rp_dlv_last_{sym}")
+    S = behaviour_stats(h, n, mode, yf_attr(sym, "splits"), _bench("NIFTY 50"), deliv)
+    if not S or not S["used"]:
+        _unavailable("Price behaviour", f"At least a few sessions in the last {n}", T)
+        return
+    up_w = "up days" if mode == "day" else "green candles"
+    dn_w = "down days" if mode == "day" else "red candles"
+    _header(f"Price behaviour · last {S['n']} sessions · {S['first']:%d %b} to {S['last']:%d %b %Y}", T, "live",
+            ("Close vs previous close: the day's real gain or loss." if mode == "day" else
+             "Candle colour: close vs the same day's open. A gap-up day that closes below its open counts as red.")
+            + (f" {S['excluded']} split / bonus day(s) left out (prices are unadjusted)." if S["excluded"] else ""))
+    reading = _pb_reading(S, sym)
+    if reading:
+        st.markdown(f'<div class="rp-read">{reading}</div>', unsafe_allow_html=True)
+    g, r_ = T["green"], T["red"]
+    vr = S.get("vol_ratio")
+    _kpis([(up_w.capitalize(), f"{S['up']}", f"{S['up_pct']:.0f}% of {S['used']} · {S['flat']} flat", g),
+           (dn_w.capitalize(), f"{S['down']}", f"{100 - S['up_pct'] - (S['flat'] / S['used'] * 100 if S['used'] else 0):.0f}% of {S['used']}", r_),
+           (f"Average {up_w[:-1]}", _pct(S["avg_up"], 2, True), f"median {_pct(S['med_up'], 2, True)}", g),
+           (f"Average {dn_w[:-1]}", _pct(S["avg_dn"], 2, True), f"median {_pct(S['med_dn'], 2, True)}", r_),
+           ("Biggest up", _pct(S["best"][1], 2, True), f"{S['best'][0]:%a %d %b %Y}", g),
+           ("Biggest down", _pct(S["worst"][1], 2, True), f"{S['worst'][0]:%a %d %b %Y}", r_),
+           ("Up / down volume", f"{vr:.2f}×" if vr else "N/A", "volume on up days ÷ down days · above 1.25 = demand",
+            (g if vr and vr >= 1.25 else r_ if vr and vr <= 0.8 else None)),
+           ("Average up ÷ average down", f"{S['payoff']:.2f}×" if S.get("payoff") else "N/A", "size of the typical up day vs down day")], T, 4)
+    st.markdown(f'<div class="rp-panel"><div class="t">Every session in the window</div><div class="b">'
+                f'{_svg_moves(list(S["frame"].index), list(S["frame"]["move"]), list(S["frame"]["Volume"]), list(S["frame"]["up"]), T)}</div></div>',
+                unsafe_allow_html=True)
+
+    a, b, c = st.columns(3, gap="medium")
+    with a:
+        su = S["streak_now"]
+        _mini("Streaks and gaps", [
+            ("Longest up streak", f"{S['streak_up']} sessions", g), ("Longest down streak", f"{S['streak_dn']} sessions", r_),
+            ("Current run", (f"{su} {'up' if S['streak_now_up'] else 'down'}" if S["streak_now_up"] is not None else "flat"),
+             g if S["streak_now_up"] else r_ if S["streak_now_up"] is False else None),
+            ("Gap ups of 1%+", f"{S['gap_up']} · {S['gap_up_held']} closed above the open"),
+            ("Gap downs of 1%+", f"{S['gap_dn']} · {S['gap_dn_held']} closed below the open")], T)
+    with b:
+        rows = [("Average daily range", _pct(S["avg_range"], 2)), ("ATR 14", f"{S['atr_pct']:.2f}% of price"),
+                ("Return over the window", _pct(S["ret"], 1, True))]
+        bn = S.get("bench")
+        if bn:
+            rows += [("NIFTY 50 up days", f"{bn['up_pct']:.0f}% (stock {S['up_pct']:.0f}%)" if mode == "day" else f"{bn['up_pct']:.0f}% (by close)"),
+                     ("NIFTY 50 average up / down", f"{_pct(bn['avg_up'], 2, True)} / {_pct(bn['avg_dn'], 2, True)}"),
+                     ("NIFTY 50 over the window", _pct(bn["ret"], 1, True))]
+        _mini("Range and the index", rows, T)
+    with c:
+        dv = S.get("deliv")
+        if dv:
+            q = dv["qty_ratio"]
+            _mini("Delivery on up vs down days", [
+                ("Delivered qty, up ÷ down", f"{q:.2f}×", g if q >= 1.25 else r_ if q <= 0.8 else None),
+                ("Average delivery %, up days", _pct(dv["pct_up"], 1)), ("Average delivery %, down days", _pct(dv["pct_dn"], 1)),
+                ("Sessions with delivery data", f"{dv['days']} ({dv['up_days']} up · {dv['dn_days']} down)")], T)
+            st.caption("Above 1.25×: more shares were taken home on up days than on down days, a sign of quiet accumulation. "
+                       "Delivery is not only institutions; read it together with price.")
+        else:
+            _panel("Delivery on up vs down days",
+                   f'<div style="color:{T["t2"]}">Needs NSE delivery data for these sessions. Load it here (it is also used by DLV).</div>', T)
+            if rd is not None and st.button("Load delivery data", key=f"{key}_pb_dlv_{sym}", use_container_width=True):
+                with st.spinner("Loading NSE delivery files…"):
+                    _delivery_frame(sym, max(60, min(250, n)))
+                st.rerun(scope="fragment")
+
+    l, r = st.columns(2, gap="medium")
+    with l:
+        rows = [{"label": (f"{lo:g}% to {hi:g}%" if hi < 1e8 else f"{lo:g}% or more"), "values": [str(u), str(d_)]} for lo, hi, u, d_ in S["buckets"]]
+        _header("How big the moves were", T)
+        _table([up_w.capitalize(), dn_w.capitalize()], rows, T)
+    with r:
+        fr = S["frame"][~S["frame"]["bad"] & S["frame"]["move"].notna()]
+        top = pd.concat([fr.nlargest(5, "move"), fr.nsmallest(5, "move")])
+        dvf = st.session_state.get(f"rp_dlv_last_{sym}")
+        dmap = {}
+        if dvf is not None and len(dvf):
+            for i_, rr in dvf.iterrows():
+                dmap[pd.Timestamp(i_).normalize()] = rr.get("deliv_pct")
+        _header("Biggest days", T)
+        _table(["Move", "Volume vs 50-day avg", "Delivery %"],
+               [{"label": f"{i_:%a %d %b %Y}", "values": [f"{rw['move']:+.2f}%", f"{rw['Volume'] / rw['vavg50']:.2f}×" if rw["vavg50"] and rw["vavg50"] == rw["vavg50"] else "—",
+                                                          _pct(dmap.get(pd.Timestamp(i_).normalize()), 1) if dmap.get(pd.Timestamp(i_).normalize()) is not None else "—"]}
+                for i_, rw in top.iterrows()], T)
+    st.caption("Descriptive statistics of past sessions, not a forecast. Prices are Yahoo daily data (unadjusted); "
+               "today's candle is included while it is still forming during market hours.")
+
+
+def _pb_mini(sym, T):
+    """Dashboard card: 60-session behaviour."""
+    h = _hist(sym, "1y")
+    S = behaviour_stats(h, 60, "day", yf_attr(sym, "splits")) if h is not None else None
+    if not S or not S["used"]:
+        return
+    vr = S.get("vol_ratio")
+    _mini("Price behaviour · 60 sessions", [
+        ("Up days", f"{S['up']} of {S['used']} ({S['up_pct']:.0f}%)"),
+        ("Average up / down day", f"{_pct(S['avg_up'], 2, True)} / {_pct(S['avg_dn'], 2, True)}"),
+        ("Up / down volume", f"{vr:.2f}×" if vr else "N/A", T["green"] if vr and vr >= 1.25 else T["red"] if vr and vr <= 0.8 else None),
+        ("Longest up / down streak", f"{S['streak_up']} / {S['streak_dn']}")], T, "PB")
+
+
 HANDLERS = {
     "DES": _overview, "HC": _health, "VAL": _valuation,
     "FA": _financials, "BS": _balance, "CF": _cashflow, "RAT": _ratios,
@@ -2084,7 +2458,7 @@ HANDLERS = {
     "FH": _fin_health, "ERN": _earnings_trend, "DLV": _deliveries, "QR": _quant, "SYN": _synthesis,
     "NOTE": _thesis, "SRC": _sources,
     "OV": _dashboard, "GP": _graph, "HP": _hist_prices, "COMP": _compare, "BETA": _beta, "HVG": _volatility,
-    "TRA": _total_return, "DCF": _dcf, "DUP": _dupont, "GRW": _growth, "EVTS": _events,
+    "TRA": _total_return, "DCF": _dcf, "DUP": _dupont, "GRW": _growth, "EVTS": _events, "PB": _price_behaviour,
 }
 assert set(HANDLERS) == set(FN), set(HANDLERS) ^ set(FN)
 
@@ -2092,73 +2466,90 @@ assert set(HANDLERS) == set(FN), set(HANDLERS) ^ set(FN)
 # ═══════════════════════════ Navigation ═══════════════════════════
 def _css(T):
     st.markdown(f"""<style>
-    :root{{--rp-bg:{T["bg"]};--rp-p:#0A0A0A;--rp-p2:#111111;--rp-b:#222222;--rp-am:{T["amber"]};--rp-tx:#EDEDED;--rp-t2:#B8B8B8;--rp-t3:#7C7C7C;
-           --rp-g:{T["green"]};--rp-r:{T["red"]};--rp-c:{T["cyan"]};--rp-m:{T["mono"]};--rp-s:Inter,'Segoe UI',Arial,sans-serif}}
-    .rp-sec{{display:flex;flex-wrap:wrap;align-items:stretch;gap:0;border:1px solid var(--rp-b);border-top:2px solid var(--rp-am);background:var(--rp-p);margin:4px 0 8px}}
-    .rp-sec .id{{padding:10px 16px;min-width:230px;border-right:1px solid var(--rp-b)}}
-    .rp-sec .nm{{font:800 19px var(--rp-s);color:var(--rp-tx);letter-spacing:.2px}}
-    .rp-sec .sb{{font:600 10.5px var(--rp-m);color:var(--rp-t3);margin-top:4px;letter-spacing:.5px;text-transform:uppercase}}
-    .rp-sec .q{{padding:8px 18px;border-right:1px solid var(--rp-b);text-align:right}}
-    .rp-sec .px{{font:800 24px var(--rp-m);color:var(--rp-tx)}} .rp-sec .ch{{font:700 12px var(--rp-m);margin-top:2px}}
-    .rp-sec .sts{{display:flex;flex-wrap:wrap;flex:1;align-items:stretch}}
-    .rp-sec .st{{padding:10px 14px;border-right:1px solid var(--rp-b);display:flex;flex-direction:column;justify-content:center}}
-    .rp-sec .st span{{font:700 9.5px var(--rp-m);color:var(--rp-t3);letter-spacing:.8px}}
-    .rp-sec .st b{{font:700 14px var(--rp-m);color:var(--rp-tx);margin-top:4px;white-space:nowrap}}
-    .rp-sec .rg{{flex:1;min-width:170px;border-right:0}} .rp-sec .bar{{position:relative;height:5px;background:#1c1c1c;margin-top:9px}}
-    .rp-sec .bar i{{position:absolute;left:0;top:0;height:5px;background:var(--rp-am);opacity:.35}} .rp-sec .bar u{{position:absolute;top:-4px;width:3px;height:13px;background:var(--rp-am)}}
-    .rp-sec .ends{{display:flex;justify-content:space-between;margin-top:6px}} .rp-sec .ends em{{font:normal 10px var(--rp-m);color:var(--rp-t3)}}
+    :root{{--rp-p:var(--s1,#0E0E10);--rp-p2:#131316;--rp-b:var(--line,#1E1E22);--rp-b2:#26262B;--rp-am:{T["amber"]};--rp-tx:#ECECEF;--rp-t2:#A9A9B0;
+           --rp-t3:#76767E;--rp-g:{T["green"]};--rp-r:{T["red"]};--rp-c:{T["cyan"]};--rp-s:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}}
+    .rp-sec,.rp-panel,.rp-kg,.rp-tw,.rp-title,.rp-h,.rp-note,.rp-read,.rp-axis{{font-family:var(--rp-s);font-variant-numeric:tabular-nums}}
 
-    .rp-h{{display:flex;justify-content:space-between;align-items:center;margin:20px 0 8px;padding-bottom:7px;border-bottom:1px solid var(--rp-b)}}
-    .rp-h b{{font:700 12px var(--rp-m);letter-spacing:1.1px;color:var(--rp-am);text-transform:uppercase;border-left:3px solid var(--rp-am);padding-left:9px}}
-    .rp-tag{{font:700 10px var(--rp-m);letter-spacing:.8px}}
-    .rp-note{{font:12px/1.55 var(--rp-s);color:var(--rp-t3);margin:-2px 0 10px}}
-    .rp-mut{{color:var(--rp-t3);font-weight:700;letter-spacing:.6px}}
-    .rp-panel{{border:1px solid var(--rp-b);background:var(--rp-p);margin:8px 0 10px}} .rp-panel.dash{{border-style:dashed}}
-    .rp-panel>.t{{display:flex;justify-content:space-between;font:700 11px var(--rp-m);letter-spacing:1px;text-transform:uppercase;color:var(--rp-am);
-                 background:#14110A;padding:7px 12px;border-bottom:1px solid var(--rp-b)}}
-    .rp-panel>.t em{{font-style:normal;color:var(--rp-t3);font-weight:600}}
-    .rp-panel>.b{{padding:10px 12px;font:12.5px/1.65 var(--rp-s);color:var(--rp-t2)}} .rp-panel>.b.tight{{padding:4px 12px 6px}}
-    .rp-mr{{display:flex;justify-content:space-between;gap:10px;padding:5px 0;border-bottom:1px solid #161616;font:12px var(--rp-m)}}
-    .rp-mr:last-child{{border-bottom:0}} .rp-mr span{{color:var(--rp-t2)}} .rp-mr b{{color:var(--rp-tx);font-weight:700;text-align:right}}
-    .rp-kg{{display:grid;grid-template-columns:repeat(var(--n),minmax(0,1fr));gap:1px;background:var(--rp-b);border:1px solid var(--rp-b);margin:6px 0 12px}}
-    .rp-k{{background:var(--rp-p);padding:11px 13px;min-width:0}}
-    .rp-k .l{{font:700 9.5px var(--rp-m);color:var(--rp-t3);letter-spacing:.9px;text-transform:uppercase}}
-    .rp-k .v{{font:700 18px var(--rp-m);margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
-    .rp-k .s{{font:11px/1.4 var(--rp-s);color:var(--rp-t3);margin-top:4px}}
+    /* security header */
+    .rp-sec{{display:grid;grid-template-columns:minmax(220px,1.1fr) auto minmax(0,2.4fr);gap:0;border:1px solid var(--rp-b);border-radius:18px;
+            background:linear-gradient(135deg,#121215,#0D0D0F 60%);margin:6px 0 14px;overflow:hidden}}
+    .rp-sec .id{{padding:18px 20px;min-width:0}}
+    .rp-sec .nm{{font-size:22px;font-weight:650;letter-spacing:-.3px;color:var(--rp-tx);line-height:1.2}}
+    .rp-sec .sb{{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}}
+    .rp-sec .sb span{{font-size:12px;font-weight:500;color:var(--rp-t2);background:#1A1A1E;border:1px solid #24242A;padding:3px 9px;border-radius:999px}}
+    .rp-sec .sb span.g{{color:var(--rp-am);border-color:rgba(255,159,10,.3);background:rgba(255,159,10,.08)}}
+    .rp-sec .q{{padding:18px 22px;border-left:1px solid var(--rp-b);border-right:1px solid var(--rp-b);text-align:right;min-width:170px}}
+    .rp-sec .px{{font-size:28px;font-weight:700;color:#fff;letter-spacing:-.5px}}
+    .rp-sec .ch{{display:inline-block;font-size:13px;font-weight:600;margin-top:6px;padding:3px 10px;border-radius:999px;
+                background:color-mix(in srgb,currentColor 13%,transparent)}}
+    .rp-sec .sts{{display:grid;grid-template-columns:repeat(auto-fit,minmax(104px,1fr));align-content:center;gap:14px 18px;padding:16px 20px}}
+    .rp-sec .st{{display:flex;flex-direction:column;min-width:0}}
+    .rp-sec .st span{{font-size:12px;color:var(--rp-t3)}}
+    .rp-sec .st b{{font-size:15px;font-weight:600;color:var(--rp-tx);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+    .rp-sec .rg{{grid-column:1/-1}} .rp-sec .bar{{position:relative;height:6px;border-radius:6px;background:#1F1F24;margin-top:9px}}
+    .rp-sec .bar i{{position:absolute;left:0;top:0;height:6px;border-radius:6px;background:linear-gradient(90deg,rgba(255,159,10,.15),rgba(255,159,10,.55))}}
+    .rp-sec .bar u{{position:absolute;top:-4px;width:4px;height:14px;border-radius:2px;background:#fff;transform:translateX(-2px)}}
+    .rp-sec .ends{{display:flex;justify-content:space-between;margin-top:6px}} .rp-sec .ends em{{font-style:normal;font-size:11.5px;color:var(--rp-t3)}}
+    @media(max-width:900px){{.rp-sec{{grid-template-columns:1fr}} .rp-sec .q{{border:0;border-top:1px solid var(--rp-b);text-align:left}}
+        .rp-sec .sts{{border-top:1px solid var(--rp-b)}}}}
+
+    /* titles and section headers */
+    .rp-title{{display:flex;justify-content:space-between;align-items:center;gap:16px;margin:14px 0 6px;padding:2px 2px 12px;border-bottom:1px solid var(--rp-b)}}
+    .rp-title b{{display:block;font-size:20px;font-weight:650;color:var(--rp-tx);letter-spacing:-.3px}}
+    .rp-title i{{display:block;font-style:normal;font-size:13px;color:var(--rp-t3);margin-top:3px;line-height:1.5}}
+    .rp-title span.code{{flex:0 0 auto;font-size:12px;font-weight:600;color:var(--rp-am);background:rgba(255,159,10,.09);border:1px solid rgba(255,159,10,.25);
+                        padding:4px 10px;border-radius:999px;white-space:nowrap}}
+    .rp-h{{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:26px 2px 10px}}
+    .rp-h b{{font-size:15px;font-weight:600;color:var(--rp-tx);letter-spacing:-.1px}}
+    .rp-tag{{font-size:11.5px;font-weight:600;padding:2px 9px;border-radius:999px;background:color-mix(in srgb,currentColor 12%,transparent);white-space:nowrap}}
+    .rp-note{{font-size:13px;line-height:1.6;color:var(--rp-t3);margin:-4px 2px 12px}}
+    .rp-mut{{color:var(--rp-t3);font-weight:600}}
+    .rp-read{{font-size:14px;line-height:1.7;color:var(--rp-t2);background:var(--rp-p);border:1px solid var(--rp-b);border-left:3px solid var(--rp-am);
+             border-radius:12px;padding:14px 16px;margin:4px 0 14px}}
+    .rp-read b{{color:var(--rp-tx);font-weight:600}} .rp-read b.pos{{color:var(--rp-g)}} .rp-read b.neg{{color:var(--rp-r)}}
+    .rp-axis{{display:flex;justify-content:space-between;gap:10px;font-size:11.5px;color:var(--rp-t3);margin-top:6px}}
+
+    /* cards */
+    .rp-panel{{border:1px solid var(--rp-b);border-radius:14px;background:var(--rp-p);margin:0 0 14px;overflow:hidden}}
+    .rp-panel.dash{{border-style:dashed;background:transparent}}
+    .rp-panel>.t{{display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:14px;font-weight:600;color:var(--rp-tx);padding:14px 16px 4px}}
+    .rp-panel>.t em{{font-style:normal;font-size:11.5px;font-weight:600;color:var(--rp-t3);background:#1A1A1E;padding:2px 8px;border-radius:999px}}
+    .rp-panel>.b{{padding:8px 16px 14px;font-size:13.5px;line-height:1.65;color:var(--rp-t2)}} .rp-panel>.b.tight{{padding:4px 16px 10px}}
+    .rp-mr{{display:flex;justify-content:space-between;align-items:baseline;gap:14px;padding:9px 0;border-bottom:1px solid #18181C;font-size:13px}}
+    .rp-mr:last-child{{border-bottom:0}} .rp-mr span{{color:var(--rp-t2)}} .rp-mr b{{color:var(--rp-tx);font-weight:600;text-align:right}}
+    .rp-kg{{display:grid;grid-template-columns:repeat(var(--n),minmax(0,1fr));gap:10px;margin:4px 0 14px}}
+    .rp-k{{background:var(--rp-p);border:1px solid var(--rp-b);border-radius:12px;padding:13px 15px;min-width:0}}
+    .rp-k .l{{font-size:12.5px;color:var(--rp-t3)}}
+    .rp-k .v{{font-size:20px;font-weight:650;letter-spacing:-.2px;margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+    .rp-k .s{{font-size:12px;line-height:1.45;color:var(--rp-t3);margin-top:4px}}
     @media(max-width:900px){{.rp-kg{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
-    .rp-tw{{overflow:auto;max-height:640px;border:1px solid var(--rp-b);background:var(--rp-p);margin:6px 0 12px}}
-    table.rp-t{{width:100%;border-collapse:collapse;font:12px var(--rp-m)}}
-    .rp-t th{{position:sticky;top:0;z-index:1;background:var(--rp-p2);color:var(--rp-t3);font:700 10px var(--rp-m);letter-spacing:.8px;text-transform:uppercase;
-             text-align:right;padding:8px 11px;border-bottom:1px solid var(--rp-b);white-space:nowrap}}
-    .rp-t td{{padding:6px 11px;border-bottom:1px solid #151515;white-space:nowrap;color:var(--rp-t2)}}
-    .rp-t td.n{{text-align:right;font-variant-numeric:tabular-nums}} .rp-t td.l,.rp-t th.l{{text-align:left;position:sticky;left:0;background:var(--rp-p)}}
-    .rp-t th.l{{background:var(--rp-p2);z-index:2}} .rp-t td.l{{color:var(--rp-tx);font-weight:600}}
-    .rp-t tbody tr:hover td{{background:#15120A}} .rp-t tr.hl td.l{{color:var(--rp-am)}} .rp-t tr.hl td{{color:var(--rp-tx);font-weight:700}}
-    .rp-t td.pos,.rp-t tr.hl td.pos,.rp-mr b.pos{{color:var(--rp-g)}} .rp-t td.neg,.rp-t tr.hl td.neg,.rp-mr b.neg{{color:var(--rp-r)}}
-    .rp-cl{{display:flex;gap:12px;align-items:baseline;padding:6px 0;border-bottom:1px solid #161616;font:12px var(--rp-m)}}
-    .rp-cl b{{min-width:54px}} .rp-cl span{{color:var(--rp-tx);flex:0 0 40%;font-family:var(--rp-s);font-size:12.5px}} .rp-cl i{{font-style:normal;color:var(--rp-t3);text-align:right;flex:1}}
-    .rp-title{{display:flex;justify-content:space-between;align-items:baseline;gap:14px;border:1px solid var(--rp-b);border-left:3px solid var(--rp-am);
-              background:var(--rp-p);padding:9px 13px;margin:6px 0 4px}}
-    .rp-title b{{font:800 13px var(--rp-m);color:var(--rp-am);letter-spacing:1px}} .rp-title b span{{color:var(--rp-tx)}}
-    .rp-title i{{font:normal 11.5px var(--rp-s);color:var(--rp-t3);text-align:right}}
-    .rp-fil{{padding:8px 0;border-bottom:1px solid #161616}} .rp-fil a{{font:600 12.5px var(--rp-s);color:var(--rp-tx);text-decoration:none}}
-    .rp-fil a:hover{{color:var(--rp-am)}} .rp-fil div{{font:10.5px var(--rp-m);color:var(--rp-t3);margin-top:3px}}
 
-    div[class*="st-key-rpgrp"] div[data-testid="stHorizontalBlock"],div[class*="st-key-rpnav"] div[data-testid="stHorizontalBlock"]{{gap:4px !important}}
-    div[class*="st-key-rpgrp"] button,div[class*="st-key-rpnav"] button{{border-radius:0 !important;min-height:30px !important;padding:2px 6px !important;width:100%;
-        background:var(--rp-p) !important;border:1px solid var(--rp-b) !important}}
-    div[class*="st-key-rpgrp"] button p,div[class*="st-key-rpnav"] button p{{font:700 10.5px var(--rp-m) !important;letter-spacing:.7px;white-space:nowrap;color:var(--rp-t2) !important}}
-    div[class*="st-key-rpgrp"] button:hover,div[class*="st-key-rpnav"] button:hover{{border-color:var(--rp-am) !important}}
-    div[class*="st-key-rpgrp"] button[kind="primary"],div[class*="st-key-rpgrp"] button[data-testid="stBaseButton-primary"]{{
-        background:#1A1408 !important;border-color:var(--rp-b) !important;border-bottom:2px solid var(--rp-am) !important}}
-    div[class*="st-key-rpgrp"] button[kind="primary"] p,div[class*="st-key-rpgrp"] button[data-testid="stBaseButton-primary"] p{{color:var(--rp-am) !important}}
-    div[class*="st-key-rpnav"] button[kind="primary"],div[class*="st-key-rpnav"] button[data-testid="stBaseButton-primary"]{{
-        background:var(--rp-am) !important;border-color:var(--rp-am) !important}}
-    div[class*="st-key-rpnav"] button[kind="primary"] p,div[class*="st-key-rpnav"] button[data-testid="stBaseButton-primary"] p{{color:#000 !important}}
-    div[class*="st-key-rpcmd"] input{{background:#000 !important;color:var(--rp-am) !important;font:700 13px var(--rp-m) !important;
-        border:1px solid var(--rp-am) !important;border-radius:0 !important;letter-spacing:.8px}}
-    div[class*="st-key-rprecent"] button{{background:var(--rp-p) !important;border:1px solid var(--rp-b) !important;border-radius:0 !important;min-height:26px !important;padding:1px 8px !important}}
-    div[class*="st-key-rprecent"] button p{{font:700 10px var(--rp-m) !important;color:var(--rp-t2) !important}}
+    /* tables */
+    .rp-tw{{overflow:auto;max-height:640px;border:1px solid var(--rp-b);border-radius:14px;background:var(--rp-p);margin:0 0 14px}}
+    table.rp-t{{width:100%;border-collapse:separate;border-spacing:0;font-size:13px}}
+    .rp-t th{{position:sticky;top:0;z-index:1;background:#111114;color:var(--rp-t3);font-size:12px;font-weight:550;text-align:right;padding:10px 14px;
+             border-bottom:1px solid var(--rp-b);white-space:nowrap}}
+    .rp-t td{{padding:9px 14px;border-bottom:1px solid #17171B;white-space:nowrap;color:var(--rp-t2)}}
+    .rp-t tbody tr:last-child td{{border-bottom:0}}
+    .rp-t td.n{{text-align:right}} .rp-t td.l,.rp-t th.l{{text-align:left;position:sticky;left:0;background:var(--rp-p)}}
+    .rp-t th.l{{background:#111114;z-index:2}} .rp-t td.l{{color:var(--rp-tx);font-weight:500}}
+    .rp-t tbody tr:hover td{{background:#141417}} .rp-t tr.hl td.l{{color:var(--rp-am)}} .rp-t tr.hl td{{color:var(--rp-tx);font-weight:600}}
+    .rp-t td.pos,.rp-t tr.hl td.pos,.rp-mr b.pos{{color:var(--rp-g)}} .rp-t td.neg,.rp-t tr.hl td.neg,.rp-mr b.neg{{color:var(--rp-r)}}
+    .rp-cl{{display:flex;gap:14px;align-items:baseline;padding:9px 0;border-bottom:1px solid #18181C;font-size:13px}}
+    .rp-cl:last-child{{border-bottom:0}}
+    .rp-cl b{{min-width:64px;font-size:12px;font-weight:600}} .rp-cl span{{color:var(--rp-tx);flex:0 0 42%}} .rp-cl i{{font-style:normal;color:var(--rp-t3);text-align:right;flex:1}}
+    .rp-fil{{padding:10px 0;border-bottom:1px solid #18181C}} .rp-fil:last-child{{border-bottom:0}}
+    .rp-fil a{{font-size:13.5px;font-weight:500;color:var(--rp-tx);text-decoration:none;line-height:1.5}}
+    .rp-fil a:hover{{color:var(--rp-am)}} .rp-fil div{{font-size:12px;color:var(--rp-t3);margin-top:3px}}
+
+    /* navigation */
+    div[class*="st-key-rpgrp"] [data-testid="stButtonGroup"],div[class*="st-key-rpnav"] [data-testid="stButtonGroup"]{{flex-wrap:wrap;gap:6px}}
+    div[class*="st-key-rpnav"]{{margin-top:2px}}
+    div[class*="st-key-rpgrp"] div[data-testid="stHorizontalBlock"],div[class*="st-key-rpnav"] div[data-testid="stHorizontalBlock"]{{gap:6px !important}}
+    div[class*="st-key-rpgrp"] button,div[class*="st-key-rpnav"] button{{border-radius:999px !important;min-height:34px !important;padding:2px 12px !important}}
+    div[class*="st-key-rpgrp"] button p,div[class*="st-key-rpnav"] button p{{font:500 13px var(--rp-s) !important;white-space:nowrap}}
+    div[class*="st-key-rprecent"] button{{border-radius:999px !important;min-height:30px !important;padding:1px 12px !important}}
+    div[class*="st-key-rprecent"] button p{{font:500 12.5px var(--rp-s) !important}}
     </style>""", unsafe_allow_html=True)
 
 
@@ -2203,39 +2594,61 @@ def _set_fn(key, code):
 
 
 def _command_bar(sym, key, T):
-    c1, c2 = st.columns([3, 2])
+    c1, c2 = st.columns([4, 1], gap="small")
     with c1:
         with st.container(key=f"rpcmd_wrap_{key}"):
             st.text_input("Command", key=f"rpcmd_{key}", on_change=_on_cmd, args=(key,),
-                          placeholder=f"{sym} ▸ type a code (DLV, DCF, COMP…) or a symbol + code (TCS FA), then Enter",
+                          placeholder="Jump to a function: type a code like PB, DLV or DCF, or a symbol and a code like TCS FA, then Enter",
                           label_visibility="collapsed")
     with c2:
-        msg = st.session_state.get(f"rp_msg_{key}")
-        tip = (f'<span style="color:{T["red"]}">{_esc(msg)}</span>' if msg else
-               '<span class="rp-mut">ALL CODES · </span>' + " ".join(f'<b style="color:#B8B8B8">{c}</b>' for c in FUNCS))
-        st.markdown(f'<div style="font:10px/1.7 {T["mono"]};padding-top:3px">{tip}</div>', unsafe_allow_html=True)
+        pop = st.popover("All codes", use_container_width=True) if hasattr(st, "popover") else st.expander("All codes")
+        with pop:
+            st.markdown("".join(f'<div class="rp-mr"><span><b style="color:{T["amber"]};font-weight:600">{c}</b> &nbsp;{_esc(FN[c][0])}</span>'
+                                f'<b style="font-weight:500;color:var(--rp-t3)">{_esc(GROUP_LABEL.get(FN[c][2], FN[c][2]))}</b></div>' for c in FUNCS),
+                        unsafe_allow_html=True)
+    msg = st.session_state.get(f"rp_msg_{key}")
+    if msg:
+        st.markdown(f'<div class="rp-note" style="color:{T["red"]};margin-top:2px">{_esc(msg)}</div>', unsafe_allow_html=True)
 
 
 def _nav(key, T):
     cur = st.session_state[f"rp_fn_{key}"]
     grp = FN[cur][2]
     st.session_state[f"rp_grp_{key}"] = grp
-    with st.container(key=f"rpgrp_{key}"):
+    items = next(it for g, it in GROUPS if g == grp)
+    if hasattr(st, "pills"):
+        gk, fk = f"rpgrp_sel_{key}", f"rpnav_sel_{key}"
+        st.session_state[gk] = grp                       # set before the widgets exist in this run
+        st.session_state[fk] = cur
+
+        def on_grp():
+            g = st.session_state.get(gk) or grp
+            _set_grp(key, g)
+
+        def on_fn():
+            _set_fn(key, st.session_state.get(fk) or cur)
+        with st.container(key=f"rpgrp_{key}"):
+            st.pills("Section", [g for g, _ in GROUPS], key=gk, format_func=lambda g: GROUP_LABEL.get(g, g), on_change=on_grp,
+                     label_visibility="collapsed")
+        with st.container(key=f"rpnav_{key}"):
+            st.pills("Function", [c for c, _, _ in items], key=fk, format_func=lambda c: FN[c][0], on_change=on_fn,
+                     label_visibility="collapsed")
+        return
+    with st.container(key=f"rpgrp_{key}"):                # older Streamlit: buttons
         cols = st.columns(len(GROUPS))
         for c, (g, _) in zip(cols, GROUPS):
-            c.button(g, key=f"rpg_{key}_{g}", on_click=_set_grp, args=(key, g), type="primary" if g == grp else "secondary",
+            c.button(GROUP_LABEL.get(g, g), key=f"rpg_{key}_{g}", on_click=_set_grp, args=(key, g), type="primary" if g == grp else "secondary",
                      use_container_width=True)
-    items = next(it for g, it in GROUPS if g == grp)
     with st.container(key=f"rpnav_{key}"):
         cols = st.columns([1.5] * len(items) + [max(0.05, (6 - len(items)) * 1.5)])
         for c, (code, name, _) in zip(cols, items):
-            c.button(f"{code} · {name}", key=f"rpb_{key}_{code}", on_click=_set_fn, args=(key, code),
+            c.button(name, key=f"rpb_{key}_{code}", on_click=_set_fn, args=(key, code),
                      type="primary" if code == cur else "secondary", use_container_width=True)
 
 
 def _title_bar(fn, sym, T):
     name, desc, grp = FN[fn]
-    st.markdown(f'<div class="rp-title"><b>{_esc(sym)} {fn} &lt;GO&gt; <span>· {_esc(name).upper()}</span></b><i>{_esc(desc)}</i></div>',
+    st.markdown(f'<div class="rp-title"><div><b>{_esc(name)}</b><i>{_esc(desc)}</i></div><span class="code">{_esc(sym)} {fn}</span></div>',
                 unsafe_allow_html=True)
 
 
@@ -2248,6 +2661,7 @@ def _research_fragment(symbol, T, news_fetch_fn, key, show_quote):
     if st.session_state.pop(f"rp_jump_{key}", False):
         st.rerun(scope="app")  # symbol changed from the command bar → redraw everything
 
+    st.session_state["_rp_sym"] = symbol
     with st.spinner("Loading fundamentals…"):
         B = get_screener_bundle(symbol) or {"resolved": False, "summary": {}, "growth": {}}
     _snapshot(symbol, B, T, show_quote)
@@ -2284,20 +2698,12 @@ def _load_symbol(sym):
 def render_research_page(T=None, news_fetch_fn=None):
     T = _theme(T)
     _css(T)
-    now = datetime.now(IST)
-    opened = _market_open(now)
-    st.markdown(
-        f'<div style="display:flex;justify-content:space-between;border-bottom:1px solid #222;padding:4px 2px 8px;margin-bottom:8px;font:700 10.5px {T["mono"]};letter-spacing:1px">'
-        f'<span style="color:{T["amber"]}">ARKA TERMINAL · RESEARCH</span>'
-        f'<span style="color:{T["green"] if opened else T["red"]}">● {"MARKET OPEN" if opened else "MARKET CLOSED"}</span>'
-        f'<span style="color:{T["t3"]}">{now.strftime("%d %b %Y · %H:%M IST")}</span></div>', unsafe_allow_html=True)
-
     active = st.session_state.get("active_security") or st.session_state.get("research_last_query") or ""
     with st.form("research_load_form", clear_on_submit=False):
         c1, c2 = st.columns([5, 1])
-        q = c1.text_input("Research security", value=active, placeholder="Symbol: RELIANCE / HDFCBANK / TCS",
+        q = c1.text_input("Research security", value=active, placeholder="Search a stock: RELIANCE, HDFCBANK, TCS…",
                           label_visibility="collapsed", key=f"research_q_{active}")
-        go_ = c2.form_submit_button("LOAD", type="primary", use_container_width=True)
+        go_ = c2.form_submit_button("Open", type="primary", use_container_width=True)
     if go_ and q.strip():
         _load_symbol(q.strip().upper())
         st.rerun()
@@ -2306,14 +2712,15 @@ def render_research_page(T=None, news_fetch_fn=None):
     if recent:
         with st.container(key="rprecent"):
             cols = st.columns([0.6] + [1] * len(recent) + [max(1, 9 - len(recent))])
-            cols[0].markdown(f'<div style="font:700 9.5px {T["mono"]};color:{T["t3"]};letter-spacing:1px;padding-top:7px">RECENT</div>', unsafe_allow_html=True)
+            cols[0].markdown(f'<div style="font:500 12.5px Inter,sans-serif;color:{T["t3"]};padding-top:7px">Recent</div>', unsafe_allow_html=True)
             for c, s in zip(cols[1:], recent):
                 c.button(s, key=f"rprecent_{s}", on_click=_load_symbol, args=(s,), use_container_width=True)
 
     symbol = st.session_state.get("active_security") or st.session_state.get("research_last_query") or ""
     if not symbol:
-        _panel("Research ready", "Load a security to open its research workspace. Once loaded, type function codes such as "
-               f'<b style="color:{T["amber"]}">DLV</b>, <b style="color:{T["amber"]}">DCF</b> or <b style="color:{T["amber"]}">TCS FA</b> into the command bar.', T, dashed=True)
+        _panel("Pick a stock to start", "Search a stock above to open its research workspace: dashboard, financials, valuation, price behaviour, "
+               f'ownership and filings. Inside it, type codes such as <b style="color:{T["amber"]}">PB</b>, <b style="color:{T["amber"]}">DLV</b> '
+               f'or <b style="color:{T["amber"]}">TCS FA</b> to jump straight to a function.', T, dashed=True)
         return
     _remember(symbol)
     render_research_panel(symbol, T, news_fetch_fn, key="rp_page", show_quote=True)
