@@ -1,5 +1,15 @@
 """
-home_page.py — Arka Trades · Market overview (the HOME page), v3.1
+home_page.py — Arka Trades · Market overview (the HOME page), v3.3
+
+v3.3
+  * The index strip is a moving ticker again: 22 instruments (Indian indices, VIX, rupee, commodities, global indices,
+    US 10Y, Bitcoin) glide right to left on every screen size and stop while the pointer or a finger is on them.
+  * No more "delayed" label: after the close it says "Closing prices · <date>", during the session "Updated HH:MM".
+
+v3.2
+  * Index cards no longer hide off the edge: on desktop all 8 always fit (one row of 8, or two rows of 4 when the
+    news column is open); only phones swipe sideways.
+  * The home "Market regime" card is renamed "Trend checklist" so it is not confused with the full Regime page.
 
 v3.1 (fixes v3)
   * v3 downloaded from Yahoo in parallel. yfinance is not safe to call from several threads at once, so results got
@@ -244,12 +254,20 @@ _CSS = """<style>
 .hm-chip.live i{background:var(--green);box-shadow:0 0 0 3px rgba(48,209,88,.18);} .hm-chip.pre i{background:var(--amber);}
 
 /* index cards strip */
-.hm-cards{display:flex;gap:10px;overflow-x:auto;scroll-snap-type:x mandatory;padding:12px 0 4px;margin:0;scrollbar-width:none;-webkit-overflow-scrolling:touch;}
-.hm-cards::-webkit-scrollbar{display:none;}
-.hm-card{flex:0 0 172px;scroll-snap-align:start;background:var(--s1);border:1px solid var(--line);border-radius:var(--hm-r);padding:12px 14px 10px;min-width:158px;}
+/* ticker: the cards twice in one track that slides left by exactly one copy, so the loop is seamless */
+.hm-cards{position:relative;overflow:hidden;padding:12px 0 4px;margin:0;
+  -webkit-mask-image:linear-gradient(90deg,transparent,#000 28px,#000 calc(100% - 28px),transparent);
+          mask-image:linear-gradient(90deg,transparent,#000 28px,#000 calc(100% - 28px),transparent);}
+.hm-cards .trk{display:flex;gap:10px;width:max-content;animation:hmtk var(--dur,90s) linear infinite;will-change:transform;}
+.hm-cards:hover .trk,.hm-cards:active .trk{animation-play-state:paused;}
+@keyframes hmtk{from{transform:translateX(0)}to{transform:translateX(calc(-50% - 5px))}}
+.hm-cards .hm-card{flex:0 0 176px;}
+@container (max-width:560px){.hm-cards .hm-card{flex-basis:150px;}}
+@media (prefers-reduced-motion:reduce){.hm-cards{overflow-x:auto;-webkit-mask-image:none;mask-image:none;} .hm-cards .trk{animation:none;} .hm-cards .dup{display:none;}}
+.hm-card{background:var(--s1);border:1px solid var(--line);border-radius:var(--hm-r);padding:12px 14px 10px;min-width:0;overflow:hidden;}
 .hm-card .n{font:500 12.5px var(--sans);color:var(--tx3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .hm-card .v{font:600 17px var(--sans);color:var(--tx);margin-top:6px;letter-spacing:-.2px;white-space:nowrap;}
-.hm-card .c{font:500 12.5px var(--sans);margin-top:2px;white-space:nowrap;}
+.hm-card .c{font:500 12.5px var(--sans);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .hm-card svg{display:block;margin-top:8px;width:100%;}
 
 /* grid */
@@ -494,7 +512,7 @@ def _spark(values, w=92, h=24, color=None):
     lo, hi = min(vals), max(vals)
     rng = (hi - lo) or 1.0
     pts = " ".join(f"{i / (len(vals) - 1) * w:.1f},{h - 2 - (v - lo) / rng * (h - 4):.1f}" for i, v in enumerate(vals))
-    return (f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}"><polyline points="{pts}" fill="none" stroke="{color}" '
+    return (f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}" preserveAspectRatio="none"><polyline points="{pts}" fill="none" stroke="{color}" '
             f'stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/></svg>')
 
 
@@ -825,7 +843,9 @@ def _book_holdings(base, quotes):
 
 # ═════════════════════════ blocks ═════════════════════════
 # ═════════════════════════ blocks ═════════════════════════
-CARDS = ["NIFTY 50", "SENSEX", "BANK NIFTY", "INDIA VIX", "USD / INR", "GOLD", "BRENT CRUDE", "S&P 500"]
+CARDS = ["NIFTY 50", "SENSEX", "BANK NIFTY", "FIN NIFTY", "NIFTY MIDCAP 100", "NIFTY NEXT 50", "NIFTY 500", "INDIA VIX",
+         "USD / INR", "GOLD", "SILVER", "BRENT CRUDE", "NATURAL GAS", "S&P 500", "NASDAQ COMP", "DOW JONES", "NIKKEI 225",
+         "HANG SENG", "DAX", "FTSE 100", "US 10Y", "BITCOIN"]
 
 
 def _cards(M, labels=CARDS):
@@ -837,8 +857,12 @@ def _cards(M, labels=CARDS):
         kind = m.get("kind", "idx")
         ch = f'{m["pts"] * 100:+.1f} bp' if kind == "yld" else f'{_chg_txt(m, kind)} ({_pct(m["chg"])})'
         out.append(f'<div class="hm-card"><div class="n">{_e(_nm(label))}</div><div class="v">{_px(m["price"], kind)}</div>'
-                   f'<div class="c {_cls(m["chg"])}">{ch}</div>{_spark(m.get("spark", [])[-20:], 130, 26)}</div>')
-    return f'<div class="hm-cards">{"".join(out)}</div>' if out else ""
+                   f'<div class="c {_cls(m["chg"])}" title="{_e(ch)}">{ch}</div>{_spark(m.get("spark", [])[-20:], 130, 26)}</div>')
+    if not out:
+        return ""
+    one = "".join(out)
+    dup = one.replace('<div class="hm-card">', '<div class="hm-card dup" aria-hidden="true">')
+    return f'<div class="hm-cards" style="--dur:{max(30, len(out) * 4.5):.0f}s"><div class="trk">{one}{dup}</div></div>'
 
 
 def _tape(M):
@@ -900,7 +924,7 @@ def _regime(M, breadth):
         med = float(vs.median())
         checks.append((f"India VIX below 1-year median ({med:.1f})", v["price"] < med))
     if not checks:
-        return _panel("", "Market regime", "", '<div class="hm-empty">Needs NIFTY 50 history. Retries automatically.</div>')
+        return _panel("", "Trend checklist", "", '<div class="hm-empty">Needs NIFTY 50 history. Retries automatically.</div>')
     score, tot = sum(1 for _, ok in checks if ok), len(checks)
     r = score / tot
     lab, c = (("Risk-on", GREEN) if r >= 0.83 else ("Constructive", "#84CC16") if r >= 0.66 else ("Neutral", YELLOW) if r >= 0.5
@@ -909,7 +933,7 @@ def _regime(M, breadth):
     rows = "".join(f'<div class="hm-chk"><span>{_e(t)}</span><b style="color:{GREEN if ok else RED}">{"Yes" if ok else "No"}</b></div>' for t, ok in checks)
     body = (f'<div class="hm-big" style="color:{c}">{lab}</div><div class="hm-cap">{score} of {tot} trend, breadth and volatility checks pass</div>'
             f'<div class="hm-meter">{meter}</div>{rows}')
-    return _panel("", "Market regime", "Rule-based", body)
+    return _panel("", "Trend checklist", "Full reading in Regime", body)
 
 
 def _session_block(S):
@@ -1206,7 +1230,12 @@ def _brief(M, B, S):
     if v:
         lvl = "calm" if v["price"] < 13 else "normal" if v["price"] < 18 else "elevated" if v["price"] < 24 else "stressed"
         bits.append(f'India VIX <b>{v["price"]:.1f}</b>, {lvl}.')
-    asof = f'Prices as of {n["date"]:%d %b}, delayed' if n else "Prices delayed"
+    if not n:
+        asof = "Waiting for prices"
+    elif S["cls"] == "live":
+        asof = f"Updated {now:%H:%M}"
+    else:
+        asof = f'Closing prices · {n["date"]:%d %b}'
     chip_cls = {"live": "live", "pre": "pre"}.get(S["cls"], "")
     return (f'<div class="hm-brief"><div><div class="g">{greet} · {now:%a %d %b}</div><div class="t">Markets today</div>'
             f'<div class="s">{" ".join(bits) or "Market data is loading."}</div></div>'
@@ -1316,5 +1345,5 @@ def render_home(supabase=None, on_open=None, nav=None, compact=None):
         if ph is not None:
             ph.empty()
         st.session_state["_hm_warm"] = True
-    st.markdown('<div class="hm-foot">Prices from Yahoo Finance, delayed; changes are close-to-close. Regime, mood and heatmap are information, '
+    st.markdown('<div class="hm-foot">Prices from Yahoo Finance, refreshed every 90 seconds during the session (free feeds can trail the exchange by a few minutes); changes are close-to-close. Regime, mood and heatmap are information, '
                 'not advice. NIFTY 50 list as of 30 Sep 2026 · Market Mood Index © Tickertape.</div>', unsafe_allow_html=True)
