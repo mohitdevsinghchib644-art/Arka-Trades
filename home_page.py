@@ -1,5 +1,14 @@
 """
-home_page.py — Arka Trades · Market overview (the HOME page), v2
+home_page.py — Arka Trades · Market overview (the HOME page), v3
+
+v3
+  * A morning-brief header: greeting, one sentence on the market (NIFTY, breadth, leading and lagging sector, VIX)
+    and chips for the session and, when it is already loaded, the Market regime.
+  * No more "Loading markets…" spinner: the first visit shows the logo with a shimmering skeleton of the page, then
+    the real page fades in. Later refreshes swap numbers in place with no loader.
+  * Faster first load: quotes, history, stock quotes and the mood index download in parallel instead of one by one.
+  * Polish: soft depth and hover on cards, a glow on the NIFTY card in the day's colour, a live dot on the chart,
+    edge fade on the scrolling index strip. Motion respects "reduce motion".
 
 v2 is a visual redesign; the data, calendar and caching code is unchanged from v1.1.
   * App-style look: Inter everywhere with tabular numbers, sentence-case labels, soft 12 px cards, no code
@@ -22,7 +31,9 @@ import html
 import json
 import math
 import re
+import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -348,6 +359,53 @@ _CSS = """<style>
 .hm-clk:last-child{border-bottom:0;}
 .hm-clk span{color:var(--tx2);} .hm-clk b{color:var(--tx);font-weight:500;}
 .hm-foot{font:12px var(--sans);color:var(--tx3);padding:18px 0 0;line-height:1.6;}
+
+/* v3: brief header */
+.hm-brief{display:flex;justify-content:space-between;align-items:flex-end;gap:14px 24px;flex-wrap:wrap;padding:18px 0 6px;}
+.hm-brief .g{font:500 13px var(--sans);color:var(--tx3);}
+.hm-brief .t{font:650 26px/1.2 var(--sans);letter-spacing:-.5px;color:var(--tx);margin-top:4px;}
+.hm-brief .s{font:14px/1.6 var(--sans);color:var(--tx2);margin-top:8px;max-width:760px;}
+.hm-brief .s b{font-weight:600;color:var(--tx);}
+.hm-chips{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;}
+.hm-chip.k{--c:var(--tx3);color:var(--c);background:color-mix(in srgb,var(--c) 12%,transparent);}
+.hm-chip.k i{background:var(--c);}
+@container (max-width:620px){.hm-brief .t{font-size:22px;} .hm-chips{justify-content:flex-start;}}
+
+/* v3: depth, hover, glow */
+.hm-card,.hm-p{box-shadow:0 1px 0 rgba(255,255,255,.025) inset;transition:border-color .18s ease,transform .18s ease,background .18s ease;}
+.hm-card:hover{border-color:#2f2f35;transform:translateY(-2px);background:#121215;}
+.hm-p:hover{border-color:#26262b;}
+.hm-cards{-webkit-mask-image:linear-gradient(90deg,#000 0,#000 calc(100% - 36px),transparent);mask-image:linear-gradient(90deg,#000 0,#000 calc(100% - 36px),transparent);padding-right:30px;}
+.hm-p.hero{position:relative;}
+.hm-p.hero::before{content:"";position:absolute;inset:0 0 auto 0;height:170px;pointer-events:none;
+  background:radial-gradient(60% 120% at 12% 0%,color-mix(in srgb,var(--hg,#30D158) 16%,transparent),transparent 70%);}
+.hm-p.hero>*{position:relative;}
+.hm-tile{transition:transform .15s ease,filter .15s ease;} .hm-tile:hover{transform:scale(1.06);filter:brightness(1.15);z-index:1;}
+.hm-li,.hm-t tbody tr:not(.g) td{transition:background .15s ease;} .hm-li:hover{background:rgba(255,255,255,.025);}
+@keyframes hmpulse{0%{r:3.5;opacity:.9}70%{r:10;opacity:0}100%{r:10;opacity:0}}
+.hm-dot{animation:hmpulse 2s ease-out infinite;}
+
+/* v3: first-load entrance (only once per session) */
+@keyframes hmin{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+.hm-in .hm-brief,.hm-in .hm-cards,.hm-in .hm-row{animation:hmin .45s cubic-bezier(.2,.8,.2,1) both;}
+.hm-in .hm-cards{animation-delay:.05s} .hm-in .hm-row:nth-of-type(1){animation-delay:.1s} .hm-in .hm-row:nth-of-type(2){animation-delay:.16s}
+.hm-in .hm-row:nth-of-type(3){animation-delay:.22s} .hm-in .hm-row:nth-of-type(n+4){animation-delay:.28s}
+
+/* v3: loading skeleton */
+.hm-load{display:flex;align-items:center;gap:14px;padding:22px 0 14px;}
+.hm-load img{width:40px;height:40px;border-radius:11px;animation:hmbreath 1.6s ease-in-out infinite;}
+@keyframes hmbreath{0%,100%{transform:scale(1);box-shadow:0 0 0 0 rgba(247,148,29,.45)}50%{transform:scale(1.05);box-shadow:0 0 0 10px rgba(247,148,29,0)}}
+.hm-load b{display:block;font:600 16px var(--sans);color:var(--tx);} .hm-load span{display:block;font:13px var(--sans);color:var(--tx3);margin-top:2px;}
+.hm-load .bar{flex:1;max-width:220px;height:3px;border-radius:3px;background:#1c1c20;overflow:hidden;position:relative;margin-left:auto;}
+.hm-load .bar i{position:absolute;left:-40%;top:0;bottom:0;width:40%;border-radius:3px;background:var(--amber,#FF9F0A);animation:hmbar 1.1s ease-in-out infinite;}
+@keyframes hmbar{to{left:100%}}
+.sk{border-radius:12px;background:linear-gradient(100deg,#101013 30%,#1a1a1f 50%,#101013 70%);background-size:220% 100%;animation:hmsk 1.25s linear infinite;border:1px solid var(--line,#1E1E21);}
+@keyframes hmsk{from{background-position:120% 0}to{background-position:-100% 0}}
+.sk-cards{display:flex;gap:10px;overflow:hidden;margin:6px 0 12px;} .sk-cards .sk{flex:1 0 150px;height:96px;}
+.sk-grid{display:grid;gap:12px;grid-template-columns:minmax(0,1.7fr) minmax(0,1fr) minmax(0,1fr);} .sk-grid .sk{height:330px;}
+.sk-grid2{display:grid;gap:12px;grid-template-columns:minmax(0,1fr) minmax(0,2fr);margin-top:12px;} .sk-grid2 .sk{height:220px;}
+@container (max-width:900px){.sk-grid,.sk-grid2{grid-template-columns:minmax(0,1fr);} .sk-grid .sk{height:220px;} .sk-grid .sk+.sk{height:150px;}}
+@media (prefers-reduced-motion:reduce){.hm-in .hm-brief,.hm-in .hm-cards,.hm-in .hm-row,.sk,.hm-load img,.hm-dot{animation:none !important;}}
 </style>"""
 
 
@@ -457,7 +515,10 @@ def _area(values, uid, h=150):
             f'<stop offset="100%" stop-color="{color}" stop-opacity="0"/></linearGradient></defs>'
             f'<line x1="0" y1="{base:.1f}" x2="{w}" y2="{base:.1f}" stroke="#3a3a3a" stroke-dasharray="3 4" stroke-width="1" vector-effect="non-scaling-stroke"/>'
             f'<path d="{line} L{w},{h} L0,{h} Z" fill="url(#hmg{uid})"/>'
-            f'<path d="{line}" fill="none" stroke="{color}" stroke-width="1.8" vector-effect="non-scaling-stroke"/></svg>')
+            f'<path d="{line}" fill="none" stroke="{color}" stroke-width="1.8" vector-effect="non-scaling-stroke"/></svg>'
+            f'<div style="position:relative;height:0"><svg width="22" height="22" viewBox="-11 -11 22 22" style="position:absolute;right:-11px;'
+            f'top:{xy[-1][1] - h - 11:.1f}px;overflow:visible"><circle class="hm-dot" r="3.5" fill="{color}"/><circle r="3.5" fill="{color}" '
+            f'stroke="#0E0E10" stroke-width="1.5"/></svg></div>')
 
 
 def _panel(code, title, right, body, cls="hm-pb"):
@@ -574,8 +635,8 @@ def _metrics(t, live, hist):
 def market_data() -> dict:
     """{label: metrics} for every WEI / cross-asset / sector row. Never raises."""
     tick = _all_tickers()
-    live = de._guarded(("hm_live", tick), lambda: _live_cached(tick, de._bucket(90, 900)), {})
-    hist = de._guarded(("hm_hist", tick), lambda: _hist_cached(tick, int(time.time() // (6 * 3600))), {})
+    live, hist = _parallel([lambda: de._guarded(("hm_live", tick), lambda: _live_cached(tick, de._bucket(90, 900)), {}),
+                            lambda: de._guarded(("hm_hist", tick), lambda: _hist_cached(tick, int(time.time() // (6 * 3600))), {})])
     out = {}
     for _, label, chain, kind in WEI + XASSET:
         for t in chain:
@@ -799,7 +860,8 @@ def _hero(M):
     body = (f'<div class="hm-hrow"><div><div class="hm-hv">{m["price"]:,.2f}</div>'
             f'<div class="hm-hc {_cls(m["chg"])}">{m["pts"]:+,.2f} ({_pct(m["chg"])}) today</div></div><div class="hm-per">{per}</div></div>'
             f'{chart}<div class="hm-stats">{stats}</div>{rng}')
-    return _panel("", "NIFTY 50", f'NSE · {m["date"]:%d %b} · 3 months', body)
+    return _panel("", "NIFTY 50", f'NSE · {m["date"]:%d %b} · 3 months', body).replace(
+        '<div class="hm-p">', f'<div class="hm-p hero" style="--hg:{GREEN if (m["chg"] or 0) >= 0 else RED}">', 1)
 
 
 def _regime(M, breadth):
@@ -1080,8 +1142,96 @@ def _world_clock():
 
 
 # ═════════════════════════ page ═════════════════════════
-def _body(supabase, compact=False):
-    M = market_data()
+def _parallel(fns):
+    """Run independent downloads side by side. Falls back to one-by-one if threads are not possible here."""
+    if len(fns) < 2:
+        return [f() for f in fns]
+    try:
+        try:
+            from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
+            ctx = get_script_run_ctx()
+        except Exception:
+            add_script_run_ctx = ctx = None
+
+        def wrap(f):
+            def run():
+                if ctx is not None:
+                    import threading
+                    add_script_run_ctx(threading.current_thread(), ctx)
+                return f()
+            return run
+        with ThreadPoolExecutor(max_workers=len(fns)) as pool:
+            futs = [pool.submit(wrap(f)) for f in fns]
+            return [f.result() for f in futs]
+    except Exception:
+        return [f() for f in fns]
+
+
+def _safe_mmi():
+    try:
+        return get_mmi()
+    except Exception:
+        return {"status": "unavailable"}
+
+
+def _regime_chip():
+    """Market regime chip, only when the Regime page has already computed it (never triggers a download here)."""
+    try:
+        qd = sys.modules.get("quant_data")
+        for p in list(getattr(qd, "_MEM", {}).values()) if qd else []:
+            df = p.get("_regime")
+            if df is not None and len(df):
+                r = df.iloc[-1]
+                col = {"Confirmed uptrend": GREEN, "Under pressure": YELLOW, "Rally attempt": "#4FA3FF", "Correction": RED}.get(r["state"], T2)
+                return f'<span class="hm-chip k" style="--c:{col}"><i></i>Regime: {_e(r["state"])} · {r["score"]:.0f}</span>'
+    except Exception:
+        pass
+    return ""
+
+
+def _brief(M, B, S):
+    now = datetime.now(IST)
+    greet = "Good morning" if now.hour < 12 else "Good afternoon" if now.hour < 17 else "Good evening"
+    n = M.get("NIFTY 50")
+    bits = []
+    if n and _ok(n.get("chg")):
+        word = "up" if n["chg"] > 0.05 else "down" if n["chg"] < -0.05 else "flat"
+        bits.append(f'NIFTY 50 is <b class="{_cls(n["chg"])}">{word}{"" if word == "flat" else " " + _pct(abs(n["chg"]), 2, False)}</b> at <b>{n["price"]:,.0f}</b>.')
+    if B and B.get("n"):
+        bits.append(f'<b>{B["adv"]}</b> of {B["n"]} NIFTY stocks are up.')
+    secs = [(l, M["SEC::" + l]["chg"]) for l, _ in SECTORS if M.get("SEC::" + l) and _ok(M["SEC::" + l].get("chg"))]
+    if len(secs) >= 4:
+        secs.sort(key=lambda x: x[1])
+        (wl_, wv), (bl_, bv) = secs[0], secs[-1]
+        bits.append(f'{_e(_nm(bl_))} leads (<b class="{_cls(bv)}">{_pct(bv, 1)}</b>), {_e(_nm(wl_))} lags (<b class="{_cls(wv)}">{_pct(wv, 1)}</b>).')
+    v = M.get("INDIA VIX")
+    if v:
+        lvl = "calm" if v["price"] < 13 else "normal" if v["price"] < 18 else "elevated" if v["price"] < 24 else "stressed"
+        bits.append(f'India VIX <b>{v["price"]:.1f}</b>, {lvl}.')
+    asof = f'Prices as of {n["date"]:%d %b}, delayed' if n else "Prices delayed"
+    chip_cls = {"live": "live", "pre": "pre"}.get(S["cls"], "")
+    return (f'<div class="hm-brief"><div><div class="g">{greet} · {now:%a %d %b}</div><div class="t">Markets today</div>'
+            f'<div class="s">{" ".join(bits) or "Market data is loading."}</div></div>'
+            f'<div class="hm-chips"><span class="hm-chip {chip_cls}"><i></i>{_e(S["detail"])}</span>{_regime_chip()}'
+            f'<span class="hm-chip">{asof}</span></div></div>')
+
+
+def _skeleton():
+    try:
+        import auth
+        logo = auth.logo_data_uri(96)
+    except Exception:
+        logo = ""
+    img = f'<img src="{logo}" alt="">' if logo else ""
+    return ('<div class="hm"><div class="hm-load">' + img + '<div><b>Reading the market</b><span>Indices, sectors, your stocks and the mood index</span></div>'
+            '<div class="bar"><i></i></div></div>'
+            '<div class="sk-cards">' + '<div class="sk"></div>' * 7 + '</div>'
+            '<div class="sk-grid"><div class="sk"></div><div class="sk"></div><div class="sk"></div></div>'
+            '<div class="sk-grid2"><div class="sk"></div><div class="sk"></div></div></div>')
+
+
+def _gather(supabase):
+    """Everything the page needs. Independent downloads run in parallel; all of them are cached underneath."""
     groups = _nifty50()
     n50 = [s for v in groups.values() for s in v]
     wl = list(dict.fromkeys(st.session_state.get("watchlist", []) or []))
@@ -1091,21 +1241,27 @@ def _body(supabase, compact=False):
     base = _book_base(supabase)
     held = sorted({l["symbol"] for l in base.get("alots", []) if l.get("open", 0) > 1e-9} if base.get("engine")
                   else {l["symbol"] for l in base.get("lots", [])})
-    quotes = get_quotes(tuple(dict.fromkeys(n50 + wl[:8] + held))) or {}
+    want = tuple(dict.fromkeys(n50 + wl[:8] + held))
+    M, quotes, mmi = _parallel([market_data, lambda: get_quotes(want) or {}, _safe_mmi])
+    return M, groups, n50, wl, wl_label, base, quotes, mmi
+
+
+def _body(supabase, compact=False):
+    M, groups, n50, wl, wl_label, base, quotes, mmi = _gather(supabase)
+    return _draw(M, groups, n50, wl, wl_label, base, quotes, mmi, compact)
+
+
+def _draw(M, groups, n50, wl, wl_label, base, quotes, mmi, compact):
+    first = not st.session_state.get("_hm_shown")
+    st.session_state["_hm_shown"] = True
+    root = "hm hm-in" if first else "hm"
+    n50 = [s for v in groups.values() for s in v]
     nq = {s: quotes.get(s) for s in n50}
     B = _breadth(nq)
     S = nse_session()
-    try:
-        mmi = get_mmi()
-    except Exception:
-        mmi = {"status": "unavailable"}
     holds, realised = _book_holdings(base, quotes)
 
-    chip_cls = {"live": "live", "pre": "pre"}.get(S["cls"], "")
-    n = M.get("NIFTY 50")
-    asof = f'Prices as of {n["date"]:%d %b}, delayed' if n else "Prices delayed"
-    head = (f'<div class="hm-head"><div><div class="t">Markets</div><div class="s">{asof}</div></div>'
-            f'<span class="hm-chip {chip_cls}"><i></i>{_e(S["detail"])}</span></div>')
+    head = _brief(M, B, S)
     imap = _panel("", "NIFTY 50 heatmap", f"{B['n']} stocks · 1-day change", _imap(groups, nq, B), "hm-pb np")
     movers = _panel("", "Top movers", "NIFTY 50 · today", _movers(nq), "hm-pb np")
     book = _panel("", "Your portfolio", "", _book(holds, realised, wl, wl_label, quotes), "hm-pb np")
@@ -1118,7 +1274,7 @@ def _body(supabase, compact=False):
                         + _panel("", "Global markets", "", _qlist(WEI, M), "hm-pb np")
                         + _panel("", "Commodities, currencies & more", "", _qlist(XASSET, M), "hm-pb np")
                         + _session_block(S)))
-        st.markdown(f'<div class="hm hm-compact">{html_}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="{root} hm-compact">{html_}</div>', unsafe_allow_html=True)
         return
 
     wei = _table(WEI, M, ["Index", "Last", "1D", "1W", "1M", "YTD", "1M trend", "Date"])
@@ -1131,7 +1287,7 @@ def _body(supabase, compact=False):
                     + _panel("", "Commodities, currencies & more", "", xa, "hm-pb np"))
              + _row("hm-r5", _session_block(S) + _panel("", "Sector rotation", "From Money flow", _rotation(), "hm-pb np")
                     + _panel("", "World markets", "Local time", _world_clock())))
-    st.markdown(f'<div class="hm">{html_}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="{root}">{html_}</div>', unsafe_allow_html=True)
 
 
 def _body_live(supabase, compact=False):
@@ -1152,7 +1308,15 @@ def render_home(supabase=None, on_open=None, nav=None, compact=None):
         compact = bool(st.session_state.get("_ak_phone", False))
     st.markdown(_CSS, unsafe_allow_html=True)
     S = nse_session()
-    with st.spinner("Loading markets…"):
-        (_frag_live if S["cls"] in ("live", "pre") else _frag_closed)(supabase, compact)
+    if not st.session_state.get("_hm_warm"):                 # first visit: skeleton while the caches fill, then the page fades in
+        ph = st.empty()
+        ph.markdown(_skeleton(), unsafe_allow_html=True)
+        try:
+            _gather(supabase)
+        except Exception:
+            pass
+        ph.empty()
+        st.session_state["_hm_warm"] = True
+    (_frag_live if S["cls"] in ("live", "pre") else _frag_closed)(supabase, compact)
     st.markdown('<div class="hm-foot">Prices from Yahoo Finance, delayed; changes are close-to-close. Regime, mood and heatmap are information, '
                 'not advice. NIFTY 50 list as of 30 Sep 2026 · Market Mood Index © Tickertape.</div>', unsafe_allow_html=True)
