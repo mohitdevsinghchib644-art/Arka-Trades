@@ -1,5 +1,9 @@
 """
-Arka Trades — regime_engine.py (v1)
+Arka Trades — regime_engine.py (v1.1)
+
+v1.1 fixes (audit): distribution-day volume compares only stocks that traded on both days (a stock with a missing
+candle can no longer fake a volume jump); a rally that grinds higher for 10+ sessions without a textbook
+follow-through day is no longer stuck in 'Rally attempt'.
 
 Market regime from price, breadth, distribution and volatility, computed for every day of the panel so the
 dashboard can show today's state AND prove how each state behaved historically.
@@ -109,8 +113,13 @@ def _compute(p: dict) -> pd.DataFrame:
     breadth = 0.6 * _lin(pct50, 25, 70) + 0.4 * _lin(pct200, 25, 70)
 
     # distribution days (turnover of the whole universe as volume)
-    turn = np.nansum(np.where(valid, c * v, 0.0), 1)
-    dd_flag = (idx_ret <= -0.002) & (turn > qd.shift(turn[:, None], 1)[:, 0])
+    cv = np.where(valid & np.isfinite(v), c * v, np.nan)
+    turn = np.nansum(cv, 1)
+    both = ~np.isnan(cv[1:]) & ~np.isnan(cv[:-1])                       # like-for-like: stocks with a candle on both days
+    t_now = np.r_[np.nan, np.where(both, cv[1:], 0.0).sum(1)]
+    t_prev = np.r_[np.nan, np.where(both, cv[:-1], 0.0).sum(1)]
+    vol_up = t_now > t_prev
+    dd_flag = (idx_ret <= -0.002) & vol_up
     dd_count = np.zeros(T)
     active = []
     for t in range(T):
@@ -146,7 +155,7 @@ def _compute(p: dict) -> pd.DataFrame:
                 att_low, att_day = l_idx(p, t), 0
             elif idx_ret[t] > 0 or att_day > 0:
                 att_day += 1
-            if att_day >= 4 and idx_ret[t] >= 0.012 and turn[t] > turn[t - 1]:
+            if att_day >= 4 and idx_ret[t] >= 0.012 and vol_up[t]:
                 ftd[t] = True
                 s = "Confirmed uptrend" if score[t] >= 50 else "Under pressure"
                 att_low, att_day = None, 0
@@ -156,6 +165,8 @@ def _compute(p: dict) -> pd.DataFrame:
                 s = "Rally attempt" if att_day > 0 else "Correction"
                 if score[t] >= 70 and ic[t] > ie50[t] and dd_count[t] < 5:     # strong recovery without a textbook FTD
                     s, att_low, att_day = "Confirmed uptrend", None, 0
+                elif att_day >= 10 and not corr and score[t] >= 55 and ic[t] > ie50[t]:
+                    s, att_low, att_day = "Under pressure", None, 0           # slow grind higher: stop waiting for an FTD
         elif corr:
             s, att_low, att_day = "Correction", l_idx(p, t), 0
         elif score[t] >= 65 and dd_count[t] < 5:
