@@ -704,7 +704,7 @@ def _css():
     /* rail summary */
     .nd-k{{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:4px 0 8px}}
     .nd-k > div{{background:var(--s1,#0E0E10);border:1px solid var(--line,#1E1E21);border-radius:10px;padding:8px 9px}}
-    .nd-k b{{display:block;font-size:11px;font-weight:500;color:var(--tx3,{TX3})}} .nd-k span{{display:block;font-size:15px;font-weight:650;color:var(--tx,{TX});margin-top:2px}}
+    .nd-k b{{display:block;font-size:11px;font-weight:500;color:var(--tx3,{TX3});white-space:nowrap;overflow:hidden;text-overflow:ellipsis}} .nd-k span{{display:block;font-size:15px;font-weight:650;color:var(--tx,{TX});margin-top:2px}}
     .nd-tone{{position:relative;height:5px;border-radius:5px;background:linear-gradient(90deg,rgba(255,69,58,.45),#26262A 50%,rgba(48,209,88,.45));margin:6px 2px 4px}}
     .nd-tone i{{position:absolute;top:-4px;width:4px;height:13px;border-radius:2px;background:#fff;transform:translateX(-2px)}}
     .nd-tl{{display:flex;justify-content:space-between;font-size:11px;color:var(--tx3,{TX3});margin:0 2px 10px}}
@@ -878,10 +878,8 @@ def render_news_rail(watchlist, label: str = "WATCHLIST", current_security: str 
     current = (current_security or st.session_state.get("active_security") or "").upper().strip()
     if st.session_state.get("page") != "security":
         current = (current_security or "").upper().strip()
-    c1, c2 = st.columns([1, 1.3], gap="small")
-    with c1:
-        days = WINDOWS[_choice("Window", ["24 h", "3 days", "7 days"], "nd_rwin2")]
-    query = c2.text_input("Search news", key="nd_rq", placeholder="Search news", label_visibility="collapsed")
+    days = {"24 hours": 1, "3 days": 3, "7 days": 7}[_choice("Window", ["24 hours", "3 days", "7 days"], "nd_rwin3")]
+    query = st.text_input("Search news", key="nd_rq", placeholder="Search news, stocks, sectors", label_visibility="collapsed")
     with st.spinner("Loading news…"):
         items = _mark_new(assemble(tuple(_universe(watchlist)), _names_from_session(), current, days))
     tone = news_tone(items)
@@ -889,7 +887,7 @@ def render_news_rail(watchlist, label: str = "WATCHLIST", current_security: str 
     tc = GREEN if tone > 0 else RED if tone < 0 else TX2
     st.markdown(
         f'<div class="nd-k"><div><b>Stories</b><span>{len(items)}</span></div>'
-        f'<div><b>Your stocks</b><span>{mine}</span></div>'
+        f'<div><b>Mine</b><span>{mine}</span></div>'
         f'<div><b>Breaking</b><span style="color:{RED if any(a["is_breaking"] for a in items) else TX}">{sum(a["is_breaking"] for a in items)}</span></div>'
         f'<div><b>Tone</b><span style="color:{tc}">{tone:+d}</span></div></div>'
         f'<div class="nd-tone"><i style="left:{(tone + 100) / 2:.0f}%"></i></div><div class="nd-tl"><span>Negative</span><span>Positive</span></div>',
