@@ -1,10 +1,11 @@
 """
-Arka Trades — backtest_page.py (v1): Backtest lab, a walk-forward backtester and expectancy engine.
+Arka Trades — backtest_page.py (v2): Backtest lab with your own rules, on the stocks you choose.
 
-Pick a setup (breakout, pullback to the 21 EMA, 52-week high, volatility contraction), set your stop, exit,
-risk and costs, and test it on up to 10+ years of NSE data before you risk capital. Walk-forward mode tunes the
-rule on past years and judges it only on the months that followed, so the result is what you could have
-known at the time.
+  1. Stocks   every stock of an index, or only the stocks you pick (any NSE symbol).
+  2. Rules    build the entry from conditions you add, edit and remove. Templates only pre-fill the list; nothing
+              runs that is not shown on the page.
+  3. Trade    entry type, stop, exits, capital, risk, costs, optional market-regime filter.
+  4. Run      "My exact rules" tests them as they are. Walk-forward (optional) tries only the alternative values you type.
 
 Public API: render_backtest(on_open=None)
 """
@@ -23,137 +24,244 @@ import regime_engine as rg
 from regime_page import _regime_for, get_panel
 
 UNIVERSES = ["Nifty 500", "Nifty 200", "Nifty 100", "Midcap 150", "Smallcap 250", "Nifty 50", "My watchlist"]
-STOPS = ["Signal-day low", "ATR multiple", "Percent"]
-TRAILS = {0: "No trailing exit", 10: "Close below 10 EMA", 21: "Close below 21 EMA", 50: "Close below 50 EMA"}
-NUM = {"lookback": (5, 120, 5, "%d"), "vol_mult": (0.5, 5.0, 0.1, "%.1f"), "rs_min": (1, 99, 5, "%d"), "ext_max": (1.0, 40.0, 1.0, "%.0f"),
-       "touch": (0.0, 6.0, 0.5, "%.1f"), "max_off_high": (2.0, 40.0, 1.0, "%.0f"), "contraction": (0.4, 1.2, 0.05, "%.2f"),
-       "base_max": (4.0, 40.0, 1.0, "%.0f")}
+REGIME_MODES = ["Off", "Skip corrections", "Scale by regime"]
+MODES = ["My exact rules", "Walk-forward: try the values I list"]
 
 
-def _num_input(where, label, key, value, spec, help=None):
-    lo, hi, step, fmt = spec
-    if isinstance(value, int) and isinstance(step, int):
-        return int(where.number_input(label, min_value=int(lo), max_value=int(hi), value=int(value), step=int(step), key=key, help=help))
-    return float(where.number_input(label, min_value=float(lo), max_value=float(hi), value=float(value), step=float(step), format=fmt, key=key, help=help))
+# ═════════════════════════ rule builder state ═════════════════════════
+def _next_id() -> int:
+    st.session_state["bt_rule_seq"] = st.session_state.get("bt_rule_seq", 0) + 1
+    return st.session_state["bt_rule_seq"]
 
 
+def _set_rules(rules: list):
+    st.session_state["bt_rules"] = [{**r, "id": _next_id()} for r in rules]
+
+
+def _cb_load():
+    _set_rules([dict(r) for r in bt.TEMPLATES[st.session_state.get("bt_tpl", "Breakout")]])
+
+
+def _cb_add():
+    st.session_state.setdefault("bt_rules", []).append({**bt.new_rule(st.session_state["bt_add_type"]), "id": _next_id()})
+
+
+def _cb_remove(rid):
+    st.session_state["bt_rules"] = [r for r in st.session_state.get("bt_rules", []) if r["id"] != rid]
+
+
+def _rule_inputs(rule: dict, n: int):
+    """One condition: its sentence, its settings, a remove button. Values are written back into the rule."""
+    grp, label, specs, _ = bt.RULES[rule["type"]]
+    rid = rule["id"]
+    st.markdown(f'<div class="q-rule"><em>{n}</em>{ui.e(label)}</div>', unsafe_allow_html=True)
+    widths = [1.3] * len(specs) + [max(0.6, 5.2 - 1.3 * len(specs)), 0.8]
+    cols = st.columns(widths, gap="small")
+    for c, spec in zip(cols, specs):
+        key = f"bt_r{rid}_{spec[0]}"
+        if isinstance(spec[3], list) and isinstance(spec[2], list):
+            rule[spec[0]] = c.multiselect(spec[1], spec[3], default=rule[spec[0]], key=key) or list(spec[2])
+        elif isinstance(spec[3], list):
+            rule[spec[0]] = c.selectbox(spec[1], spec[3], index=spec[3].index(rule[spec[0]]), key=key)
+        elif isinstance(spec[2], int):
+            rule[spec[0]] = int(c.number_input(spec[1], min_value=int(spec[3]), max_value=int(spec[4]), value=int(rule[spec[0]]), step=int(spec[5]), key=key))
+        else:
+            rule[spec[0]] = float(c.number_input(spec[1], min_value=float(spec[3]), max_value=float(spec[4]), value=float(rule[spec[0]]),
+                                                 step=float(spec[5]), key=key))
+    cols[-1].button("Remove", key=f"bt_rm{rid}", on_click=_cb_remove, args=(rid,), use_container_width=True)
+
+
+def _parse_values(text: str, as_int: bool) -> list:
+    out = []
+    for tok in str(text or "").replace(";", ",").split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            out.append(int(float(tok)) if as_int else float(tok))
+        except ValueError:
+            pass
+    return list(dict.fromkeys(out))[:5]
+
+
+# ═════════════════════════ controls ═════════════════════════
 def _controls():
     ph = ui.phone()
-    with st.container(key="q_ctrl_bt"):
-        setup = ui.choice("Setup", list(bt.SETUPS), "bt_setup", pills=True)
-        st.markdown(f'<div class="q-sub" style="margin:2px 2px 10px">{ui.e(bt.SETUPS[setup]["about"])}</div>', unsafe_allow_html=True)
-        a, b, c = st.columns(3 if not ph else [1, 1, 1], gap="small")
-        uni = a.selectbox("Universe", UNIVERSES, key="bt_uni", help="Today's index members. Stocks that left the index are missing (survivorship bias).")
-        years = b.selectbox("History", [10, 8, 5, 12], key="bt_years", format_func=lambda y: f"{y} years")
-        mode = c.selectbox("Test", ["Walk-forward (recommended)", "Single test"], key="bt_mode",
-                           help="Walk-forward tunes on past years and judges only on the unseen months that followed.")
-        prm = dict(bt.SETUPS[setup]["params"])
-        with st.expander("Entry rules", expanded=False):
-            cols = st.columns(len(prm) if not ph else 2, gap="small")
-            for i, (k, v) in enumerate(prm.items()):
-                prm[k] = _num_input(cols[i % len(cols)], bt.PARAM_LABEL.get(k, k), f"bt_p_{setup}_{k}", v, NUM[k])
-            min_turn = st.number_input("Skip stocks trading less than ₹ crore a day (20-day average)", 0.0, 500.0, float(bt.MIN_TURN_CR), 1.0, key="bt_turn")
+    if "bt_rules" not in st.session_state:
+        _set_rules([dict(r) for r in bt.TEMPLATES["Breakout"]])
+
+    with st.container(key="q_ctrl_stocks"):
+        st.markdown('<div class="q-step"><em>1</em>Stocks</div>', unsafe_allow_html=True)
+        a, b = st.columns([1.4, 1], gap="small")
+        uni = a.selectbox("Index (also the group RS rating is ranked against)", UNIVERSES, key="bt_uni",
+                          help="Today's members of the index. RS rating compares each stock with every stock in this index.")
+        years = b.selectbox("History", [10, 8, 5, 12, 3], key="bt_years", format_func=lambda y: f"{y} years")
+        scope = ui.choice("Scope", ["Every stock in the index", "Only the stocks I pick"], "bt_scope")
+        picked, extra = [], []
+        if scope == "Only the stocks I pick":
+            members, _ = qd.universe(uni, st.session_state.get("watchlist", []))
+            picked = st.multiselect(f"Pick from {uni}", sorted(members), key="bt_pick", placeholder="Type to search: RELIANCE, TCS …")
+            other = st.text_input("Other NSE symbols, comma separated (optional)", key="bt_other", placeholder="e.g. ECLERX, STYL, URBANCO")
+            extra = [s.strip().upper() for s in other.replace(";", ",").split(",") if s.strip()]
+            picked = list(dict.fromkeys(list(picked) + extra))
+            if not picked:
+                st.markdown('<div class="q-note">Pick at least one stock, or switch to every stock in the index.</div>', unsafe_allow_html=True)
+
+    with st.container(key="q_ctrl_rules"):
+        st.markdown('<div class="q-step"><em>2</em>Your entry rules<span style="font-weight:500;font-size:12.5px;color:#8A8A90;margin-left:10px">'
+                    'a stock gives a signal on a day only when every condition below is true at that day\'s close</span></div>', unsafe_allow_html=True)
+        t1, t2 = st.columns([3, 1], gap="small")
+        t1.selectbox("Start from a template (it only fills the list; edit or remove anything)", list(bt.TEMPLATES), key="bt_tpl")
+        t2.markdown('<div style="height:28px"></div>', unsafe_allow_html=True)
+        t2.button("Load template", key="bt_tpl_go", on_click=_cb_load, use_container_width=True)
+        rules = st.session_state["bt_rules"]
+        if not rules:
+            st.markdown('<div class="q-note">No conditions yet. Add your first one below.</div>', unsafe_allow_html=True)
+        for n, r in enumerate(rules, 1):
+            _rule_inputs(r, n)
+        st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
+        a1, a2 = st.columns([3, 1], gap="small")
+        a1.selectbox("Add a condition", list(bt.RULES), key="bt_add_type", format_func=lambda k: f"{bt.RULES[k][0]} · {bt.RULES[k][1]}")
+        a2.markdown('<div style="height:28px"></div>', unsafe_allow_html=True)
+        a2.button("Add condition", key="bt_add_go", on_click=_cb_add, use_container_width=True, type="primary")
+
+    with st.container(key="q_ctrl_trade"):
+        st.markdown('<div class="q-step"><em>3</em>How the trade is taken and managed</div>', unsafe_allow_html=True)
         ex = dict(bt.EXIT_DEFAULT)
-        with st.expander("Stop and exit", expanded=False):
-            s1, s2, s3 = st.columns(3, gap="small")
-            ex["stop"] = s1.selectbox("Initial stop", STOPS, key="bt_stop")
-            if ex["stop"] == "ATR multiple":
-                ex["stop_atr"] = s2.number_input("ATR × below entry", 0.5, 5.0, 1.5, 0.25, key="bt_satr")
-            elif ex["stop"] == "Percent":
-                ex["stop_pct"] = s2.number_input("% below entry", 1.0, 20.0, 7.0, 0.5, key="bt_spct")
-            else:
-                s2.markdown('<div class="q-note" style="margin-top:30px">Stop at the low of the signal day.</div>', unsafe_allow_html=True)
-            ex["max_risk"] = s3.number_input("Never risk more than % per share", 2.0, 20.0, 10.0, 0.5, key="bt_mrisk")
-            e1, e2, e3, e4 = st.columns(4 if not ph else 2, gap="small") if not ph else (st.columns(2) + st.columns(2))
-            ex["trail"] = e1.selectbox("Trailing exit", list(TRAILS), index=2, format_func=TRAILS.get, key="bt_trail")
-            ex["target_r"] = e2.number_input("Profit target in R (0 = none)", 0.0, 20.0, 0.0, 0.5, key="bt_tgt")
-            ex["max_days"] = int(e3.number_input("Time stop, sessions", 3, 250, 40, 1, key="bt_days"))
-            ex["breakeven_r"] = e4.number_input("Move stop to entry at R (0 = never)", 0.0, 10.0, 0.0, 0.5, key="bt_be")
-            ex["gap_max"] = st.number_input("Skip if the next open gaps up more than %", 0.5, 20.0, 4.0, 0.5, key="bt_gap")
+        e1, e2 = st.columns([1.6, 1], gap="small")
+        ex["entry"] = e1.selectbox("Entry", bt.ENTRIES, key="bt_entry",
+                                   help="Second option: a buy-stop just above the signal day's high, valid for the next session only.")
+        ex["gap_max"] = e2.number_input("Skip if the next open gaps up more than %", 0.5, 30.0, 4.0, 0.5, key="bt_gap")
+        s1, s2, s3 = st.columns(3, gap="small")
+        ex["stop"] = s1.selectbox("Initial stop", bt.STOPS, key="bt_stop")
+        if ex["stop"] == bt.STOPS[1]:
+            ex["stop_n"] = int(s2.number_input("N days (including the signal day)", 2, 60, 5, 1, key="bt_sn"))
+        elif ex["stop"] == bt.STOPS[2]:
+            ex["stop_atr"] = s2.number_input("ATR × below entry", 0.5, 6.0, 1.5, 0.25, key="bt_satr")
+        elif ex["stop"] == bt.STOPS[3]:
+            ex["stop_pct"] = s2.number_input("% below entry", 1.0, 25.0, 7.0, 0.5, key="bt_spct")
+        else:
+            s2.markdown('<div class="q-note" style="margin-top:30px">Stop at the low of the signal day.</div>', unsafe_allow_html=True)
+        ex["max_risk"] = s3.number_input("Never risk more than % per share", 2.0, 25.0, 10.0, 0.5, key="bt_mrisk",
+                                         help="If the stop is further away than this, it is pulled up to this distance.")
+        x = st.columns(5, gap="small") if not ph else (st.columns(2) + st.columns(2) + st.columns(1))
+        ex["trail_kind"] = x[0].selectbox("Trailing average", ["EMA", "SMA"], key="bt_tk")
+        ex["trail_n"] = int(x[1].number_input("Exit on a close below length (0 = off)", 0, 250, 21, 1, key="bt_tn"))
+        ex["target_r"] = x[2].number_input("Profit target in R (0 = none)", 0.0, 30.0, 0.0, 0.5, key="bt_tgt")
+        ex["breakeven_r"] = x[3].number_input("Stop to entry at +R (0 = never)", 0.0, 10.0, 0.0, 0.5, key="bt_be")
+        ex["max_days"] = int(x[4].number_input("Time stop, sessions", 2, 400, 40, 1, key="bt_days"))
+        k = st.columns(5, gap="small") if not ph else (st.columns(2) + st.columns(2) + st.columns(1))
         book = bt.Book()
-        with st.expander("Capital, risk and costs", expanded=False):
-            k1, k2, k3, k4 = st.columns(4 if not ph else 2, gap="small") if not ph else (st.columns(2) + st.columns(2))
-            book.capital = float(k1.number_input("Capital ₹", 50_000.0, 1e9, 1_000_000.0, 50_000.0, key="bt_cap", format="%.0f"))
-            book.risk_pct = float(k2.number_input("Risk per trade %", 0.1, 5.0, 1.0, 0.1, key="bt_risk"))
-            book.max_pos = int(k3.number_input("Maximum open positions", 1, 40, 8, 1, key="bt_maxpos"))
-            book.max_pos_pct = float(k4.number_input("Maximum position size %", 5.0, 100.0, 25.0, 5.0, key="bt_maxpct"))
-            cost = float(st.number_input("Costs and slippage per round trip %", 0.0, 2.0, bt.COST_DEFAULT, 0.05, key="bt_cost",
-                                         help="Delivery trades: STT 0.1% on each side, stamp duty, exchange and SEBI fees, GST and DP charges come to "
-                                              "about 0.25%. The default adds about 0.1% for slippage."))
-        with st.expander("Market regime filter and walk-forward", expanded=False):
-            book.regime_mode = st.selectbox("Use the Market regime", ["Off", "Skip corrections", "Scale by regime"], key="bt_reg",
-                                            help="Skip corrections: no new trades in a Correction. Scale by regime: risk 100% / 50% / 25% / 0% of normal "
-                                                 "in Uptrend / Under pressure / Rally attempt / Correction.")
-            w1, w2, w3 = st.columns(3, gap="small")
+        book.capital = float(k[0].number_input("Capital ₹", 10_000.0, 1e10, 1_000_000.0, 50_000.0, key="bt_cap", format="%.0f"))
+        book.risk_pct = float(k[1].number_input("Risk per trade %", 0.1, 10.0, 1.0, 0.1, key="bt_risk"))
+        book.max_pos = int(k[2].number_input("Maximum open positions", 1, 50, 8, 1, key="bt_maxpos"))
+        book.max_pos_pct = float(k[3].number_input("Maximum position size %", 5.0, 100.0, 25.0, 5.0, key="bt_maxpct"))
+        cost = float(k[4].number_input("Costs + slippage, % round trip", 0.0, 3.0, bt.COST_DEFAULT, 0.05, key="bt_cost",
+                                       help="Delivery: STT 0.1% each side, stamp duty, exchange and SEBI fees, GST and DP charges ≈ 0.25%, plus ≈ 0.1% slippage. "
+                                            "Use 0.5% or more for small caps."))
+        book.regime_mode = st.selectbox("Market regime filter on new trades", REGIME_MODES, key="bt_reg",
+                                        help="Off: the regime plays no part (unless you added a Market condition yourself). Skip corrections: no new trades when "
+                                             "the signal day is in a Correction. Scale by regime: risk 100 / 50 / 25 / 0% of normal by state.")
+
+    with st.container(key="q_ctrl_run"):
+        st.markdown('<div class="q-step"><em>4</em>Test</div>', unsafe_allow_html=True)
+        mode = ui.choice("Mode", MODES, "bt_mode")
+        grid, nearby, train, test = {}, False, 3, 6
+        if mode == MODES[0]:
+            nearby = st.toggle("Also check nearby settings (each number moved about 25% down and up; takes longer)", value=True, key="bt_nearby")
+        else:
+            st.markdown('<div class="q-note">Walk-forward does not invent rules. It tries only the alternative values you type here on each block of past '
+                        'years, then trades the best one on the next unseen months. Leave a box empty to keep your value fixed.</div>', unsafe_allow_html=True)
+            opts = [(i, sp[0], f"{i + 1}. {bt.RULES[r['type']][1]} · {sp[1]} (now {r[sp[0]]})", isinstance(sp[2], int))
+                    for i, r in enumerate(rules) for sp in bt.RULES[r["type"]][2] if not isinstance(sp[2], (list, str))]
+            labels = ["—"] + [o[2] for o in opts]
+            for slot in (1, 2):
+                g1, g2 = st.columns([2, 1.2], gap="small")
+                pick = g1.selectbox(f"Setting {slot} to vary", labels, key=f"bt_wf_p{slot}")
+                vals = g2.text_input("Values to try, comma separated", key=f"bt_wf_v{slot}", placeholder="e.g. 20, 50")
+                if pick != "—":
+                    o = opts[labels.index(pick) - 1]
+                    vv = _parse_values(vals, o[3])
+                    if vv:
+                        grid[(o[0], o[1])] = vv
+            tv = _parse_values(st.text_input("Trailing-exit lengths to try (optional)", key="bt_wf_trail", placeholder="e.g. 10, 21, 50"), True)
+            if tv:
+                grid[("exit", "trail_n")] = tv
+            w1, w2 = st.columns(2, gap="small")
             train = w1.selectbox("Tune on", [3, 2, 4, 5], key="bt_train", format_func=lambda y: f"{y} years")
             test = w2.selectbox("Then trade unseen", [6, 3, 12], key="bt_test", format_func=lambda m: f"{m} months")
-            tune_exit = w3.toggle("Also tune the trailing exit", value=True, key="bt_tune_exit")
         run = st.button("Run backtest", key="bt_run", type="primary", use_container_width=True)
-    cfg = {"setup": setup, "uni": uni, "years": int(years), "mode": mode, "prm": prm, "ex": ex, "book": book.__dict__.copy(), "cost": cost,
-           "train": int(train), "test": int(test), "tune_exit": bool(tune_exit), "min_turn": float(min_turn)}
+
+    clean = [{k: v for k, v in r.items() if k != "id"} for r in rules]
+    cfg = {"uni": uni, "years": int(years), "scope": scope, "picked": picked, "extra": extra, "rules": clean, "ex": ex,
+           "book": book.__dict__.copy(), "cost": cost, "mode": mode, "grid": [[list(k), v] for k, v in grid.items()], "nearby": bool(nearby),
+           "train": int(train), "test": int(test)}
     return cfg, run
 
 
+def _problems(cfg) -> list:
+    out = []
+    if not cfg["rules"]:
+        out.append("Add at least one entry condition.")
+    if cfg["scope"] == "Only the stocks I pick" and not cfg["picked"]:
+        out.append("Pick at least one stock.")
+    for r in cfg["rules"]:
+        if r["type"] == "ma_above_ma" and r["fast"] >= r["slow"]:
+            out.append("In 'Fast average above slow average' the fast length must be smaller than the slow length.")
+        if r["type"] in ("day_change", "pullback_depth") and r["lo"] > r["hi"]:
+            out.append(f"In '{bt.RULES[r['type']][1]}' the first % must not be larger than the second.")
+    if cfg["mode"] == MODES[1] and not cfg["grid"]:
+        out.append("Walk-forward needs at least one setting with values to try. Otherwise use 'My exact rules'.")
+    n = 1
+    for _, v in cfg["grid"]:
+        n *= len(v)
+    if n > 60:
+        out.append(f"{n} combinations is too many (and invites curve-fitting). Keep it to 60 or fewer.")
+    return out
+
+
+# ═════════════════════════ run ═════════════════════════
 def _run(cfg: dict):
-    p, err = get_panel(cfg["uni"], cfg["years"])
+    p, err = get_panel(cfg["uni"], cfg["years"], False, cfg["extra"])
     if p is None:
         return None, f"Could not load prices: {err}"
-    if len(p["symbols"]) < 5:
-        return None, "Fewer than 5 stocks returned prices. Pick a bigger universe."
+    cols, not_found = None, []
+    if cfg["scope"] == "Only the stocks I pick":
+        pos = {s: i for i, s in enumerate(p["symbols"])}
+        cols = [pos[s] for s in cfg["picked"] if s in pos]
+        not_found = [s for s in cfg["picked"] if s not in pos]
+        if not cols:
+            return None, "None of the picked stocks returned prices from Yahoo: " + ", ".join(not_found) + ". Check the NSE symbols."
     df = _regime_for(p)
     state = df["state"].reindex(p["dates"]).to_numpy(dtype=object)
     book = bt.Book(**cfg["book"])
     bar = st.progress(0.0, text="Testing…")
-    prog = lambda f, m: bar.progress(min(1.0, f), text=m)
     try:
-        if cfg["mode"].startswith("Walk"):
-            grid = dict(bt.SETUPS[cfg["setup"]]["grid"])
-            if cfg["tune_exit"] and cfg["ex"].get("trail"):
-                grid["trail"] = [10, 21, 50]
-            res = bt.run_walk_forward(p, cfg["setup"], cfg["prm"], cfg["ex"], book, cfg["cost"], grid, cfg["train"], cfg["test"], state,
-                                      progress=prog, min_turn=cfg["min_turn"])
+        if cfg["mode"] == MODES[1]:
+            grid = {tuple(k): v for k, v in cfg["grid"]}
+            res = bt.run_walk_forward(p, cfg["rules"], cfg["ex"], book, cfg["cost"], grid, cfg["train"], cfg["test"], state, cols,
+                                      progress=lambda f, m: bar.progress(min(1.0, f), text=m))
         else:
-            prog(0.1, "Simulating every signal")
-            res = bt.run_single(p, cfg["setup"], cfg["prm"], cfg["ex"], book, cfg["cost"], state, min_turn=cfg["min_turn"])
-            keys = list(bt.SETUPS[cfg["setup"]]["grid"])[:2]
-            axes = {}
-            for k in keys:
-                cur = cfg["prm"][k]
-                vals = sorted(set(bt.SETUPS[cfg["setup"]]["grid"][k] + [cur]))
-                axes[k] = vals[:4]
-            prog(0.5, "Checking nearby settings (is it a plateau or a lucky peak?)")
-            res["sensitivity"] = bt.sensitivity(p, cfg["setup"], cfg["prm"], cfg["ex"], cfg["cost"], axes, cfg["min_turn"])
-            res["sens_axes"] = keys
+            bar.progress(0.15, text="Simulating every signal")
+            res = bt.run_single(p, cfg["rules"], cfg["ex"], book, cfg["cost"], state, cols)
+            if cfg["nearby"]:
+                res["sensitivity"] = bt.sensitivity(p, cfg["rules"], cfg["ex"], cfg["cost"], state, cols,
+                                                    progress=lambda f, m: bar.progress(min(1.0, 0.2 + 0.8 * f), text=m))
     finally:
         bar.empty()
-    res["state"] = state
-    res["cfg"] = cfg
-    res["panel_key"] = (p["name"], len(p["symbols"]), str(p["dates"][-1].date()), p.get("note", ""), len(p.get("missing") or []))
+    curve = res["curve"]
+    if curve is not None and len(curve) > 1:
+        ic = pd.Series(p["idx_c"], index=p["dates"]).reindex(curve.index).ffill()
+        res["bench_curve"] = ic / ic.iloc[0] * 100
+        res["bench_stats"] = bt.curve_stats(ic)
+    n_scope = len(cols) if cols is not None else len(p["symbols"])
+    res.update(state=state, cfg=cfg, not_found=not_found,
+               info={"n_syms": len(p["symbols"]), "n_scope": n_scope, "last": str(p["dates"][-1].date()), "note": p.get("note", ""),
+                     "missing": len(p.get("missing") or []), "first": str(p["dates"][res["start_i"]].date())})
     return res, None
 
 
-def _heat(df: pd.DataFrame, a: str, b: str) -> str:
-    if df is None or df.empty or a not in df or b not in df:
-        return ""
-    pv = df.groupby([a, b])["exp"].mean().unstack(b)
-    cnt = df.groupby([a, b])["trades"].sum().unstack(b)
-    vals = pv.to_numpy(dtype=float)
-    mx = np.nanmax(np.abs(vals)) if np.isfinite(vals).any() else 1
-    head = "".join(f"<th>{ui.e(bt.PARAM_LABEL.get(b, b))}: {ui.e(c)}</th>" for c in pv.columns)
-    rows = []
-    for ia, r in pv.iterrows():
-        cells = []
-        for ib, v in r.items():
-            if not np.isfinite(v):
-                cells.append("<td>—</td>")
-                continue
-            al = 0.12 + 0.5 * min(1, abs(v) / (mx or 1))
-            bg = f"rgba(48,209,88,{al:.2f})" if v > 0 else f"rgba(255,69,58,{al:.2f})"
-            cells.append(f'<td style="background:{bg};color:#fff">{v:+.2f}R<br><span style="font-weight:500;font-size:11px;opacity:.75">{int(cnt.loc[ia, ib])} trades</span></td>')
-        rows.append(f"<tr><td>{ui.e(bt.PARAM_LABEL.get(a, a))}: {ui.e(ia)}</td>{''.join(cells)}</tr>")
-    return f'<div class="q-tw"><table class="q-t q-hm"><thead><tr><th></th>{head}</tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
-
-
+# ═════════════════════════ results ═════════════════════════
 def _bd_table(tb: pd.DataFrame, by: str, title: str, order=None) -> str:
     d = bt.breakdown(tb, by, order)
     if d.empty:
@@ -165,30 +273,79 @@ def _bd_table(tb: pd.DataFrame, by: str, title: str, order=None) -> str:
             f'<th>Expectancy</th><th>Total</th></tr></thead><tbody>{rows}</tbody></table></div></div>')
 
 
-def _results(res: dict, on_open=None):
+def _exp(v, n=None):
+    if v is None or not np.isfinite(v):
+        return "—"
+    return f'<span style="color:{ui.signed_color(v) or ui.TX}">{v:+.2f}R</span>' + (f' <span style="color:{ui.TX3}">· {int(n)}</span>' if n is not None else "")
+
+
+def _combo_text(cfg, cmb) -> str:
+    parts = []
+    for (a, b), v in cmb.items():
+        if a == "exit":
+            parts.append(f"trail {v}")
+        else:
+            sp = next(s for s in bt.RULES[cfg["rules"][a]["type"]][2] if s[0] == b)
+            parts.append(f"{a + 1}. {sp[1]} {v}")
+    return ", ".join(parts)
+
+
+def _stock_chart(res, sym):
     cfg = res["cfg"]
-    ph = ui.phone()
-    p_name, n_syms, last_day, note, miss = res["panel_key"]
+    p, err = get_panel(cfg["uni"], cfg["years"], False, cfg["extra"])
+    if p is None or sym not in p["symbols"]:
+        return ""
+    j = p["symbols"].index(sym)
     tr = res["trades"]
-    taken = res["taken"]
+    tr = tr[tr["symbol"] == sym]
+    s0 = res["start_i"]
+    c = p["c"][s0:, j].astype(float)
+    dates = p["dates"][s0:]
+    series = [(c, "#F2F2F5", 1.4, "Close")]
+    tn = int(cfg["ex"].get("trail_n") or 0)
+    if tn:
+        series.append((bt.ma(p, cfg["ex"]["trail_kind"], tn)[s0:, j].astype(float), ui.AMBER, 1.0, "Trail"))
+    marks = [(int(r.entry_i) - s0, r.entry, ui.GREEN, "up") for r in tr.itertuples()] + \
+            [(int(r.exit_i) - s0, r.exit, ui.RED, "down") for r in tr.itertuples() if r.reason != "Open at end"]
+    ch = ui.line_chart(dates, series, height=280 if not ui.phone() else 220, log=True, markers=marks)
+    s = bt.trade_stats(tr["r"]) if len(tr) else {"n": 0}
+    sub = f'{s["n"]} trades · win {s["win"]:.0f}% · {s["exp"]:+.2f}R per trade · total {s["total_r"]:+.1f}R' if s["n"] else "no trades"
+    leg = ui.legend([("Close (adjusted)", "#F2F2F5", False)] + ([(f'{tn} {cfg["ex"]["trail_kind"]}', ui.AMBER, False)] if tn else [])
+                    + [("Entry ▲", ui.GREEN, True), ("Exit ▼", ui.RED, True)])
+    return f'<div class="q-card"><div class="q-ch">{ui.e(sym)}<em>{sub}</em></div>{ch}{leg}</div>'
+
+
+def _results(res: dict, on_open=None):
+    cfg, info = res["cfg"], res["info"]
+    ph = ui.phone()
+    tr, taken = res["trades"], res["taken"]
     tone, head, body = bt.verdict(res)
     col = {"good": ui.GREEN, "warn": ui.YELLOW, "bad": ui.RED}[tone]
+    scope = (f'{info["n_scope"]} picked stock{"s" if info["n_scope"] != 1 else ""}' if cfg["scope"] != "Every stock in the index"
+             else f'{cfg["uni"]} ({info["n_scope"]} stocks)')
     st.markdown(f'<div class="q-verdict" style="--c:{col}"><b>{ui.e(head)}</b><p>{ui.e(body)}</p>'
-                f'<p style="color:{ui.TX3};font-size:12px">{ui.e(cfg["setup"])} · {ui.e(cfg["uni"])} ({n_syms} stocks) · '
-                f'{"walk-forward, out-of-sample only" if res["mode"] == "walk" else "single test"} · costs {cfg["cost"]:.2f}% per round trip · data to {last_day}</p></div>',
-                unsafe_allow_html=True)
+                f'<p style="color:{ui.TX3};font-size:12px">{ui.e(scope)} · {len(cfg["rules"])} conditions · '
+                f'{"walk-forward, unseen months only" if res["mode"] == "walk" else "your exact rules"} · {info["first"]} to {info["last"]} · '
+                f'costs {cfg["cost"]:.2f}% per round trip</p></div>', unsafe_allow_html=True)
+    if res.get("not_found"):
+        st.warning("No price data for: " + ", ".join(res["not_found"]) + ". They were left out; check the NSE symbols.")
+    rules_txt = "".join(f'<div class="q-rs" style="--c:{ui.BLUE}"><i></i><span>{ui.e(bt.describe(r))}</span></div>' for r in cfg["rules"])
+    ex = cfg["ex"]
+    stop_txt = {bt.STOPS[0]: "signal-day low", bt.STOPS[1]: f'lowest low of {ex.get("stop_n")} days', bt.STOPS[2]: f'{ex.get("stop_atr")} × ATR',
+                bt.STOPS[3]: f'{ex.get("stop_pct")}%'}[ex["stop"]]
+    exits = ", ".join(x for x in (f'close below {ex["trail_n"]} {ex["trail_kind"]}' if ex.get("trail_n") else "",
+                                  f'target {ex["target_r"]}R' if ex.get("target_r") else "", f'stop to entry at +{ex["breakeven_r"]}R' if ex.get("breakeven_r") else "",
+                                  f'time stop {ex["max_days"]} sessions') if x)
+    with st.expander("What was tested (your rules, exactly)"):
+        st.markdown(f'<div class="q-root">{rules_txt}<div class="q-rs" style="--c:{ui.AMBER}"><i></i><span>Entry: {ui.e(ex["entry"].lower())}; skip gaps over '
+                    f'{ex["gap_max"]}%. Stop: {ui.e(stop_txt)}, never more than {ex["max_risk"]}% per share. Exits: {ui.e(exits)}. '
+                    f'Regime filter: {ui.e(cfg["book"]["regime_mode"].lower())}.</span></div></div>', unsafe_allow_html=True)
     if tr is None or tr.empty:
-        st.markdown('<div class="q-card"><div class="q-sub">No trades. The rules may be too strict for this universe: lower the RS or volume filter.</div></div>',
-                    unsafe_allow_html=True)
+        st.markdown('<div class="q-card"><div class="q-sub">No trades. Your conditions were never all true on the same day for these stocks, or every '
+                    'signal was skipped at entry. Remove or loosen a condition and run again.</div></div>', unsafe_allow_html=True)
         return
     s = bt.trade_stats(tr["r"], tr["days"])
     cs = bt.curve_stats(res["curve"])
-    idx = pd.Series(res["curve"].index)
-    p_close = None
-    try:
-        p_close = res.get("bench")
-    except Exception:
-        pass
     pf = "∞" if not np.isfinite(s["pf"]) else f'{s["pf"]:.2f}'
     kp = [ui.kpi("Expectancy", f'{s["exp"]:+.2f}R', "average result per trade", ui.signed_color(s["exp"])),
           ui.kpi("Win rate", f'{s["win"]:.0f}%', f'{s["n"]} trades'),
@@ -199,56 +356,79 @@ def _results(res: dict, on_open=None):
     if cs:
         kp += [ui.kpi("Portfolio CAGR", f'{cs["cagr"]:+.1f}%', f'{cs["years"]:.1f} years · {len(taken)} trades taken', ui.signed_color(cs["cagr"])),
                ui.kpi("Maximum drawdown", f'{cs["maxdd"]:.1f}%', f'{cs["dd_peak"]:%b %Y} to {cs["dd_trough"]:%b %Y}', ui.RED)]
-        bench = res.get("bench_stats")
-        if bench:
-            kp.append(ui.kpi("NIFTY 50, same period", f'{bench["cagr"]:+.1f}%', f'max drawdown {bench["maxdd"]:.1f}%'))
+        if res.get("bench_stats"):
+            kp.append(ui.kpi("NIFTY 50, same period", f'{res["bench_stats"]["cagr"]:+.1f}%', f'max drawdown {res["bench_stats"]["maxdd"]:.1f}%'))
     st.markdown('<div class="q-kpis">' + "".join(kp) + "</div>", unsafe_allow_html=True)
 
     curve = res["curve"]
-    if len(curve) > 2:
+    if cs and len(curve) > 2:
         base = curve / curve.iloc[0] * 100
-        bn = res.get("bench_curve")
         series = [(base.to_numpy(), ui.AMBER, 1.8, "Strategy")]
-        if bn is not None:
-            series.append((bn.to_numpy(), "#9A9AA0", 1.2, "NIFTY 50"))
+        if res.get("bench_curve") is not None:
+            series.append((res["bench_curve"].to_numpy(), "#9A9AA0", 1.2, "NIFTY 50"))
         ch = ui.line_chart(base.index, series, height=260 if not ph else 200, log=True, area_first=True)
         dd = cs["dd_series"] * 100
         ddc = ui.line_chart(dd.index, [(dd.to_numpy(), ui.RED, 1.2, "Drawdown")], height=110, y_suffix="%", area_first=True)
+        idle = " With only a few stocks most of the capital sits in cash most of the time, so compare expectancy, not CAGR." if info["n_scope"] <= 10 else ""
         st.markdown(f'<div class="q-card"><div class="q-ch">Equity curve<em>₹{cfg["book"]["capital"]:,.0f} start · risk {cfg["book"]["risk_pct"]}% per trade · '
                     f'max {cfg["book"]["max_pos"]} positions · log scale</em></div>{ch}'
                     f'{ui.legend([("Strategy", ui.AMBER, False), ("NIFTY 50", "#9A9AA0", False)])}'
-                    f'<div class="q-ch" style="margin-top:12px">Drawdown<em>% below the previous peak</em></div>{ddc}</div>', unsafe_allow_html=True)
+                    f'<div class="q-ch" style="margin-top:12px">Drawdown<em>% below the previous peak</em></div>{ddc}'
+                    f'<div class="q-note">{len(tr)} trades simulated, {len(taken)} taken by the portfolio (the rest had no free slot or cash).{idle}</div></div>',
+                    unsafe_allow_html=True)
 
-    cards = []
+    # robustness
     if res["mode"] == "walk":
         w = res["windows"]
         wfe = res.get("wfe", np.nan)
-        rows = []
-        for r in w.itertuples():
-            ch_ = ", ".join(f"{bt.PARAM_LABEL.get(k, k).split(' ')[0] if k != 'trail' else 'Trail'} {v}" for k, v in (r.chosen or {}).items()) or "no variant had enough trades"
-            rows.append(f'<tr><td>{r.test_from:%b %Y} to {r.test_to:%b %Y}</td><td style="text-align:left;white-space:normal">{ui.e(ch_)}</td>'
-                        f'<td>{r.is_exp:+.2f}R</td><td style="color:{ui.signed_color(r.oos_exp) or ui.TX}">{(f"{r.oos_exp:+.2f}R") if np.isfinite(r.oos_exp) else "—"}</td><td>{r.oos_n}</td></tr>')
+        rows = "".join(
+            f'<tr><td>{r.test_from:%b %Y} to {r.test_to:%b %Y}</td><td style="text-align:left;white-space:normal">'
+            f'{ui.e(_combo_text(cfg, r.chosen) if isinstance(r.chosen, dict) else r.note)}</td><td>{_exp(r.is_exp)}</td><td>{_exp(r.oos_exp)}</td><td>{r.oos_n}</td></tr>'
+            for r in w.itertuples())
         wfe_txt = (f"Walk-forward efficiency <b style='color:#fff'>{wfe:.2f}</b>: the unseen months kept {wfe * 100:.0f}% of the in-sample edge. "
-                   + ("Above 0.5 means the edge survives contact with new data." if wfe >= 0.5 else "Below 0.5 means much of the in-sample edge was curve-fitting.")
-                   if np.isfinite(wfe) else "The tuned versions had no positive in-sample edge, so efficiency is not meaningful.")
-        cards.append(f'<div class="q-card"><div class="q-ch">Walk-forward windows<em>tuned on {cfg["train"]} years, traded the next {cfg["test"]} months</em></div>'
-                     f'<div class="q-sub" style="margin-bottom:8px">In-sample {res["is_exp"]:+.2f}R per trade vs out-of-sample {res["oos_exp"]:+.2f}R. {wfe_txt} '
-                     f'{res["variants"]} variants tried per window; only the out-of-sample months count in every number on this page.</div>'
-                     f'<div class="q-tw"><table class="q-t"><thead><tr><th>Unseen period</th><th style="text-align:left">Settings chosen from the years before</th>'
-                     f'<th>In-sample</th><th>Out-of-sample</th><th>Trades</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div></div>')
-        gr = res["grid_results"]
-        keys = [k for k in gr.columns if k not in ("trades", "exp", "win", "pf")]
-        if len(keys) >= 2:
-            cards.append(f'<div class="q-card"><div class="q-ch">Every variant over the whole period<em>average expectancy · broad green = robust, one green cell = luck</em></div>'
-                         f'{_heat(gr, keys[0], keys[1])}</div>')
+                   + ("Above 0.5 means the edge survives new data." if wfe >= 0.5 else "Below 0.5 means much of the in-sample edge was curve-fitting.")
+                   if np.isfinite(wfe) else "Efficiency cannot be computed (no window had a positive in-sample edge and unseen trades).")
+        allv = "".join(f'<tr><td style="text-align:left">{ui.e(_combo_text(cfg, g["combo"]))}</td><td>{g["trades"]}</td><td>{g["win"]:.0f}%</td><td>{_exp(g["exp"])}</td></tr>'
+                       for g in res["grid_results"])
+        st.markdown(f'<div class="q-card"><div class="q-ch">Walk-forward windows<em>tuned on {cfg["train"]} years, traded the next {cfg["test"]} months</em></div>'
+                    f'<div class="q-sub" style="margin-bottom:8px">In-sample {res["is_exp"]:+.2f}R per trade vs unseen {res["oos_exp"]:+.2f}R. {wfe_txt} '
+                    f'{res["variants"]} variants from the values you listed; every number on this page counts unseen months only.</div>'
+                    f'<div class="q-tw"><table class="q-t"><thead><tr><th>Unseen period</th><th style="text-align:left">Chosen from the years before</th>'
+                    f'<th>In-sample</th><th>Unseen</th><th>Trades</th></tr></thead><tbody>{rows}</tbody></table></div></div>'
+                    f'<div class="q-card"><div class="q-ch">Every variant over the whole period<em>mostly green = robust · one green row = luck</em></div>'
+                    f'<div class="q-tw"><table class="q-t"><thead><tr><th style="text-align:left">Variant</th><th>Trades</th><th>Win</th><th>Expectancy</th></tr></thead>'
+                    f'<tbody>{allv}</tbody></table></div></div>', unsafe_allow_html=True)
     else:
+        hv = bt.halves(tr)
+        left = right = ""
+        if hv:
+            p_dates = pd.to_datetime(tr["entry_date"])
+            ok = hv["a_exp"] > 0 and hv["b_exp"] > 0
+            left = (f'<div class="q-card"><div class="q-ch">First half vs second half<em>is the edge stable over time?</em></div>'
+                    f'<div class="q-tw"><table class="q-t"><thead><tr><th></th><th>Trades</th><th>Expectancy</th></tr></thead><tbody>'
+                    f'<tr><td>First half (from {p_dates.min():%b %Y})</td><td>{hv["a_n"]}</td><td>{_exp(hv["a_exp"])}</td></tr>'
+                    f'<tr><td>Second half (to {p_dates.max():%b %Y})</td><td>{hv["b_n"]}</td><td>{_exp(hv["b_exp"])}</td></tr></tbody></table></div>'
+                    f'<div class="q-note">{"Positive in both halves: a good sign." if ok else "Not positive in both halves: the edge may come from one lucky stretch."}</div></div>')
         sens = res.get("sensitivity")
-        a = res.get("sens_axes") or []
-        if sens is not None and len(a) == 2:
-            cards.append(f'<div class="q-card"><div class="q-ch">Nearby settings<em>is your setting a plateau or a lucky peak?</em></div>{_heat(sens, a[0], a[1])}'
-                         f'<div class="q-note">A robust rule stays positive when its settings move a little. If only your exact setting is green, expect it to fail live.</div></div>')
-    for c in cards:
-        st.markdown(c, unsafe_allow_html=True)
+        if sens is not None and len(sens):
+            base = s["exp"]
+            rows, flips = [], 0
+            for r in sens.itertuples():
+                for v in (r.lower_exp, r.higher_exp):
+                    if np.isfinite(v) and base > 0 and v <= 0:
+                        flips += 1
+                lo_txt = "—" if pd.isna(r.lower) else f"{r.lower:g}: " + _exp(r.lower_exp, r.lower_n)
+                hi_txt = "—" if pd.isna(r.higher) else f"{r.higher:g}: " + _exp(r.higher_exp, r.higher_n)
+                rows.append(f'<tr><td style="text-align:left;white-space:normal">{ui.e(r.rule)} · {ui.e(r.setting)}</td>'
+                            f'<td>{lo_txt}</td><td>{r.yours:g}: {_exp(base)}</td><td>{hi_txt}</td></tr>')
+            msg = ("Every nearby setting stays positive: the result does not hang on one exact number." if base > 0 and flips == 0 else
+                   f"{flips} nearby setting{'s' if flips != 1 else ''} turn the result negative: fragile, treat with caution." if base > 0 else
+                   "Your rules lose money as set; green cells show which direction helps, but re-test before believing them.")
+            right = (f'<div class="q-card"><div class="q-ch">Nearby settings<em>each number moved about 25%, one at a time · expectancy · trades</em></div>'
+                     f'<div class="q-tw"><table class="q-t"><thead><tr><th style="text-align:left">Setting</th><th>Lower</th><th>Yours</th><th>Higher</th></tr></thead>'
+                     f'<tbody>{"".join(rows)}</tbody></table></div><div class="q-note">{msg}</div></div>')
+        if left or right:
+            st.markdown(f'<div class="q-two">{left}{right}</div>', unsafe_allow_html=True)
 
     mc = bt.monte_carlo(tr["r"].to_numpy(), cfg["book"]["risk_pct"], n_trades=100)
     ss = bt.stop_study(tr)
@@ -258,93 +438,86 @@ def _results(res: dict, on_open=None):
         left = (f'<div class="q-card"><div class="q-ch">Monte Carlo · your next 100 trades<em>{mc["sims"]:,} reshuffles at {cfg["book"]["risk_pct"]}% risk</em></div>'
                 f'<div class="q-sub">Typical drawdown <b style="color:#fff">{mc["dd_med"]:.1f}%</b>; 1 time in 20 it reaches <b style="color:{ui.RED}">{mc["dd_p95"]:.1f}%</b>. '
                 f'Expect a losing streak of about {mc["streak_med"]:.0f} trades, and {mc["streak_p90"]:.0f} in a bad stretch. '
-                f'Result after 100 trades: {mc["ret_p05"]:+.0f}% (bad luck) to {mc["ret_p95"]:+.0f}% (good luck), median {mc["ret_med"]:+.0f}%; '
-                f'{mc["p_loss"]:.0f}% chance of being down after 100 trades.</div>{hist}'
-                f'<div class="q-note">Distribution of maximum drawdowns. Decide now whether you can live with the amber line, because it will happen.</div></div>')
+                f'After 100 trades: {mc["ret_p05"]:+.0f}% (bad luck) to {mc["ret_p95"]:+.0f}% (good luck), median {mc["ret_med"]:+.0f}%; '
+                f'{mc["p_loss"]:.0f}% chance of being down. This assumes every trade risks {cfg["book"]["risk_pct"]}% and future trades resemble these.</div>{hist}</div>')
     if ss:
         x, e = ss["tight_stop"]
         better = e > ss["base_exp"] + 0.02
         right = (f'<div class="q-card"><div class="q-ch">Stop and exit study<em>from how far each trade went for and against you</em></div>'
                  f'<div class="q-rs" style="--c:{ui.BLUE}"><i></i><span>{ss["win_mae_share_05"]:.0f}% of winners never went more than 0.5R against you.</span></div>'
-                 f'<div class="q-rs" style="--c:{ui.YELLOW if ss["giveback"] > 1 else ui.GREEN}"><i></i><span>Winners gave back {ss["giveback"]:.1f}R on average from their best point'
-                 f'{" — a tighter trail or partial profits could keep more." if ss["giveback"] > 1 else "."}</span></div>'
-                 f'<div class="q-rs" style="--c:{ui.YELLOW if ss["losers_hit_1r"] > 25 else ui.BLUE}"><i></i><span>{ss["losers_hit_1r"]:.0f}% of all trades were up 1R or more and still ended as losers'
-                 f'{" — consider moving the stop to entry at +1R." if ss["losers_hit_1r"] > 25 else "."}</span></div>'
+                 f'<div class="q-rs" style="--c:{ui.YELLOW if ss["giveback"] > 1 else ui.GREEN}"><i></i><span>Winners gave back {ss["giveback"]:.1f}R on average from their best point.</span></div>'
+                 f'<div class="q-rs" style="--c:{ui.YELLOW if ss["losers_hit_1r"] > 25 else ui.BLUE}"><i></i><span>{ss["losers_hit_1r"]:.0f}% of all trades were up 1R or more and still ended as losers.</span></div>'
                  f'<div class="q-rs" style="--c:{ui.GREEN if better else ui.BLUE}"><i></i><span>'
-                 + (f"A stop at {x:.2f}R instead of 1R would have lifted expectancy from {ss['base_exp']:+.2f}R to about {e:+.2f}R (estimate)." if better
-                    else "Tighter stops (0.5R to 0.75R) would not have improved expectancy: your stop placement looks right.")
+                 + (f"A stop at {x:.2f}R instead of 1R might have lifted expectancy from {ss['base_exp']:+.2f}R to about {e:+.2f}R. This is a rough estimate that ignores gaps: change the stop above and re-run to confirm."
+                    if better else "Tighter stops (0.5R to 0.75R) would not have improved expectancy.")
                  + "</span></div></div>")
     if left or right:
         st.markdown(f'<div class="q-two">{left}{right}</div>', unsafe_allow_html=True)
 
     tb = bt.add_buckets(tr, res.get("state"))
-    parts = [_bd_table(tb, "regime", "By market regime at the signal", rg.STATES),
-             _bd_table(tb, "rs_bucket", "By RS rating", ["Under 70", "70 to 79", "80 to 89", "90 to 99"]),
-             _bd_table(tb, "ext_bucket", "By distance from the 21 EMA", ["Below 21 EMA", "0 to 2%", "2 to 5%", "5 to 8%", "Over 8%"]),
-             _bd_table(tb, "year", "By year"), _bd_table(tb, "reason", "By exit")]
-    sec = bt.breakdown(tb, "sector")
-    if not sec.empty and sec.index.astype(str).str.len().max() > 0 and len(sec) > 1:
-        sec = sec.sort_values("total", ascending=False)
-        tb2 = tb[tb["sector"].isin(list(sec.index[:6]) + list(sec.index[-3:]))]
-        parts.append(_bd_table(tb2, "sector", "By sector (best and worst)", list(dict.fromkeys(list(sec.index[:6]) + list(sec.index[-3:])))))
-    parts = [x for x in parts if x]
+    parts = [x for x in (_bd_table(tb, "regime", "By market regime at the signal", rg.STATES), _bd_table(tb, "year", "By year"),
+                         _bd_table(tb, "reason", "By exit"), _bd_table(tb, "rs_bucket", "By RS rating", ["Under 70", "70 to 79", "80 to 89", "90 to 99"]),
+                         _bd_table(tb, "ext_bucket", "By distance from the 21 EMA", ["Below 21 EMA", "0 to 2%", "2 to 5%", "5 to 8%", "Over 8%"])) if x]
     st.markdown('<div class="q-three">' + "".join(parts[:3]) + '</div><div class="q-three">' + "".join(parts[3:]) + "</div>", unsafe_allow_html=True)
 
-    st.markdown('<div class="q-sec" style="font:600 14px Inter,sans-serif;margin:6px 2px 8px">Trades taken by the portfolio</div>', unsafe_allow_html=True)
-    if taken is not None and not taken.empty:
-        show = taken.sort_values("entry_i", ascending=False).head(400)
-        view = pd.DataFrame({"Stock": show["symbol"], "Entry": pd.to_datetime(show["entry_date"]).dt.strftime("%d %b %Y"),
-                             "Exit": [("open" if r == "Open at end" else pd.Timestamp(d).strftime("%d %b %Y")) for r, d in zip(show["reason"], show["exit_date"])],
-                             "Entry ₹": show["entry"].round(2), "Stop ₹": show["stop"].round(2), "Exit ₹": show["exit"].round(2),
-                             "R": show["r"].round(2), "P&L ₹": show["pnl"].round(0), "Days": show["days"], "Exit reason": show["reason"],
-                             "RS": show["rs"].astype(int), "Qty": show["qty"]})
-        st.dataframe(view, use_container_width=True, hide_index=True, height=360)
-        c1, c2, c3 = st.columns([1.2, 1.2, 1], gap="small")
-        c1.download_button("Download trades (CSV)", taken.drop(columns=[c for c in ("j",) if c in taken]).to_csv(index=False).encode(),
-                           f"arka_backtest_{cfg['setup'].split()[0].lower()}.csv", "text/csv", key="bt_csv", use_container_width=True)
-        if on_open:
-            pick = c2.selectbox("Open a stock", list(dict.fromkeys(show["symbol"])), key="bt_open_pick", label_visibility="collapsed")
-            if c3.button("Open chart", key="bt_open", use_container_width=True):
-                on_open(pick)
-    st.markdown(f'<div class="q-note">How to read this: R = profit or loss divided by the risk you took (entry minus stop); +2R means twice what you risked. '
-                f'Signals use only data up to that day\'s close and are entered at the next open; stops are checked before targets; a gap through the stop '
-                f'fills at the open; costs of {cfg["cost"]:.2f}% are taken off every round trip. '
-                f'<b>Survivorship bias:</b> the universe is today\'s {ui.e(p_name)} members ({n_syms} stocks with data{f", {miss} returned none" if miss else ""}), so stocks that '
-                f'were dropped or delisted are missing and results look somewhat better than reality. {ui.e(note)}. A research tool, not investment advice.</div>',
+    ps = bt.per_stock(tr)
+    if len(ps):
+        st.markdown('<div class="q-step" style="margin-top:6px">Stock by stock</div>', unsafe_allow_html=True)
+        view = ps.reset_index().rename(columns={"symbol": "Stock", "trades": "Trades", "win": "Win %", "exp": "Expectancy R", "total": "Total R",
+                                                "best": "Best R", "worst": "Worst R"}).round(2)
+        st.dataframe(view, use_container_width=True, hide_index=True, height=min(360, 60 + 35 * len(view)))
+        c1, c2 = st.columns([3, 1], gap="small")
+        if st.session_state.get("bt_chart_sym") not in ps.index:
+            st.session_state["bt_chart_sym"] = ps.index[0]
+        sym = c1.selectbox("Chart a stock with its entries and exits", list(ps.index), key="bt_chart_sym")
+        if on_open and c2.button("Open in Arka", key="bt_open", use_container_width=True):
+            on_open(sym)
+        st.markdown(_stock_chart(res, sym), unsafe_allow_html=True)
+
+    st.markdown('<div class="q-step" style="margin-top:6px">Every simulated trade</div>', unsafe_allow_html=True)
+    show = tr.sort_values("entry_i", ascending=False)
+    view = pd.DataFrame({"Stock": show["symbol"], "Entry": pd.to_datetime(show["entry_date"]).dt.strftime("%d %b %Y"),
+                         "Exit": [("open" if r == "Open at end" else pd.Timestamp(d).strftime("%d %b %Y")) for r, d in zip(show["reason"], show["exit_date"])],
+                         "Entry ₹": show["entry"].round(2), "Stop ₹": show["stop"].round(2), "Exit ₹": show["exit"].round(2), "R": show["r"].round(2),
+                         "Return %": show["ret_pct"].round(2), "Days": show["days"], "Exit reason": show["reason"], "RS": show["rs"].round(0)})
+    st.dataframe(view.head(1000), use_container_width=True, hide_index=True, height=360)
+    st.download_button("Download all trades (CSV)", show.drop(columns=["j"]).to_csv(index=False).encode(), "arka_backtest_trades.csv", "text/csv", key="bt_csv")
+    drop = res.get("dropped", 0)
+    miss_txt = f"; {info['missing']} symbols returned no data" if info["missing"] else ""
+    st.markdown(f'<div class="q-note">R = profit or loss divided by the risk taken (entry minus stop). Prices are adjusted for splits, bonuses and dividends, so old '
+                f'prices differ from what the chart showed then. Signals use only data up to that day\'s close; entry is the next session; stops are checked before '
+                f'targets; a gap through the stop fills at the open; {cfg["cost"]:.2f}% is taken off every round trip. '
+                + (f'{drop} trade{"s" if drop != 1 else ""} crossing a suspect candle (a one-day move beyond −35% / +50%, usually an unadjusted corporate action) were removed. ' if drop else "")
+                + f'<b>Survivorship bias:</b> index lists are today\'s members, so stocks that were dropped or delisted are missing and results look somewhat better than '
+                f'reality. <b>Picked stocks:</b> choosing stocks you already know went up makes any rule look good; that is hindsight, not an edge. '
+                f'{ui.e(info["note"])}{miss_txt}. A research tool, not investment advice.</div>',
                 unsafe_allow_html=True)
-
-
-def _bench(res: dict, p: dict):
-    curve = res["curve"]
-    if curve is None or len(curve) < 2:
-        return
-    ic = pd.Series(p["idx_c"], index=p["dates"]).reindex(curve.index).ffill()
-    res["bench_curve"] = ic / ic.iloc[0] * 100
-    res["bench_stats"] = bt.curve_stats(ic)
 
 
 def render_backtest(on_open=None):
     ui.css()
-    # the page title and subtitle come from app.py (PAGE_META)
     cfg, run = _controls()
-    key = json.dumps({k: v for k, v in cfg.items()}, sort_keys=True, default=str)
+    key = json.dumps(cfg, sort_keys=True, default=str)
     if run:
+        probs = _problems(cfg)
+        if probs:
+            for m in probs:
+                st.warning(m)
+            return
         res, err = _run(cfg)
         if err:
             st.markdown(f'<div class="q-card"><div class="q-ch">Could not run</div><div class="q-sub">{ui.e(err)}</div></div>', unsafe_allow_html=True)
             return
-        p, _ = get_panel(cfg["uni"], cfg["years"])
-        _bench(res, p)
         st.session_state["bt_result"] = res
         st.session_state["bt_result_key"] = key
     res = st.session_state.get("bt_result")
     if res is None:
         st.markdown('<div class="q-card"><div class="q-ch">How it works</div><div class="q-sub">'
-                    '1. Pick a setup and adjust its rules, stop, exit, risk and costs (sensible defaults are already set).<br>'
-                    '2. Run. The first run of the day downloads prices (a minute or two for 500 stocks); later runs take seconds.<br>'
-                    '3. Read the verdict, then the walk-forward table, the Monte Carlo drawdowns and the breakdowns by regime, RS and extension.<br><br>'
-                    'Walk-forward mode tries several versions of the rule on each block of past years, picks the best using only those years, '
-                    'then trades it on the next months it has never seen. Stitching those unseen months together gives the honest result.</div></div>',
+                    '1. Choose the stocks: a whole index, or only the ones you pick.<br>'
+                    '2. Build your entry: add, edit or remove conditions until the list says exactly what you trade. Templates are only a starting point.<br>'
+                    '3. Set the entry type, stop, exits, risk and costs.<br>'
+                    '4. Run. The first run of the day downloads prices (a minute or two for 500 stocks); later runs take seconds.<br><br>'
+                    'Nothing is tuned for you. "My exact rules" tests what is on the page. Walk-forward is optional and tries only the values you type.</div></div>',
                     unsafe_allow_html=True)
         return
     if st.session_state.get("bt_result_key") != key:
