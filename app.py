@@ -1,5 +1,8 @@
 """
-Arka Trades — Market Terminal v9.4.1
+Arka Trades — Market Terminal v9.5
+
+v9.5: Screener and Arka AI are admin-only. Members do not see them in the tabs, the phone menu, the search codes or the
+      stock page, and a direct link or old session lands on Home with a short notice.
 
 v9.4.1: with the news column hidden, Home uses the full width (no empty side strip); "Show news" is a small button on the right.
 
@@ -661,6 +664,11 @@ if not st.session_state.logged_in:
     st.stop()
 
 IS_ADMIN = st.session_state.get("is_admin", False)       # the bridge may have just signed this device in
+ADMIN_PAGES = {"smart_scan": "Screener", "analysis": "Arka AI"}   # pages only admins can open
+
+
+def _allowed(page: str) -> bool:
+    return IS_ADMIN or page not in ADMIN_PAGES
 
 
 # ═══════════════════════════════ TERMINAL SHELL ═══════════════════════════════
@@ -675,6 +683,11 @@ FUNCTION_CODES = {"HOME": "home", "MAIN": "home", "MF": "flow", "FLOW": "flow", 
 FUNCTION_MENU = ["MF · Money flow", "RES · Research", "PORT · Portfolio", "WL · Watchlist", "NEWS · News", "EQS · Screener",
                  "AI · Arka AI", "REG · Market regime", "BT · Backtest lab", "HOME · Market monitor", "ACCT · Account"]
 TICKER_FUNCS = {"RES": "research", "AI": "analysis", "DES": "security", "GP": "security"}
+if not IS_ADMIN:                                          # members: admin pages disappear from every menu
+    NAV = [(l, t) for l, t in NAV if _allowed(t)]
+    FUNCTION_CODES = {k: v for k, v in FUNCTION_CODES.items() if _allowed(v)}
+    FUNCTION_MENU = [m for m in FUNCTION_MENU if not m.startswith(("EQS ", "AI "))]
+    TICKER_FUNCS = {k: v for k, v in TICKER_FUNCS.items() if _allowed(v)}
 
 PAGE_META = {
     "home": ("Market monitor", "India first, global context and your book."),
@@ -692,10 +705,17 @@ PAGE_META = {
 st.session_state.page = LEGACY_PAGES.get(st.session_state.page, st.session_state.page)
 if st.session_state.page not in PAGE_META and st.session_state.page != "security":
     st.session_state.page = "home"
+if not _allowed(st.session_state.page):                  # a member reached an admin page (old session, another module's button)
+    st.session_state["_ak_denied"] = ADMIN_PAGES[st.session_state.page]
+    st.session_state.page = "home"
 
 
 def _nav_cb(target):
-    st.session_state.page = LEGACY_PAGES.get(target, target)
+    target = LEGACY_PAGES.get(target, target)
+    if not _allowed(target):
+        st.session_state["_ak_denied"] = ADMIN_PAGES[target]
+        target = "home"
+    st.session_state.page = target
     sym = st.session_state.get("active_security")
     if sym and target != "home":
         st.session_state["research_last_query"] = sym
@@ -843,6 +863,10 @@ MORE_PHONE = [("Market regime", "regime", ":material/monitor_heart:"), ("Backtes
               ("Money flow", "flow", ":material/swap_vert:"), ("News", "news", ":material/newspaper:"),
               ("Screener", "smart_scan", ":material/filter_alt:"), ("Arka AI", "analysis", ":material/auto_awesome:"),
               ("Account", "account", ":material/person:")]
+if not IS_ADMIN:
+    TABS_DESKTOP = [x for x in TABS_DESKTOP if _allowed(x[1])]
+    TABS_PHONE = [x for x in TABS_PHONE if _allowed(x[1])]
+    MORE_PHONE = [x for x in MORE_PHONE if _allowed(x[1])]
 
 
 def _render_desktop_top():
@@ -971,7 +995,7 @@ def _render_security_workspace(symbol: str):
     if a2.button("Add to portfolio", key=f"sec_pf_{symbol}", use_container_width=True):
         st.session_state.page = "portfolio"
         st.rerun()
-    if a3.button("Arka AI analysis", key=f"sec_ai_{symbol}", use_container_width=True):
+    if IS_ADMIN and a3.button("Arka AI analysis", key=f"sec_ai_{symbol}", use_container_width=True):
         if hasattr(ud, "go_analysis"):
             ud.go_analysis(symbol)
         st.session_state.page = "analysis"
@@ -1114,6 +1138,12 @@ else:
     center, right_rail = st.container(), None
 
 with center:
+    _denied = st.session_state.pop("_ak_denied", None)
+    if _denied:
+        try:
+            st.toast(f"{_denied} is available to admin accounts only.")
+        except Exception:
+            st.info(f"{_denied} is available to admin accounts only.")
     if pg == "home" or (pg == "security" and not st.session_state.get("active_security")):
         _home = _load("home_page", "render_home")
         try:
@@ -1135,6 +1165,8 @@ with center:
             st.session_state["research_last_query"] = st.session_state["active_security"]
         _run("research_page", _load("research_page", "render_research_page"), TERM_TOKENS,
              news_fetch_fn=_load("news_feed", "_fetch_news_for_stock"))
+    elif pg in ADMIN_PAGES and not IS_ADMIN:               # last line of defence
+        st.info(f"{ADMIN_PAGES[pg]} is available to admin accounts only.")
     elif pg == "analysis":
         if st.session_state.get("active_security"):
             st.session_state["m1_ticker"] = st.session_state["active_security"]
