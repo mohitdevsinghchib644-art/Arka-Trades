@@ -1,5 +1,8 @@
 """
-Arka Trades — Market Terminal v9.3
+Arka Trades — Market Terminal v9.4
+
+v9.4: the Arka mark (arka_icon.png) sits next to the wordmark in the header, on the opening and sign-in screens, and is
+      the browser-tab / home-screen icon. Pages no longer fade to grey while Streamlit re-runs (smoother tab switches).
 
 v9.3: two new pages. Regime (market regime and breadth dashboard) and Backtest (walk-forward backtester and expectancy
       engine). Desktop tabs, phone "More" menu and the command bar (REG, BT) open them. Needs quant_data.py, quant_ui.py,
@@ -432,6 +435,10 @@ div[class*="st-key-signin"] [data-testid="stForm"]{padding:22px !important;}
 .si-h .t{font:600 22px var(--sans);letter-spacing:-.3px;color:var(--tx);margin-top:14px;} .si-h .s{font:14px var(--sans);color:var(--tx3);margin-top:4px;}
 .si-foot{text-align:center;font:12.5px/1.6 var(--sans);color:var(--tx3);margin-top:14px;}
 /* opening screen */
+/* v9.4: no grey-out while a page re-runs */
+[data-stale="true"],.element-container[data-stale="true"],div[data-testid="stElementContainer"][data-stale="true"]{opacity:1 !important;transition:none !important;}
+.sp img{animation:spbreath 1.6s ease-in-out infinite;}
+@keyframes spbreath{0%,100%{transform:scale(1);box-shadow:0 0 0 0 rgba(247,148,29,.45)}50%{transform:scale(1.05);box-shadow:0 0 0 14px rgba(247,148,29,0)}}
 .sp{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:62vh;gap:16px;}
 .sp img{width:56px;height:56px;border-radius:14px;}
 .sp .t{font:500 15px var(--sans);color:var(--tx2);}
@@ -517,13 +524,20 @@ def _run(module: str, fn, *args, **kwargs):
 
 
 LOGO = auth.logo_data_uri(128)
-WM = auth.wordmark_html(17)
+def _brand(mark: int = 26, text: int = 17) -> str:
+    """Logo mark + wordmark."""
+    img = (f'<img src="{LOGO}" alt="" style="height:{mark}px;width:{mark}px;border-radius:{max(5, mark // 4)}px;display:block;flex:0 0 auto">'
+           if LOGO else "")
+    return f'<span style="display:inline-flex;align-items:center;gap:{max(8, mark // 3)}px">{img}{auth.wordmark_html(text)}</span>'
+
+
+WM = _brand(26, 17)
 
 
 # ═══════════════════════════════ OPENING SCREEN · LANDING · SIGN-IN ═══════════════════════════════
 def _render_opening():
     """Shown for the fraction of a second the browser needs to hand back a saved sign-in."""
-    st.markdown(f'<div class="sp">{auth.wordmark_html(22)}<div class="bar"><i></i></div></div>',
+    st.markdown(f'<div class="sp">{"<img src=" + chr(34) + LOGO + chr(34) + " alt=" + chr(34) + chr(34) + ">" if LOGO else ""}{auth.wordmark_html(22)}<div class="bar"><i></i></div></div>',
                 unsafe_allow_html=True)
     with st.container(key="spskip"):
         if st.button("Go to sign in", key="sp_skip"):
@@ -547,7 +561,7 @@ def _lp_nav():
 def _render_login():
     _lp_nav()
     with st.container(key="signin"):
-        st.markdown(f'<div class="si-h"><div style="display:flex;justify-content:center">{auth.wordmark_html(20)}</div><div class="t">Sign in</div>'
+        st.markdown(f'<div class="si-h"><div style="display:flex;justify-content:center">{_brand(30, 19)}</div><div class="t">Sign in</div>'
                     '<div class="s">Your watchlists, portfolio and research, synced.</div></div>', unsafe_allow_html=True)
         with st.form("lf"):
             u = st.text_input("Username", placeholder="Username", autocomplete="username")
@@ -846,7 +860,7 @@ def _render_desktop_top():
 
 def _render_phone_top():
     pg = st.session_state.page
-    st.markdown(f'<div class="ak-hdr ak-phdr"><div class="ak-id">{auth.wordmark_html(15)}</div>'
+    st.markdown(f'<div class="ak-hdr ak-phdr"><div class="ak-id">{_brand(22, 15)}</div>'
                 f'<div class="ak-meta">{_status_html(with_clock=False)}</div></div>', unsafe_allow_html=True)
     if pg in ("home", "watchlist", "research", "security", "news", "analysis"):
         _render_search()
