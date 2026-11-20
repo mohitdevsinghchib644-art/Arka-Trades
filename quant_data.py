@@ -191,8 +191,26 @@ def _frame_from(df: pd.DataFrame, ticker: str, single: bool) -> pd.DataFrame | N
         return None
 
 
-def _yf_download(tickers: list, start: str):
+_YF_GUARD = threading.Lock()
+
+
+def _lock_yfinance():
+    """yf.download keeps shared state, so simultaneous downloads corrupt each other: make every caller take turns."""
     import yfinance as yf
+    with _YF_GUARD:
+        if not getattr(yf, "_arka_serial", False):
+            lock, orig = threading.RLock(), yf.download
+
+            def download(*a, **k):
+                with lock:
+                    return orig(*a, **k)
+            yf.download = download
+            yf._arka_serial = True
+    return yf
+
+
+def _yf_download(tickers: list, start: str):
+    yf = _lock_yfinance()
     kw = dict(start=start, interval="1d", auto_adjust=True, progress=False, group_by="ticker", threads=True)
     try:
         return yf.download(tickers, **kw)
