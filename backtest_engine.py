@@ -1,103 +1,221 @@
 """
-Arka Trades — backtest_engine.py (v1): walk-forward backtester and expectancy engine for swing / momentum setups.
+Arka Trades — backtest_engine.py (v2): your own rules, on the stocks you choose.
 
-Realism rules (the ones most home-made backtests break)
-  * A signal uses only data up to that day's close. Entry is the NEXT day's open. Gap-ups bigger than a limit are skipped.
+v2
+  * RULE BUILDER: a strategy is a list of conditions you pick and tune (trend, breakout, momentum, pullback, candle,
+    volume, volatility, market). Nothing is applied that is not on your list, except a one-year warm-up.
+  * STOCK PICKER: signals can be limited to the stocks you select; RS rating is still ranked against the whole universe.
+  * Entry at the next open, or only if the next day trades above the signal day's high (buy-stop).
+  * Stops: signal-day low, lowest low of the last N days, ATR multiple or percent. Trailing exit on any EMA / SMA.
+  * Audit fixes: a slot freed by an intraday stop can no longer be reused at that morning's open; trades that cross a
+    suspect candle (a one-day move beyond -35% / +50%, usually an unadjusted corporate action) are removed and counted.
+
+Realism rules
+  * A signal uses only data up to that day's close. Entry is the NEXT session. Gap-ups bigger than a limit are skipped.
   * Stops are checked before targets inside a day (worst case). A gap below the stop fills at the open, not the stop.
   * Trailing exits are decided on the close and filled at the next open.
-  * Indian round-trip costs (STT, stamp duty, exchange, GST, DP charges) plus slippage are taken off every trade.
-  * The portfolio is simulated with real constraints: capital, risk per trade, maximum positions, maximum position
-    size and cash. When more signals fire than free slots, the highest RS rating is taken first.
-
-Walk-forward
-  For each window: pick the parameter set with the best (expectancy x sqrt(trades)) using only trades that ENTERED
-  AND EXITED inside the training years, then trade that set on the next, unseen months. All unseen months are
-  stitched into one out-of-sample result. Walk-forward efficiency = out-of-sample expectancy / in-sample expectancy.
+  * Round-trip costs (STT, stamp duty, exchange, GST, DP charges) plus slippage are taken off every trade.
+  * The portfolio has real constraints: capital, risk per trade, maximum positions, position size and cash. When more
+    signals fire than free slots, the highest RS rating is taken first.
 """
 from __future__ import annotations
 
 import itertools
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 
 import quant_data as qd
 
-# ═════════════════════════ setups ═════════════════════════
-SETUPS = {
-    "Breakout": {
-        "about": "Close above the highest high of the last N sessions on volume, in a stock with strong relative strength "
-                 "that is above its 50 EMA and 200 DMA and not already stretched from its 21 EMA.",
-        "params": {"lookback": 20, "vol_mult": 1.5, "rs_min": 80, "ext_max": 8.0},
-        "grid": {"lookback": [20, 50], "vol_mult": [1.3, 1.8], "rs_min": [70, 85]},
-    },
-    "Pullback to 21 EMA": {
-        "about": "A leader in an uptrend (21 EMA > 50 EMA > 200 DMA, within 15% of its 52-week high) dips to its 21 EMA "
-                 "within the last 3 sessions, then prints a green candle that closes above the previous day's high.",
-        "params": {"touch": 1.5, "rs_min": 80, "max_off_high": 15.0},
-        "grid": {"touch": [1.0, 2.5], "rs_min": [70, 85]},
-    },
-    "52-week high": {
-        "about": "A new 52-week high on above-average volume in a stock with strong relative strength, above its 50 EMA.",
-        "params": {"vol_mult": 1.3, "rs_min": 85, "ext_max": 10.0},
-        "grid": {"vol_mult": [1.0, 1.6], "rs_min": [75, 90]},
-    },
-    "Volatility contraction (VCP)": {
-        "about": "Volatility dries up (14-day ATR well below the 50-day ATR, a tight 15-day range), then price breaks the "
-                 "15-day high on volume, in an uptrend with strong relative strength.",
-        "params": {"contraction": 0.80, "base_max": 12.0, "vol_mult": 1.5, "rs_min": 75},
-        "grid": {"contraction": [0.7, 0.85], "base_max": [10.0, 15.0], "vol_mult": [1.3, 1.8]},
-    },
-}
-PARAM_LABEL = {"lookback": "Breakout of the last N days", "vol_mult": "Volume ≥ × 50-day average", "rs_min": "RS rating at least",
-               "ext_max": "Skip if more than % above 21 EMA", "touch": "Low within % of the 21 EMA", "max_off_high": "Within % of 52-week high",
-               "contraction": "ATR 14 / ATR 50 at most", "base_max": "15-day range at most %", "trail": "Trailing EMA",
-               "target_r": "Profit target (R)", "max_days": "Time stop (days)"}
-
-EXIT_DEFAULT = {"stop": "Signal-day low", "stop_atr": 1.5, "stop_pct": 7.0, "max_risk": 10.0, "trail": 21, "target_r": 0.0,
-                "max_days": 40, "breakeven_r": 0.0, "gap_max": 4.0}
 COST_DEFAULT = 0.35     # % per round trip: ~0.25% statutory (STT 0.1% x2, stamp, exchange, GST, DP) + ~0.1% slippage
-MIN_PRICE, MIN_TURN_CR = 20.0, 5.0
+WARMUP = 252
+STATES = ["Confirmed uptrend", "Under pressure", "Rally attempt", "Correction"]
 
 
-def signals(p: dict, setup: str, prm: dict, min_turn: float = MIN_TURN_CR) -> np.ndarray:
-    """Boolean (T, N): the setup triggered at that day's close."""
-    c, o, h, l, v = p["c"], p["o"], p["h"], p["l"], p["v"]
-    e21, e50, s200, rs = p["ema21"], p["ema50"], p["sma200"], p["rs"]
+# ═════════════════════════ indicators on demand ═════════════════════════
+def ma(p: dict, kind: str, n: int) -> np.ndarray:
+    n = int(n)
+    k = f"{'ema' if kind == 'EMA' else 'sma'}{n}"
+    if k not in p:
+        c = p["c"].astype(np.float64)
+        p[k] = np.asarray(qd.ema(c, n) if kind == "EMA" else qd.sma(c, n), dtype=np.float32)
+    return p[k]
+
+
+def _cached(p, key, fn):
+    if key not in p:
+        p[key] = np.asarray(fn(), dtype=np.float32)
+    return p[key]
+
+
+def prior_low(p, n):
+    return _cached(p, f"pl{int(n)}", lambda: qd.shift(qd.roll_min(p["l"].astype(np.float64), int(n)), 1))
+
+
+def high_n(p, n):
+    return _cached(p, f"hn{int(n)}", lambda: qd.roll_max(p["h"].astype(np.float64), int(n)))
+
+
+def low_n(p, n):
+    """Lowest low of the last n sessions including today (used for stops; a missing candle is simply ignored)."""
+    return _cached(p, f"ln{int(n)}", lambda: pd.DataFrame(p["l"].astype(np.float64)).rolling(int(n), min_periods=1).min().to_numpy())
+
+
+def rsi(p, n):
+    return _cached(p, f"rsi{int(n)}", lambda: qd.rsi(p["c"].astype(np.float64), int(n)))
+
+
+# ═════════════════════════ the rule catalogue ═════════════════════════
+# param spec: (key, label, default, min, max, step)   or   (key, label, default, [choices])
+K = ("kind", "Average", "EMA", ["EMA", "SMA"])
+
+
+def _idx_ma(p, kind, n):
+    k = f"idx_{kind}{int(n)}"
+    if k not in p:
+        x = p["idx_c"][:, None].astype(np.float64)
+        p[k] = np.asarray((qd.ema(x, int(n)) if kind == "EMA" else qd.sma(x, int(n)))[:, 0], dtype=np.float32)
+    return p[k]
+
+
+RULES = {
+    # ── trend ──
+    "close_above_ma": ("Trend", "Close above a moving average", [K, ("n", "Length", 50, 2, 400, 1)],
+                       lambda p, a, s: p["c"] > ma(p, a["kind"], a["n"])),
+    "ma_above_ma": ("Trend", "Fast average above slow average", [K, ("fast", "Fast", 21, 2, 400, 1), ("slow", "Slow", 50, 2, 400, 1)],
+                    lambda p, a, s: ma(p, a["kind"], a["fast"]) > ma(p, a["kind"], a["slow"])),
+    "ma_rising": ("Trend", "Moving average is rising", [K, ("n", "Length", 50, 2, 400, 1), ("days", "Higher than N days ago", 20, 1, 120, 1)],
+                  lambda p, a, s: ma(p, a["kind"], a["n"]) > qd.shift(ma(p, a["kind"], a["n"]), int(a["days"]))),
+    "near_52w_high": ("Trend", "Within % of the 52-week high", [("pct", "Within %", 15.0, 0.0, 80.0, 1.0)],
+                      lambda p, a, s: p["c"] >= p["hh52"] * (1 - a["pct"] / 100)),
+    "above_52w_low": ("Trend", "At least % above the 52-week low", [("pct", "At least %", 30.0, 0.0, 500.0, 5.0)],
+                      lambda p, a, s: p["c"] >= p["ll52"] * (1 + a["pct"] / 100)),
+    # ── breakout ──
+    "breakout_n": ("Breakout", "Close above the highest high of the previous N days", [("n", "N days", 20, 2, 260, 1)],
+                   lambda p, a, s: p["c"] > qd.prior_high(p, int(a["n"]))),
+    "new_52w_high": ("Breakout", "New 52-week high today", [],
+                     lambda p, a, s: p["h"] >= qd.prior_high(p, 252)),
+    "close_above_prev_high": ("Breakout", "Close above the previous day's high", [],
+                              lambda p, a, s: p["c"] > qd.shift(p["h"], 1)),
+    "gap_up": ("Breakout", "Opened with a gap up of at least %", [("pct", "Gap %", 1.0, 0.1, 20.0, 0.25)],
+               lambda p, a, s: p["o"] >= qd.shift(p["c"], 1) * (1 + a["pct"] / 100)),
+    # ── momentum ──
+    "rs_min": ("Momentum", "RS rating at least", [("x", "RS rating", 80, 1, 99, 1)],
+               lambda p, a, s: p["rs"] >= a["x"]),
+    "ret_n": ("Momentum", "Return over N days at least %", [("n", "N days", 63, 1, 260, 1), ("pct", "Return %", 20.0, -90.0, 500.0, 1.0)],
+              lambda p, a, s: (p["c"] / qd.shift(p["c"], int(a["n"])) - 1) * 100 >= a["pct"]),
+    "day_change": ("Momentum", "Today's change between % and %", [("lo", "From %", 2.0, -20.0, 20.0, 0.25), ("hi", "To %", 6.0, -20.0, 20.0, 0.25)],
+                   lambda p, a, s: _between((p["c"] / qd.shift(p["c"], 1) - 1) * 100, a["lo"], a["hi"])),
+    "rsi_above": ("Momentum", "RSI above", [("n", "RSI length", 14, 2, 50, 1), ("x", "Above", 55.0, 1.0, 99.0, 1.0)],
+                  lambda p, a, s: rsi(p, a["n"]) > a["x"]),
+    "rsi_below": ("Momentum", "RSI below", [("n", "RSI length", 14, 2, 50, 1), ("x", "Below", 75.0, 1.0, 99.0, 1.0)],
+                  lambda p, a, s: rsi(p, a["n"]) < a["x"]),
+    # ── pullback ──
+    "touch_ma": ("Pullback", "Low came within % of a moving average in the last N days",
+                 [K, ("n", "Length", 21, 2, 400, 1), ("pct", "Within %", 1.5, 0.0, 10.0, 0.25), ("days", "In the last N days", 3, 1, 20, 1)],
+                 lambda p, a, s: qd.roll_min((p["l"] / ma(p, a["kind"], a["n"])).astype(np.float64), int(a["days"])) <= 1 + a["pct"] / 100),
+    "pullback_depth": ("Pullback", "Pulled back between % and % from the N-day high",
+                       [("n", "N days", 20, 3, 260, 1), ("lo", "At least %", 3.0, 0.0, 60.0, 0.5), ("hi", "At most %", 12.0, 0.0, 80.0, 0.5)],
+                       lambda p, a, s: _between((1 - p["c"] / high_n(p, a["n"])) * 100, a["lo"], a["hi"])),
+    # ── candle ──
+    "green": ("Candle", "Green candle (close above open)", [], lambda p, a, s: p["c"] > p["o"]),
+    "close_top": ("Candle", "Close in the top % of the day's range", [("pct", "Top %", 30.0, 1.0, 100.0, 5.0)],
+                  lambda p, a, s: (p["c"] - p["l"]) >= (1 - a["pct"] / 100) * (p["h"] - p["l"])),
+    "inside_day": ("Candle", "Inside day (range within the previous day's)", [],
+                   lambda p, a, s: (p["h"] <= qd.shift(p["h"], 1)) & (p["l"] >= qd.shift(p["l"], 1))),
+    "nr7": ("Candle", "Narrowest range of the last 7 days (NR7)", [],
+            lambda p, a, s: (p["h"] - p["l"]) <= qd.roll_min((p["h"] - p["l"]).astype(np.float64), 7)),
+    # ── volume ──
+    "vol_mult": ("Volume", "Volume at least × the 50-day average", [("x", "Times average", 1.5, 0.1, 20.0, 0.1)],
+                 lambda p, a, s: p["v"] >= a["x"] * p["vavg50"]),
+    "vol_dry": ("Volume", "Volume dried up: at most × average on each of the N days before today",
+                [("x", "Times average", 0.8, 0.1, 5.0, 0.05), ("days", "N days", 3, 1, 20, 1)],
+                lambda p, a, s: qd.shift(qd.roll_max((p["v"] / p["vavg50"]).astype(np.float64), int(a["days"])), 1) <= a["x"]),
+    "turnover_min": ("Volume", "Trades at least ₹ crore a day (20-day average)", [("x", "₹ crore", 5.0, 0.0, 5000.0, 1.0)],
+                     lambda p, a, s: p["turn_cr"] >= a["x"]),
+    "price_min": ("Volume", "Price at least ₹", [("x", "₹", 20.0, 0.0, 100000.0, 5.0)],
+                  lambda p, a, s: p["c"] >= a["x"]),
+    # ── volatility / extension ──
+    "atr_contract": ("Volatility", "Volatility contracted: ATR 14 ÷ ATR 50 at most (before today)", [("x", "Ratio", 0.80, 0.2, 2.0, 0.05)],
+                     lambda p, a, s: qd.shift((p["atr14"] / p["atr50"]).astype(np.float64), 1) <= a["x"]),
+    "range_tight": ("Volatility", "Tight base: range of the previous N days at most % of price",
+                    [("n", "N days", 15, 3, 120, 1), ("pct", "Range %", 12.0, 1.0, 80.0, 0.5)],
+                    lambda p, a, s: (qd.prior_high(p, int(a["n"])) - prior_low(p, a["n"])) <= a["pct"] / 100 * p["c"]),
+    "not_extended": ("Volatility", "Not extended: at most % above a moving average", [K, ("n", "Length", 21, 2, 400, 1), ("pct", "At most %", 8.0, 0.0, 100.0, 0.5)],
+                     lambda p, a, s: (p["c"] / ma(p, a["kind"], a["n"]) - 1) * 100 <= a["pct"]),
+    # ── market ──
+    "nifty_above_ma": ("Market", "NIFTY 50 above its moving average", [K, ("n", "Length", 50, 2, 400, 1)],
+                       lambda p, a, s: np.broadcast_to((p["idx_c"] > _idx_ma(p, a["kind"], a["n"]))[:, None], p["c"].shape)),
+    "regime_in": ("Market", "Market regime is one of", [("states", "States", ["Confirmed uptrend", "Under pressure"], STATES)],
+                  lambda p, a, s: np.broadcast_to(np.isin(s, list(a["states"]))[:, None], p["c"].shape) if s is not None
+                  else np.ones(p["c"].shape, dtype=bool)),
+}
+
+
+def _between(x, lo, hi):
+    return (x >= lo) & (x <= hi)
+
+
+def new_rule(rtype: str, **over) -> dict:
+    r = {"type": rtype}
+    for spec in RULES[rtype][2]:
+        r[spec[0]] = spec[2] if not isinstance(spec[2], list) else list(spec[2])
+    r.update(over)
+    return r
+
+
+def describe(rule: dict) -> str:
+    grp, label, specs, _ = RULES[rule["type"]]
+    if not specs:
+        return label
+    vals = ", ".join(f"{sp[1]} {', '.join(rule[sp[0]]) if isinstance(rule[sp[0]], (list, tuple)) else rule[sp[0]]}" for sp in specs)
+    return f"{label} ({vals})"
+
+
+TEMPLATES = {
+    "Breakout": [new_rule("breakout_n", n=20), new_rule("vol_mult", x=1.5), new_rule("rs_min", x=80), new_rule("close_above_ma", n=50),
+                 new_rule("close_above_ma", kind="SMA", n=200), new_rule("not_extended", n=21, pct=8.0), new_rule("turnover_min", x=5.0)],
+    "Pullback to 21 EMA": [new_rule("ma_above_ma", fast=21, slow=50), new_rule("close_above_ma", kind="SMA", n=200), new_rule("near_52w_high", pct=15.0),
+                           new_rule("rs_min", x=80), new_rule("touch_ma", n=21, pct=1.5, days=3), new_rule("close_above_ma", n=21),
+                           new_rule("green"), new_rule("close_above_prev_high"), new_rule("turnover_min", x=5.0)],
+    "52-week high": [new_rule("new_52w_high"), new_rule("vol_mult", x=1.3), new_rule("rs_min", x=85), new_rule("close_above_ma", n=50),
+                     new_rule("not_extended", n=21, pct=10.0), new_rule("turnover_min", x=5.0)],
+    "Volatility contraction (VCP)": [new_rule("atr_contract", x=0.80), new_rule("range_tight", n=15, pct=12.0), new_rule("breakout_n", n=15),
+                                     new_rule("vol_mult", x=1.5), new_rule("rs_min", x=75), new_rule("close_above_ma", n=50),
+                                     new_rule("close_above_ma", kind="SMA", n=200), new_rule("turnover_min", x=5.0)],
+    "Start from nothing": [],
+}
+
+
+def rule_mask(p: dict, rule: dict, state=None) -> np.ndarray:
     with np.errstate(invalid="ignore", divide="ignore"):
-        liquid = (c >= MIN_PRICE) & (p["turn_cr"] >= min_turn)
-        trend200 = np.where(np.isnan(s200), True, c > s200)
-        volok = lambda m: v >= m * p["vavg50"]
-        ext = (c / e21 - 1) * 100
-        if setup == "Breakout":
-            ph = qd.prior_high(p, int(prm["lookback"]))
-            sig = (c > ph) & volok(prm["vol_mult"]) & (rs >= prm["rs_min"]) & (c > e50) & trend200 & (ext <= prm["ext_max"])
-        elif setup == "Pullback to 21 EMA":
-            touch = qd.roll_min((l / e21).astype(np.float64), 3) <= 1 + prm["touch"] / 100
-            up = (e21 > e50) & np.where(np.isnan(s200), True, e50 > s200)
-            near = c >= p["hh52"] * (1 - prm["max_off_high"] / 100)
-            sig = touch & up & near & (rs >= prm["rs_min"]) & (c > e21) & (c > o) & (c > qd.shift(h, 1))
-        elif setup == "52-week high":
-            prior52 = qd.prior_high(p, 252)
-            sig = (h >= prior52) & (c > e50) & volok(prm["vol_mult"]) & (rs >= prm["rs_min"]) & (ext <= prm["ext_max"])
-        elif setup == "Volatility contraction (VCP)":
-            ph15 = qd.prior_high(p, 15)
-            k = "pl15"
-            if k not in p:
-                p[k] = np.asarray(qd.shift(qd.roll_min(p["l"].astype(np.float64), 15), 1), dtype=np.float32)
-            tight = (ph15 - p[k]) / c * 100 <= prm["base_max"]
-            contr = qd.shift((p["atr14"] / p["atr50"]).astype(np.float64), 1) <= prm["contraction"]
-            sig = (c > ph15) & tight & contr & volok(prm["vol_mult"]) & (rs >= prm["rs_min"]) & (c > e50) & trend200
-        else:
-            raise ValueError(setup)
-        sig = sig & liquid & ~np.isnan(c)
-    sig[:252] = False                     # warm-up: 52-week and 200-day measures need a year
+        m = RULES[rule["type"]][3](p, rule, state)
+    return np.asarray(m, dtype=bool)
+
+
+def signals(p: dict, rules: list, state=None, cols=None, masks=None) -> np.ndarray:
+    """Boolean (T, N): every condition true at that day's close. cols: indices of the stocks to trade (None = all)."""
+    sig = ~np.isnan(p["c"])
+    for i, r in enumerate(rules):
+        sig &= masks[i] if masks is not None else rule_mask(p, r, state)
+    sig[:WARMUP] = False                      # 52-week and 200-day measures need a year
+    if cols is not None:
+        keep = np.zeros(sig.shape[1], dtype=bool)
+        keep[list(cols)] = True
+        sig[:, ~keep] = False
     return sig
 
 
 # ═════════════════════════ trades (each signal on its own) ═════════════════════════
+EXIT_DEFAULT = {"entry": "Next day's open", "stop": "Signal-day low", "stop_n": 5, "stop_atr": 1.5, "stop_pct": 7.0, "max_risk": 10.0,
+                "trail_kind": "EMA", "trail_n": 21, "target_r": 0.0, "max_days": 40, "breakeven_r": 0.0, "gap_max": 4.0}
+ENTRIES = ["Next day's open", "Next day, only above the signal day's high"]
+STOPS = ["Signal-day low", "Lowest low of the last N days", "ATR multiple", "Percent"]
+SUSPECT_DOWN, SUSPECT_UP = -0.35, 0.50
+
+
 def _ffill(a):
     a = a.copy()
     for i in range(1, len(a)):
@@ -110,36 +228,43 @@ def make_trades(p: dict, sig: np.ndarray, ex: dict, cost_pct: float = COST_DEFAU
     """Simulate every signal as an independent trade (one open trade per stock at a time)."""
     O, H, L, C = p["o"], p["h"], p["l"], p["c"]
     T, N = C.shape
-    trail = int(ex.get("trail") or 0)
-    ema_t = p.get(f"ema{trail}") if trail else None
-    if trail and ema_t is None:
-        ema_t = p[f"ema{trail}"] = np.asarray(qd.ema(C.astype(np.float64), trail), dtype=np.float32)
+    trail = int(ex.get("trail_n") or 0)
+    ema_t = ma(p, ex.get("trail_kind", "EMA"), trail) if trail else None
     cost = cost_pct / 100.0
     gap_max = ex.get("gap_max", 4.0) / 100.0
     max_days = int(ex.get("max_days") or 60)
     tgt_r = float(ex.get("target_r") or 0)
     be_r = float(ex.get("breakeven_r") or 0)
     max_risk = ex.get("max_risk", 10.0) / 100.0
-    rows = []
-    cols = {}
+    buy_stop = ex.get("entry", ENTRIES[0]) == ENTRIES[1]
+    stop_low = low_n(p, ex.get("stop_n", 5)) if ex["stop"] == STOPS[1] else None
+    rows, dropped = [], 0
     for j in np.flatnonzero(sig.any(0)):
         idxs = np.flatnonzero(sig[:, j])
-        if j not in cols:
-            cols[j] = (_ffill(O[:, j].astype(np.float64)), _ffill(H[:, j].astype(np.float64)),
-                       _ffill(L[:, j].astype(np.float64)), _ffill(C[:, j].astype(np.float64)))
-        o, h, l, c = cols[j]
+        o, h, l, c = (_ffill(x[:, j].astype(np.float64)) for x in (O, H, L, C))
+        with np.errstate(invalid="ignore", divide="ignore"):
+            rr = c[1:] / c[:-1] - 1
+        sus = np.r_[0, np.cumsum((rr < SUSPECT_DOWN) | (rr > SUSPECT_UP))]
         et = ema_t[:, j].astype(np.float64) if trail else None
         busy_until = -1
         for t in idxs:
             ei = t + 1
             if ei >= T or ei <= busy_until or not np.isfinite(O[ei, j]):
                 continue
-            entry = o[ei]
-            if entry > c[t] * (1 + gap_max):
+            if o[ei] > c[t] * (1 + gap_max):
                 continue                                           # chasing a big gap: skip
-            if ex["stop"] == "Signal-day low":
+            if buy_stop:
+                trig = h[t]
+                if not h[ei] > trig:
+                    continue                                       # never traded above the signal day's high
+                entry = max(o[ei], trig)
+            else:
+                entry = o[ei]
+            if ex["stop"] == STOPS[0]:
                 stop = l[t]
-            elif ex["stop"] == "ATR multiple":
+            elif ex["stop"] == STOPS[1]:
+                stop = float(stop_low[t, j])
+            elif ex["stop"] == STOPS[2]:
                 stop = entry - ex.get("stop_atr", 1.5) * float(p["atr14"][t, j])
             else:
                 stop = entry * (1 - ex.get("stop_pct", 7.0) / 100)
@@ -174,37 +299,46 @@ def make_trades(p: dict, sig: np.ndarray, ex: dict, cost_pct: float = COST_DEFAU
                 tr = np.flatnonzero(cl < et[ei:end + 1])
                 if len(tr):
                     k = int(tr[0])
+                    nm = f"Close below {trail} {ex.get('trail_kind', 'EMA')}"
                     if ei + k + 1 < T:
-                        cand.append((k + 1, 0, o[ei + k + 1], f"Close below {trail} EMA"))
+                        cand.append((k + 1, 0, o[ei + k + 1], nm))
                     else:
-                        cand.append((k, 3, cl[k], f"Close below {trail} EMA"))
+                        cand.append((k, 3, cl[k], nm))
             cand.append((n - 1, 4, cl[n - 1], "Time stop" if end < T - 1 else "Open at end"))
             k, pri, px, why = min(cand, key=lambda x: (x[0], x[1]))
             xi = ei + k
+            if sus[xi] - sus[t] > 0:
+                dropped += 1                                       # a suspect candle inside the trade: do not trust it
+                busy_until = xi
+                continue
             last = xi - 1 if (pri == 0 and xi > ei) else xi                # exited at the open: that day's range never happened to us
             seg_lo, seg_hi = l[ei:last + 1], h[ei:last + 1]
             r_g = (px - entry) / risk
             mae = (seg_lo.min() - entry) / risk if len(seg_lo) else min(0.0, r_g)
             mfe = (seg_hi.max() - entry) / risk if len(seg_hi) else max(0.0, r_g)
-            if "top" in why:                                               # stopped: the worst we lived through is the fill
+            if "top" in why:
                 mae = max(mae, r_g)
             mae, mfe = min(mae, r_g, 0.0), max(mfe, r_g, 0.0)
             r_net = (px - entry - cost * entry) / risk
             rows.append((j, t, ei, xi, entry, stop, px, why, r_g, r_net, (px / entry - 1 - cost) * 100, xi - ei + 1, mae, mfe,
-                         float(p["rs"][t, j]), float((C[t, j] / p["ema21"][t, j] - 1) * 100), risk / entry * 100))
+                         float(p["rs"][t, j]), float((C[t, j] / p["ema21"][t, j] - 1) * 100), risk / entry * 100, pri == 0))
             busy_until = xi
     df = pd.DataFrame(rows, columns=["j", "sig_i", "entry_i", "exit_i", "entry", "stop", "exit", "reason", "r_gross", "r", "ret_pct",
-                                     "days", "mae", "mfe", "rs", "ext21", "risk_pct"])
+                                     "days", "mae", "mfe", "rs", "ext21", "risk_pct", "exit_open"])
     if not df.empty:
         df["symbol"] = [p["symbols"][j] for j in df["j"]]
         df["sector"] = [p["industry"][j] for j in df["j"]]
         df["entry_date"] = p["dates"][df["entry_i"].to_numpy()]
         df["exit_date"] = p["dates"][df["exit_i"].to_numpy()]
         df["open_at_end"] = df["reason"] == "Open at end"
+    df.attrs["dropped_suspect"] = dropped
     return df
 
 
 # ═════════════════════════ portfolio ═════════════════════════
+EXPOSURE = {"Confirmed uptrend": 1.0, "Under pressure": 0.5, "Rally attempt": 0.25, "Correction": 0.0}
+
+
 @dataclass
 class Book:
     capital: float = 1_000_000.0
@@ -216,39 +350,43 @@ class Book:
 
 def portfolio(p: dict, trades: pd.DataFrame, book: Book, start_i: int, end_i: int | None = None,
               regime_state: np.ndarray | None = None) -> tuple[pd.Series, pd.DataFrame]:
-    """Day-by-day book. Returns (equity curve, trades actually taken with quantity and ₹ P&L)."""
-    from regime_engine import EXPOSURE
+    """Day-by-day book. Returns (equity curve, trades actually taken with quantity and ₹ P&L).
+    Order inside a day: exits filled at the open → new entries → exits that happen during the day or at the close."""
     T = len(p["dates"])
     end_i = T - 1 if end_i is None else end_i
     C = p["c"]
     cash = float(book.capital)
-    open_pos = []                                                     # dicts
-    taken = []
+    open_pos, taken, last_px = [], [], {}
     eq = np.full(T, np.nan)
-    last_px = {}
     if trades is None or trades.empty:
-        tr = pd.DataFrame(columns=["entry_i"])
+        by_day = {}
     else:
         tr = trades[(trades["entry_i"] >= start_i) & (trades["entry_i"] <= end_i)].sort_values(["entry_i", "rs"], ascending=[True, False])
-    by_day = {k: g for k, g in tr.groupby("entry_i")} if len(tr) else {}
+        by_day = {k: g for k, g in tr.groupby("entry_i")}
     equity = cash
+
+    def close_out(ps):
+        nonlocal cash
+        fee = ps["qty"] * ps["entry"] * ps["cost"]
+        cash += ps["qty"] * ps["exit"] - fee
+        ps["pnl"] = ps["qty"] * (ps["exit"] - ps["entry"]) - fee
+        taken.append(ps)
+
     for d in range(start_i, end_i + 1):
         still = []
-        for ps in open_pos:
-            if ps["exit_i"] == d:
-                cash += ps["qty"] * ps["exit"] - ps["qty"] * ps["entry"] * ps["cost"]
-                ps["pnl"] = ps["qty"] * (ps["exit"] - ps["entry"]) - ps["qty"] * ps["entry"] * ps["cost"]
-                taken.append(ps)
+        for ps in open_pos:                                           # 1. exits at this morning's open
+            if ps["exit_i"] == d and ps["exit_open"]:
+                close_out(ps)
             else:
                 still.append(ps)
         open_pos = still
         g = by_day.get(d)
-        if g is not None:
+        if g is not None:                                             # 2. new entries
             scale = 1.0
             if regime_state is not None and book.regime_mode != "Off":
                 stt = regime_state[d - 1] if d - 1 >= 0 else None
                 if book.regime_mode == "Skip corrections":
-                    scale = 0.0 if stt in ("Correction",) else 1.0
+                    scale = 0.0 if stt == "Correction" else 1.0
                 else:
                     scale = EXPOSURE.get(stt, 1.0) if stt else 1.0
             slots = book.max_pos - len(open_pos)
@@ -258,25 +396,20 @@ def portfolio(p: dict, trades: pd.DataFrame, book: Book, start_i: int, end_i: in
                     break
                 if r.j in held:
                     continue
-                risk_amt = equity * book.risk_pct / 100 * scale
-                qty = math.floor(risk_amt / max(1e-9, r.entry - r.stop))
+                qty = math.floor(equity * book.risk_pct / 100 * scale / max(1e-9, r.entry - r.stop))
                 qty = min(qty, math.floor(equity * book.max_pos_pct / 100 / r.entry), math.floor(cash / r.entry))
                 if qty < 1:
                     continue
-                c_rt = (r.r_gross - r.r) * (r.entry - r.stop) / r.entry          # cost fraction used for this trade
-                cash -= qty * r.entry
                 ps = r._asdict()
-                ps.update(qty=qty, cost=c_rt, value=qty * r.entry, equity_at_entry=equity)
+                ps.update(qty=qty, cost=(r.r_gross - r.r) * (r.entry - r.stop) / r.entry, value=qty * r.entry, equity_at_entry=equity)
+                cash -= qty * r.entry
                 open_pos.append(ps)
                 held.add(r.j)
                 slots -= 1
-        # same-day exits for positions opened today
         still = []
-        for ps in open_pos:
-            if ps["exit_i"] == d and ps["entry_i"] == d:
-                cash += ps["qty"] * ps["exit"] - ps["qty"] * ps["entry"] * ps["cost"]
-                ps["pnl"] = ps["qty"] * (ps["exit"] - ps["entry"]) - ps["qty"] * ps["entry"] * ps["cost"]
-                taken.append(ps)
+        for ps in open_pos:                                           # 3. stops, targets and time stops during the day
+            if ps["exit_i"] == d and (not ps["exit_open"] or ps["entry_i"] == d):
+                close_out(ps)
             else:
                 still.append(ps)
         open_pos = still
@@ -409,41 +542,103 @@ def add_buckets(tr: pd.DataFrame, regime_state: np.ndarray | None = None) -> pd.
 
 
 # ═════════════════════════ runs ═════════════════════════
+def _start_i(p, start_year=None):
+    s = WARMUP
+    if start_year:
+        s = max(s, int(np.searchsorted(p["dates"], pd.Timestamp(f"{start_year}-01-01"))))
+    return s
+
+
+def run_single(p, rules, ex, book, cost_pct, state=None, cols=None, start_year=None):
+    """Your exact rules, no tuning."""
+    sig = signals(p, rules, state, cols)
+    tr = make_trades(p, sig, ex, cost_pct)
+    dropped = tr.attrs.get("dropped_suspect", 0)
+    s0 = _start_i(p, start_year)
+    tr = tr[tr["entry_i"] >= s0] if not tr.empty else tr
+    curve, taken = portfolio(p, tr, book, s0, None, state)
+    return {"mode": "single", "signals": int(sig[s0:].sum()), "trades": tr, "curve": curve, "taken": taken, "start_i": s0,
+            "variants": 1, "dropped": dropped}
+
+
+def halves(tr: pd.DataFrame) -> dict:
+    """First half vs second half of the test period: an edge that exists in only one half is fragile."""
+    if tr is None or len(tr) < 20:
+        return {}
+    mid = (tr["entry_i"].min() + tr["entry_i"].max()) // 2
+    a, b = tr[tr["entry_i"] <= mid]["r"], tr[tr["entry_i"] > mid]["r"]
+    return {"a_n": len(a), "a_exp": float(a.mean()) if len(a) else np.nan, "b_n": len(b), "b_exp": float(b.mean()) if len(b) else np.nan,
+            "mid": mid}
+
+
+def sensitivity(p, rules, ex, cost_pct, state=None, cols=None, progress=None) -> pd.DataFrame:
+    """Move each numeric setting of your rules one step down and up (about 25%), one at a time, and re-test.
+    A robust strategy stays positive; one that flips when a number moves a little was fitted to noise."""
+    masks = [rule_mask(p, r, state) for r in rules]
+    jobs = []
+    for i, r in enumerate(rules):
+        for spec in RULES[r["type"]][2]:
+            if isinstance(spec[2], (list, str)):
+                continue
+            key, label, _, lo, hi, step = spec
+            cur = r[key]
+            delta = max(step, abs(cur) * 0.25)
+            vals = []
+            for v in (cur - delta, cur + delta):
+                v = min(hi, max(lo, round(round(v / step) * step, 6)))
+                v = int(v) if isinstance(spec[2], int) else float(v)
+                vals.append(v if v != cur else None)
+            jobs.append((i, key, label, cur, vals))
+    rows = []
+    for k, (i, key, label, cur, vals) in enumerate(jobs):
+        row = {"rule": RULES[rules[i]["type"]][1], "setting": label, "yours": cur}
+        for side, v in zip(("lower", "higher"), vals):
+            if v is None:
+                row[side], row[f"{side}_exp"], row[f"{side}_n"] = None, np.nan, 0
+                continue
+            alt = dict(rules[i]); alt[key] = v
+            ms = list(masks); ms[i] = rule_mask(p, alt, state)
+            tr = make_trades(p, signals(p, rules, state, cols, ms), ex, cost_pct)
+            tr = tr[tr["entry_i"] >= WARMUP] if not tr.empty else tr
+            row[side], row[f"{side}_exp"], row[f"{side}_n"] = v, (float(tr["r"].mean()) if len(tr) else np.nan), len(tr)
+        rows.append(row)
+        if progress:
+            progress((k + 1) / max(1, len(jobs)), f"Checked nearby setting {k + 1} of {len(jobs)}")
+    return pd.DataFrame(rows)
+
+
 def combos(grid: dict) -> list:
     keys = list(grid)
     return [dict(zip(keys, vals)) for vals in itertools.product(*[grid[k] for k in keys])]
 
 
-def run_single(p, setup, prm, ex, book, cost_pct, regime_state=None, start_year=None, min_turn=MIN_TURN_CR):
-    sig = signals(p, setup, prm, min_turn)
-    tr = make_trades(p, sig, ex, cost_pct)
-    start_i = 252
-    if start_year:
-        start_i = max(start_i, int(np.searchsorted(p["dates"], pd.Timestamp(f"{start_year}-01-01"))))
-    tr = tr[tr["entry_i"] >= start_i] if not tr.empty else tr
-    curve, taken = portfolio(p, tr, book, start_i, None, regime_state)
-    return {"mode": "single", "signals": int(sig.sum()), "trades": tr, "curve": curve, "taken": taken, "start_i": start_i,
-            "params": dict(prm), "variants": 1}
+def apply_combo(rules, ex, cmb):
+    """grid keys: (rule index, param) for a rule setting, or ('exit', key) for an exit setting."""
+    rules2, ex2 = [dict(r) for r in rules], dict(ex)
+    for (a, b), v in cmb.items():
+        if a == "exit":
+            ex2[b] = v
+        else:
+            rules2[a][b] = v
+    return rules2, ex2
 
 
-def run_walk_forward(p, setup, prm, ex, book, cost_pct, grid: dict, train_years=3, test_months=6, regime_state=None,
-                     min_train_trades=20, progress=None, min_turn=MIN_TURN_CR):
-    """Tune on train years, trade the next unseen months, roll forward. Grid keys may include 'trail'."""
+def run_walk_forward(p, rules, ex, book, cost_pct, grid: dict, train_years=3, test_months=6, state=None, cols=None,
+                     min_train_trades=20, progress=None):
+    """Optional: try the alternative values YOU listed on each block of past years, then trade the best on the next unseen months.
+    If no alternative made money in the training years, that window is not traded."""
     T = len(p["dates"])
     allc = combos(grid)
-    exit_keys = {"trail", "target_r", "max_days", "breakeven_r"}
-    cache_sig, lists = {}, []
+    lists, dropped = [], 0
     for k, cmb in enumerate(allc):
-        ep = {**prm, **{a: b for a, b in cmb.items() if a not in exit_keys}}
-        xx = {**ex, **{a: b for a, b in cmb.items() if a in exit_keys}}
-        key = tuple(sorted((a, b) for a, b in ep.items()))
-        if key not in cache_sig:
-            cache_sig[key] = signals(p, setup, ep, min_turn)
-        lists.append(make_trades(p, cache_sig[key], xx, cost_pct))
+        r2, x2 = apply_combo(rules, ex, cmb)
+        tr = make_trades(p, signals(p, r2, state, cols), x2, cost_pct)
+        dropped = max(dropped, tr.attrs.get("dropped_suspect", 0))
+        lists.append(tr)
         if progress:
-            progress((k + 1) / len(allc) * 0.85, f"Tested variant {k + 1} of {len(allc)}")
+            progress((k + 1) / len(allc) * 0.9, f"Tested variant {k + 1} of {len(allc)}")
     train, test = int(train_years * 252), int(test_months * 21)
-    s0 = 252
+    s0 = WARMUP
     windows, oos = [], []
     ts = s0 + train
     while ts < T - 5:
@@ -457,49 +652,45 @@ def run_walk_forward(p, setup, prm, ex, book, cost_pct, grid: dict, train_years=
             if n < min_train_trades:
                 continue
             e = float(tr.loc[m, "r"].mean())
-            obj = e * math.sqrt(n)
-            if obj > best_obj:
-                best, best_obj, best_is = k, obj, (e, n)
-        if best is None:
-            windows.append({"train_from": p["dates"][ts - train], "test_from": p["dates"][ts], "test_to": p["dates"][te], "chosen": None,
-                            "is_exp": np.nan, "is_n": 0, "oos_exp": np.nan, "oos_n": 0})
-        else:
+            if e * math.sqrt(n) > best_obj:
+                best, best_obj, best_is = k, e * math.sqrt(n), (e, n)
+        w = {"train_from": p["dates"][ts - train], "test_from": p["dates"][ts], "test_to": p["dates"][te], "chosen": None,
+             "is_exp": np.nan, "is_n": 0, "oos_exp": np.nan, "oos_n": 0, "note": "too few trades in the training years"}
+        if best is not None and best_is[0] <= 0:
+            w.update(is_exp=best_is[0], is_n=best_is[1], note="no variant made money in the training years: stood aside")
+        elif best is not None:
             tr = lists[best]
-            mo = (tr["entry_i"] >= ts) & (tr["entry_i"] <= te)
-            sel = tr[mo]
+            sel = tr[(tr["entry_i"] >= ts) & (tr["entry_i"] <= te)]
             oos.append(sel.assign(window=len(windows)))
-            windows.append({"train_from": p["dates"][ts - train], "test_from": p["dates"][ts], "test_to": p["dates"][te], "chosen": allc[best],
-                            "is_exp": best_is[0], "is_n": best_is[1], "oos_exp": float(sel["r"].mean()) if len(sel) else np.nan, "oos_n": len(sel)})
+            w.update(chosen=allc[best], is_exp=best_is[0], is_n=best_is[1], oos_exp=float(sel["r"].mean()) if len(sel) else np.nan,
+                     oos_n=len(sel), note="")
+        windows.append(w)
         ts = te + 1
-    oos_tr = pd.concat(oos, ignore_index=True) if oos else pd.DataFrame(columns=lists[0].columns if lists else [])
+    cols_ = lists[0].columns if lists else []
+    oos_tr = pd.concat(oos, ignore_index=True) if oos else pd.DataFrame(columns=cols_)
     start_i = s0 + train
-    if progress:
-        progress(0.92, "Simulating the out-of-sample portfolio")
-    curve, taken = portfolio(p, oos_tr, book, start_i, None, regime_state)
+    curve, taken = portfolio(p, oos_tr, book, start_i, None, state)
     full = []
     for cmb, tr in zip(allc, lists):
         tr2 = tr[tr["entry_i"] >= s0] if not tr.empty else tr
-        st_ = trade_stats(tr2["r"]) if len(tr2) else {"n": 0}
-        full.append({**cmb, "trades": st_.get("n", 0), "exp": st_.get("exp", np.nan), "win": st_.get("win", np.nan), "pf": st_.get("pf", np.nan)})
+        full.append({"combo": cmb, "trades": len(tr2), "exp": float(tr2["r"].mean()) if len(tr2) else np.nan,
+                     "win": float((tr2["r"] > 0).mean() * 100) if len(tr2) else np.nan})
     wdf = pd.DataFrame(windows)
-    is_exp = float(np.nanmean(wdf["is_exp"])) if len(wdf) else np.nan
+    traded = wdf[wdf["chosen"].notna()] if len(wdf) else wdf
+    is_exp = float(traded["is_exp"].mean()) if len(traded) else np.nan
     oos_exp = float(oos_tr["r"].mean()) if len(oos_tr) else np.nan
-    return {"mode": "walk", "trades": oos_tr, "curve": curve, "taken": taken, "start_i": start_i, "windows": wdf,
-            "variants": len(allc), "grid_results": pd.DataFrame(full), "is_exp": is_exp, "oos_exp": oos_exp,
-            "wfe": (oos_exp / is_exp) if is_exp and np.isfinite(is_exp) and is_exp > 0 else np.nan, "params": dict(prm)}
+    return {"mode": "walk", "trades": oos_tr, "curve": curve, "taken": taken, "start_i": start_i, "windows": wdf, "variants": len(allc),
+            "grid_results": full, "is_exp": is_exp, "oos_exp": oos_exp, "dropped": dropped,
+            "wfe": (oos_exp / is_exp) if np.isfinite(is_exp) and is_exp > 0 and np.isfinite(oos_exp) else np.nan}
 
 
-def sensitivity(p, setup, prm, ex, cost_pct, axes: dict, min_turn=MIN_TURN_CR) -> pd.DataFrame:
-    """Expectancy on a small grid around the chosen settings (is it a plateau or a lucky peak?)."""
-    rows = []
-    exit_keys = {"trail", "target_r", "max_days", "breakeven_r"}
-    for cmb in combos(axes):
-        ep = {**prm, **{a: b for a, b in cmb.items() if a not in exit_keys}}
-        xx = {**ex, **{a: b for a, b in cmb.items() if a in exit_keys}}
-        tr = make_trades(p, signals(p, setup, ep, min_turn), xx, cost_pct)
-        tr = tr[tr["entry_i"] >= 252] if not tr.empty else tr
-        rows.append({**cmb, "trades": len(tr), "exp": float(tr["r"].mean()) if len(tr) else np.nan})
-    return pd.DataFrame(rows)
+def per_stock(tr: pd.DataFrame) -> pd.DataFrame:
+    if tr is None or tr.empty:
+        return pd.DataFrame()
+    g = tr.groupby("symbol")["r"]
+    out = pd.DataFrame({"trades": g.size(), "win": g.apply(lambda s: (s > 0).mean() * 100), "exp": g.mean(), "total": g.sum(),
+                        "best": g.max(), "worst": g.min()})
+    return out.sort_values("total", ascending=False)
 
 
 def verdict(res: dict) -> tuple[str, str, str]:
@@ -509,17 +700,19 @@ def verdict(res: dict) -> tuple[str, str, str]:
     n = st_.get("n", 0)
     if n < 30:
         return ("warn", "Not enough trades to judge",
-                f"Only {n} trades. You need roughly 100 before win rate and expectancy settle. Widen the universe, relax a filter or test more years.")
+                f"Only {n} trades. You need roughly 100 before win rate and expectancy settle, so treat every number below as a rough hint. "
+                "Test more stocks or more years, or relax a condition.")
     e, t = st_["exp"], st_.get("t", 0)
     wf = res.get("mode") == "walk"
     wfe = res.get("wfe", np.nan)
+    small = " With under 100 trades the estimate is still loose." if n < 100 else ""
     if e > 0.15 and t >= 2 and (not wf or (np.isfinite(wfe) and wfe >= 0.5)):
-        return ("good", "Edge holds" + (" on unseen data" if wf else ""),
+        return ("good", "Edge holds" + (" on unseen data" if wf else " in this test"),
                 f"{e:+.2f}R per trade over {n} trades (t = {t:.1f})" + (f", walk-forward efficiency {wfe:.2f}." if wf else ".")
-                + " Statistically this is unlikely to be luck. Size it with the Monte Carlo drawdown in mind.")
+                + " Statistically this is unlikely to be luck." + small + " Check the first-half / second-half and nearby-settings tables before trusting it.")
     if e > 0 and t >= 1:
         return ("warn", "Small or uncertain edge",
                 f"{e:+.2f}R per trade over {n} trades (t = {t:.1f})" + (f", walk-forward efficiency {wfe:.2f}" if wf and np.isfinite(wfe) else "")
-                + ". Positive but not convincing. Check the regime split: it may work only in uptrends.")
+                + ". Positive but not convincing." + small + " Check the regime split: it may work only in uptrends.")
     return ("bad", "No reliable edge",
-            f"{e:+.2f}R per trade over {n} trades after costs. Trading this rule as it stands would most likely lose money or tread water.")
+            f"{e:+.2f}R per trade over {n} trades after costs. Trading these rules as they stand would most likely lose money or tread water.")
