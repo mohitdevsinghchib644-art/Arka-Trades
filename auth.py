@@ -113,19 +113,14 @@ _LOGO_FILES = ("arka_icon.png", "assets/arka_icon.png", "icon.png", "arka_logo.p
 _WORDMARK_FILES = ("arka_logo.png", "assets/arka_logo.png", "logo.png", "assets/logo.png")
 
 
+# The Arka mark (orange square, black A with an underline), built in so the icon is right even without arka_icon.png.
+_MARK_PNG = "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"
+
+
 def _default_mark(size: int):
-    """Fallback app icon: ARKA / TRADES in white on black."""
-    from PIL import Image, ImageDraw, ImageFont
-    S = 512
-    im = Image.new("RGBA", (S, S), (0, 0, 0, 255))
-    d = ImageDraw.Draw(im)
-    for txt, px, y in (("ARKA", 132, 190), ("TRADES", 54, 318)):
-        try:
-            f = ImageFont.load_default(size=px)
-        except Exception:
-            f = ImageFont.load_default()
-        w = d.textlength(txt, font=f)
-        d.text(((S - w) / 2, y - px / 2), txt, font=f, fill=(255, 255, 255, 255))
+    """Built-in app icon: the Arka mark."""
+    from PIL import Image
+    im = Image.open(io.BytesIO(base64.b64decode(_MARK_PNG))).convert("RGBA")
     return im.resize((size, size), Image.LANCZOS)
 
 
@@ -146,8 +141,30 @@ def _logo_source(names=_LOGO_FILES):
 _ICON_CACHE: dict = {}
 
 
+def _logo_stamp() -> tuple:
+    """Changes whenever a logo file is added, replaced or removed, so a new logo shows without restarting the app."""
+    out = []
+    here = Path(__file__).resolve().parent
+    for name in _LOGO_FILES + _WORDMARK_FILES:
+        for base in (Path.cwd(), here):
+            p = base / name
+            try:
+                out.append((str(p), p.stat().st_mtime_ns))
+            except OSError:
+                pass
+    return tuple(out)
+
+
+def _fresh_cache():
+    stamp = _logo_stamp()
+    if _ICON_CACHE.get("_stamp") != stamp:
+        _ICON_CACHE.clear()
+        _ICON_CACHE["_stamp"] = stamp
+
+
 def logo_image(size: int):
     """Square RGBA logo of `size` px: your file centred on the dark background (transparency filled), or the Arka mark."""
+    _fresh_cache()
     if size in _ICON_CACHE:
         return _ICON_CACHE[size]
     from PIL import Image
@@ -177,6 +194,7 @@ def wordmark_html(height: int = 18) -> str:
         src, _ = _logo_source(_WORDMARK_FILES)
     except Exception:
         src = None
+    _fresh_cache()
     if src is not None and src.width > src.height * 2:            # a real wordmark (wide), not a square icon
         if "wm" not in _ICON_CACHE:
             im = src.copy()
