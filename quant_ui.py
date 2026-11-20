@@ -79,6 +79,8 @@ def css():
     .q-hm td{{text-align:center !important;font-weight:600}}
     .q-two{{display:grid;grid-template-columns:1fr 1fr;gap:12px}} @media (max-width:760px){{.q-two{{grid-template-columns:1fr}}}}
     .q-three{{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}} @media (max-width:980px){{.q-three{{grid-template-columns:1fr}}}}
+    .q-rule{{font:600 13px {SANS};color:var(--tx,{TX});margin:10px 0 2px}} .q-rule em{{font-style:normal;font-weight:500;color:var(--tx3,{TX3});margin-right:8px}}
+    .q-step{{font:650 15px {SANS};color:var(--tx,{TX});margin:2px 0 6px}} .q-step em{{font-style:normal;color:{AMBER};margin-right:8px}}
     div[class*="st-key-q_ctrl"]{{background:var(--s1,#0E0E10);border:1px solid var(--line,#1E1E21);border-radius:16px;padding:12px 14px 4px;margin-bottom:12px}}
     </style>""", unsafe_allow_html=True)
 
@@ -137,7 +139,8 @@ def _fmt_tick(v):
     return f"{v:.1f}".rstrip("0").rstrip(".") if a >= 1 or v == 0 else f"{v:.2f}"
 
 
-def line_chart(dates, series: list, height=240, bands=None, hlines=None, y_suffix="", log=False, area_first=False, w=None) -> str:
+def line_chart(dates, series: list, height=240, bands=None, hlines=None, y_suffix="", log=False, area_first=False, w=None, markers=None) -> str:
+    # markers: [(index, value, colour, "up" | "down")] small triangles, e.g. entries and exits
     """series: [(values, colour, width, label)]. bands: [(i0, i1, colour)] shaded columns. hlines: [(y, colour, label)]."""
     n = len(dates)
     w = w or (430 if phone() else 1000)            # phones: a narrower canvas keeps axis text readable
@@ -206,6 +209,11 @@ def line_chart(dates, series: list, height=240, bands=None, hlines=None, y_suffi
                 base = H - pad_b
                 parts.append(f'<polygon points="{sg[0].split(",")[0]},{base} {" ".join(sg)} {sg[-1].split(",")[0]},{base}" fill="{col}" opacity=".10"/>')
             parts.append(f'<polyline points="{" ".join(sg)}" fill="none" stroke="{col}" stroke-width="{wd}" stroke-linejoin="round" stroke-linecap="round"/>')
+    for i, v, col, shape in markers or []:
+        if 0 <= i < n and np.isfinite(v):
+            x, y = X(i), Y(v)
+            pts = f"{x - 5:.1f},{y + 13:.1f} {x + 5:.1f},{y + 13:.1f} {x:.1f},{y + 4:.1f}" if shape == "up" else f"{x - 5:.1f},{y - 13:.1f} {x + 5:.1f},{y - 13:.1f} {x:.1f},{y - 4:.1f}"
+            parts.append(f'<polygon points="{pts}" fill="{col}" stroke="#0B0B0D" stroke-width="0.8"/>')
     return f'<svg viewBox="0 0 {W} {H}" width="100%" preserveAspectRatio="none" style="display:block;height:{H}px">{"".join(parts)}</svg>'
 
 
