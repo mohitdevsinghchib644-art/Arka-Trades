@@ -1,5 +1,9 @@
 """
-Arka Trades — Market Terminal v9.2
+Arka Trades — Market Terminal v9.3
+
+v9.3: two new pages. Regime (market regime and breadth dashboard) and Backtest (walk-forward backtester and expectancy
+      engine). Desktop tabs, phone "More" menu and the command bar (REG, BT) open them. Needs quant_data.py, quant_ui.py,
+      regime_engine.py, regime_page.py, backtest_engine.py and backtest_page.py next to app.py.
 
 v9.2: premium buttons everywhere: soft depth, press-in on tap, glow on primary actions, a tap ripple and a light haptic
       tick on Android (from auth.py). Respects "reduce motion".
@@ -644,16 +648,16 @@ IS_ADMIN = st.session_state.get("is_admin", False)       # the bridge may have j
 
 
 # ═══════════════════════════════ TERMINAL SHELL ═══════════════════════════════
-NAV = [("Home", "home"), ("Money flow", "flow"), ("Watchlist", "watchlist"), ("Portfolio", "portfolio"), ("News", "news"),
-       ("Screener", "smart_scan"), ("Research", "research"), ("Arka AI", "analysis"), ("Account", "account")]
+NAV = [("Home", "home"), ("Regime", "regime"), ("Money flow", "flow"), ("Watchlist", "watchlist"), ("Portfolio", "portfolio"), ("News", "news"),
+       ("Screener", "smart_scan"), ("Backtest", "backtest"), ("Research", "research"), ("Arka AI", "analysis"), ("Account", "account")]
 NAV_LABEL = {t: l for l, t in NAV}
 LEGACY_PAGES = {"profile": "account", "settings": "account", "contact": "account"}
 
 FUNCTION_CODES = {"HOME": "home", "MAIN": "home", "MF": "flow", "FLOW": "flow", "WL": "watchlist", "PORT": "portfolio",
                   "NEWS": "news", "N": "news", "EQS": "smart_scan", "SCRN": "smart_scan", "RES": "research", "AI": "analysis",
-                  "ACCT": "account", "SET": "account"}
+                  "ACCT": "account", "SET": "account", "REG": "regime", "MKT": "regime", "BT": "backtest", "BACK": "backtest"}
 FUNCTION_MENU = ["MF · Money flow", "RES · Research", "PORT · Portfolio", "WL · Watchlist", "NEWS · News", "EQS · Screener",
-                 "AI · Arka AI", "HOME · Market monitor", "ACCT · Account"]
+                 "AI · Arka AI", "REG · Market regime", "BT · Backtest lab", "HOME · Market monitor", "ACCT · Account"]
 TICKER_FUNCS = {"RES": "research", "AI": "analysis", "DES": "security", "GP": "security"}
 
 PAGE_META = {
@@ -666,6 +670,8 @@ PAGE_META = {
     "research": ("Research", "Financials, valuation, ownership, quant and filings for one company."),
     "analysis": ("Arka AI", "Chart analysis against your own trading rules."),
     "account": ("Account", "Profile, this device, display and data."),
+    "regime": ("Market regime", "Trend, breadth, distribution and volatility: how hard to press right now."),
+    "backtest": ("Backtest lab", "Walk-forward test of your setups on years of NSE data, with expectancy and drawdown odds."),
 }
 st.session_state.page = LEGACY_PAGES.get(st.session_state.page, st.session_state.page)
 if st.session_state.page not in PAGE_META and st.session_state.page != "security":
@@ -812,11 +818,13 @@ def _render_search():
                           placeholder="Search a stock and press Enter")
 
 
-TABS_DESKTOP = [("Home", "home"), ("Money flow", "flow"), ("Watchlist", "watchlist"), ("Portfolio", "portfolio"), ("News", "news"),
-                ("Screener", "smart_scan"), ("Research", "research"), ("Arka AI", "analysis"), ("Account", "account")]
+TABS_DESKTOP = [("Home", "home"), ("Regime", "regime"), ("Money flow", "flow"), ("Watchlist", "watchlist"), ("Portfolio", "portfolio"),
+                ("News", "news"), ("Screener", "smart_scan"), ("Backtest", "backtest"), ("Research", "research"), ("Arka AI", "analysis"),
+                ("Account", "account")]
 TABS_PHONE = [("Home", "home", ":material/home:"), ("Watchlist", "watchlist", ":material/bookmark:"),
               ("Portfolio", "portfolio", ":material/pie_chart:"), ("Research", "research", ":material/query_stats:")]
-MORE_PHONE = [("Money flow", "flow", ":material/swap_vert:"), ("News", "news", ":material/newspaper:"),
+MORE_PHONE = [("Market regime", "regime", ":material/monitor_heart:"), ("Backtest lab", "backtest", ":material/science:"),
+              ("Money flow", "flow", ":material/swap_vert:"), ("News", "news", ":material/newspaper:"),
               ("Screener", "smart_scan", ":material/filter_alt:"), ("Arka AI", "analysis", ":material/auto_awesome:"),
               ("Account", "account", ":material/person:")]
 
@@ -1114,6 +1122,10 @@ with center:
              on_open=_open_security, current_security=st.session_state.get("active_security") or None)
     elif pg == "flow":
         _run("money_flow", _load("money_flow", "render_money_flow"), on_open=_open_security)
+    elif pg == "regime":
+        _run("regime_page", _load("regime_page", "render_regime"), on_open=_open_security)
+    elif pg == "backtest":
+        _run("backtest_page", _load("backtest_page", "render_backtest"), on_open=_open_security)
     elif pg == "account":
         _page_account()
     _status_bar()
