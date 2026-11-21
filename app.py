@@ -74,7 +74,7 @@ except Exception:  # pragma: no cover
     create_client = None
 
 IST = timezone(timedelta(hours=5, minutes=30))
-APP_VERSION = "v9.7"
+APP_VERSION = "v9.8"
 
 
 def _secret(name: str, default=""):
@@ -1455,6 +1455,11 @@ def _page_account():
         st.radio("Layout", ["Auto", "Phone", "Desktop"], key="layout_pref", horizontal=True,
                  help="Auto picks the phone layout on screens narrower than 820 px.")
         st.toggle("Show the news column next to Home and stock pages (desktop)", key="show_news_rail")
+        st.markdown('<div class="ak-sec">Chart settings</div>', unsafe_allow_html=True)
+        st.caption("How every chart opens on this device: chart type, colours, moving averages, volume, RSI, MACD and levels. "
+                   "Changes save as you make them and apply the next time a chart opens. The gear on any chart opens the same settings.")
+        with st.expander("Open chart settings", expanded=False):
+            _run("chart_engine", _load("chart_engine", "render_chart_settings"))
         st.markdown('<div class="ak-sec">Data</div>', unsafe_allow_html=True)
         st.caption("Quotes refresh every 30–60 s while NSE is open and every 15 min when it is closed; fundamentals every 6 h.")
         if st.button("Clear cached market data", key="set_clear"):
