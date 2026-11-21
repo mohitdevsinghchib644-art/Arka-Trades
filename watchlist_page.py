@@ -1,5 +1,13 @@
 """
-Arka Trades — Watchlist (v4)
+Arka Trades — Watchlist (v5)
+
+v5: a calmer, roomier screen. Lists are pills; adding and importing sit in one tidy row; the three switches moved into
+an Options menu; six summary cards instead of eight; filters wrap instead of running off the edge; the Quotes table
+shows the day's low and high as one range bar with the numbers at its ends (three fewer columns) and the change as one
+cell. Technical view gains a Trend column (20 EMA / 50-day / 200-day) and distance from the 52-week high. Any row opens
+the stock. Data, lists, alerts, storage and the public API are unchanged.
+
+(v4 notes follow)
 
 A market-watch screen: one row per stock with the full quote, an intraday chart and an "Events" column that says
 what is happening to each stock today (news, filings, results, Open = high, gaps, 52-week highs, volume spikes,
@@ -757,38 +765,44 @@ def _css():
     st.markdown(f"""<style>
     .w3-root, .w3-tw, .w3-card, .w3-kp, .w3-mlist, .ev-pop {{font-family:{SANS};font-variant-numeric:tabular-nums}}
     .w3-top{{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin:6px 2px 10px;font-family:{SANS}}}
-    .w3-top b{{font-size:20px;font-weight:650;color:var(--tx,{TX});letter-spacing:-.2px}} .w3-top span{{font-size:12.5px;color:var(--tx3,{TX3})}}
+    .w3-top{{margin:14px 2px 10px}}
+    .w3-top b{{font-size:22px;font-weight:650;color:var(--tx,{TX});letter-spacing:-.3px}} .w3-top span{{font-size:13px;color:var(--tx3,{TX3})}}
     /* KPI strip */
-    .w3-kp{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:6px 0 12px}}
-    .w3-k{{background:var(--s1,#0E0E10);border:1px solid var(--line,#1E1E21);border-radius:12px;padding:11px 13px;min-width:0}}
-    .w3-k .l{{font-size:12px;font-weight:500;color:var(--tx3,{TX3})}}
-    .w3-k .v{{font-size:18px;font-weight:650;color:var(--tx,{TX});margin-top:4px;white-space:nowrap;letter-spacing:-.2px}}
-    .w3-k .s{{font-size:11.5px;color:var(--tx3,{TX3});margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
-    .w3-br{{display:flex;height:4px;margin-top:8px;background:#1A1A1D;border-radius:4px;overflow:hidden}} .w3-br i{{display:block;height:100%}}
+    .w3-kp{{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;margin:10px 0 16px}}
+    @media (max-width:1100px){{.w3-kp{{grid-template-columns:repeat(3,minmax(0,1fr))}}}} @media (max-width:640px){{.w3-kp{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
+    .w3-k{{background:var(--s1,#111113);border:1px solid var(--line,#232326);border-radius:14px;padding:14px 16px;min-width:0}}
+    .w3-k .l{{font-size:12.5px;font-weight:500;color:var(--tx3,{TX3})}}
+    .w3-k .v{{font-size:21px;font-weight:650;color:var(--tx,{TX});margin-top:7px;white-space:nowrap;letter-spacing:-.3px;overflow:hidden;text-overflow:ellipsis}}
+    .w3-k .s{{font-size:12.5px;color:var(--tx3,{TX3});margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+    .w3-br{{display:flex;height:5px;margin-top:11px;background:#1E1E22;border-radius:5px;overflow:hidden}} .w3-br i{{display:block;height:100%}}
     /* table */
-    .w3-tw{{overflow:auto;border:1px solid var(--line,#1E1E21);border-radius:14px;background:var(--s1,#0B0B0D);max-height:720px}}
-    table.w3{{width:100%;border-collapse:separate;border-spacing:0;font-size:13px}}
-    .w3 th{{position:sticky;top:0;z-index:3;background:#111114;color:var(--tx3,#8A8A90);font-size:11.5px;font-weight:550;
-           text-align:right;padding:10px 12px;border-bottom:1px solid var(--line,#1E1E21);white-space:nowrap}}
-    .w3 td{{padding:8px 12px;border-bottom:1px solid #151518;text-align:right;color:#D9D9DE;white-space:nowrap;vertical-align:middle}}
+    .w3-tw{{overflow:auto;border:1px solid var(--line,#232326);border-radius:16px;background:var(--s1,#111113);max-height:760px;margin-top:6px}}
+    table.w3{{width:100%;border-collapse:separate;border-spacing:0;font-size:13.5px}}
+    .w3 th{{position:sticky;top:0;z-index:3;background:#151517;color:var(--tx3,#8A8A90);font-size:12.5px;font-weight:500;
+           text-align:right;padding:13px 14px;border-bottom:1px solid var(--line,#232326);white-space:nowrap}}
+    .w3 td{{padding:13px 14px;border-bottom:1px solid #1B1B1E;text-align:right;color:#DCDCE1;white-space:nowrap;vertical-align:middle}}
+    .w3 td .sub2{{display:block;font-size:12px;margin-top:3px}}
+    .rg{{display:inline-flex;align-items:center;gap:9px;font-size:12.5px;color:var(--tx2,{TX2})}} .rg .bar{{width:74px}}
+    .w3 td.ev-col details.ev>summary{{flex-wrap:nowrap}}
+    .tr3{{display:inline-flex;gap:5px;align-items:center}} .tr3 i{{width:9px;height:9px;border-radius:50%;display:inline-block;background:#2A2A2F}}
     .w3 tbody tr:last-child td{{border-bottom:0}}
     .w3 th.l,.w3 td.l{{text-align:left}} .w3 td.c,.w3 th.c{{text-align:center}}
-    .w3 tbody tr:hover td{{background:#131316}}
+    .w3 tbody tr:hover td{{background:#17171A}}
     .w3 tr.sel td{{background:rgba(255,159,10,.07) !important}} .w3 tr.sel td.sym b{{color:{AMBER}}}
     .w3 tr.sel td:first-child{{box-shadow:inset 2px 0 0 {AMBER}}}
     .w3 tr.grp td{{background:#0F0F12 !important;color:var(--tx2,{TX2});font-size:12px;font-weight:600;text-align:left;padding:9px 12px}}
-    .w3 td.rk{{color:#4A4A50;width:24px;font-size:11.5px}}
-    .w3 td.sym b{{display:block;font-size:13.5px;font-weight:650;color:#F4F4F6}}
-    .w3 td.sym span{{display:block;font-size:11.5px;color:var(--tx3,{TX3});max-width:190px;overflow:hidden;text-overflow:ellipsis;margin-top:1px}}
+    .w3 td.rk{{color:#55555C;width:24px;font-size:12px}}
+    .w3 td.sym b{{display:block;font-size:14.5px;font-weight:650;color:#F4F4F6;letter-spacing:-.1px}}
+    .w3 td.sym span{{display:block;font-size:12px;color:var(--tx3,{TX3});max-width:210px;overflow:hidden;text-overflow:ellipsis;margin-top:3px}}
     .w3 td.sym i{{font-style:normal;color:{AMBER};margin-left:5px;font-size:10px}}
-    .w3 td.px{{color:#fff;font-weight:600}}
-    .pc{{display:inline-block;min-width:64px;text-align:right;padding:2px 7px;border-radius:6px;font-weight:600}}
+    .w3 td.px{{color:#fff;font-weight:650;font-size:14.5px}}
+    .pc{{display:inline-block;min-width:68px;text-align:right;padding:3px 9px;border-radius:999px;font-weight:600;font-size:13px}}
     .na{{color:#46464C}} .live{{color:{AMBER};font-size:9px;margin-left:3px}}
-    .bar{{position:relative;display:inline-block;width:70px;height:4px;background:#26262A;border-radius:4px;vertical-align:middle}}
-    .bar i{{position:absolute;top:-3px;width:4px;height:10px;transform:translateX(-2px);border-radius:2px}}
+    .bar{{position:relative;display:inline-block;width:70px;height:5px;background:#26262A;border-radius:5px;vertical-align:middle}}
+    .bar i{{position:absolute;top:-3.5px;width:12px;height:12px;transform:translateX(-6px);border-radius:50%;border:2px solid var(--s1,#111113)}}
     /* chips */
-    .chip{{--c:#8A8A90;display:inline-flex;align-items:center;gap:5px;margin:2px 5px 2px 0;padding:3px 9px;border-radius:999px;
-          font:600 11.5px {SANS};white-space:nowrap;color:var(--c);
+    .chip{{--c:#8A8A90;display:inline-flex;align-items:center;gap:5px;margin:2px 6px 2px 0;padding:4px 10px;border-radius:999px;
+          font:600 12px {SANS};white-space:nowrap;color:var(--c);
           background:color-mix(in srgb,var(--c) 12%,transparent);border:1px solid color-mix(in srgb,var(--c) 26%,transparent)}}
     .chip.news::before{{content:"";width:6px;height:6px;border-radius:50%;background:var(--c);box-shadow:0 0 0 3px color-mix(in srgb,var(--c) 22%,transparent)}}
     .more{{display:inline-block;color:var(--tx2,{TX2});font:600 11.5px {SANS};padding:3px 8px;border-radius:999px;background:#1A1A1E}}
@@ -866,7 +880,13 @@ def _css():
     .w3-empty{{padding:34px 18px;text-align:center;color:var(--tx3,{TX3});border:1px dashed #2A2A2F;border-radius:14px;background:var(--s1,#0E0E10);font:13px/1.8 {SANS}}}
     .w3-empty b{{color:var(--tx2,{TX2})}}
     /* action bar + list tabs */
-    div[class*="st-key-w3_act"]{{border:1px solid var(--line,#1E1E21);background:var(--s1,#0E0E10);border-radius:14px;padding:10px 12px 2px;margin-top:10px}}
+    div[class*="st-key-w3_act"]{{border:1px solid var(--line,#232326);background:var(--s1,#111113);border-radius:16px;padding:14px 16px 6px;margin-top:14px}}
+    .w3-actl{{font:500 12.5px {SANS};color:var(--tx3,{TX3});margin:0 0 8px}}
+    div[class*="st-key-w3_addrow"]{{border:1px solid var(--line,#232326);background:var(--s1,#111113);border-radius:16px;padding:12px 14px 0;margin:0 0 14px}}
+    div[class*="st-key-w3_addrow"] [data-testid="stForm"]{{border:0 !important;padding:0 !important;background:transparent !important}}
+    div[class*="st-key-w3_tools"]{{margin:0 0 2px}}
+    div[class*="st-key-w3_lists"]{{margin:2px 0 0}}
+    div[class*="st-key-w3_flt"]{{margin:2px 0 6px}}
     div[class*="st-key-w3_lists"] button{{border-radius:999px !important;min-height:34px !important}}
     div[class*="st-key-w3_lists"] button p{{font:600 13px {SANS} !important}}
     div[class*="st-key-w3_lists"] button[kind="primary"],div[class*="st-key-w3_lists"] button[data-testid="stBaseButton-primary"]{{
@@ -1086,12 +1106,22 @@ def _sym_cell(r, names, meta):
             f'<span>{_e(sub)}</span></td>')
 
 
+def _trend_cell(r):
+    vals = [r.get("vs_ema20"), r.get("vs_sma50"), r.get("vs_sma200")]
+    if not r["has_data"] or all(v is None for v in vals):
+        return '<span class="na">—</span>'
+    labs = ("20-day EMA", "50-day average", "200-day average")
+    dots = "".join(f'<i title="{lab}: {"no data" if v is None else ("above" if v >= 0 else "below")}" style="background:{"#2A2A2F" if v is None else GREEN if v >= 0 else RED}"></i>'
+                   for lab, v in zip(labs, vals))
+    return f'<span class="tr3">{dots}</span>'
+
+
 def _vol_cell(r):
     if not r["has_data"]:
         return '<span class="na">—</span>'
     vx = r.get("vol_x")
     star = '<span class="live" title="Projected to a full day">*</span>' if r.get("live") else ""
-    vx_html = f'<div style="font-size:10px;color:{YELLOW if vx and vx >= 2 else GREEN if vx and vx >= 1.2 else TX3}">{vx:.2f}×{star}</div>' if vx else ""
+    vx_html = f'<span class="sub2" style="color:{YELLOW if vx and vx >= 2 else GREEN if vx and vx >= 1.2 else TX3}">{vx:.2f}× average{star}</span>' if vx else ""
     return f'<span title="{r["volume"]:,.0f} shares">{fmt_qty(r["volume"])}</span>{vx_html}'
 
 
@@ -1100,7 +1130,7 @@ def _deliv_cell(d):
         return '<span class="na">—</span>'
     p, a = d.get("pct"), d.get("avg")
     col = GREEN if a and p >= a * 1.2 else RED if a and p <= a * 0.8 else TX
-    sub = f'<div style="font-size:10px;color:{TX3}">avg {a:.0f}%</div>' if a else ""
+    sub = f'<span class="sub2" style="color:{TX3}">average {a:.0f}%</span>' if a else ""
     return f'<span style="color:{col}" title="NSE delivery % on {d.get("date")}; avg = previous sessions">{p:.1f}%</span>{sub}'
 
 
@@ -1109,16 +1139,25 @@ def _columns(view):
     """(header, cell function(r, ctx) -> inner html, td class, header tooltip)"""
     q = lambda k, d=2: (lambda r, x: fmt_price(r.get(k), d) if r["has_data"] else '<span class="na">—</span>')
     if view == "Quotes":
+        def change(r, x):
+            if not r["has_data"]:
+                return '<span class="na">—</span>'
+            return f'{_pct(r.get("pct"))}<span class="sub2">{_signed(r.get("chg"))}</span>'
+
+        def day_range(r, x):
+            if not r["has_data"]:
+                return '<span class="na">—</span>'
+            return (f'<span class="rg"><span title="Day low">{fmt_price(r.get("low"))}</span>'
+                    f'{_rbar(r.get("day_pos"), "Where the price sits between the day low and high")}<span title="Day high">{fmt_price(r.get("high"))}</span></span>')
         return [
-            ("LTP", lambda r, x: fmt_price(r.get("last")) + ('<span class="live">●</span>' if r.get("live") else "") if r["has_data"] else '<span class="na">no data</span>', "px", "Last traded price"),
-            ("Chg", lambda r, x: _signed(r.get("chg")), "", "Change from the previous close"),
-            ("% Chg", lambda r, x: _pct(r.get("pct")), "", ""),
-            ("Open", q("open"), "", ""), ("High", q("high"), "", ""), ("Low", q("low"), "", ""),
-            ("Prev Close", q("prev"), "", ""),
-            ("Day range", lambda r, x: _rbar(r.get("day_pos"), "Where price sits between today's low and high"), "c", "Low ← → High"),
+            ("Price", lambda r, x: fmt_price(r.get("last")) + ('<span class="live">●</span>' if r.get("live") else "") if r["has_data"] else '<span class="na">no data</span>', "px", "Last traded price"),
+            ("Change", change, "", "Change from the previous close, in % and in rupees"),
+            ("Day low — high", day_range, "c", "The dot shows where the price is inside today's range"),
+            ("Open", q("open"), "", ""),
+            ("Prev close", q("prev"), "", ""),
             ("Volume", lambda r, x: _vol_cell(r), "", "Today's volume and its multiple of the 20-day average"),
-            ("Deliv %", lambda r, x: _deliv_cell(x["deliv"].get(r["symbol"])), "", "NSE delivery % of the latest published session"),
-            ("Chart", lambda r, x: _spark_intraday(x["intra"].get(r["symbol"]), r.get("prev")), "c", "Today, 5-minute candles; dashed = previous close"),
+            ("Delivery", lambda r, x: _deliv_cell(x["deliv"].get(r["symbol"])), "", "NSE delivery % of the latest published session"),
+            ("Today", lambda r, x: _spark_intraday(x["intra"].get(r["symbol"]), r.get("prev")), "c", "Today in 5-minute steps; dashed line = previous close"),
             ("Events", lambda r, x: _events_cell(r["events"], 4, r, x["names"]), "l ev-col", "Tap a chip to read the news and what each signal means"),
         ]
     if view == "Performance":
@@ -1136,6 +1175,8 @@ def _columns(view):
     return [  # TECHNICAL
         ("LTP", lambda r, x: fmt_price(r.get("last")) if r["has_data"] else '<span class="na">no data</span>', "px", ""),
         ("% Chg", lambda r, x: _pct(r.get("pct")), "", ""),
+        ("Trend", lambda r, x: _trend_cell(r), "c", "Price against the 20-day EMA, the 50-day and the 200-day average: green = above, red = below"),
+        ("From 52W high", lambda r, x: _pct(r.get("off_hi52"), 1, 30, False, False), "", "How far the price is below its 52-week high"),
         ("RSI 14", lambda r, x: _rsi_cell(r.get("rsi")), "", ""),
         ("vs EMA 20", lambda r, x: _pct(r.get("vs_ema20"), 1, 8, True, False), "", ""),
         ("vs SMA 50", lambda r, x: _pct(r.get("vs_sma50"), 1, 12, True, False), "", ""),
@@ -1207,15 +1248,14 @@ def render_kpis(rows, nifty_row) -> str:
           f'<i style="width:{dec / tot * 100:.1f}%;background:{RED}"></i></div>')
     cell = lambda v: f'<span style="color:{GREEN if v >= 0 else RED}">{v:+.2f}%</span>' if v is not None else "—"
     cards = [
-        k("Stocks", f"{len(rows)}", f"{len(rows) - len(ok)} without data" if len(rows) != len(ok) else "all priced"),
-        f'<div class="w3-k"><div class="l">Advance / decline</div><div class="v"><span style="color:{GREEN}">{adv}</span>'
+        f'<div class="w3-k"><div class="l">Advancing / declining</div><div class="v"><span style="color:{GREEN}">{adv}</span>'
         f' <span style="color:{TX3}">/</span> <span style="color:{RED}">{dec}</span></div>{br}</div>',
-        k("List today", cell(avg), f"NIFTY 50 {cell(npct)}" if npct is not None else "equal-weighted"),
-        k("Up on volume", f'<span style="color:{GREEN}">{upvol}</span> / <span style="color:{RED}">{dnvol}</span>', "up / down with volume ≥ 1.5×"),
-        k("52W high / low", f'<span style="color:{GREEN}">{hi}</span> / <span style="color:{RED}">{lo}</span>', "new today"),
-        k("With events", f"{with_ev}", "chips in the events column"),
-        k("Best", _e(best["symbol"]) if best else "—", cell(best["pct"]) if best else ""),
-        k("Worst", _e(worst["symbol"]) if worst else "—", cell(worst["pct"]) if worst else ""),
+        k("List today", cell(avg), f"NIFTY 50 {cell(npct)}" if npct is not None else "average of the list"),
+        k("Moving on volume", f'<span style="color:{GREEN}">{upvol}</span> <span style="color:{TX3}">/</span> <span style="color:{RED}">{dnvol}</span>', "up / down with 1.5× volume"),
+        k("New 52-week high / low", f'<span style="color:{GREEN}">{hi}</span> <span style="color:{TX3}">/</span> <span style="color:{RED}">{lo}</span>',
+          f"{with_ev} of {len(rows)} stocks have events"),
+        k("Best today", _e(best["symbol"]) if best else "—", cell(best["pct"]) if best else ""),
+        k("Worst today", _e(worst["symbol"]) if worst else "—", cell(worst["pct"]) if worst else ""),
     ]
     return '<div class="w3-kp">' + "".join(cards) + "</div>"
 
@@ -1328,11 +1368,16 @@ def _popover(label, disabled=False):
         return st.popover(label, use_container_width=True)
 
 def _add_box(sb, list_name, key, desk=False):
-    c1, c2 = st.columns([3.2, 1.2], gap="small")
+    with st.container(key=f"w3_addrow_{key}"):
+        _add_box_inner(sb, list_name, key, desk)
+
+
+def _add_box_inner(sb, list_name, key, desk=False):
+    c1, c2 = st.columns([5, 1], gap="small")
     with c1:
         with st.form(f"w3_add_{key}", clear_on_submit=True):
-            a, b = st.columns([4.2, 1])
-            raw = a.text_input("Add", placeholder=f"Add to {list_name}: RELIANCE, HDFCBANK, tata motors …", label_visibility="collapsed")
+            a, b = st.columns([5, 1], gap="small")
+            raw = a.text_input("Add", placeholder=f"Add stocks to {list_name}: type symbols or company names, separated by commas", label_visibility="collapsed")
             go = b.form_submit_button("Add", use_container_width=True, type="primary")
     with c2:
         with _popover("Import"):
@@ -1364,15 +1409,32 @@ def _add_box(sb, list_name, key, desk=False):
             st.warning("Not found on NSE: " + ", ".join(bad) + ". Check the spelling or use the NSE ticker.")
 
 
+def _pick_list():
+    v = st.session_state.get("w3_list_pills")
+    if v:
+        st.session_state["w3_list"] = v
+
+
 def _list_bar(names_in_use, current, supports, is_admin):
     tabs = list(names_in_use) + [DESK]
     with st.container(key="w3_lists"):
-        cols = st.columns([1] * len(tabs) + [1.1, max(0.2, 7 - len(tabs))], gap="small")
-        for c, name in zip(cols, tabs):
-            if c.button(name, key=f"w3_l_{name}", use_container_width=True, type="primary" if name == current else "secondary"):
-                st.session_state["w3_list"] = name
-                st.rerun()
-        with cols[len(tabs)]:
+        a, b = st.columns([6, 1], gap="small")
+        done = False
+        if hasattr(st, "pills"):
+            try:
+                if st.session_state.get("w3_list_pills") != current:
+                    st.session_state["w3_list_pills"] = current
+                a.pills("List", tabs, key="w3_list_pills", label_visibility="collapsed", on_change=_pick_list)
+                done = True
+            except Exception:
+                done = False
+        if not done:                                       # Streamlit without pills: plain buttons
+            cols = a.columns([1] * len(tabs) + [max(0.2, 6 - len(tabs))], gap="small")
+            for c, name in zip(cols, tabs):
+                if c.button(name, key=f"w3_l_{name}", use_container_width=True, type="primary" if name == current else "secondary"):
+                    st.session_state["w3_list"] = name
+                    st.rerun()
+        with b:
             with _popover("New list", not supports):
                 nm = st.text_input("New list name", key="w3_newlist", placeholder="e.g. Swing, Long term, Breakouts").strip()
                 if st.button("Create", key="w3_newlist_go", disabled=not nm or nm in tabs):
@@ -1380,7 +1442,7 @@ def _list_bar(names_in_use, current, supports, is_admin):
                     st.session_state["w3_list"] = nm[:24]
                     st.rerun()
     if not supports:
-        st.caption("Several named lists, notes and price alerts need one SQL statement: open Manage → Storage at the bottom of the page.")
+        st.caption("Several named lists, notes and price alerts need one SQL statement: open Manage list → Storage at the bottom of the page.")
 
 
 def _news_body(r, names):
@@ -1404,6 +1466,8 @@ def _actions(sb, shown, all_rows, list_name, key, on_open, can_edit, meta, lists
         cur = st.session_state.get(f"w3_pick_{key}")
         if cur not in syms:
             st.session_state[f"w3_pick_{key}"] = syms[0]
+        st.markdown('<div class="w3-actl">Selected stock: open it, read its news, add a note or alert, or remove it. Clicking a row in the table opens the stock directly.</div>',
+                    unsafe_allow_html=True)
         c1, c2, c3, c4, c5, c6, c7 = st.columns([2.2, 0.85, 0.95, 1, 0.95, 1.15, 0.9], gap="small")
         pick = c1.selectbox("Stock", syms, key=f"w3_pick_{key}", label_visibility="collapsed",
                             format_func=lambda s: f"{s}  ·  {next((fmt_price(r.get('last')) + '  ' + (format(r['pct'], '+.2f') + '%' if r.get('pct') is not None else '') for r in all_rows if r['symbol'] == s), '')}")
@@ -1507,13 +1571,19 @@ def render_watchlist(supabase, on_open=None, is_admin=False):
     if can_edit:
         _add_box(sb, current, key, desk=current == DESK)
 
-    o1, o2, o3, o4 = st.columns([2.2, 1.1, 1.3, 1.4], gap="small")
+    with st.container(key="w3_tools"):
+        o1, o_gap, o_opt = st.columns([3, 3, 1], gap="small")
     if st.session_state.get("w3_view") not in VIEWS:
         st.session_state["w3_view"] = str(st.session_state.get("w3_view") or "").title() if str(st.session_state.get("w3_view") or "").title() in VIEWS else VIEWS[0]
     view = _seg(o1, "View", VIEWS, "w3_view")
-    group = o2.toggle("Group by sector", key="w3_group")
-    rich = o3.toggle("News, filings & results", value=True, key="w3_rich", help="Adds today's news, filings and results dates to the events column (a few seconds the first time)")
-    auto = o4.toggle("Live refresh every 60 s", value=True, key="w3_auto", disabled=not market_open(), help="Only while NSE is open")
+    for _k, _v in (("w3_group", False), ("w3_rich", True), ("w3_auto", True)):
+        st.session_state.setdefault(_k, _v)
+    with o_opt:
+        with _popover("Options"):
+            st.toggle("Group by sector", key="w3_group")
+            st.toggle("News, filings and results", key="w3_rich", help="Adds today's news, filings and results dates to the events column (a few seconds the first time)")
+            st.toggle("Live refresh every 60 seconds", key="w3_auto", disabled=not market_open(), help="Only while NSE is open")
+    group, rich, auto = bool(st.session_state.get("w3_group")), bool(st.session_state.get("w3_rich")), bool(st.session_state.get("w3_auto"))
     run_every = 60 if (auto and market_open()) else None
 
     @st.fragment(run_every=run_every)
@@ -1543,8 +1613,9 @@ def _body(sb, symbols, meta, key, on_open, can_edit, view, group, rich, list_nam
             r["group"] = _group_of(r["symbol"], names)
     st.markdown(render_kpis(rows, compute("^NSEI", nifty)), unsafe_allow_html=True)
 
-    f1, f2, f3 = st.columns([1.3, 4.4, 1.3], gap="small")
-    query = f1.text_input("Search", placeholder="Search symbol / name…", key=f"w3_q_{key}", label_visibility="collapsed")
+    f1, f_gap, f3 = st.columns([2, 3.4, 1.6], gap="small")
+    query = f1.text_input("Search", placeholder="Find a stock in this list", key=f"w3_q_{key}", label_visibility="collapsed")
+    f2 = st.container(key=f"w3_flt_{key}")
     counts = {f: len(filter_rows(rows, f)) for f in FILTERS}
     opts = [f for f in FILTERS if f == "All" or counts[f]]
     if st.session_state.get(f"w3_f_{key}") not in opts:
@@ -1554,9 +1625,11 @@ def _body(sb, symbols, meta, key, on_open, can_edit, view, group, rich, list_nam
            else f2.radio("Filter", opts, key=f"w3_f_{key}", format_func=fmt, horizontal=True, label_visibility="collapsed")) or "All"
     sort_opts = list(SORTS)
     if view == "Heatmap":
-        hf = f3.selectbox("Colour by", ["1D", "1W", "1M", "3M", "YTD", "1Y"], key="w3_heat", label_visibility="collapsed")
+        hf = f3.selectbox("Colour by", ["1D", "1W", "1M", "3M", "YTD", "1Y"], key="w3_heat", label_visibility="collapsed",
+                          format_func=lambda x: {"1D": "Colour by today", "1W": "Colour by 1 week", "1M": "Colour by 1 month", "3M": "Colour by 3 months",
+                                                 "YTD": "Colour by this year", "1Y": "Colour by 1 year"}[x])
     else:
-        how = f3.selectbox("Sort", sort_opts, key=f"w3_s_{key}", label_visibility="collapsed")
+        how = f3.selectbox("Sort", sort_opts, key=f"w3_s_{key}", label_visibility="collapsed", format_func=lambda x: "Sort: " + (x if x != "List order" else "list order"))
     shown = filter_rows(rows, flt, query)
     if not shown:
         st.markdown('<div class="w3-empty">No stocks match this filter.</div>', unsafe_allow_html=True)
@@ -1579,7 +1652,7 @@ def _body(sb, symbols, meta, key, on_open, can_edit, view, group, rich, list_nam
     asof = max((r["date"] for r in rows if r["has_data"]), default=None)
     c1, c2, c3, c4 = st.columns([4, 0.9, 0.9, 1.2], gap="small")
     c1.caption(f"Showing {len(shown)} of {len(rows)}" + (f" · prices as of {asof:%d %b %Y}" if asof is not None else "")
-               + " · Yahoo Finance (delayed) · ● / * = today's candle is still forming (volume projected to a full day) · "
+               + " · Yahoo Finance · ● and * mean today's candle is still forming (volume is projected to a full day) · "
                "delivery from NSE's daily file · tap an event chip to read the news.")
     if c2.button("Refresh", key=f"w3_ref_{key}", use_container_width=True):
         for fn in (_live, _intraday):
