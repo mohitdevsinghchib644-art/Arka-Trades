@@ -74,7 +74,7 @@ except Exception:  # pragma: no cover
     create_client = None
 
 IST = timezone(timedelta(hours=5, minutes=30))
-APP_VERSION = "v9.9"
+APP_VERSION = "v10.0"
 
 
 def _secret(name: str, default=""):
@@ -186,14 +186,37 @@ def _screen_state() -> str:
     return f"{pg_}|{str(sym_).strip().upper()}"
 
 
+PREF_KEYS = ("ak_rs_index",)                              # per-device settings kept in the browser
+
+
+def _prefs_json() -> str:
+    """Settings to remember on this device. Empty until the saved ones have been read back, so nothing is overwritten."""
+    ss = st.session_state
+    if not ss.get("_ak_prefs_ready"):
+        return ""
+    import json as _json
+    return _json.dumps({k: ss[k] for k in PREF_KEYS if ss.get(k)}, sort_keys=True)
+
+
 with st.container(key="akbridge"):
     try:
-        auth.bridge(_AUTH_KEY, nav=_screen_state(), back=st.session_state.get("_ak_backtag"))
-    except TypeError:                                     # an older auth.py without screen history
+        auth.bridge(_AUTH_KEY, nav=_screen_state(), back=st.session_state.get("_ak_backtag"), prefs=_prefs_json())
+    except TypeError:                                     # an older auth.py without screen history / device settings
         try:
             auth.bridge(_AUTH_KEY, nav=_screen_state())
         except TypeError:
             auth.bridge(_AUTH_KEY)
+
+if not st.session_state.get("_ak_prefs_ready") and (st.session_state.get("_ak_boot") is not None or auth.ready()):
+    try:                                                  # read this device's saved settings back once
+        import json as _json
+        _saved = _json.loads((st.session_state.get("_ak_boot") or {}).get("prefs") or "{}")
+        for _k in PREF_KEYS:
+            if isinstance(_saved, dict) and isinstance(_saved.get(_k), str) and _saved[_k].strip() and not st.session_state.get(_k):
+                st.session_state[_k] = _saved[_k].strip()[:60]
+    except Exception:
+        pass
+    st.session_state["_ak_prefs_ready"] = st.session_state.get("_ak_boot") is not None or auth.waited() > 4
 
 name = st.session_state.profile.get("name", "Trader") or "Trader"
 initial = name[0].upper()
@@ -1455,6 +1478,10 @@ def _page_account():
         st.radio("Layout", ["Auto", "Phone", "Desktop"], key="layout_pref", horizontal=True,
                  help="Auto picks the phone layout on screens narrower than 820 px.")
         st.toggle("Show the news column next to Home and stock pages (desktop)", key="show_news_rail")
+        st.markdown('<div class="ak-sec">Relative strength index</div>', unsafe_allow_html=True)
+        st.caption("The RS line on every chart is the stock's price divided by this index. Pick one from the list, or type any index symbol "
+                   "(for example NIFTYMIDSML400).")
+        _run("chart_engine", _load("chart_engine", "render_rs_index_setting"))
         st.markdown('<div class="ak-sec">Chart settings</div>', unsafe_allow_html=True)
         st.caption("How every chart opens on this device: chart type, colours, moving averages, volume, RSI, MACD and levels. "
                    "Changes save as you make them and apply the next time a chart opens. The gear on any chart opens the same settings.")
