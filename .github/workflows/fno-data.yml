@@ -1,6 +1,6 @@
 # Arka Trades · F&O data
 # Every weekday evening this downloads NSE's free end-of-day derivatives files, reduces them to a small history and
-# saves it in the repository under data/fno/. The app only reads those files.
+# saves it in the repository under arka_data/fno/. The app only reads those files.
 #
 # First time: Actions tab -> "F&O data" -> "Run workflow", type 5 in the box (years of history) and run it.
 #             It takes about an hour or more. If it says it stopped early, run it again: it continues where it stopped.
@@ -49,7 +49,7 @@ jobs:
         run: |
           git config user.name "arka-data-bot"
           git config user.email "arka-data-bot@users.noreply.github.com"
-          git add data/fno || true
+          git add arka_data/fno || true
           if git diff --cached --quiet; then
             echo "Nothing new to save."
             exit 0
