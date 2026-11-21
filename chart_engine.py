@@ -21,6 +21,10 @@ What v3 adds over v2
     direction (rising = stronger than the index, falling = weaker). A pink dot marks an RS new high BEFORE the price makes
     one; a small blue dot marks an RS new high together with price. The legend shows an RS score (above 100 = beating
     the index over the past year, recent months weighted more). Index, placement, colours and dots are in the settings.
+  * v6 — Price scale like a trading platform: drag the price numbers (or roll the mouse wheel over them) to stretch or
+    squeeze the candles; once you have done that, drag the chart up and down freely; double-click the numbers or press
+    "auto" to fit again. A button hides the indicator names for a clean chart. Two more tools: a trade plan (entry, stop
+    and 1R / 2R / 3R targets) and Fibonacci levels. Keyboard: arrows scroll, + / − zoom, Alt+H / T / M / P / F pick a tool.
   * Full screen: fills the app window (and the whole screen where the browser allows it). Esc leaves it.
   * Settings: the gear on the chart, or Account → Chart settings (render_chart_settings). Saved in this browser, so
     every chart on this device opens the way you set it.
@@ -38,7 +42,7 @@ import streamlit.components.v1 as components
 
 from data_engine import get_history
 
-CHART_VERSION = 5
+CHART_VERSION = 6
 
 # Indices the relative-strength line can be measured against (label → Yahoo tickers to try, in order).
 RS_INDICES = {
@@ -358,7 +362,10 @@ body.page .sf{padding:14px 0 4px;border-top:0}
     <button class="tb" data-tool="hline" title="Horizontal line: click a price"><svg viewBox="0 0 24 24"><path d="M3 12h18"/><circle cx="12" cy="12" r="2.2"/></svg></button>
     <button class="tb" data-tool="trend" title="Trend line: click two points"><svg viewBox="0 0 24 24"><path d="M5 18L19 6"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="6" r="2"/></svg></button>
     <button class="tb" data-tool="measure" title="Measure: click two points"><svg viewBox="0 0 24 24"><path d="M4 16L16 4l4 4L8 20z"/><path d="M8 12l2 2M11 9l2 2M14 6l2 2"/></svg></button>
+    <button class="tb" data-tool="plan" title="Trade plan: click the entry, then the stop. Targets at 1R, 2R and 3R are drawn"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16" stroke-dasharray="3 3"/><path d="M8 18V6" stroke-dasharray="0"/><path d="M5 9l3-3 3 3"/></svg></button>
+    <button class="tb" data-tool="fib" title="Fibonacci levels: click the start of the move, then its end"><svg viewBox="0 0 24 24"><path d="M3 5h18M3 10h18M3 14h18M3 19h18"/><path d="M6 19L18 5"/></svg></button>
     <button class="tb" data-act="undo" title="Remove the last drawing"><svg viewBox="0 0 24 24"><path d="M9 7L4 12l5 5"/><path d="M4 12h10a6 6 0 010 12"/></svg></button>
+    <button class="tb" data-act="legend" title="Hide or show the indicator names on the chart"><svg viewBox="0 0 24 24"><path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z"/><circle cx="12" cy="12" r="2.8"/></svg></button>
     <button class="tb" data-act="clear" title="Remove all drawings"><svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13"/></svg></button>
   </div>
   <div id="panes">
@@ -392,6 +399,7 @@ var DEFAULTS = {iv:"D", rng:"", type:"candles", palette:"green", log:false, pct:
   ma:[{on:false,kind:"EMA",len:10,color:"#FFD60A"},{on:true,kind:"EMA",len:21,color:"#F2F2F5"},{on:false,kind:"SMA",len:20,color:"#5AC8FA"},
       {on:true,kind:"SMA",len:50,color:"#FF9F0A"},{on:true,kind:"SMA",len:200,color:"#BF5AF2"}],
   vol:true, volma:true, volmaLen:20, bb:false, bbLen:20, bbK:2, rsi:true, rsiLen:14, macd:false, pd:true, wk52:false,
+  lgHide:false, magnet:false,
   rs:true, rsPlace:"above", rsColor:"ma", rsDir:10, rsMa:true, rsCloud:true, rsCross:true, rsLen:21, rsKind:"EMA", rsHi:true, rsHiAll:false,
   rsUp:"#2196F3", rsDn:"#E040FB", rsMaCol:"#F23645"};
 var RS_NAME = (P && P.ix && P.ix.label) || "the index";
@@ -460,6 +468,8 @@ function buildSettings(){
   b.appendChild(rowToggle("Logarithmic price scale", "", function(){ return S.log; }, function(v){ S.log = v; if (v) S.pct = false; }));
   b.appendChild(rowToggle("Grid lines", "", function(){ return S.grid; }, function(v){ S.grid = v; }));
   b.appendChild(rowToggle("Last price line", "", function(){ return S.pline; }, function(v){ S.pline = v; }));
+  b.appendChild(rowToggle("Hide indicator names on the chart", "Keeps only the symbol and price line; the eye button on the chart does the same", function(){ return S.lgHide; }, function(v){ S.lgHide = v; }));
+  b.appendChild(rowToggle("Crosshair snaps to the candle close", "Magnet mode", function(){ return S.magnet; }, function(v){ S.magnet = v; }));
   b.appendChild(rowToggle("Symbol watermark", "", function(){ return S.wm; }, function(v){ S.wm = v; }));
   b.appendChild(el("div", "ss", "Moving averages"));
   S.ma.forEach(function(m, i){
@@ -603,9 +613,65 @@ function rsLegend(i){
 }
 var iv = S.iv, rng = S.rng || DEF_RNG || "6M", tool = "cursor";
 if (!(P[iv] && P[iv].length)) iv = "D";
+var yView = null, yDrag = null, yRaf = 0, mainCv = null;      // yView = {min, max} once the price scale has been set by hand
+var tf = function(v){ return S.log ? Math.log(Math.max(v, 1e-9)) : v; }, ti = function(v){ return S.log ? Math.exp(v) : v; };
+function yProvider(orig){ var o = orig(); if (!yView || !o) return o; return {priceRange:{minValue:yView.min, maxValue:yView.max}, margins:o.margins}; }
+function yFollow(orig){ return yView ? null : orig(); }            // averages and bands stop stretching the scale while it is set by hand
+function yMargins(){ return {top:0.08, bottom:S.vol ? 0.24 : 0.06}; }
+function yApply(){ if (yRaf) return; yRaf = requestAnimationFrame(function(){ yRaf = 0; try { main.applyOptions({}); } catch (e) {} placeMeasure(); mark(); }); }
+function yPaneH(){ var h = mainCv ? mainCv.clientHeight : 300; try { if (main.timeScale().options().visible) h -= 28; } catch (e) {} return Math.max(60, h); }
+function yEnsure(){
+  if (yView) return true;
+  try {
+    var H = yPaneH(), m = yMargins(), hi = mainSeries.coordinateToPrice(H * m.top), lo = mainSeries.coordinateToPrice(H * (1 - m.bottom));
+    if (hi == null || lo == null || !(hi > lo)) return false;
+    if (S.pct) { S.pct = false; saveS(); mainSeries.priceScale().applyOptions({mode:S.log ? 1 : 0}); }
+    yView = {min:lo, max:hi}; return true;
+  } catch (e) { return false; }
+}
+function yZoom(f, anchor){
+  if (!yEnsure()) return;
+  var a = tf(anchor == null ? ti((tf(yView.min) + tf(yView.max)) / 2) : anchor), lo = tf(yView.min), hi = tf(yView.max);
+  var nlo = a - (a - lo) * f, nhi = a + (hi - a) * f; if (!(nhi - nlo > 1e-9)) return;
+  yView = {min:ti(nlo), max:ti(nhi)}; yApply();
+}
+function yPan(dy){
+  if (!yView) return; var m = yMargins(), px = yPaneH() * (1 - m.top - m.bottom), lo = tf(yView.min), hi = tf(yView.max), d = dy / px * (hi - lo);
+  yView = {min:ti(lo + d), max:ti(hi + d)}; yApply();
+}
+function yReset(){ yView = null; try { charts.forEach(function(c){ c.chart.priceScale("right").applyOptions({autoScale:true}); }); } catch (e) {} yApply(); }
+function yAxisW(){ try { var w = main.priceScale("right").width(); if (w > 20) return w; } catch (e) {} return 76; }
+function yInAxis(e, cv){ var r = cv.getBoundingClientRect(), x = (e.touches && e.touches[0] ? e.touches[0].clientX : e.clientX); return x >= r.right - yAxisW() && x <= r.right; }
+function yWire(cv){
+  cv.addEventListener("wheel", function(e){                      // wheel over the price numbers stretches / squeezes the candles
+    if (!yInAxis(e, cv)) return; e.preventDefault(); e.stopPropagation();
+    var r = cv.getBoundingClientRect(), pr = null; try { pr = mainSeries.coordinateToPrice(e.clientY - r.top); } catch (x) {}
+    yZoom(e.deltaY > 0 ? 1.12 : 1 / 1.12, pr);
+  }, {capture:true, passive:false});
+  cv.addEventListener("mousedown", function(e){
+    if (e.button !== 0) return;
+    if (yInAxis(e, cv)) { e.preventDefault(); e.stopPropagation(); if (yEnsure()) yDrag = {mode:"scale", y:e.clientY}; }
+    else if (yView && tool === "cursor") yDrag = {mode:"pan", y:e.clientY};
+  }, true);
+  cv.addEventListener("dblclick", function(e){ if (yInAxis(e, cv)) { e.preventDefault(); e.stopPropagation(); yReset(); } }, true);
+  cv.addEventListener("touchstart", function(e){
+    if (e.touches.length !== 1) { yDrag = null; return; }
+    if (yInAxis(e, cv)) { e.preventDefault(); e.stopPropagation(); if (yEnsure()) yDrag = {mode:"scale", y:e.touches[0].clientY}; }
+    else if (yView && tool === "cursor") yDrag = {mode:"pan", y:e.touches[0].clientY};
+  }, {capture:true, passive:false});
+}
+function yMove(y, e){
+  if (!yDrag) return; var dy = y - yDrag.y; yDrag.y = y; if (!dy) return;
+  if (yDrag.mode === "scale") { if (e && e.cancelable) e.preventDefault(); yZoom(Math.exp(dy * 0.007)); } else yPan(dy);
+}
+document.addEventListener("mousemove", function(e){ if (yDrag) yMove(e.clientY, e); });
+document.addEventListener("mouseup", function(){ yDrag = null; });
+document.addEventListener("touchmove", function(e){ if (yDrag && e.touches.length === 1) yMove(e.touches[0].clientY, yDrag.mode === "scale" ? e : null); }, {passive:false});
+document.addEventListener("touchend", function(){ yDrag = null; });
 var charts = [], main = null, mainSeries = null, volSeries = null, ind = {}, lines = [], drawSeries = [], xs = false, syncing = false, pend = null, msr = null;
 var DKEY = "arka_draw_" + SYM, draws = {h:[], t:[]};
 try { var dr = JSON.parse(window.localStorage.getItem(DKEY) || "null"); if (dr && Array.isArray(dr.h) && Array.isArray(dr.t)) draws = dr; } catch (e) {}
+["h", "t", "p", "f", "o"].forEach(function(k){ if (!Array.isArray(draws[k])) draws[k] = []; });
 function saveDraws(){ try { window.localStorage.setItem(DKEY, JSON.stringify(draws)); } catch (e) {} }
 
 function fmt(v, d){ d = (d == null ? 2 : d); return (v == null || isNaN(v)) ? "—" : Number(v).toLocaleString("en-IN", {minimumFractionDigits:d, maximumFractionDigits:d}); }
@@ -613,22 +679,23 @@ function fmtVol(v){ if (v == null) return "—"; if (v >= 1e7) return (v / 1e7).
 function tkey(t){ if (t == null) return null; if (typeof t === "string") return t; if (typeof t === "number") return new Date(t * 1000).toISOString().slice(0, 10);
   if (t.year) return t.year + "-" + String(t.month).padStart(2, "0") + "-" + String(t.day).padStart(2, "0"); return null; }
 
-function opts(elm, showTime){
+function opts(elm, showTime, isMain){
   return {width:elm.clientWidth || 800, height:elm.clientHeight || 300,
     layout:{background:{type:"solid", color:C.bg}, textColor:C.text, fontFamily:FONT, fontSize:11, attributionLogo:false},
     grid:{vertLines:{color:C.grid, visible:!!S.grid}, horzLines:{color:C.grid, visible:!!S.grid}},
     rightPriceScale:{borderColor:C.border, minimumWidth:76},
     timeScale:{borderColor:C.border, rightOffset:8, barSpacing:7, minBarSpacing:0.8, timeVisible:false, visible:showTime},
-    crosshair:{mode:LW.CrosshairMode.Normal, vertLine:{color:"#5A5A63", labelBackgroundColor:"#2E2E33"}, horzLine:{color:"#5A5A63", labelBackgroundColor:"#2E2E33"}},
+    crosshair:{mode:S.magnet ? LW.CrosshairMode.Magnet : LW.CrosshairMode.Normal, vertLine:{color:"#5A5A63", labelBackgroundColor:"#2E2E33"}, horzLine:{color:"#5A5A63", labelBackgroundColor:"#2E2E33"}},
     handleScroll:{mouseWheel:true, pressedMouseMove:true, horzTouchDrag:true, vertTouchDrag:true},
-    handleScale:{axisPressedMouseMove:{time:true, price:true}, axisDoubleClickReset:{time:true, price:true}, mouseWheel:true, pinch:true},
+    handleScale:{axisPressedMouseMove:{time:true, price:!isMain}, axisDoubleClickReset:{time:true, price:true}, mouseWheel:true, pinch:true},
     localization:{dateFormat:"dd MMM yyyy", priceFormatter:function(p){ return p.toFixed(2); }}};
 }
 function addPane(id, cls){
   var p = el("div", "pane " + cls); p.id = "p-" + id; var cv = el("div", "cv"), lg = el("div", "lg"); lg.id = "lg-" + id; p.appendChild(cv); p.appendChild(lg);
   $("panes").appendChild(p); return {id:id, el:p, cv:cv, lg:lg};
 }
-function lineOn(chart, color, w, extra){ return chart.addLineSeries(Object.assign({color:color, lineWidth:w || 1, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false}, extra || {})); }
+function lineOn(chart, color, w, extra){ return chart.addLineSeries(Object.assign({color:color, lineWidth:w || 1, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false},
+  chart === main ? {autoscaleInfoProvider:yFollow} : {}, extra || {})); }
 
 function teardown(){
   charts.forEach(function(c){ try { c.chart.remove(); } catch (e) {} if (c.el.parentNode) c.el.parentNode.removeChild(c.el); });
@@ -647,12 +714,14 @@ function build(keep){
   if (S.rsi) subs.push("rsi"); if (S.macd) subs.push("macd");
   var nSub = subs.length + (rsPane && S.rsPlace === "above" ? 1 : 0), basis = (nSub >= 3 ? 17 : nSub === 2 ? 20 : 24) + "%";
   var pm = addPane("main", ""); pm.el.id = "p-main";
-  main = LW.createChart(pm.cv, opts(pm.cv, subs.length === 0));
+  if (!keep) yView = null;
+  main = LW.createChart(pm.cv, opts(pm.cv, subs.length === 0, true));
+  mainCv = pm.cv; yWire(pm.cv);
   if (S.wm) main.applyOptions({watermark:{visible:true, text:SYM, color:"rgba(255,255,255,.045)", fontSize:64, fontFamily:FONT, horzAlign:"center", vertAlign:"center"}});
   charts.push({id:"main", chart:main, el:pm.el, cv:pm.cv, lg:pm.lg});
 
   // price series
-  var pf = {type:"price", precision:2, minMove:0.05}, base = {priceFormat:pf, priceLineVisible:!!S.pline, lastValueVisible:true};
+  var pf = {type:"price", precision:2, minMove:0.05}, base = {priceFormat:pf, priceLineVisible:!!S.pline, lastValueVisible:true, autoscaleInfoProvider:yProvider};
   var ohlc = S.type === "heikin" ? heikin(d.R) : d.R.map(function(r){ return {time:r[0], open:r[1], high:r[2], low:r[3], close:r[4]}; });
   if (S.type === "line") { mainSeries = main.addLineSeries(Object.assign({color:"#2962FF", lineWidth:2}, base)); mainSeries.setData(d.R.map(function(r){ return {time:r[0], value:r[4]}; })); }
   else if (S.type === "area") { mainSeries = main.addAreaSeries(Object.assign({lineColor:"#2962FF", topColor:"rgba(41,98,255,.32)", bottomColor:"rgba(41,98,255,.02)", lineWidth:2}, base)); mainSeries.setData(d.R.map(function(r){ return {time:r[0], value:r[4]}; })); }
@@ -734,6 +803,14 @@ function levels(){
   if (S.pd) { add(P.pdh, "#FF9F0A", "PDH"); add(P.pdl, "#FF9F0A", "PDL"); }
   if (S.wk52) { add(P.hi52, "#30D158", "52W high"); add(P.lo52, "#FF453A", "52W low"); }
   draws.h.forEach(function(p){ add(p, "#2962FF", "", 0); });
+  draws.p.forEach(function(x){                               // trade plan: entry, stop and targets in multiples of the risk
+    var risk = x.e - x.s; if (!risk) return;
+    add(x.e, "#2962FF", "Entry", 0); add(x.s, "#FF453A", "Stop " + (-(risk) / x.e * 100).toFixed(1) + "%", 0);
+    [1, 2, 3].forEach(function(k){ add(Math.round((x.e + k * risk) * 100) / 100, "#30D158", k + "R " + (k * risk / x.e * 100 >= 0 ? "+" : "") + (k * risk / x.e * 100).toFixed(1) + "%"); });
+  });
+  draws.f.forEach(function(x){                               // Fibonacci levels of the move from a to b
+    [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1].forEach(function(k){ add(Math.round((x.b - (x.b - x.a) * k) * 100) / 100, k === 0 || k === 1 ? "#B2B5BE" : k === 0.618 ? "#FFD60A" : "#8A7CFF", (k * 100).toFixed(1).replace(".0", "") + "%"); });
+  });
 }
 function snap(t){ var d = dataFor(iv), T = d.T; if (d.idx.has(t)) return t; for (var i = 0; i < T.length; i++) if (T[i] >= t) return T[i]; return T[T.length - 1]; }
 function drawAll(){
@@ -778,6 +855,7 @@ function legend(i){
   var s = '<div class="row"><b>' + SYMH + '</b> <span class="mut">· ' + IVN[iv] + ' · NSE</span> &nbsp;O <i style="color:' + k + '">' + fmt(o[0]) + '</i> H <i style="color:' + k + '">' + fmt(o[1]) +
           '</i> L <i style="color:' + k + '">' + fmt(o[2]) + '</i> C <i style="color:' + k + '">' + fmt(o[3]) + '</i> <span style="color:' + k + '">' + (ch >= 0 ? "+" : "") + fmt(ch) + " (" + (ch >= 0 ? "+" : "") + pct.toFixed(2) + '%)</span></div>';
   var parts = [];
+  if (S.lgHide) { charts[0].lg.innerHTML = s; charts.forEach(function(c){ if (c.id !== "main") c.lg.innerHTML = ""; }); return; }
   (ind.ma || []).forEach(function(x){ parts.push('<span style="color:' + x.m.color + '">' + x.m.kind + " " + x.m.len + " " + fmt(x.a[i]) + "</span>"); });
   if (ind.bb) parts.push('<span style="color:#5B8DEF">BB ' + S.bbLen + ", " + S.bbK + " &nbsp;" + fmt(ind.bb.u[i]) + " / " + fmt(ind.bb.m[i]) + " / " + fmt(ind.bb.l[i]) + "</span>");
   if (parts.length) s += '<div class="row">' + parts.join(" &nbsp; ") + "</div>";
@@ -809,6 +887,8 @@ function mark(){
   document.querySelectorAll("[data-rng]").forEach(function(b){ b.classList.toggle("act", b.dataset.rng === rng); });
   document.querySelectorAll("[data-tool]").forEach(function(b){ b.classList.toggle("act", b.dataset.tool === tool); });
   document.querySelector('[data-sc="pct"]').classList.toggle("act", !!S.pct); document.querySelector('[data-sc="log"]').classList.toggle("act", !!S.log);
+  document.querySelector('[data-sc="auto"]').classList.toggle("act", !yView);
+  var lb = document.querySelector('[data-act="legend"]'); if (lb) lb.classList.toggle("act", !!S.lgHide);
   var t = TYPES.filter(function(x){ return x[0] === S.type; })[0]; $("typ-l").textContent = t ? t[1] : "";
   $("p-main").style.cursor = tool === "cursor" ? "" : "crosshair";
 }
@@ -816,15 +896,26 @@ function mark(){
 // ───────── drawing and measuring ─────────
 function hint(t){ var h = $("hint"); if (!t) { h.style.display = "none"; return; } h.textContent = t; h.style.display = "block"; }
 function setTool(t){ tool = t; pend = null; if (t !== "measure") clearMeasure();
-  hint(t === "hline" ? "Click a price to place a horizontal line" : t === "trend" ? "Click the first point of the trend line" : t === "measure" ? "Click the first point to measure from" : ""); mark(); }
+  hint(t === "hline" ? "Click a price to place a horizontal line" : t === "trend" ? "Click the first point of the trend line" : t === "measure" ? "Click the first point to measure from"
+     : t === "plan" ? "Trade plan: click your entry price" : t === "fib" ? "Fibonacci: click the start of the move" : ""); mark(); }
 function pointOf(p){ if (!p || !p.point) return null; var k = tkey(p.time); if (!k) return null; var price = mainSeries.coordinateToPrice(p.point.y); if (price == null) return null; return {t:k, p:Math.round(price * 100) / 100}; }
 function onClick(p){
   if (tool === "cursor") { if (msr && msr.done) clearMeasure(); return; }
   var pt = pointOf(p); if (!pt) return;
-  if (tool === "hline") { draws.h.push(pt.p); saveDraws(); levels(); setTool("cursor"); return; }
+  if (tool === "hline") { draws.h.push(pt.p); draws.o.push("h"); saveDraws(); levels(); setTool("cursor"); return; }
+  if (tool === "plan") {
+    if (!pend) { pend = pt; hint("Now click your stop-loss price"); return; }
+    if (pend.p !== pt.p) { draws.p.push({e:pend.p, s:pt.p}); draws.o.push("p"); saveDraws(); levels(); }
+    setTool("cursor"); return;
+  }
+  if (tool === "fib") {
+    if (!pend) { pend = pt; hint("Now click the end of the move"); return; }
+    if (pend.p !== pt.p) { draws.f.push({a:pend.p, b:pt.p}); draws.o.push("f"); saveDraws(); levels(); }
+    setTool("cursor"); return;
+  }
   if (tool === "trend") {
     if (!pend) { pend = pt; hint("Click the second point"); return; }
-    if (pend.t !== pt.t) { draws.t.push({t1:pend.t, p1:pend.p, t2:pt.t, p2:pt.p}); saveDraws(); drawAll(); }
+    if (pend.t !== pt.t) { draws.t.push({t1:pend.t, p1:pend.p, t2:pt.t, p2:pt.p}); draws.o.push("t"); saveDraws(); drawAll(); }
     setTool("cursor"); return;
   }
   if (tool === "measure") {
@@ -845,17 +936,24 @@ function placeMeasure(){
   lab.style.display = "block"; lab.style.left = ((x1 + x2) / 2) + "px"; lab.style.top = (off + Math.max(y1, y2)) + "px";
   lab.innerHTML = (ch >= 0 ? "+" : "") + fmt(ch) + " (" + (ch >= 0 ? "+" : "") + pct.toFixed(2) + "%)<br>" + bars + " bars · " + days + " days";
 }
-function undo(){ if (msr) { clearMeasure(); return; } if (draws.t.length) { draws.t.pop(); drawAll(); } else if (draws.h.length) { draws.h.pop(); levels(); } saveDraws(); }
-function clearAll(){ draws = {h:[], t:[]}; saveDraws(); clearMeasure(); levels(); drawAll(); }
+function undo(){
+  if (msr) { clearMeasure(); return; }
+  var k = draws.o.pop(); if (!k || !draws[k] || !draws[k].length) k = ["f", "p", "t", "h"].filter(function(x){ return draws[x].length; })[0];
+  if (k) draws[k].pop();
+  saveDraws(); levels(); drawAll();
+}
+function clearAll(){ draws = {h:[], t:[], p:[], f:[], o:[]}; saveDraws(); clearMeasure(); levels(); drawAll(); }
+function toggleLegend(){ S.lgHide = !S.lgHide; saveS(); legend(dataFor(iv).R.length - 1); mark(); }
+document.querySelector('[data-act="legend"]').onclick = toggleLegend;
 document.querySelectorAll("[data-tool]").forEach(function(b){ b.onclick = function(){ setTool(b.dataset.tool); }; });
 document.querySelector('[data-act="undo"]').onclick = undo; document.querySelector('[data-act="clear"]').onclick = clearAll;
 
 // ───────── toolbar ─────────
 document.querySelectorAll("[data-iv]").forEach(function(b){ b.onclick = function(){ if (!(P[b.dataset.iv] && P[b.dataset.iv].length)) return; iv = b.dataset.iv; clearMeasure(); build(false); }; });
 document.querySelectorAll("[data-rng]").forEach(function(b){ b.onclick = function(){ rng = b.dataset.rng; mark(); setRange(rng); }; });
-document.querySelector('[data-sc="pct"]').onclick = function(){ S.pct = !S.pct; if (S.pct) S.log = false; saveS(); scale(); };
-document.querySelector('[data-sc="log"]').onclick = function(){ S.log = !S.log; if (S.log) S.pct = false; saveS(); scale(); };
-document.querySelector('[data-sc="auto"]').onclick = function(){ charts.forEach(function(c){ c.chart.priceScale("right").applyOptions({autoScale:true}); }); };
+document.querySelector('[data-sc="pct"]').onclick = function(){ S.pct = !S.pct; if (S.pct) S.log = false; yView = null; saveS(); scale(); };
+document.querySelector('[data-sc="log"]').onclick = function(){ S.log = !S.log; if (S.log) S.pct = false; yView = null; saveS(); scale(); };
+document.querySelector('[data-sc="auto"]').onclick = yReset;
 function scale(){ mainSeries.priceScale().applyOptions({mode:S.pct ? 2 : (S.log ? 1 : 0)}); mark(); }
 $("latest").onclick = function(){ main.timeScale().scrollToRealTime(); };
 
@@ -889,7 +987,8 @@ function menus(){
   tg("Previous day high and low (PDH / PDL)", "pd", "#FF9F0A"); tg("52-week high and low", "wk52", "#30D158");
   mi.appendChild(item("Lengths and colours…", null, function(){ closeMenus(); openSettings(); }));
   var md = $("menu-draw"); md.innerHTML = "";
-  [["hline","Horizontal line"],["trend","Trend line"],["measure","Measure"]].forEach(function(t){ md.appendChild(item(t[1], null, function(){ closeMenus(); setTool(t[0]); })); });
+  [["hline","Horizontal line"],["trend","Trend line"],["measure","Measure"],["plan","Trade plan (entry, stop, targets)"],["fib","Fibonacci levels"]].forEach(function(t){ md.appendChild(item(t[1], null, function(){ closeMenus(); setTool(t[0]); })); });
+  md.appendChild(item(S.lgHide ? "Show indicator names" : "Hide indicator names", null, function(){ closeMenus(); toggleLegend(); menus(); }));
   md.appendChild(item("Remove the last drawing", null, function(){ closeMenus(); undo(); })); md.appendChild(item("Remove all drawings", null, function(){ closeMenus(); clearAll(); }));
 }
 $("b-type").onclick = function(e){ e.stopPropagation(); openMenu("menu-type", this); };
@@ -926,6 +1025,15 @@ function setFS(on){
 $("b-fs").onclick = function(){ setFS(!fsOn); };
 document.addEventListener("fullscreenchange", function(){ if (!document.fullscreenElement && fsOn) setFS(false); });
 document.addEventListener("keydown", function(e){
+  var tg = e.target && e.target.tagName; if (tg === "INPUT" || tg === "SELECT" || tg === "TEXTAREA" || !main) { if (e.key !== "Escape") return; }
+  if (e.altKey && !e.ctrlKey && !e.metaKey) { var kt = {h:"hline", t:"trend", m:"measure", p:"plan", f:"fib"}[String(e.key).toLowerCase()]; if (kt) { e.preventDefault(); setTool(kt); return; } }
+  if (!e.altKey && !e.ctrlKey && !e.metaKey && main) {
+    try {
+      var tsk = main.timeScale();
+      if (e.key === "ArrowLeft" || e.key === "ArrowRight") { e.preventDefault(); tsk.scrollToPosition(tsk.scrollPosition() + (e.key === "ArrowLeft" ? -5 : 5), false); return; }
+      if (e.key === "+" || e.key === "=" || e.key === "-") { var lr = tsk.getVisibleLogicalRange(); if (lr) { e.preventDefault(); var wv = lr.to - lr.from, nv = Math.max(10, wv * (e.key === "-" ? 1.25 : 0.8)); tsk.setVisibleLogicalRange({from:lr.to - nv, to:lr.to}); } return; }
+    } catch (x) {}
+  }
   if (e.key === "Escape") { if ($("setwrap").classList.contains("open")) closeSettings(); else if (tool !== "cursor" || msr) { setTool("cursor"); clearMeasure(); } else if (fsOn) setFS(false); closeMenus(); }
 });
 
@@ -937,7 +1045,7 @@ if (window.ResizeObserver) new ResizeObserver(fit).observe($("panes"));
 menus(); build(false);
 setTimeout(function(){ fit(); setRange(rng); }, 60);
 if (S.rs && !(P.ix && P.ix.v)) { hint("No data for " + RS_NAME + ", so the RS line is hidden. Choose the index in Account → Relative strength index."); setTimeout(function(){ if (tool === "cursor") hint(""); }, 9000); }
-window.__arkaChart = {S:function(){ return S; }, charts:function(){ return charts; }, ind:function(){ return ind; }, draws:function(){ return draws; }};
+window.__arkaChart = {yView:function(){ return yView; }, S:function(){ return S; }, charts:function(){ return charts; }, ind:function(){ return ind; }, draws:function(){ return draws; }};
 })();
 </script></body></html>"""
 
