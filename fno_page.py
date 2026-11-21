@@ -767,6 +767,174 @@ def _method(res: dict) -> str:
     return _grid("two" if len(cards) > 1 else "", *cards)
 
 
+# ───────────── signals ─────────────
+TIER = {"on": ("Approved", "g"), "trial": ("On trial", "a"), "off": ("Switched off", "n")}
+
+
+def _tier_of(S_, trusted) -> str:
+    return "off" if (not S_ or not trusted) else S_.get("tier", "off")
+
+
+def _rec_row(name, S_, trusted) -> str:
+    st_ = (S_ or {}).get("stats") or {}
+    lab, cl = TIER[_tier_of(S_, trusted)]
+    if not st_.get("n"):
+        return f'<tr><td>{_e(name)}</td><td class="l"><span class="fo-pill n">No record yet</span></td>' + "<td>—</td>" * 4 + '<td class="xw">—</td>' * 4 + "</tr>"
+    return (f'<tr><td>{_e(name)}</td><td class="l"><span class="fo-pill {cl}">{lab}</span></td><td>{st_["n"]}</td><td>{st_["win"] * 100:.0f}%</td>'
+            f'<td class="b">{_col(st_["exp"], 2)}</td><td>{st_["pf"]:.2f}</td><td class="xw">{_col(st_.get("edge"), 2)}</td><td class="xw">{_col(st_["avg_win"])} / {_col(st_["avg_loss"])}</td>'
+            f'<td class="xw">{_col(st_["worst"])}</td><td class="xw">{st_["losing_run"]} in a row</td></tr>')
+
+
+def _sig_status(res: dict) -> str:
+    rows = ""
+    for x in res["indexes"].values():
+        M = x.get("model") or {}
+        T, tr = M.get("trade") or {}, M.get("conf_n", 0) >= 1
+        rows += _rec_row(f'{x["name"]} · buy', T.get("long"), tr) + _rec_row(f'{x["name"]} · short', T.get("short"), tr)
+    ST = res.get("stock_trade")
+    rows += _rec_row("Stocks · buy (ten-stock portfolio)", ST, bool(ST and ST.get("trusted")))
+    head = ('<tr><th>Signal</th><th class="l">Status</th><th>Past trades</th><th>Won</th><th>Per trade, after costs</th><th>Money won ÷ lost</th>'
+            '<th class="xw">Against just holding</th><th class="xw">Average win / loss</th><th class="xw">Worst trade</th><th class="xw">Longest losing run</th></tr>')
+    return (f'<div class="fo-tw"><table class="fo-t"><thead>{head}</thead><tbody>{rows}</tbody></table></div><div class="fo-note" style="padding:0 14px 12px">'
+            '<b style="color:var(--tx2)">Approved</b>: on sessions the model had never seen, this signal made money after costs, won at least 1.2 times what it lost, and beat simply '
+            'holding by more than luck explains. <b style="color:var(--tx2)">On trial</b>: it made money and beat holding, but not by enough to rule out luck; paper trade it or use '
+            'very small size. <b style="color:var(--tx2)">Switched off</b>: it failed, or the model behind it has no record. Switched-off signals are never shown as a trade.</div>')
+
+
+def _plan_tiles(c: dict, lot=None, cap=None, risk=None) -> str:
+    t = []
+    if _ok(c.get("entry")):
+        t.append(_tile("Entry" if c.get("since") else "Entry reference", _px(c["entry"]), f'since {_day(c["since"], False)}' if c.get("since") else "last close · act at the next close"))
+    if _ok(c.get("stop")):
+        t.append(_tile("Stop (closing basis)", f'<span class="dn">{_px(c["stop"])}</span>', "exit if a session closes beyond this"))
+    if _ok(c.get("target")):
+        t.append(_tile("Target", f'<span class="up">{_px(c["target"])}</span>', "book the trade here"))
+    if _ok(c.get("pnl")):
+        t.append(_tile("Result so far", _col(c["pnl"], 2), f'{c.get("bars", 0)} sessions held'))
+    if c.get("left") is not None and c.get("since"):
+        t.append(_tile("Time limit", f'{c["left"]} sessions left', "after that the signal must still be on to stay in"))
+    if _ok(c.get("entry")) and _ok(c.get("stop")) and cap and risk and not c.get("since"):
+        per = abs(c["entry"] - c["stop"])
+        q = (cap * risk / 100) / per if per > 0 else 0
+        if _ok(lot) and lot > 0:
+            t.append(_tile("Size for your risk", f'{int(q // lot)} lot{"" if int(q // lot) == 1 else "s"}', f'lot {lot:,.0f} · one lot risks ₹{per * lot:,.0f}'))
+        else:
+            t.append(_tile("Size for your risk", f'{int(q):,} shares', f'risks ₹{cap * risk / 100:,.0f}'))
+    return f'<div class="fo-tiles">{"".join(t)}</div>' if t else ""
+
+
+def _index_signal(x: dict, cap, risk) -> str:
+    c, M = x.get("call") or {}, x.get("model") or {}
+    tier = c.get("tier")
+    tag = f'<span class="fo-pill {TIER[tier][1]}" style="margin-left:auto">{TIER[tier][0]}</span>' if tier else ""
+    head = f'<div class="fo-vd"><b class="{TONE.get(c.get("tone", "flat"), "fl")}">{_e(c.get("word", "No signal"))}</b><span>{_e(x["name"])} future</span>{tag}</div>'
+    body = head + f'<div class="fo-tx">{_e(c.get("why", ""))}</div>' + _plan_tiles(c, x["levels"].get("lot"), cap, risk)
+    if tier == "trial":
+        body += '<div class="fo-note"><b class="am">On trial.</b> This signal has not yet beaten luck in testing. Do not put meaningful money on it.</div>'
+    T = M.get("trade") or {}
+    S_ = T.get(c.get("side") or "long")
+    if S_ and S_["stats"].get("n"):
+        cv = S_["curve"]
+        nm = "Buy signals only" if S_["side"] == 1 else "Short signals only"
+        body += ('<div style="height:14px"></div>' + _lines(cv["date"], [(nm, AMBER, cv["sys"], _pct(cv["sys"][-1], 0)), ("Always in the position", GREY, cv["hold"], _pct(cv["hold"][-1], 0))],
+                                                            h=150, fmt=lambda v: f"{v * 100:+.0f}%", zero=True))
+        rows = "".join(f'<tr><td>{_day(t["in"])}</td><td class="xw">{_px(t["in_px"])}</td><td>{_day(t["out"], False)}</td><td class="xw">{_px(t["out_px"])}</td>'
+                       f'<td class="b">{_col(t["ret"], 2)}</td><td class="l xw">{_e(t["why"])}</td></tr>' for t in S_["trades"][:8])
+        body += (f'<div class="fo-tw" style="max-height:250px;margin-top:10px"><table class="fo-t"><thead><tr><th>Entered</th><th class="xw">At</th><th>Exited</th><th class="xw">At</th>'
+                 f'<th>Result after costs</th><th class="l xw">Why it ended</th></tr></thead><tbody>{rows}</tbody></table></div>')
+    return _card(f'{x["name"]} signal', "end of day · act at the next close", body)
+
+
+def _stock_signals(res: dict, cap, risk) -> str:
+    ST = res.get("stock_trade")
+    if not ST:
+        return _grid("", _card("Stock signals", "", '<div class="fo-empty">Stock signals need about two and a half years of stored history before they can be replayed and judged.</div>', True))
+    tier = _tier_of(ST, ST.get("trusted"))
+    lab, cl = TIER[tier]
+    st_, pf_, bn = ST["stats"], ST.get("port") or {}, ST.get("bench") or {}
+    rec = ('<div class="fo-tiles six" style="margin-top:0">' + _tile("Status", f'<span class="fo-pill {cl}">{lab}</span>', f'tested since {_day(ST.get("from"))}')
+           + _tile("Past trades", f'{st_.get("n", 0):,}', f'{st_.get("win", 0) * 100:.0f}% won · held {st_.get("bars") or 0:.0f} sessions')
+           + _tile("Per trade, after costs", _col(st_.get("exp"), 2), f'money won ÷ lost {st_.get("pf", 0):.2f}')
+           + _tile("Portfolio, a year", _col(pf_.get("cagr")), f'average F&O stock {_pct(bn.get("cagr"))}')
+           + _tile("Worst fall from a peak", _col(pf_.get("dd")), f'average F&O stock {_pct(bn.get("dd"))}')
+           + _tile("Money at work", f'{ST.get("invested", 0) * 100:.0f}%', f'of {ST["slots"]} equal slots, on average') + '</div>')
+    cv = ST["curve"]
+    chart = _lines(cv["date"], [("Signal portfolio", AMBER, cv["sys"], _pct(cv["sys"][-1], 0)), ("Average F&O stock", GREY, cv["bench"], _pct(cv["bench"][-1], 0))],
+                   h=170, fmt=lambda v: f"{v * 100:+.0f}%", zero=True)
+    out = _grid("", _card("Stock buy signals: the record", "ten-stock test portfolio on unseen sessions, after costs", rec + '<div style="height:14px"></div>' + chart))
+    if tier == "off":
+        why = ("the stock model has not shown skill on unseen sessions" if not ST.get("trusted") else "the replay did not make enough money after costs, or did not beat holding the average stock")
+        out += _grid("", _card("Buy · Hold · Sell", "switched off", f'<div class="fo-empty"><b>No stock buy signals.</b> They are switched off because {why}. '
+                                                                 'The stay-away list below is still shown, as a caution list.</div>', True))
+    else:
+        warn = '<div class="fo-note" style="padding:0 14px 10px"><b class="am">On trial.</b> These signals have not yet beaten luck in testing. Paper trade them or use very small size.</div>' if tier == "trial" else ""
+
+        def size(b):
+            per = abs(b["entry"] - b["stop"])
+            if not (cap and risk and per > 0 and b["entry"] > 0):
+                return "—"
+            return f'{int(min((cap * risk / 100) / per, cap / E.SLOTS / b["entry"])):,}'          # the smaller of: your risk limit, a tenth of your capital
+        buy = "".join(f'<tr><td>{_e(b["sym"])}</td><td>{_px(b["entry"])}</td><td class="dn">{_px(b["stop"])}</td><td class="up">{_px(b["target"])}</td>'
+                      f'<td class="xw">{(b["rank"] or 0) * 100:.0f}</td><td class="xw">{_pct(-E.SIG_STOP * b["swing"])} / {_pct(E.SIG_TARGET * b["swing"])}</td><td>{size(b)}</td></tr>' for b in ST["buy"])
+        buy = (f'<div class="fo-tw"><table class="fo-t"><thead><tr><th>Buy at the next close</th><th>Reference</th><th>Stop</th><th>Target</th><th class="xw">Model rank</th>'
+               f'<th class="xw">Risk / reward</th><th>Shares for your risk</th></tr></thead><tbody>{buy}</tbody></table></div>' if ST["buy"]
+               else '<div class="fo-empty">No new buy today' + ("." if ST.get("market_ok") else ": the market verdict is negative, so no new stock is bought.") + '</div>')
+        hold = [h for h in ST["hold"] if not h["sell"]]
+        sell = [h for h in ST["hold"] if h["sell"]]
+        hrow = lambda h: (f'<tr><td>{_e(h["sym"])}</td><td class="xw">{_day(h["since"], False)}</td><td class="xw">{_px(h["entry"])}</td><td>{_px(h["price"])}</td><td class="b">{_col(h["pnl"])}</td>'
+                          f'<td class="dn">{_px(h["stop"])}</td><td class="up">{_px(h["target"])}</td><td class="xw">{(h["rank"] or 0) * 100:.0f}</td><td class="xw">{h["left"]}</td></tr>')
+        hh = ('<tr><th>Hold</th><th class="xw">Bought</th><th class="xw">At</th><th>Now</th><th>Result</th><th>Stop</th><th>Target</th><th class="xw">Model rank</th>'
+              '<th class="xw">Sessions left</th></tr>')
+        holdt = (f'<div class="fo-tw"><table class="fo-t"><thead>{hh}</thead><tbody>{"".join(hrow(h) for h in hold)}</tbody></table></div>' if hold
+                 else '<div class="fo-empty">No open positions.</div>')
+        srows = "".join(f'<tr><td>{_e(h["sym"])}</td><td>Sell at the next close</td><td class="b">{_col(h["pnl"])}</td><td class="l">{_e(h["sell"])}</td></tr>' for h in sell)
+        srows += "".join(f'<tr><td>{_e(t["sym"])}</td><td>Sold at today\'s close</td><td class="b">{_col(t["ret"])}</td><td class="l">{_e(t["why"])}</td></tr>' for t in ST["sold"])
+        sellt = (f'<div class="fo-tw"><table class="fo-t"><thead><tr><th>Sell</th><th>When</th><th>Result</th><th class="l">Why</th></tr></thead><tbody>{srows}</tbody></table></div>'
+                 if srows else '<div class="fo-empty">Nothing to sell today.</div>')
+        n_buy, n_sell = len(ST["buy"]), len(sell) + len(ST["sold"])
+        out += _grid("two", f'<div class="fo-stack">{_card("Buy", str(n_buy) + " new today", buy + warn, True)}{_card("Sell", str(n_sell) + " today", sellt, True)}</div>',
+                     _card("Hold", f'{len(hold)} of {ST["slots"]} slots in use', holdt, True))
+    av = "".join(f'<tr><td>{_e(a["sym"])}</td><td>{_px(a["price"])}</td><td>{(a["rank"] or 0) * 100:.0f}</td><td class="l">Bottom fifth of the model and below its 50-day average</td></tr>' for a in ST["avoid"])
+    q = (res.get("stock_model") or {}).get("quint") or []
+    note = (f'On unseen sessions the bottom fifth moved {_pct(q[0], 2)} against the average F&O stock per {E.MAIN_H} sessions.' if (q and _ok(q[0])) else "")
+    avt = (f'<div class="fo-tw" style="max-height:320px"><table class="fo-t"><thead><tr><th>Stay away</th><th>Price</th><th>Model rank</th><th class="l">Why</th></tr></thead><tbody>{av}</tbody></table></div>'
+           if av else '<div class="fo-empty">No stock is in the bottom fifth and in a downtrend today.</div>')
+    out += _grid("", _card("Stay away", "do not buy · if you hold one, tighten your stop", avt + f'<div class="fo-note" style="padding:0 14px 12px">{note} '
+                           'This is a caution list, not a short-selling signal.</div>', True))
+    return out
+
+
+def _sig_rules() -> str:
+    R = [("Index: when to buy", f"The model's verdict is Stay invested or Rally setup, and no trade is open. You act at the next session's close."),
+         ("Index: where the stop and target go", f"Stop: {E.SIG_STOP:.0f} normal 10-session swing below your entry. Target: {E.SIG_TARGET:.0f} swings above. The swing is measured from the last 60 sessions. "
+                                                "Both are checked on the closing price, so a spike during the day does not count."),
+         ("Index: when to sell", f"The first of: a close below the stop; a close above the target; the verdict turns to Reduce risk or Correction risk; or {E.SIG_HOLD} sessions have passed "
+                                 "and the verdict is no longer positive. Short signals are the mirror image."),
+         ("Stocks: what gets bought", f"Top fifth of the stock model, above its 50-day average, and the NIFTY verdict is not negative. At most {E.SLOTS} stocks, a tenth of the money in each, "
+                                      "best rank first."),
+         ("Stocks: when to sell", f"The first of: a close below the stop; a close above the target; model rank falls below 40 of 100; or {E.SIG_HOLD} sessions have passed and it has left the top fifth."),
+         ("Costs in the test", f"{E.IDX_COST * 100:.2f}% a side on the index future and {E.STK_COST * 100:.2f}% a side on stocks, for brokerage, taxes and slippage."),
+         ("How much to trade", "Decide what you can lose on one trade (1% of capital is a common ceiling). Size = that amount ÷ (entry − stop), and for stocks never more than a tenth of your "
+                              "capital in one name. The tables do this sum for the numbers you enter; the numbers stay in your browser session."),
+         ("What this cannot promise", "The test covers a few years and a few dozen index trades. Losing runs happen even to systems that work; the table shows the longest one in testing. "
+                                      "Prices are futures closes; your fills will differ. This is analysis of public data, not investment advice.")]
+    return '<div class="fo-note2">' + "".join(f"<div><small>{_e(a)}</small>{_e(b)}</div>" for a, b in R) + "</div>"
+
+
+def _signals_tab(res: dict):
+    idx = list(res["indexes"].values())
+    _html(_grid("", _card("Which signals are switched on", "each kind of signal replayed trade by trade on sessions the model had never seen", _sig_status(res), True)))
+    c1, c2, _ = st.columns([1, 1, 2])
+    with c1:
+        cap = st.number_input("Your trading capital (₹)", min_value=0, value=int(st.session_state.get("fo_cap", 100000)), step=10000, key="fo_cap")
+    with c2:
+        risk = st.number_input("Most you will lose on one trade (%)", min_value=0.1, max_value=5.0, value=float(st.session_state.get("fo_risk", 1.0)), step=0.1, key="fo_risk")
+    _html(_sec("Index", "One instruction per index, with the plan") + _grid("two", *[_index_signal(x, cap, risk) for x in idx])
+          + _sec("Stocks", "What to buy, what to hold, what to sell, what to stay away from") + _stock_signals(res, cap, risk)
+          + _sec("The rules", "Exactly what the signals do, so you can check them yourself") + _grid("", _card("How every signal is made", "fixed rules, no judgement calls", _sig_rules())))
+
+
+
 # ───────────── page ─────────────
 def _html(body: str):
     st.markdown(f'<div class="fo">{body}</div>', unsafe_allow_html=True)
@@ -796,10 +964,12 @@ def render_fno(supabase=None, on_open=None):
              + '<span class="fo-chip">End of day · updates after 8 pm</span>')
     _html(f'<div class="fo-chips">{chips}</div>')
 
-    tabs = ["Overview"] + [x["name"] for x in idx] + ["Stocks", "Participants", "Method"]
-    tab = st.pills("View", tabs, default="Overview", key="fo_tab", label_visibility="collapsed") or "Overview"
+    tabs = ["Signals", "Overview"] + [x["name"] for x in idx] + ["Stocks", "Participants", "Method"]
+    tab = st.pills("View", tabs, default="Signals", key="fo_tab", label_visibility="collapsed") or "Signals"
 
-    if tab == "Overview":
+    if tab == "Signals":
+        _signals_tab(res)
+    elif tab == "Overview":
         _html(_overview(res))
     elif tab in [x["name"] for x in idx]:
         x = next(v for v in idx if v["name"] == tab)
@@ -859,5 +1029,5 @@ def home_rows(wait: float = 2.0) -> list | None:
         out.append({"name": x["name"], "verdict": x["verdict"], "tone": x["tone"], "asof": res.get("asof"), "pcr": lv.get("pcr"), "iv": lv.get("iv"),
                     "max_pain": lv.get("max_pain"), "put_wall": lv.get("put_wall"), "call_wall": lv.get("call_wall"), "move5": lv.get("move5"), "fut": lv.get("fut"),
                     "proven": x["counts"].get("proven", 0), "reason": (top["label"] if top else ""), "forecast": M.get("forecast"), "conf": M.get("conf", "Untested"),
-                    "p_up": M.get("p_up")})
+                    "p_up": M.get("p_up"), "signal": (x.get("call") or {}).get("word", "")})
     return out
