@@ -74,7 +74,7 @@ except Exception:  # pragma: no cover
     create_client = None
 
 IST = timezone(timedelta(hours=5, minutes=30))
-APP_VERSION = "v9.6"
+APP_VERSION = "v9.7"
 
 
 def _secret(name: str, default=""):
@@ -404,6 +404,29 @@ div[class*="st-key-search"] [data-baseweb="select"] input,div[class*="st-key-sea
 .ak-ov{background:var(--s1);border:1px solid var(--line);border-radius:var(--r);padding:4px 14px;}
 .ak-desc{background:var(--s1);border:1px solid var(--line);border-radius:var(--r);padding:14px;font:13.5px var(--sans);color:var(--tx2);line-height:1.7;}
 .ak-pt2{font:600 14px var(--sans);color:var(--tx);padding:14px 0 8px;}
+/* ── startup screen: logo in a turning ring, one status line ── */
+.bt{position:fixed;inset:0;z-index:999990;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0;padding-bottom:6vh;}
+.bt::before{content:"";position:absolute;inset:0;pointer-events:none;background:radial-gradient(520px 380px at 50% 42%,rgba(255,159,10,.07),transparent 70%);}
+.bt-ring{position:relative;width:148px;height:148px;display:flex;align-items:center;justify-content:center;}
+.bt-ring svg{position:absolute;inset:0;width:100%;height:100%;animation:btspin 1.15s linear infinite;}
+.bt-ring circle{fill:none;stroke-width:3;}
+.bt-ring .tr{stroke:rgba(255,255,255,.07);} .bt-ring .arc{stroke:#F5F5F7;stroke-linecap:round;stroke-dasharray:250 90;}
+.bt-ring img{position:relative;width:76px;height:76px;border-radius:20px;box-shadow:0 10px 40px rgba(255,159,10,.18);}
+.bt-ring b{position:relative;font:700 44px var(--sans);color:#fff;}
+@keyframes btspin{to{transform:rotate(360deg)}}
+.bt-t{position:relative;margin-top:30px;font:500 18px var(--sans);letter-spacing:-.1px;color:var(--tx);white-space:nowrap;}
+.bt-t i{font-style:normal;display:inline-block;width:1.4em;text-align:left;}
+.bt-t i u{text-decoration:none;opacity:0;animation:btdot 1.2s infinite;} .bt-t i u:nth-child(2){animation-delay:.2s;} .bt-t i u:nth-child(3){animation-delay:.4s;}
+@keyframes btdot{0%,20%{opacity:0}40%,100%{opacity:1}}
+.bt-s{position:relative;margin-top:10px;min-height:18px;font:13px var(--sans);color:var(--tx3);}
+.bt-p{position:relative;margin-top:22px;width:168px;height:3px;border-radius:2px;background:rgba(255,255,255,.07);overflow:hidden;}
+.bt-p u{display:block;height:100%;border-radius:2px;background:var(--amber);transition:width .35s ease;}
+div[class*="st-key-akwarm"]{display:none !important;}
+div[class*="st-key-btskip"],div[class*="st-key-spskip"]{position:fixed !important;left:0;right:0;bottom:7vh;z-index:999995;display:flex !important;flex-direction:column !important;align-items:center !important;width:auto !important;}
+div[class*="st-key-btskip"] button,div[class*="st-key-spskip"] button{background:transparent !important;border:0 !important;box-shadow:none !important;color:var(--tx3) !important;
+  font:500 13px var(--sans) !important;min-height:32px !important;}
+div[class*="st-key-btskip"] button:hover,div[class*="st-key-spskip"] button:hover{color:var(--tx) !important;}
+@media (prefers-reduced-motion:reduce){.bt-ring svg{animation-duration:3s;}}
 /* ── stock screen (security workspace) v2 ── */
 div[class*="st-key-swback"]{margin:6px 0 2px;}
 div[class*="st-key-swback"] button{min-height:34px !important;padding:4px 14px 4px 10px !important;border-radius:999px !important;background:transparent !important;
@@ -634,10 +657,18 @@ WM = _brand(26, 17)
 
 
 # ═══════════════════════════════ OPENING SCREEN · LANDING · SIGN-IN ═══════════════════════════════
+def _splash_html(line: str, sub: str = "", frac=None) -> str:
+    """The startup screen: the logo inside a turning ring, a status line with moving dots, an optional progress bar."""
+    mark = f'<img src="{LOGO}" alt="">' if LOGO else "<b>A</b>"
+    bar = f'<div class="bt-p"><u style="width:{max(4, min(100, frac * 100)):.0f}%"></u></div>' if frac is not None else ""
+    return ('<div class="bt"><div class="bt-ring"><svg viewBox="0 0 120 120" aria-hidden="true"><circle class="tr" cx="60" cy="60" r="55"/>'
+            f'<circle class="arc" cx="60" cy="60" r="55"/></svg>{mark}</div>'
+            f'<div class="bt-t">{_esc(line)}<i><u>.</u><u>.</u><u>.</u></i></div><div class="bt-s">{_esc(sub)}</div>{bar}</div>')
+
+
 def _render_opening():
-    """Shown for the fraction of a second the browser needs to hand back a saved sign-in."""
-    st.markdown(f'<div class="sp">{"<img src=" + chr(34) + LOGO + chr(34) + " alt=" + chr(34) + chr(34) + ">" if LOGO else ""}{auth.wordmark_html(22)}<div class="bar"><i></i></div></div>',
-                unsafe_allow_html=True)
+    """Shown while the browser hands back a saved sign-in."""
+    st.markdown(_splash_html("Starting Arka Trades", "Checking this device"), unsafe_allow_html=True)
     with st.container(key="spskip"):
         if st.button("Go to sign in", key="sp_skip"):
             st.session_state["_ak_ready"] = True
@@ -1479,6 +1510,89 @@ def _news_rail_fragment():
     _run("news_feed", render_news_rail, watchlist_for_news, label=rail_label,
          current_security=st.session_state.get("active_security") if st.session_state.get("page") == "security" else None)
 
+
+# ═══════════════════════════════ STARTUP: LOAD EVERY PAGE'S DATA ONCE ═══════════════════════════════
+# After sign-in the startup screen stays up while each main page is drawn once out of sight. That fills the data caches
+# (quotes, history, breadth, news), so moving between pages afterwards only redraws, it does not download.
+BOOT_BUDGET_S = 30            # stop preloading after this long; anything left loads on its first visit
+WARM_FRESH_S = 240            # a page preloaded this recently (by any session) is not preloaded again
+
+
+@st.cache_resource(show_spinner=False)
+def _warm_registry() -> dict:
+    return {}
+
+
+def _boot_steps():
+    def home():
+        fn = _load("home_page", "render_home")
+        try:
+            compact_ok = fn is not None and "compact" in inspect.signature(fn).parameters
+        except (TypeError, ValueError):
+            compact_ok = False
+        if fn is not None:
+            fn(supabase, on_open=_open_security, nav=_nav_cb, **({"compact": IS_PHONE} if compact_ok else {}))
+
+    def page(module, attr, *a, **k):
+        def go():
+            fn = _load(module, attr)
+            if fn is not None:
+                fn(*a, **k)
+        return go
+    news_syms = list(dict.fromkeys(st.session_state.get("watchlist", []) + st.session_state.get("admin_watchlist", [])))
+    return [
+        ("home", "Loading markets", "Indices, sectors and the NIFTY 50", home),
+        ("watchlist", "Loading your watchlist", "Quotes, history and today's events",
+         page("watchlist_page", "render_watchlist", supabase, on_open=_open_security, is_admin=IS_ADMIN)),
+        ("portfolio", "Loading your portfolio", "Holdings and P&L", page("portfolio_page", "render_portfolio", supabase, on_open=_open_security)),
+        ("regime", "Reading the market regime", "Trend, breadth and volatility", page("regime_page", "render_regime", on_open=_open_security)),
+        ("flow", "Tracking money flow", "Sector rotation", page("money_flow", "render_money_flow", on_open=_open_security)),
+        ("news", "Collecting news", "Market wire and filings", page("news_feed", "render_news_terminal", news_syms, on_open=_open_security,
+                                                                   current_security=None)),
+    ]
+
+
+def _boot_done():
+    st.session_state["_ak_booted"] = True
+
+
+def _boot():
+    """One page per run: show the startup screen, draw that page hidden, then run again for the next one."""
+    ss = st.session_state
+    steps = _boot_steps()
+    reg = _warm_registry()
+    who = "admin" if IS_ADMIN else "member"
+    i = int(ss.get("_ak_boot_i", 0))
+    ss.setdefault("_ak_boot_t0", time.time())
+    now = time.time()
+    while i < len(steps) and now - reg.get((steps[i][0], who), 0) < WARM_FRESH_S:     # already fresh
+        i += 1
+    if i >= len(steps) or now - ss["_ak_boot_t0"] > BOOT_BUDGET_S:
+        _boot_done()
+        if ss.get("_ak_boot_i") is None:
+            return                                         # nothing needed loading: no startup screen at all
+        st.rerun()
+    key, line, sub, draw = steps[i]
+    st.markdown(_splash_html(line, sub, frac=(i + 0.5) / len(steps)), unsafe_allow_html=True)
+    with st.container(key="btskip"):
+        st.button("Skip", key="bt_skip", on_click=_boot_done)
+    ss["_ak_boot_i"] = i + 1                               # set first: a page that fails or stops is not retried
+    try:
+        with st.container(key="akwarm"):
+            draw()
+        reg[(key, who)] = time.time()
+    except BaseException as e:                             # noqa: BLE001
+        if _is_streamlit_control(e):
+            if "Stop" in type(e).__name__:                 # the page called st.stop(): carry on with the next page
+                st.rerun()
+            raise                                          # a rerun (Skip was pressed, or the page asked): let it through
+        if isinstance(e, (KeyboardInterrupt, SystemExit)):
+            raise
+    st.rerun()
+
+
+if not st.session_state.get("_ak_booted"):
+    _boot()
 
 # ═══════════════════════════════ ROUTER ═══════════════════════════════
 pg = st.session_state.page
