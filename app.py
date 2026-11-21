@@ -74,7 +74,7 @@ except Exception:  # pragma: no cover
     create_client = None
 
 IST = timezone(timedelta(hours=5, minutes=30))
-APP_VERSION = "v10.0"
+APP_VERSION = "v10.1"
 
 
 def _secret(name: str, default=""):
@@ -1018,7 +1018,39 @@ def _screen_label(state: str) -> str:
     return (PAGE_META.get(p_) or ("Home",))[0] if p_ != "home" else "Home"
 
 
+@st.cache_data(ttl=24 * 3600, show_spinner=False, max_entries=2)
+def _stock_directory(day: str) -> dict:
+    """{SYMBOL: company name} for every NSE stock the app can find: NSE's equity list, plus the Nifty 500 members.
+    Raises when neither source answers, so an empty result is not remembered for a day."""
+    out = {}
+    try:
+        import watchlist_page as _wl
+        for sym, val in (_wl.equity_names() or {}).items():
+            out[str(sym).upper()] = str((val or ("",))[0] or "").strip()
+    except Exception:
+        pass
+    try:
+        import quant_data as _qd
+        members, _ = _qd.universe("Nifty 500")
+        for sym in members or {}:
+            out.setdefault(str(sym).upper(), "")
+    except Exception:
+        pass
+    if len(out) < 100:
+        raise RuntimeError("stock directory unavailable")
+    return out
+
+
+def _directory() -> dict:
+    try:
+        return _stock_directory(datetime.now(IST).strftime("%Y-%m-%d"))
+    except Exception:
+        return {}
+
+
 def _security_candidates():
+    """Search suggestions, "SYMBOL · Company name": your recent stocks, lists and holdings first, then every NSE stock, so typing
+    a few letters of the symbol or of the company name finds it (HDF → HDFCBANK, HDFCLIFE, HDFCAMC; jamna → JAMNAAUTO)."""
     base = ["RELIANCE", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK", "TCS", "INFY", "WIPRO", "HCLTECH",
             "LT", "ITC", "BHARTIARTL", "TMPV", "M&M", "MARUTI", "SUNPHARMA", "HINDUNILVR", "BAJFINANCE",
             "ADANIENT", "ADANIPORTS", "TATASTEEL", "JSWSTEEL", "NTPC", "POWERGRID", "ONGC", "COALINDIA", "BEL",
@@ -1027,13 +1059,18 @@ def _security_candidates():
         held = ud.holding_symbols()
     except Exception:
         held = []
-    out = []
+    names = _directory()
+    first, seen = [], set()
     for source in (st.session_state.get("recent_symbols", []), st.session_state.get("watchlist", []),
                    st.session_state.get("admin_watchlist", []), held, base):
         for x in source:
-            if x and x.upper() not in out:
-                out.append(x.upper())
-    return out + FUNCTION_MENU
+            x = str(x or "").upper()
+            if x and x not in seen:
+                seen.add(x)
+                first.append(x)
+    label = lambda sym: f"{sym} · {names[sym]}" if names.get(sym) else sym
+    rest = sorted(sym for sym in names if sym not in seen)
+    return [label(x) for x in first] + FUNCTION_MENU + [label(x) for x in rest]
 
 
 def _resolve_query(raw: str) -> str:
@@ -1109,7 +1146,7 @@ def _render_search():
     with st.container(key="search"):
         try:
             st.selectbox("Search", _security_candidates(), index=None, key="ak_cmd", on_change=_cmd_cb, args=("ak_cmd",),
-                         accept_new_options=True, label_visibility="collapsed", placeholder="Search stocks, or type MF, PORT, TCS RES")
+                         accept_new_options=True, label_visibility="collapsed", placeholder="Search any stock by symbol or company name, or type MF, PORT, TCS RES")
         except TypeError:                                  # Streamlit older than accept_new_options
             st.text_input("Search", key="ak_cmd_txt", on_change=_cmd_cb, args=("ak_cmd_txt",), label_visibility="collapsed",
                           placeholder="Search a stock and press Enter")
