@@ -10,7 +10,7 @@ What it does
     * Participant-wise open interest (FII, DII, Pro, Client)
     * F&O ban list
 
-  What it keeps (folder data/fno/)
+  What it keeps (folder arka_data/fno/)
     u/YYYY-MM.csv         one row per underlying per day: futures price and open interest, rollover, put and call
                           open interest and volume, max pain, the biggest call and put strikes, implied volatility
                           (solved from option prices with Black-76), skew and the at-the-money straddle
@@ -49,7 +49,7 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 HEAD = {"User-Agent": UA, "Accept": "*/*", "Accept-Language": "en-US,en;q=0.9", "Referer": "https://www.nseindia.com/all-reports-derivatives"}
 MON = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
 UDIFF_FROM = date(2024, 7, 8)
-ROOT = Path("data") / "fno"
+ROOT = Path("arka_data") / "fno"            # not "data/": that name is already taken by a file in the repository
 RATE = 0.065                                # risk-free rate used to discount option prices
 INDEX_SYMS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"}
 
@@ -336,7 +336,10 @@ def reduce_day(df: pd.DataFrame, day: date) -> tuple:
 
 # ═════════════════════════ storage ═════════════════════════
 def _write(path: Path, text: str):
-    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except (NotADirectoryError, FileExistsError):
+        raise SystemExit(f"Cannot create the folder {path.parent}: something with that name already exists and is a file.")
     path.write_text(text, encoding="utf-8", newline="\n")
 
 
@@ -404,7 +407,6 @@ class Book:
         for m in sorted(self.dirty):
             _write(self.root / "u" / f"{m}.csv", _fmt(self.u[m][U_COLS]))
         self.dirty.clear()
-        self.root.mkdir(parents=True, exist_ok=True)
         if self.p_dirty:
             _write(self.root / "participants.csv", _fmt(self.p[P_COLS]))
             self.p_dirty = False
