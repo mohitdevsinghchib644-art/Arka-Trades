@@ -1,5 +1,10 @@
 """
-news_feed.py — Arka News Desk v12
+news_feed.py — Arka News Desk v12.1
+
+v12.1
+  * NSE is a source: the exchange's own filing feeds (announcements, financial results, board meetings, corporate
+    actions, insider trading) from nsearchives.nseindia.com. Each filing is matched to its stock through NSE's
+    company list, so it carries a stock chip you can tap, and filings from your stocks show under My stocks.
 
 v12 (faster and sharper; the look and the public API are unchanged)
   FASTER
@@ -59,7 +64,9 @@ from __future__ import annotations
 
 import hashlib
 import html
+import importlib
 import re
+import sys
 import threading
 import time
 from collections import Counter, defaultdict
@@ -111,6 +118,13 @@ WIRE_SOURCES = [
     ("Moneycontrol", "https://www.moneycontrol.com/rss/business.xml"),
     ("BusinessLine", "https://www.thehindubusinessline.com/markets/feeder/default.rss"),
     ("NDTV Profit", "https://feeds.feedburner.com/ndtvprofit-latest"),
+]
+NSE_FEEDS = [  # the exchange's own RSS feeds of company filings
+    ("Announcements", "https://nsearchives.nseindia.com/content/RSS/Online_announcements.xml"),
+    ("Financial results", "https://nsearchives.nseindia.com/content/RSS/Financial_Results.xml"),
+    ("Board meetings", "https://nsearchives.nseindia.com/content/RSS/Board_Meetings.xml"),
+    ("Corporate actions", "https://nsearchives.nseindia.com/content/RSS/Corporate_action.xml"),
+    ("Insider trading", "https://nsearchives.nseindia.com/content/RSS/Insider_Trading.xml"),
 ]
 MACRO_QUERIES = ["RBI monetary policy repo rate", "Nifty Sensex stock market today", "FII DII flows India equities",
                  "US Federal Reserve rates markets", "crude oil prices India", "rupee dollar forex India",
@@ -203,7 +217,8 @@ NEGATION = re.compile(r"\b(not|no|never|fails? to|unlikely to|without)\b[\w\s,'-
 AMOUNT = re.compile(r"(?:₹|rs\.?|inr)\s?([\d,]+(?:\.\d+)?)\s?(lakh crore|lakh cr|crore|cr\b|billion|bn\b|million|mn\b)", re.I)
 BORING_FILINGS = re.compile(r"trading window|74\s?\(5\)|loss of share|duplicate share|newspaper (publication|advertisement)|"
                             r"compliance certificate|closure of trading|investor (meet|presentation) intimation|book closure|"
-                            r"change in (address|registrar)|copy of newspaper", re.I)
+                            r"change in (address|registrar)|copy of newspaper|postal ballot|esop|esos|"
+                            r"analysts?.{0,25}meet|investors?.{0,12}meet|certificate under sebi|record of proceedings", re.I)
 
 _SENT_RX = [(re.compile(rf"(?<![a-z0-9])(?:{p})(?![a-z0-9])"), w) for p, w in SENT]
 _EVENT_RX = [(e, re.compile(rf"(?<![a-z0-9])(?:{p})", re.I)) for e, p in EVENTS]
@@ -249,6 +264,12 @@ def _parse_dt(raw, parsed=None):
             return datetime(*parsed[:6], tzinfo=timezone.utc).astimezone(IST)
         except Exception:
             pass
+    if raw:                                               # NSE writes "22-Nov-2026 18:30:00", in Indian time
+        for fmt in ("%d-%b-%Y %H:%M:%S", "%d-%b-%Y %H:%M", "%d-%b-%Y"):
+            try:
+                return datetime.strptime(str(raw).strip(), fmt).replace(tzinfo=IST)
+            except ValueError:
+                continue
     return None
 
 
@@ -333,6 +354,63 @@ def _bse_cached(d_from: str, d_to: str, bucket: int) -> list:
         link = f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{att}" if att else "https://www.bseindia.com/corporates/ann.html"
         out.append({"title": f"{name.title()}: {head}"[:240], "link": link, "summary": str(x.get("CATEGORYNAME") or x.get("SUBCATNAME") or ""),
                     "dt": dt, "src": "BSE filing", "company": name})
+    if not out:
+        raise RuntimeError("no filings")
+    return out
+
+
+_NAME_INDEX: dict = {"t": 0.0, "map": {}}
+_NAME_LOCK = threading.Lock()
+
+
+def _co_key(name: str) -> str:
+    """'Tata Consultancy Services Limited' -> 'tata consultancy services' (for matching a filing to its stock)."""
+    k = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", (name or "").lower())).strip()
+    return re.sub(r"\s+(limited|ltd)$", "", k)
+
+
+def _name_index() -> dict:
+    """Company name -> NSE symbol, from the exchange's own equity list (the list the search box uses). Refreshed
+    every 6 hours; an empty result is retried after 10 minutes."""
+    with _NAME_LOCK:                                      # several feeds ask at once: build it once, hand out the same map
+        now = time.time()
+        if now - _NAME_INDEX["t"] < (6 * 3600 if _NAME_INDEX["map"] else 600):
+            return _NAME_INDEX["map"]
+        out = {}
+        try:
+            wl = sys.modules.get("watchlist_page") or importlib.import_module("watchlist_page")
+            for sym, v in (wl.equity_names() or {}).items():
+                k = _co_key(str(v[0] if isinstance(v, (tuple, list)) else v or ""))
+                if k:
+                    out.setdefault(k, str(sym).upper())
+        except Exception:
+            out = {}
+        _NAME_INDEX["map"], _NAME_INDEX["t"] = out, now
+        return out
+
+
+@st.cache_data(ttl=FEED_TTL * 2, show_spinner=False, max_entries=16)
+def _nse_cached(url: str, label: str, bucket: int) -> list:
+    """One NSE filing feed, newest first. Each row names its company; `sym` is set when NSE's list knows it."""
+    r = _SESSION.get(url, timeout=HTTP_TIMEOUT, headers={"User-Agent": UA, "Accept": "application/rss+xml,application/xml,text/xml,*/*",
+                                                         "Referer": "https://www.nseindia.com/"})
+    r.raise_for_status()
+    feed = feedparser.parse(r.content)
+    index = _name_index()
+    out = []
+    for e in feed.entries[:150]:
+        title, desc = _clean_html(e.get("title", ""), 300), _clean_html(e.get("summary", ""), 300)
+        if " - " in title:
+            name, head = (x.strip() for x in title.split(" - ", 1))
+        else:
+            name, head = title.strip(), desc
+        if not name or BORING_FILINGS.search(f"{head} {desc}"):
+            continue
+        dt = _parse_dt(e.get("published") or e.get("updated"), e.get("published_parsed") or e.get("updated_parsed"))
+        if dt is None:
+            continue
+        out.append({"title": f"{name}: {head or label}"[:240], "link": e.get("link", "") or "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+                    "summary": desc if desc and desc != head else label, "dt": dt, "src": "NSE filing", "company": name, "sym": index.get(_co_key(name))})
     if not out:
         raise RuntimeError("no filings")
     return out
@@ -462,11 +540,13 @@ def _make(row: dict, kind: str, source: str, symbol: str | None, tagger) -> dict
         summary = ""                                 # Google News summaries just repeat the headline + publisher
     text = f"{title}. {summary}"
     low = text.lower()
-    score = _sentiment(title) if kind == "filing" else _sentiment(title) * 2 + _sentiment(summary)
+    score = _sentiment(f"{title}. {summary}") if kind == "filing" else _sentiment(title) * 2 + _sentiment(summary)   # a filing's substance is in its text
     score = max(-3, min(3, round(score / (1 if kind == "filing" else 2)))) if kind != "filing" else score
     syms = _tag(title, summary if kind != "company" else "", tagger)
     if symbol and symbol not in syms and kind == "company":
         syms.insert(0, symbol)
+    if row.get("sym") and row["sym"] not in syms:        # a filing matched to its stock through NSE's company list
+        syms.insert(0, row["sym"])
     sectors, macro = (list(x) for x in _topics(low))
     event = _event(title if kind != "filing" else f"{title} {summary}", macro=kind == "macro" or (bool(macro) and not syms))
     amt = _amount_cr(text)
@@ -607,6 +687,8 @@ def _build(key) -> list:
     if include_filings:
         d_to, d_from = _now().strftime("%Y%m%d"), (_now() - timedelta(days=min(days, 7))).strftime("%Y%m%d")
         jobs.append(("bse://filings", "BSE filings", "filing", None, lambda: _bse_cached(d_from, d_to, _bucket(600))))
+        for label, url in NSE_FEEDS:
+            jobs.append((url, "NSE filings", "filing", None, (lambda u=url, l=label: _nse_cached(u, l, _bucket()))))
     pool = ThreadPoolExecutor(max_workers=10)
     futs = {pool.submit(_fetch, u, n, fn): (u, n, kind, sym) for u, n, kind, sym, fn in jobs}
     done, pending = wait(futs, timeout=FETCH_BUDGET_S)
@@ -1135,7 +1217,7 @@ def _desk(watchlist=None, on_open=None, current_security: str | None = None):
              kp("News tone", f'<span style="color:{tc}">{tone:+d}</span>', f'<span style="color:{GREEN}">{pos} positive</span> · <span style="color:{RED}">{neg} negative</span>'),
              kp("Breaking", f'{sum(a["is_breaking"] for a in items)}', f'{sum(a["hot"] for a in items)} trending (3+ outlets)')]
     if not phone:
-        cards += [kp("Filings", sum(a["kind"] == "filing" for a in items), "BSE exchange announcements"),
+        cards += [kp("Filings", sum(a["kind"] == "filing" for a in items), "NSE and BSE exchange filings"),
                   kp("Sources live", f"{live} of {len(health)}", "details in Sources")]
     st.markdown('<div class="nd-kpis">' + "".join(cards) + "</div>", unsafe_allow_html=True)
 
