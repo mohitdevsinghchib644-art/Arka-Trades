@@ -1,0 +1,23 @@
+# Arka Trades · F&O data source check
+# A one-time test, started by hand: Actions tab -> "F&O source check" -> "Run workflow".
+# It asks each free NSE source whether it answers from GitHub's servers and shows the first rows of every file.
+# The result appears on the run's Summary page. No secrets are used and nothing is saved.
+name: F&O source check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install --quiet requests
+      - run: python fno_check.py
