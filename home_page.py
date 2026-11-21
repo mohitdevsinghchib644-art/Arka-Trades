@@ -1426,6 +1426,8 @@ def _fno(compact=False):
               f'<div class="hm-kv"><span>Put wall · call wall</span><b>{num(r["put_wall"])} · {num(r["call_wall"])}</b></div>']
         if _ok(r.get("move5")):
             kv.append(f'<div class="hm-kv"><span>Priced move, 5 sessions</span><b>±{num(r["move5"])} pts</b></div>')
+        if r.get("signal"):
+            kv.insert(0, f'<div class="hm-kv"><span>Signal today</span><b>{_e(r["signal"])}</b></div>')
         if r.get("reason"):
             kv.append(f'<div class="hm-kv"><span>Biggest driver</span><b>{_e(r["reason"])}</b></div>')
         body = f'<div class="hm-vd"><b style="color:{col}">{_e(r["verdict"])}</b><span>{sub}</span></div><div class="hm-kvs" style="margin-top:10px">{"".join(kv)}</div>'
