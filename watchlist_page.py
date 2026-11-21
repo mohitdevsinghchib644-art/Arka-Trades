@@ -834,6 +834,7 @@ def _css():
     .w3-mlist{{display:flex;flex-direction:column;gap:8px}}
     .w3-m{{background:var(--s1,#0E0E10);border:1px solid var(--line,#1E1E21);border-radius:14px;padding:12px 13px}}
     .w3-m.sel{{border-color:rgba(255,159,10,.45)}}
+    .w3-m[data-ak-sym]{{cursor:pointer}} td.sym[data-ak-sym]{{cursor:pointer}} td.sym[data-ak-sym]:hover b{{color:{AMBER}}}
     .w3-m .t{{display:flex;justify-content:space-between;align-items:center;gap:10px}}
     .w3-m .t b{{display:block;font-size:15px;font-weight:650;color:#fff}} .w3-m .t small{{display:block;font-size:11.5px;color:var(--tx3,{TX3});max-width:52vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
     .w3-m .r{{text-align:right}} .w3-m .r b{{font-size:15px}} .w3-m .r .pc{{min-width:0;margin-top:3px;font-size:12px}}
@@ -1070,7 +1071,7 @@ def render_phone_list(rows, view, ctx, group=False, selected=None) -> str:
             sub = f'Vol {r["vol_x"]:.1f}×' if r.get("vol_x") else ""
         sub_html = f'<small style="margin-top:2px">{_e(sub)}</small>' if sub else ""
         ev = f'<div class="e">{_events_cell(r["events"], 3, r, ctx["names"])}</div>' if r["events"] else ""
-        out.append(f'<div class="w3-m{" sel" if r["symbol"] == selected else ""}"><div class="t"><div><b>{_e(r["symbol"])}{note}</b>'
+        out.append(f'<div class="w3-m{" sel" if r["symbol"] == selected else ""}" data-ak-sym="{_e(r["symbol"])}"><div class="t"><div><b>{_e(r["symbol"])}{note}</b>'
                    f'<small>{_e(nm)}</small>{sub_html}</div>{right}</div>{ev}</div>')
     return '<div class="w3-mlist">' + "".join(out) + "</div>"
 
@@ -1080,7 +1081,7 @@ def _sym_cell(r, names, meta):
     note = (meta or {}).get("note")
     tip = " · ".join(x for x in (nm, isin, f"Note: {note}" if note else "") if x)
     sub = nm or ("no data" if not r["has_data"] else "")
-    return (f'<td class="l sym" title="{_e(tip)}"><b>{_e(r["symbol"])}{"<i>✎</i>" if note else ""}</b>'
+    return (f'<td class="l sym" data-ak-sym="{_e(r["symbol"])}" title="{_e(tip)}"><b>{_e(r["symbol"])}{"<i>✎</i>" if note else ""}</b>'
             f'<span>{_e(sub)}</span></td>')
 
 
