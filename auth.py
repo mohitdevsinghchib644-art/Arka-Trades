@@ -225,7 +225,7 @@ _BRIDGE_HTML = r"""<!doctype html><html><head><meta charset="utf-8"></head><body
     window.parent.postMessage(Object.assign({isStreamlitMessage: true, type: type}, data || {}), "*");
   }
   var lastNonce = null, branded = false;
-  var lastResp = {}, navCur = null, navPending = null, navPendAt = 0, seq = 0;
+  var lastResp = {}, navCur = null, navPending = null, navPendAt = 0, seq = 0, expectPop = null, usedBack = null;
   function emit(extra) {                           // report an event to Python without losing the last storage answer
     send("streamlit:setComponentValue", {dataType: "json", value: Object.assign({}, lastResp, extra || {})});
   }
@@ -346,12 +346,17 @@ _BRIDGE_HTML = r"""<!doctype html><html><head><meta charset="utf-8"></head><body
   function onPop(w) {
     var st = null;
     try { st = (w.history.state && w.history.state.ak) || navParse(w.location.search); } catch (e) {}
+    if (expectPop) {                                  // our own history.back() for the in-app Back button: nothing to report
+      var exp = expectPop; expectPop = null;
+      if (st !== exp) { try { w.history.replaceState(Object.assign({}, w.history.state || {}, {ak: exp}), "", urlFor(w, exp)); } catch (e) {} }
+      return;
+    }
     if (!st) return;
     navCur = st; navPending = st; navPendAt = Date.now();
     saveNav(st);
     emit({nav: st, navNonce: tag()});
   }
-  function navRender(state) {
+  function navRender(state, back) {
     if (!state) return;                               // Python sends nothing until it has restored the last page
     var w = appWin();
     if (!w) return;
@@ -365,10 +370,15 @@ _BRIDGE_HTML = r"""<!doctype html><html><head><meta charset="utf-8"></head><body
     }
     if (state === navCur) return;
     try {
-      var data = Object.assign({}, w.history.state || {}, {ak: state});
-      if (navCur === null) w.history.replaceState(data, "", urlFor(w, state));
-      else w.history.pushState(data, "", urlFor(w, state));
+      var cur = w.history.state || {}, depth = cur.akn || 0, data = Object.assign({}, cur, {ak: state});
+      if (navCur === null) { data.akn = depth; w.history.replaceState(data, "", urlFor(w, state)); }
+      else if (back && back !== usedBack && depth > 0) {   // the in-app Back button: step the browser back too
+        usedBack = back; expectPop = state;
+        setTimeout(function () { expectPop = null; }, 1500);
+        w.history.back();
+      } else { data.akn = depth + 1; w.history.pushState(data, "", urlFor(w, state)); }
     } catch (e) {}
+    if (back) usedBack = back;
     navCur = state;
     saveNav(state);
   }
@@ -398,7 +408,7 @@ _BRIDGE_HTML = r"""<!doctype html><html><head><meta charset="utf-8"></head><body
   function handle(args) {
     if (!branded && args.brand) { brand(args.brand); branded = true; try { fx(window.parent); } catch (e) {} }
     try { var aw = appWin(); if (aw) tapOpen(aw); } catch (e) {}
-    navRender(args.nav || "");
+    navRender(args.nav || "", args.navback || "");
     var nonce = args.nonce;
     if (!nonce || nonce === lastNonce) return;          // nothing new to do
     lastNonce = nonce;
@@ -460,7 +470,9 @@ try:
     _DIR = _component_dir()
     _ICON_VERSION = hashlib.md5(b"".join((_DIR / f"icon-{px}.png").read_bytes() for px in (64, 180, 192, 512)
                                          if (_DIR / f"icon-{px}.png").exists())).hexdigest()[:8]
-    _bridge_component = components.declare_component("arka_bridge", path=str(_DIR))
+    # the name carries a hash of the bridge code, so a tab left open across a deploy reloads the bridge
+    _bridge_component = components.declare_component("arka_bridge_" + hashlib.md5(_BRIDGE_HTML.encode("utf-8")).hexdigest()[:6],
+                                                     path=str(_DIR))
 except Exception:  # pragma: no cover - the app still works, it just cannot remember devices
     _DIR, _ICON_VERSION, _bridge_component = None, "0", None
 
@@ -491,11 +503,12 @@ def _accept(token, key: bytes):
     return True
 
 
-def bridge(key: bytes, nav: str | None = None) -> None:
+def bridge(key: bytes, nav: str | None = None, back: str | None = None) -> None:
     """Call once near the top of every run. Restores the session from this device and runs pending storage commands.
 
     nav: "page|SYMBOL" for the screen being shown (empty until the app has restored the last screen). The browser
     turns each new value into a history entry, so back / the phone's back swipe return to the previous screen.
+    back: a one-off tag set when the in-app Back button caused this screen (the browser then steps back instead).
     Events from the browser land in session state: "_ak_nav_in" (back/forward to a screen), "_ak_open_in" (a stock
     was tapped) and "_ak_boot" (where this device was last, read once with the sign-in token)."""
     ss = st.session_state
@@ -512,7 +525,7 @@ def bridge(key: bytes, nav: str | None = None) -> None:
     try:
         val = _bridge_component(op=cmd.get("op", "noop"), value=cmd.get("value"), nonce=cmd.get("nonce"), skey=COOKIE_NAME,
                                 max_age=COOKIE_MAX_AGE, brand={"name": APP_NAME, "short": SHORT_NAME, "theme": THEME_BG, "v": _ICON_VERSION},
-                                nav=nav or "", default=None, key="ak_bridge")
+                                nav=nav or "", navback=back or "", default=None, key="ak_bridge")
     except Exception:
         ss["_ak_ready"] = True
         return
