@@ -507,11 +507,29 @@ def _client():
         from google.genai import types
     except Exception:
         raise BriefError("The google-genai package is missing (add `google-genai` to requirements.txt).")
-    try:
-        client = genai.Client(api_key=key, http_options=types.HttpOptions(timeout=180_000))
-    except Exception:
-        client = genai.Client(api_key=key)
+    # v1beta on purpose: on the "v1" address Google rejects the system instruction and the "-latest" model names.
+    client = None
+    for opts in ({"api_version": "v1beta", "timeout": 240_000}, {"api_version": "v1beta"}, {}):
+        try:
+            client = genai.Client(api_key=key, http_options=types.HttpOptions(**opts)) if opts else genai.Client(api_key=key)
+            break
+        except Exception:
+            continue
+    if client is None:
+        raise BriefError("The Gemini client could not be started.")
     return client, types
+
+
+def _thinking_variants(types) -> list:
+    """Ways to ask for a quick answer, newest first. Newer models take a "thinking level", older ones a token budget;
+    None means the model's own default (slowest, the last resort)."""
+    out = []
+    for kw in ({"thinking_level": "low"}, {"thinking_budget": 1024}):
+        try:
+            out.append(types.ThinkingConfig(**kw))
+        except Exception:
+            pass
+    return out + [None]
 
 
 def _models(client) -> list:
@@ -549,35 +567,49 @@ def _web_sources(resp) -> list:
     return out[:20]
 
 
-def ask_model(prompt: str, progress=None, backend=None) -> tuple:
-    """-> (data, model name, mode, web sources). Tries the newest flash model first, then falls back."""
+def ask_model(prompt: str, progress=None, backend=None, budget_s: float = 420.0) -> tuple:
+    """-> (data, model name, mode, web sources). Tries the newest flash model first, then falls back.
+    For each model it first asks for light "thinking" (a long think is what makes a request time out); if the model
+    refuses that setting it asks again without it. A busy server gets one retry; a timeout moves on to the next model."""
     client, types = backend or _client()
     want_search = _cfg("BRIEF_WEB_SEARCH").lower() in ("on", "1", "true", "yes")
-    errors = []
+    variants = _thinking_variants(types)
+    errors, t0 = [], time.time()
     for model in _models(client):
         for use_search in ([True, False] if want_search else [False]):
-            for attempt in (1, 2):
-                try:
-                    kw = {"system_instruction": SYSTEM, "temperature": 0.3}
-                    if use_search:
-                        kw["tools"] = [types.Tool(google_search=types.GoogleSearch())]
-                    else:
-                        kw["response_mime_type"] = "application/json"
-                    if progress:
-                        progress(f"Writing with {model}" + (" and web search" if use_search else ""))
-                    resp = client.models.generate_content(model=model, contents=prompt, config=types.GenerateContentConfig(**kw))
-                    data = _parse_json(getattr(resp, "text", "") or "")
-                    if not isinstance(data, dict) or not data.get("deep"):
-                        raise ValueError("the reply has no stories")
-                    return data, model, ("wire + web search" if use_search else "wire"), (_web_sources(resp) if use_search else [])
-                except Exception as e:
-                    msg = _safe_err(e)
-                    errors.append(f"{model}: {msg}")
-                    busy = any(k in msg for k in ("503", "429", "UNAVAILABLE", "overloaded", "RESOURCE_EXHAUSTED"))
-                    if attempt == 1 and busy:
-                        time.sleep(8)
-                        continue
+            next_model = False
+            for think in variants:
+                if next_model:
                     break
+                for attempt in (1, 2):
+                    if time.time() - t0 > budget_s:
+                        raise BriefError("The AI took too long to answer. Try again in a few minutes. " + " | ".join(errors[-2:]))
+                    try:
+                        kw = {"system_instruction": SYSTEM, "temperature": 0.3}
+                        if think is not None:
+                            kw["thinking_config"] = think
+                        if use_search:
+                            kw["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+                        else:
+                            kw["response_mime_type"] = "application/json"
+                        if progress:
+                            progress(f"Writing with {model}" + (" and web search" if use_search else ""))
+                        resp = client.models.generate_content(model=model, contents=prompt, config=types.GenerateContentConfig(**kw))
+                        data = _parse_json(getattr(resp, "text", "") or "")
+                        if not isinstance(data, dict) or not data.get("deep"):
+                            raise ValueError("the reply has no stories")
+                        return data, model, ("wire + web search" if use_search else "wire"), (_web_sources(resp) if use_search else [])
+                    except Exception as e:
+                        msg = _safe_err(e)
+                        errors.append(f"{model}: {msg[:160]}")
+                        low = msg.lower()
+                        if attempt == 1 and any(k in msg for k in ("503", "429", "UNAVAILABLE", "overloaded", "RESOURCE_EXHAUSTED")):
+                            time.sleep(8)
+                            continue                              # busy: the same request once more
+                        if think is not None and ("400" in msg or "invalid_argument" in low or "thinking" in low):
+                            break                                 # the model refused this setting: next variant
+                        next_model = True                         # timeout or anything else: next model
+                        break
     raise BriefError("The AI did not return a usable brief. " + " | ".join(errors[-3:]))
 
 
