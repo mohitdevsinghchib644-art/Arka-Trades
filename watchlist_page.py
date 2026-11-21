@@ -1419,7 +1419,7 @@ def _actions(sb, shown, all_rows, list_name, key, on_open, can_edit, meta, lists
                 st.session_state[f"w3_news_open_{key}"] = pick
         if c4.button("Research", key=f"w3_res_{key}", use_container_width=True):
             ud.go_research(pick)
-        if st.session_state.get("is_admin") and c5.button("Arka AI", key=f"w3_ai_{key}", use_container_width=True):   # admin-only page
+        if c5.button("Arka AI", key=f"w3_ai_{key}", use_container_width=True):
             ud.go_analysis(pick)
         with c6:
             with _popover("Note & alert", not (can_edit and key != "desk" and lists_supported(sb))):
