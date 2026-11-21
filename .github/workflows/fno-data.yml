@@ -1,0 +1,59 @@
+# Arka Trades · F&O data
+# Every weekday evening this downloads NSE's free end-of-day derivatives files, reduces them to a small history and
+# saves it in the repository under data/fno/. The app only reads those files.
+#
+# First time: Actions tab -> "F&O data" -> "Run workflow", type 5 in the box (years of history) and run it.
+#             It takes about an hour or more. If it says it stopped early, run it again: it continues where it stopped.
+# After that it runs by itself at about 8 pm and 11 pm IST, Monday to Friday. No secrets are used.
+name: F&O data
+
+on:
+  schedule:
+    - cron: "30 14 * * 1-5"       # 20:00 IST
+    - cron: "30 17 * * 1-5"       # 23:00 IST, in case NSE published late
+  workflow_dispatch:
+    inputs:
+      years:
+        description: "Years of history to build (0 = only the last few days)"
+        required: false
+        default: "0"
+
+permissions:
+  contents: write                 # needed to save the data files in the repository
+
+concurrency:
+  group: fno-data
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 170
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install --quiet requests pandas numpy
+
+      - name: Download and reduce
+        env:
+          YEARS: ${{ github.event.inputs.years || '0' }}
+        run: python fno_data.py --years "$YEARS" --minutes 140
+
+      - name: Save to the repository
+        if: always()
+        run: |
+          git config user.name "arka-data-bot"
+          git config user.email "arka-data-bot@users.noreply.github.com"
+          git add data/fno || true
+          if git diff --cached --quiet; then
+            echo "Nothing new to save."
+            exit 0
+          fi
+          git commit -m "F&O data $(date -u +%Y-%m-%d)"
+          git pull --rebase --autostash origin "$GITHUB_REF_NAME" || true
+          git push
