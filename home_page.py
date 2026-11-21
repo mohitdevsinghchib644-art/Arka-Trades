@@ -1417,15 +1417,17 @@ def _fno(compact=False):
     cards = []
     for r in rows:
         col = GREEN if r["tone"] == "up" else RED if r["tone"] == "dn" else "var(--tx2)"
-        sub = f'next 10 sessions · {r["proven"]} proven reading{"" if r["proven"] == 1 else "s"}'
-        kv = [f'<div class="hm-kv"><span>Put-call ratio</span><b>{num(r["pcr"], 2)}</b></div>',
+        sub = f'next 10 sessions · model confidence {_e(str(r.get("conf", "untested")).lower())}'
+        fc = r.get("forecast")
+        kv = [f'<div class="hm-kv"><span>Model forecast, 10 sessions</span><b class="{"hm-up" if (_ok(fc) and fc > 0) else "hm-dn" if (_ok(fc) and fc < 0) else ""}">{f"{fc * 100:+.1f}%" if _ok(fc) else "—"}</b></div>',
+              f'<div class="hm-kv"><span>Put-call ratio</span><b>{num(r["pcr"], 2)}</b></div>',
               f'<div class="hm-kv"><span>Implied volatility</span><b>{num(r["iv"] * 100, 1) + "%" if _ok(r["iv"]) else "—"}</b></div>',
               f'<div class="hm-kv"><span>Max pain</span><b>{num(r["max_pain"])}</b></div>',
               f'<div class="hm-kv"><span>Put wall · call wall</span><b>{num(r["put_wall"])} · {num(r["call_wall"])}</b></div>']
         if _ok(r.get("move5")):
             kv.append(f'<div class="hm-kv"><span>Priced move, 5 sessions</span><b>±{num(r["move5"])} pts</b></div>')
         if r.get("reason"):
-            kv.append(f'<div class="hm-kv"><span>Main reading</span><b>{_e(r["reason"])}</b></div>')
+            kv.append(f'<div class="hm-kv"><span>Biggest driver</span><b>{_e(r["reason"])}</b></div>')
         body = f'<div class="hm-vd"><b style="color:{col}">{_e(r["verdict"])}</b><span>{sub}</span></div><div class="hm-kvs" style="margin-top:10px">{"".join(kv)}</div>'
         asof = ""
         try:
