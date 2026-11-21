@@ -16,6 +16,8 @@ Two ways it runs, from the same code
   * In the app:      render_brief(supabase, on_open)  -> the "Daily brief" page.
   * On a schedule:   python daily_brief.py --send     -> writes the brief and sends it to Telegram
                      (run by .github/workflows/daily-brief.yml at about 08:00 IST on weekdays).
+                     --once  = do nothing if today's brief was already sent. The workflow starts a main run and two
+                     backup runs each morning with --once, so a run GitHub skips or delays does not cost you the brief.
   If the Supabase table `arka_briefs` exists, both share one brief: the scheduled job writes it and the app shows the
   same text instantly. Without the table each side keeps its own copy in a local folder and everything still works.
 
@@ -1275,6 +1277,9 @@ def main(argv=None) -> int:
     now = _now()
     store = _cli_store()
     brief = None if "--force" in args else store.get(now.strftime("%Y-%m-%d"))
+    if brief is not None and brief.get("sent") and "--once" in args and "--send" in args:
+        print(f"Today's brief was already sent at {brief['sent']}. Nothing to do.")
+        return 0
     try:
         if brief is None:
             brief = write_brief(store, now, progress=lambda m: print("·", m), prefer_home=False)
@@ -1289,6 +1294,8 @@ def main(argv=None) -> int:
             print("\n\n".join(html.unescape(_TAG_RX.sub("", m)) for m in msgs))
         if "--send" in args:
             print(f"Telegram: {send_telegram(msgs)} message(s) sent.")
+            brief["sent"] = _now().isoformat(timespec="seconds")      # remembered so a backup run does not send it twice
+            store.put(brief)
         return 0
     except Exception as e:
         reason = str(e) if isinstance(e, BriefError) else _safe_err(e)
