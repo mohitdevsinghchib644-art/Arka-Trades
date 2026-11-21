@@ -1,0 +1,55 @@
+# Arka Trades · morning brief
+# Writes the Daily brief and sends it to Telegram at about 08:00 IST on weekdays.
+# GitHub can start scheduled jobs a few minutes late, so expect the message between 08:00 and 08:30 IST.
+# You can also start it by hand: Actions tab -> "Daily brief" -> "Run workflow".
+#
+# Secrets it reads (repository Settings -> Secrets and variables -> Actions). Names only; values never appear in logs:
+#   GEMINI_KEY            required   the same Gemini key the app uses
+#   TELEGRAM_BOT_TOKEN    required   from @BotFather
+#   TELEGRAM_CHAT_ID      required   the chat the bot should write to
+#   SUPABASE_URL          optional   with SUPABASE_KEY: the app shows the exact brief that was sent
+#   SUPABASE_KEY          optional
+name: Daily brief
+
+on:
+  schedule:
+    - cron: "30 2 * * 1-5"        # 02:30 UTC = 08:00 IST, Monday to Friday
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-brief
+  cancel-in-progress: false
+
+jobs:
+  brief:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Keeps the last few briefs between runs, so a continuing story is written as "what changed".
+      - uses: actions/cache@v4
+        with:
+          path: .brief_store
+          key: brief-store-${{ github.run_id }}
+          restore-keys: |
+            brief-store-
+
+      - name: Install
+        run: pip install --quiet requests pandas yfinance google-genai supabase
+
+      - name: Write and send
+        env:
+          GEMINI_KEY: ${{ secrets.GEMINI_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python daily_brief.py --send
