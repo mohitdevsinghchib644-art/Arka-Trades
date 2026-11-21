@@ -834,6 +834,7 @@ def _css():
     .w3-mlist{{display:flex;flex-direction:column;gap:8px}}
     .w3-m{{background:var(--s1,#0E0E10);border:1px solid var(--line,#1E1E21);border-radius:14px;padding:12px 13px}}
     .w3-m.sel{{border-color:rgba(255,159,10,.45)}}
+    table.w3 tr[data-ak-sym]{{cursor:pointer}} table.w3 tr[data-ak-sym]:hover td{{background:rgba(255,255,255,.025)}}
     .w3-m[data-ak-sym]{{cursor:pointer}} td.sym[data-ak-sym]{{cursor:pointer}} td.sym[data-ak-sym]:hover b{{color:{AMBER}}}
     .w3-m .t{{display:flex;justify-content:space-between;align-items:center;gap:10px}}
     .w3-m .t b{{display:block;font-size:15px;font-weight:650;color:#fff}} .w3-m .t small{{display:block;font-size:11.5px;color:var(--tx3,{TX3});max-width:52vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
@@ -1160,7 +1161,7 @@ def render_table(rows, view, ctx, group=False, selected=None) -> str:
             body.append(f'<tr class="grp"><td colspan="{len(cols) + 2}">{_e(last_grp)} · {len(members)}{avg_html}</td></tr>')
         i += 1
         cells = "".join(f'<td class="{cls}">{fn(r, ctx)}</td>' for _, fn, cls, _ in cols)
-        body.append(f'<tr class="{"sel" if r["symbol"] == selected else ""}"><td class="rk">{i}</td>{_sym_cell(r, ctx["names"], ctx["meta"].get(r["symbol"]))}{cells}</tr>')
+        body.append(f'<tr class="{"sel" if r["symbol"] == selected else ""}" data-ak-sym="{_e(r["symbol"])}"><td class="rk">{i}</td>{_sym_cell(r, ctx["names"], ctx["meta"].get(r["symbol"]))}{cells}</tr>')
     return f'<div class="w3-tw"><table class="w3"><thead><tr>{head}</tr></thead><tbody>{"".join(body)}</tbody></table></div>'
 
 
