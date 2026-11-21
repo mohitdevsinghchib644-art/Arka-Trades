@@ -314,6 +314,8 @@ _CSS = """<style>
 .hm-li .a small{display:block;font:12px var(--sans);color:var(--tx3);margin-top:2px;}
 .hm-li .z{text-align:right;flex-shrink:0;} .hm-li .z b{display:block;font:500 14px var(--sans);color:var(--tx);}
 .hm-li .z small{display:block;font:500 12.5px var(--sans);margin-top:2px;}
+.hm-li[data-ak-sym]{cursor:pointer;transition:background .15s;} .hm-li[data-ak-sym]:hover{background:rgba(255,255,255,.03);}
+.hm-tile[data-ak-sym]{cursor:pointer;transition:filter .15s,transform .15s;} .hm-tile[data-ak-sym]:hover{filter:brightness(1.15);}
 .hm-lg{font:600 12px var(--sans);color:var(--tx3);padding:14px 16px 4px;}
 .hm-pct{display:inline-block;min-width:64px;padding:4px 8px;border-radius:6px;font:600 12.5px var(--sans);text-align:center;}
 
@@ -1058,7 +1060,7 @@ def _imap(groups, nq, B):
             q = nq.get(s) or {}
             c, px = q.get("chg"), q.get("price")
             tip = f"{s} · ₹{px:,.2f}" if _ok(px) else f"{s} · no price"
-            tiles.append(f'<div class="hm-tile{"" if _ok(c) else " nq"}" style="background:{_heat(c)}" title="{_e(tip)}"><b>{_e(s)}</b><span>{_pct(c, 1)}</span></div>')
+            tiles.append(f'<div class="hm-tile{"" if _ok(c) else " nq"}" data-ak-sym="{_e(s)}" style="background:{_heat(c)}" title="{_e(tip)}"><b>{_e(s)}</b><span>{_pct(c, 1)}</span></div>')
         blocks.append(f'<div class="hm-grp"><small>{_e(_nm(g))}</small><div class="hm-tiles">{"".join(tiles)}</div></div>')
     tot = max(B["n"], 1)
     ad = (f'<div class="hm-adl"><span class="hm-up">{B["adv"]} advancing</span><span>{B["flat"]} unchanged</span>'
@@ -1101,7 +1103,7 @@ def _movers(nq):
     def col(items, title):
         if not items:
             return f'<div><div class="hm-lg">{title}</div><div class="hm-empty">None today.</div></div>'
-        rows = "".join(f'<div class="hm-li"><div class="a"><b>{_e(s)}</b><small>₹{q["price"]:,.2f}</small></div>'
+        rows = "".join(f'<div class="hm-li" data-ak-sym="{_e(s)}"><div class="a"><b>{_e(s)}</b><small>₹{q["price"]:,.2f}</small></div>'
                        f'<div class="z"><small class="{_cls(q["chg"])}" style="font-size:13.5px">{_pct(q["chg"])}</small></div></div>' for s, q in items)
         return f'<div><div class="hm-lg">{title}</div>{rows}</div>'
     g = [x for x in ranked[:5] if x[1]["chg"] > 0]
@@ -1126,9 +1128,9 @@ def _book(holds, realised, wl, wl_label, quotes):
                    f'<div><small>Realised P&amp;L</small><b class="{_cls(realised) if realised else ""}">{_inr(realised)}</b><em style="color:var(--tx3)">all time</em></div></div>')
         def hrow(h):
             if not _ok(h.get("ltp")):
-                return (f'<div class="hm-li" style="opacity:.6"><div class="a"><b>{_e(h["symbol"])}</b><small>Price not available right now</small></div>'
+                return (f'<div class="hm-li" data-ak-sym="{_e(h["symbol"])}" style="opacity:.6"><div class="a"><b>{_e(h["symbol"])}</b><small>Price not available right now</small></div>'
                         '<div class="z"></div></div>')
-            return (f'<div class="hm-li"><div class="a"><b>{_e(h["symbol"])}</b><small>₹{h["ltp"]:,.2f} · {_pct(h.get("weight"), 1, False)} of book</small></div>'
+            return (f'<div class="hm-li" data-ak-sym="{_e(h["symbol"])}"><div class="a"><b>{_e(h["symbol"])}</b><small>₹{h["ltp"]:,.2f} · {_pct(h.get("weight"), 1, False)} of book</small></div>'
                     f'<div class="z"><b class="{_cls(h.get("pnl_pct"))}">{_pct(h.get("pnl_pct"), 1)}</b>'
                     f'<small class="{_cls(h.get("chg"))}">{_pct(h.get("chg"))} today</small></div></div>')
         rows = "".join(hrow(h) for h in holds[:6])
@@ -1140,7 +1142,7 @@ def _book(holds, realised, wl, wl_label, quotes):
         rows = []
         for s in wl[:6]:
             q = quotes.get(s) or {}
-            rows.append(f'<div class="hm-li"><div class="a"><b>{_e(s)}</b></div><div class="z"><b>{"₹" + format(q["price"], ",.2f") if _ok(q.get("price")) else "—"}</b>'
+            rows.append(f'<div class="hm-li" data-ak-sym="{_e(s)}"><div class="a"><b>{_e(s)}</b></div><div class="z"><b>{"₹" + format(q["price"], ",.2f") if _ok(q.get("price")) else "—"}</b>'
                         f'<small class="{_cls(q.get("chg"))}">{_pct(q.get("chg"))}</small></div></div>')
         out.append(f'<div class="hm-lg">{_e(wl_label)}</div>{"".join(rows)}')
     return "".join(out)
