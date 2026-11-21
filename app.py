@@ -166,8 +166,31 @@ if not st.session_state.db_loaded:
     st.session_state.db_loaded = True
 
 # Restore this device's sign-in (and set the site icon) BEFORE deciding what to show. Must run on every rerun.
+def _screen_state() -> str:
+    """"page|SYMBOL" for the screen on show. Sent to the browser, which turns every change into a history entry
+    (so the phone's back swipe goes back inside the app) and remembers it (so the app reopens where you left it)."""
+    ss = st.session_state
+    if not ss.get("logged_in") or not ss.get("_ak_url_done"):
+        return ""                                         # nothing until the last screen has been restored
+    pg_ = ss.get("page", "home")
+    if pg_ == "security":
+        sym_ = ss.get("active_security") or ""
+        if not sym_:
+            pg_ = "home"
+    elif pg_ == "research":
+        sym_ = ss.get("research_last_query") or ss.get("active_security") or ""
+    elif pg_ == "analysis":
+        sym_ = ss.get("m1_ticker") or ss.get("active_security") or ""
+    else:
+        sym_ = ""
+    return f"{pg_}|{str(sym_).strip().upper()}"
+
+
 with st.container(key="akbridge"):
-    auth.bridge(_AUTH_KEY)
+    try:
+        auth.bridge(_AUTH_KEY, nav=_screen_state())
+    except TypeError:                                     # an older auth.py without screen history
+        auth.bridge(_AUTH_KEY)
 
 name = st.session_state.profile.get("name", "Trader") or "Trader"
 initial = name[0].upper()
@@ -755,6 +778,79 @@ def _open_security(symbol: str):
     """Used by workspace modules (on_open). Navigates immediately."""
     _goto_symbol(symbol)
     st.rerun()
+
+
+# ── screen history, tap-to-open and resume ──────────────────────────────────
+_SYM_OK = re.compile(r"^[A-Z0-9][A-Z0-9&._\-]{0,24}$")
+RESUME_HOURS = 6                                          # reopen the last screen if it was used within this time
+
+
+def _apply_screen(state) -> bool:
+    """Show the screen described by "page|SYMBOL" (from the back button, the URL or this device's last visit)."""
+    if not isinstance(state, str) or "|" not in state:
+        return False
+    p_, _, s_ = state.partition("|")
+    p_ = LEGACY_PAGES.get(p_.strip().lower(), p_.strip().lower())
+    s_ = s_.strip().upper()
+    if s_ and not _SYM_OK.match(s_):
+        s_ = ""
+    if (p_ not in PAGE_META and p_ != "security") or not _allowed(p_):
+        return False
+    ss = st.session_state
+    if p_ == "security":
+        if not s_:
+            p_ = "home"
+        else:
+            _goto_symbol(s_)
+            return True
+    if s_ and p_ in ("research", "analysis"):
+        if ss.get("research_last_query") != s_:
+            ss.pop("research_data", None)
+        ss["active_security"] = ss["research_last_query"] = ss["m1_ticker"] = s_
+    ss.page = p_
+    return True
+
+
+def _resume_target():
+    """Where this session should start: a link (?p=&s=), the address bar after a reload, or the last screen used."""
+    try:
+        qp = st.query_params.get("p")
+        if qp:
+            return f"{qp}|{st.query_params.get('s', '')}"
+    except Exception:
+        pass
+    boot = st.session_state.get("_ak_boot") or {}
+    if isinstance(boot.get("loc"), str):
+        return boot["loc"]
+    saved = boot.get("saved")
+    try:
+        if isinstance(saved, dict) and isinstance(saved.get("s"), str) \
+                and time.time() * 1000 - float(saved.get("t") or 0) < RESUME_HOURS * 3600 * 1000:
+            return saved["s"]
+    except Exception:
+        pass
+    return None
+
+
+_ss = st.session_state
+if not _ss.get("_ak_url_done"):
+    # wait for the browser's answer (it arrives with the sign-in check) unless there is no bridge at all
+    if _ss.get("_ak_boot") is not None or getattr(auth, "_bridge_component", None) is None or auth.waited() > 4 \
+            or st.query_params.get("p"):
+        _ss["_ak_url_done"] = True
+        _t = _resume_target()
+        if _t and _ss.page in ("home", "") and _t.split("|")[0] != "home":
+            _apply_screen(_t)
+        st.rerun()                                        # registers the first screen with the browser before drawing
+_nav_in = _ss.pop("_ak_nav_in", None)                    # back / forward in the browser
+if _nav_in is not None:
+    if _nav_in != _screen_state() and _apply_screen(_nav_in):
+        st.rerun()
+_open_in = _ss.pop("_ak_open_in", None)                  # a stock was tapped anywhere in the app
+if _open_in:
+    _open_in = str(_open_in).strip().upper()
+    if _SYM_OK.match(_open_in):
+        _open_security(_open_in)
 
 
 def _security_candidates():
