@@ -1,5 +1,8 @@
 """
-Arka Trades — Market Terminal v10.2
+Arka Trades — Market Terminal v10.3
+
+v10.3: the last screen is remembered per browser tab. A tab that is still open comes back where you left it (also after
+       a reload or after the phone put it to sleep); a newly opened tab or app always starts on Home.
 
 v10.2: new page, Daily brief (daily_brief.py): the morning report on what happened overnight and what can move Indian
        stocks today. It sits after Home in the tabs, first in the phone menu, and opens with the search code BRIEF.
@@ -77,7 +80,7 @@ except Exception:  # pragma: no cover
     create_client = None
 
 IST = timezone(timedelta(hours=5, minutes=30))
-APP_VERSION = "v10.2"
+APP_VERSION = "v10.3"
 
 
 def _secret(name: str, default=""):
@@ -911,7 +914,7 @@ def _open_security(symbol: str):
 
 # ── screen history, tap-to-open and resume ──────────────────────────────────
 _SYM_OK = re.compile(r"^[A-Z0-9][A-Z0-9&._\-]{0,24}$")
-RESUME_HOURS = 6                                          # reopen the last screen if it was used within this time
+RESUME_HOURS = 7 * 24                                     # a tab left open longer than this starts on Home again
 
 
 def _apply_screen(state) -> bool:
@@ -941,16 +944,10 @@ def _apply_screen(state) -> bool:
 
 
 def _resume_target():
-    """Where this session should start: a link (?p=&s=), the address bar after a reload, or the last screen used."""
-    try:
-        qp = st.query_params.get("p")
-        if qp:
-            return f"{qp}|{st.query_params.get('s', '')}"
-    except Exception:
-        pass
+    """Where this session should start. The browser remembers the last screen per tab, so a tab that is still open
+    (reloaded, or woken up after the phone put it to sleep) reopens that screen. A newly opened tab has nothing
+    remembered and starts on Home; a `?p=` left in the address from an earlier visit is deliberately not followed."""
     boot = st.session_state.get("_ak_boot") or {}
-    if isinstance(boot.get("loc"), str):
-        return boot["loc"]
     saved = boot.get("saved")
     try:
         if isinstance(saved, dict) and isinstance(saved.get("s"), str) \
@@ -964,8 +961,7 @@ def _resume_target():
 _ss = st.session_state
 if not _ss.get("_ak_url_done"):
     # wait for the browser's answer (it arrives with the sign-in check) unless there is no bridge at all
-    if _ss.get("_ak_boot") is not None or getattr(auth, "_bridge_component", None) is None or auth.waited() > 4 \
-            or st.query_params.get("p"):
+    if _ss.get("_ak_boot") is not None or getattr(auth, "_bridge_component", None) is None or auth.waited() > 4:
         _ss["_ak_url_done"] = True
         _t = _resume_target()
         if _t and _ss.page in ("home", "") and _t.split("|")[0] != "home":
