@@ -699,6 +699,7 @@ def _css():
     .nd-x{{font-size:12.5px;line-height:1.55;color:var(--tx2,{TX2});margin-top:5px}}
     .nd-f{{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:11.5px;color:var(--tx3,{TX3});margin-top:8px}}
     .nd-sym{{display:inline-block;padding:1px 7px;border-radius:6px;font-size:11px;font-weight:650;color:#E8E8EC;background:#1C1C21;border:1px solid #26262C}}
+    .nd-sym[data-ak-sym]{{cursor:pointer}} .nd-sym[data-ak-sym]:hover{{border-color:rgba(255,159,10,.45);color:#fff}}
     .nd-sym.cur{{color:{AMBER};border-color:rgba(255,159,10,.4);background:rgba(255,159,10,.08)}}
     .nd-tone-dot{{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--c);margin-right:4px;vertical-align:1px}}
     /* rail summary */
@@ -770,7 +771,7 @@ def _story(a: dict, full: bool = False, current: str = "") -> str:
     ago = a["time_str"] + ("" if a["time_str"] == "now" or not a["time_str"][-1:] in "mh" else " ago")
     meta = (f'<span class="t">{_clock(a["pub_dt"])}</span><span class="dot">·</span><span>{html.escape(ago)}</span>'
             f'<span class="dot">·</span><span>{src}</span>')
-    syms = "".join(f'<span class="nd-sym{" cur" if s == current else ""}">{html.escape(s)}</span>' for s in a["symbols"][:4])
+    syms = "".join(f'<span class="nd-sym{" cur" if s == current else ""}" data-ak-sym="{html.escape(s)}" title="Open {html.escape(s)}">{html.escape(s)}</span>' for s in a["symbols"][:4])
     if not syms:
         syms = f'<span class="nd-sym">{"Macro" if a["kind"] == "macro" or a["macro"] else "Market"}</span>'
     tone = f'<span><span class="nd-tone-dot" style="--c:{sc}"></span>{TONE_WORD[a["sentiment"]]}</span>'
