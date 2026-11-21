@@ -16,6 +16,11 @@ What v3 adds over v2
     remembered per stock on this device.
   * Bottom bar: 1M … 5Y / All ranges, percent scale, log scale, auto fit and a "latest" button.
   * Levels: previous day high / low and 52-week high / low.
+  * v4 — Relative strength line, in the style swing traders know from the TraderLion and MarketSmith charts: the stock
+    divided by an index you choose, drawn over the price chart (or in its own pane). The line changes colour with its
+    direction (rising = stronger than the index, falling = weaker). A pink dot marks an RS new high BEFORE the price makes
+    one; a small blue dot marks an RS new high together with price. The legend shows an RS score (above 100 = beating
+    the index over the past year, recent months weighted more). Index, placement, colours and dots are in the settings.
   * Full screen: fills the app window (and the whole screen where the browser allows it). Esc leaves it.
   * Settings: the gear on the chart, or Account → Chart settings (render_chart_settings). Saved in this browser, so
     every chart on this device opens the way you set it.
@@ -32,7 +37,14 @@ import streamlit.components.v1 as components
 
 from data_engine import get_history
 
-CHART_VERSION = 3
+CHART_VERSION = 4
+
+# Indices the relative-strength line can be measured against (label → Yahoo tickers to try, in order).
+RS_INDICES = {
+    "NIFTY 50": ("^NSEI",), "NIFTY 500": ("^CRSLDX",), "NIFTY NEXT 50": ("^NSMIDCP",), "NIFTY MIDCAP 100": ("NIFTY_MIDCAP_100.NS", "^CRSMID"),
+    "NIFTY SMALLCAP 100": ("^CNXSC",), "BANK NIFTY": ("^NSEBANK",), "NIFTY IT": ("^CNXIT",), "NIFTY AUTO": ("^CNXAUTO",),
+    "NIFTY PHARMA": ("^CNXPHARMA",), "NIFTY FMCG": ("^CNXFMCG",), "NIFTY METAL": ("^CNXMETAL",), "NIFTY ENERGY": ("^CNXENERGY",),
+}
 
 
 # ───────────────────────── data preparation ─────────────────────────
@@ -66,13 +78,66 @@ def _rows(d: pd.DataFrame) -> list:
             for a, o, hh, l, c, v in zip(t, d["Open"], d["High"], d["Low"], d["Close"], d["Volume"])]
 
 
-def build_payload(h: pd.DataFrame) -> dict:
+def _yf():
+    """yfinance with downloads taking turns (the other pages wrap yf.download the same way)."""
+    import yfinance as yf
+    for mod in ("quant_data", "home_page"):
+        try:
+            getattr(__import__(mod), "_lock_yfinance")()
+            break
+        except Exception:
+            continue
+    return yf
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False, max_entries=2)
+def _index_closes(day: str) -> dict:
+    """{index label: daily close Series} for the relative-strength line. Raises when nothing loads, so a failure is not kept."""
+    yf = _yf()
+    tickers = sorted({t for ts in RS_INDICES.values() for t in ts})
+    df = yf.download(tickers, period="5y", interval="1d", auto_adjust=True, progress=False, group_by="ticker", threads=False)
+    out = {}
+    for label, ts in RS_INDICES.items():
+        for t in ts:
+            try:
+                c = pd.to_numeric(df[t]["Close"], errors="coerce").dropna()
+            except Exception:
+                continue
+            if len(c) < 200:
+                continue
+            idx = pd.to_datetime(c.index)
+            if getattr(idx, "tz", None) is not None:
+                idx = idx.tz_localize(None)
+            c.index = idx.normalize()
+            out[label] = c[~c.index.duplicated(keep="last")].sort_index()
+            break
+    if not out:
+        raise ValueError("no index history")
+    return out
+
+
+def index_payload(dates: pd.DatetimeIndex) -> dict:
+    """Index closes lined up with the stock's own trading days: {label: [close or None per day]}."""
+    try:
+        closes = _index_closes(pd.Timestamp.now().strftime("%Y-%m-%d"))
+    except Exception:
+        return {}
+    out = {}
+    for label, c in closes.items():
+        a = c.reindex(dates.union(c.index)).ffill().reindex(dates)
+        if a.notna().sum() >= 100:
+            out[label] = [None if pd.isna(v) else round(float(v), 2) for v in a.tolist()]
+    return out
+
+
+def build_payload(h: pd.DataFrame, with_index: bool = True) -> dict:
     d = _prep(h)
     if len(d) < 5:
         return {}
     y = d.tail(252)
     out = {"D": _rows(d), "W": _rows(_group(d, "W-FRI")), "M": _rows(_group(d, "M")),
-           "hi52": round(float(y["High"].max()), 2), "lo52": round(float(y["Low"].min()), 2), "pdh": None, "pdl": None}
+           "hi52": round(float(y["High"].max()), 2), "lo52": round(float(y["Low"].min()), 2), "pdh": None, "pdl": None,
+           "ix": index_payload(d.index) if with_index else {}}
     if len(d) >= 2:
         out["pdh"], out["pdl"] = round(float(d["High"].iloc[-2]), 2), round(float(d["Low"].iloc[-2]), 2)
     return out
@@ -126,7 +191,7 @@ svg{display:block}
 .pane{position:relative;min-height:0}
 .pane+.pane{border-top:1px solid #1E1E22}
 #p-main{flex:1 1 auto;min-height:150px}
-.sub{flex:0 0 23%;min-height:92px;max-height:190px}
+.sub{flex:0 0 23%;min-height:84px;max-height:190px}
 .cv{position:absolute;inset:0}
 .lg{position:absolute;left:10px;top:6px;right:84px;z-index:5;pointer-events:none;font-size:12px;line-height:1.75;color:#868993;
     text-shadow:0 0 5px #0E0E10,0 0 5px #0E0E10;font-variant-numeric:tabular-nums}
@@ -242,7 +307,10 @@ var SYMH = esc(SYM);
 var DEFAULTS = {iv:"D", rng:"", type:"candles", palette:"green", log:false, pct:false, grid:true, wm:false, pline:true,
   ma:[{on:false,kind:"EMA",len:10,color:"#FFD60A"},{on:true,kind:"EMA",len:21,color:"#F2F2F5"},{on:false,kind:"SMA",len:20,color:"#5AC8FA"},
       {on:true,kind:"SMA",len:50,color:"#FF9F0A"},{on:true,kind:"SMA",len:200,color:"#BF5AF2"}],
-  vol:true, volma:true, volmaLen:20, bb:false, bbLen:20, bbK:2, rsi:true, rsiLen:14, macd:false, pd:true, wk52:false};
+  vol:true, volma:true, volmaLen:20, bb:false, bbLen:20, bbK:2, rsi:true, rsiLen:14, macd:false, pd:true, wk52:false,
+  rs:true, rsIdx:"NIFTY 50", rsPlace:"price", rsColor:"dir", rsDir:10, rsMa:false, rsLen:21, rsKind:"EMA", rsHi:true, rsHiAll:true,
+  rsUp:"#30D158", rsDn:"#FF453A"};
+var RS_LIST = __RSLIST__;
 function clone(o){ return JSON.parse(JSON.stringify(o)); }
 function loadS(){
   var s = clone(DEFAULTS);
@@ -260,6 +328,8 @@ function loadS(){
   s.ma.forEach(function(m){ m.len = clampInt(m.len, 2, 400, 20); m.kind = m.kind === "SMA" ? "SMA" : "EMA"; });
   s.volmaLen = clampInt(s.volmaLen, 2, 200, 20); s.bbLen = clampInt(s.bbLen, 2, 200, 20); s.rsiLen = clampInt(s.rsiLen, 2, 100, 14);
   s.bbK = Math.min(5, Math.max(0.5, Number(s.bbK) || 2));
+  s.rsDir = clampInt(s.rsDir, 1, 100, 10); if (["price","pane"].indexOf(s.rsPlace) < 0) s.rsPlace = "price"; if (["dir","ma"].indexOf(s.rsColor) < 0) s.rsColor = "dir";
+  s.rsLen = clampInt(s.rsLen, 2, 200, 21); s.rsKind = s.rsKind === "SMA" ? "SMA" : "EMA"; if (RS_LIST.indexOf(s.rsIdx) < 0) s.rsIdx = RS_LIST[0];
   if (["D","W","M"].indexOf(s.iv) < 0) s.iv = "D";
   return s;
 }
@@ -330,6 +400,23 @@ function buildSettings(){
   var rr = rowToggle("RSI", "Wilder's RSI in its own pane", function(){ return S.rsi; }, function(v){ S.rsi = v; });
   rr.insertBefore(numInput("RSI length", function(){ return S.rsiLen; }, function(v){ S.rsiLen = v; }, 2, 100), rr.lastChild); b.appendChild(rr);
   b.appendChild(rowToggle("MACD", "12, 26, 9 in its own pane", function(){ return S.macd; }, function(v){ S.macd = v; }));
+  b.appendChild(el("div", "ss", "Relative strength line"));
+  b.appendChild(rowToggle("Show the RS line", "The stock's price divided by an index", function(){ return S.rs; }, function(v){ S.rs = v; }));
+  b.appendChild(rowSelect("Compare with", RS_LIST.map(function(x){ return [x, x]; }), function(){ return S.rsIdx; }, function(v){ S.rsIdx = v; }));
+  b.appendChild(rowSelect("Where to draw it", [["price","On the price chart"],["pane","In its own pane below"]], function(){ return S.rsPlace; }, function(v){ S.rsPlace = v; }));
+  b.appendChild(rowSelect("Colour the line by", [["dir","Its direction: rising or falling"],["ma","Above or below its average"]], function(){ return S.rsColor; }, function(v){ S.rsColor = v; }));
+  var rd = el("div", "sr"), rdl = el("div", "l", "Direction look-back"); rdl.appendChild(el("small", "", "rising when the line is higher than this many candles ago"));
+  rd.appendChild(rdl); rd.appendChild(numInput("Direction look-back", function(){ return S.rsDir; }, function(v){ S.rsDir = v; }, 1, 100)); b.appendChild(rd);
+  var rc = el("div", "sr"), rcl = el("div", "l", "Colours"); rcl.appendChild(el("small", "", "strong (rising), weak (falling)"));
+  rc.appendChild(rcl);
+  [["rsUp", "RS colour when strong"], ["rsDn", "RS colour when weak"]].forEach(function(x){ var c = el("input"); c.type = "color"; c.value = S[x[0]]; c.setAttribute("aria-label", x[1]); c.onchange = function(){ S[x[0]] = c.value; changed(); }; rc.appendChild(c); });
+  b.appendChild(rc);
+  var rq = rowToggle("Average of the RS line", "Type and length", function(){ return S.rsMa; }, function(v){ S.rsMa = v; });
+  var rqk = el("select"); rqk.setAttribute("aria-label", "RS average type"); [["EMA","EMA"],["SMA","SMA"]].forEach(function(o){ var op = el("option", "", o[1]); op.value = o[0]; rqk.appendChild(op); });
+  rqk.value = S.rsKind; rqk.onchange = function(){ S.rsKind = rqk.value; changed(); };
+  rq.insertBefore(rqk, rq.lastChild); rq.insertBefore(numInput("RS average length", function(){ return S.rsLen; }, function(v){ S.rsLen = v; }, 2, 200), rq.lastChild); b.appendChild(rq);
+  b.appendChild(rowToggle("Pink dot: RS new high before price", "The RS line makes a 52-week high while the price has not yet", function(){ return S.rsHi; }, function(v){ S.rsHi = v; }));
+  b.appendChild(rowToggle("Blue dot: RS new high with price", "Both at a 52-week high", function(){ return S.rsHiAll; }, function(v){ S.rsHiAll = v; }));
   b.appendChild(el("div", "ss", "Levels"));
   b.appendChild(rowToggle("Previous day high and low", "", function(){ return S.pd; }, function(v){ S.pd = v; }));
   b.appendChild(rowToggle("52-week high and low", "", function(){ return S.wk52; }, function(v){ S.wk52 = v; }));
@@ -373,6 +460,50 @@ function dataFor(iv){
   return D[iv];
 }
 
+var IXMAP = {};                      // index label -> Map(date -> close), built once from the daily rows
+function indexFor(label, T){
+  var arr = (P.ix || {})[label]; if (!arr) return null;
+  if (!IXMAP[label]) { var m = new Map(), DT = dataFor("D").T; for (var i = 0; i < DT.length; i++) if (arr[i] != null) m.set(DT[i], arr[i]); IXMAP[label] = m; }
+  var m2 = IXMAP[label]; return T.map(function(t){ var v = m2.get(t); return v == null ? null : v; });
+}
+function rsCalc(d){
+  var ix = indexFor(S.rsIdx, d.T); if (!ix) return null;
+  var raw = d.close.map(function(c, i){ return ix[i] ? c / ix[i] : null; }), base = null, i;
+  for (i = 0; i < raw.length; i++) if (raw[i] != null) { base = raw[i]; break; }
+  if (base === null) return null;
+  var line = raw.map(function(v){ return v == null ? null : v / base * 100; });
+  for (i = 1; i < line.length; i++) if (line[i] == null && line[i - 1] != null) line[i] = line[i - 1];      // a day the index did not trade
+  var filled = line.map(function(v){ return v == null ? 0 : v; }), first = line.findIndex(function(v){ return v != null; });
+  var ma = (S.rsKind === "SMA" ? sma(filled, S.rsLen) : emaFrom(line, S.rsLen)).map(function(v, k){ return k < first + S.rsLen - 1 ? null : v; });
+  var win = iv === "D" ? 252 : iv === "W" ? 52 : 12, hi = new Array(line.length).fill(false);
+  for (i = first + Math.min(win, 20); i < line.length; i++) { var mx = -Infinity; for (var j = Math.max(first, i - win + 1); j < i; j++) if (line[j] > mx) mx = line[j]; hi[i] = line[i] != null && line[i] > mx; }
+  var up = line.map(function(v, k){ if (v == null) return true; if (S.rsColor === "ma") return ma[k] == null ? true : v >= ma[k]; var b0 = line[Math.max(first, k - S.rsDir)]; return b0 == null ? true : v >= b0; });
+  var bp = new Array(line.length).fill(false);            // RS at a new high while the price is not: the "before price" case
+  for (i = 0; i < line.length; i++) if (hi[i]) { var ph = -Infinity; for (var q = Math.max(0, i - win + 1); q < i; q++) if (d.R[q][2] > ph) ph = d.R[q][2]; bp[i] = !(d.R[i][2] >= ph); }
+  var per = iv === "D" ? 63 : iv === "W" ? 13 : 3, n = line.length - 1, sc = null;
+  var perf = function(a, k){ var b1 = a[n - k]; return (b1 == null || !b1 || a[n] == null) ? null : a[n] / b1; };
+  var w = [[per, 0.4], [per * 2, 0.2], [per * 3, 0.2], [per * 4, 0.2]], num = 0, den = 0, ws = 0;
+  w.forEach(function(x){ if (n - x[0] < 0) return; var ps = perf(d.close, x[0]), pi = perf(ix, x[0]); if (ps == null || pi == null) return; num += ps * x[1]; den += pi * x[1]; ws += x[1]; });
+  if (ws > 0 && den > 0) sc = num / den * 100;
+  return {line:line, ma:ma, hi:hi, bp:bp, up:up, win:win, score:sc};
+}
+function rsSeries(chart, R, T, extra){
+  var sr = chart.addLineSeries(Object.assign({color:S.rsUp, lineWidth:2, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false, priceFormat:{type:"price", precision:2, minMove:0.01}}, extra || {}));
+  sr.setData(T.map(function(t, i){ var v = R.line[i]; return v == null ? {time:t} : {time:t, value:Math.round(v * 100) / 100, color:R.up[i] ? S.rsUp : S.rsDn}; }));
+  if (S.rsMa) chart.addLineSeries(Object.assign({color:"rgba(180,180,190,.6)", lineWidth:1, lineStyle:2, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false}, extra && extra.priceScaleId ? {priceScaleId:extra.priceScaleId} : {})).setData(pts(T, R.ma));
+  var mk = [];
+  R.hi.forEach(function(x, i){ if (!x) return; if (R.bp[i]) { if (S.rsHi) mk.push({time:T[i], position:"inBar", color:"#FF4FD8", shape:"circle", size:0.9}); } else if (S.rsHiAll) mk.push({time:T[i], position:"inBar", color:"#5AC8FA", shape:"circle", size:0.5}); });
+  sr.setMarkers(mk);
+  return sr;
+}
+function rsLegend(i){
+  var R = ind.rs, v = R.line[i], strong = R.up[i], cc = strong ? S.rsUp : S.rsDn;
+  var word = S.rsColor === "ma" ? (strong ? "above its average" : "below its average") : (strong ? "rising: stronger than the index" : "falling: weaker than the index");
+  return 'RS line <span class="mut">vs ' + esc(S.rsIdx) + '</span> <span style="color:' + cc + '">' + fmt(v) + " " + (v == null ? "" : word) + "</span>" +
+    (R.score == null ? "" : ' &nbsp;<span class="mut">RS score</span> <span style="color:' + (R.score >= 100 ? S.rsUp : S.rsDn) + '">' + R.score.toFixed(0) + "</span>") +
+    (S.rsMa ? ' &nbsp;<span class="mut">' + S.rsKind + " " + S.rsLen + " " + fmt(R.ma[i]) + "</span>" : "") +
+    (R.hi[i] ? (R.bp[i] ? ' &nbsp;<span style="color:#FF4FD8">● RS new high before price</span>' : ' &nbsp;<span style="color:#5AC8FA">● RS new high</span>') : "");
+}
 var iv = S.iv, rng = S.rng || DEF_RNG || "6M", tool = "cursor";
 if (!(P[iv] && P[iv].length)) iv = "D";
 var charts = [], main = null, mainSeries = null, volSeries = null, ind = {}, lines = [], drawSeries = [], xs = false, syncing = false, pend = null, msr = null;
@@ -412,7 +543,10 @@ function build(keep){
   if (keep && main) { try { prev = main.timeScale().getVisibleLogicalRange(); } catch (e) {} }
   teardown();
   var d = dataFor(iv), T = d.T, cl = d.close, col = pal();
-  var subs = []; if (S.rsi) subs.push("rsi"); if (S.macd) subs.push("macd");
+  var subs = [];
+  ind.rs = S.rs ? rsCalc(d) : null;
+  if (ind.rs && S.rsPlace === "pane") subs.push("rs");
+  if (S.rsi) subs.push("rsi"); if (S.macd) subs.push("macd");
   var pm = addPane("main", ""); pm.el.id = "p-main";
   main = LW.createChart(pm.cv, opts(pm.cv, subs.length === 0));
   if (S.wm) main.applyOptions({watermark:{visible:true, text:SYM, color:"rgba(255,255,255,.045)", fontSize:64, fontFamily:FONT, horzAlign:"center", vertAlign:"center"}});
@@ -435,6 +569,11 @@ function build(keep){
     volSeries.setData(d.R.map(function(r, i){ var up = i === 0 ? r[4] >= r[1] : r[4] >= d.R[i - 1][4]; return {time:r[0], value:r[5], color:hexA(up ? col.up : col.dn, 0.5)}; }));
     if (S.volma) { ind.volma = sma(d.vol, S.volmaLen); var vm = main.addLineSeries({priceScaleId:"vol", color:"#5AC8FA", lineWidth:1, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false, priceFormat:{type:"volume"}}); vm.setData(pts(T, ind.volma)); }
   }
+  // relative strength line drawn over the price chart, on its own hidden scale in the lower part of the pane
+  if (ind.rs && S.rsPlace === "price") {
+    var rso = rsSeries(main, ind.rs, T, {priceScaleId:"rs"});
+    rso.priceScale().applyOptions({scaleMargins:{top:0.52, bottom:S.vol ? 0.24 : 0.08}});
+  }
   // moving averages and bands
   ind.ma = [];
   S.ma.forEach(function(m){
@@ -449,8 +588,11 @@ function build(keep){
   }
   // lower panes
   subs.forEach(function(id, n){
-    var p = addPane(id, "sub"), last = n === subs.length - 1, ch = LW.createChart(p.cv, opts(p.cv, last)), rec = {id:id, chart:ch, el:p.el, cv:p.cv, lg:p.lg};
-    if (id === "rsi") {
+    var p = addPane(id, "sub"), last = n === subs.length - 1; p.el.style.flexBasis = (subs.length >= 3 ? 17 : subs.length === 2 ? 20 : 24) + "%";
+    var ch = LW.createChart(p.cv, opts(p.cv, last)), rec = {id:id, chart:ch, el:p.el, cv:p.cv, lg:p.lg};
+    if (id === "rs") {
+      rec.series = rsSeries(ch, ind.rs, T, {lastValueVisible:true});
+    } else if (id === "rsi") {
       ind.rsi = rsiW(cl, S.rsiLen); ind.rsima = sma(ind.rsi.map(function(v){ return v == null ? 0 : v; }), 14).map(function(v, i){ return i < S.rsiLen + 13 ? null : v; });
       rec.series = ch.addLineSeries({color:"#BF5AF2", lineWidth:2, priceLineVisible:false, lastValueVisible:true, priceFormat:{type:"price", precision:2, minMove:0.01},
         autoscaleInfoProvider:function(){ return {priceRange:{minValue:0, maxValue:100}}; }});
@@ -509,7 +651,7 @@ function wire(){
         charts.forEach(function(o){
           if (o === c) return;
           if (i === undefined) { o.chart.clearCrosshairPosition(); return; }
-          var v = o.id === "main" ? d.close[i] : o.id === "rsi" ? ind.rsi[i] : ind.macd.m[i];
+          var v = o.id === "main" ? d.close[i] : o.id === "rsi" ? ind.rsi[i] : o.id === "rs" ? ind.rs.line[i] : ind.macd.m[i];
           if (v != null && o.series) o.chart.setCrosshairPosition(v, k, o.series);
         });
         legend(i === undefined ? d.R.length - 1 : i);
@@ -533,8 +675,10 @@ function legend(i){
   if (parts.length) s += '<div class="row">' + parts.join(" &nbsp; ") + "</div>";
   if (S.vol) s += '<div class="row">Vol <i style="color:' + k + '">' + fmtVol(r[5]) + "</i>" + (ind.volma && ind.volma[i] != null ? ' &nbsp;<span style="color:#5AC8FA">Average ' + S.volmaLen + " " + fmtVol(ind.volma[i]) +
        "</span> &nbsp;<span class=\"mut\">" + (r[5] / ind.volma[i]).toFixed(2) + "× average</span>" : "") + "</div>";
+  if (ind.rs && S.rsPlace === "price") s += '<div class="row">' + rsLegend(i) + "</div>";
   charts[0].lg.innerHTML = s;
   charts.forEach(function(c){
+    if (c.id === "rs") c.lg.innerHTML = rsLegend(i);
     if (c.id === "rsi") c.lg.innerHTML = 'RSI <span class="mut">' + S.rsiLen + '</span> <span style="color:#BF5AF2">' + fmt(ind.rsi[i]) + '</span> &nbsp;<span style="color:#FF9F0A">Average <span class="mut">14</span> ' + fmt(ind.rsima[i]) + "</span>";
     if (c.id === "macd") c.lg.innerHTML = 'MACD <span class="mut">12, 26, 9</span> <span style="color:#2962FF">' + fmt(ind.macd.m[i]) + '</span> &nbsp;<span style="color:#FF9F0A">Signal ' + fmt(ind.macd.s[i]) +
        '</span> &nbsp;<span class="mut">Histogram ' + fmt(ind.macd.h[i]) + "</span>";
@@ -629,6 +773,11 @@ function menus(){
   tg("Volume", "vol"); tg("Volume average", "volma", "#5AC8FA", String(S.volmaLen)); tg("Bollinger bands", "bb", "#2962FF", S.bbLen + ", " + S.bbK);
   mi.appendChild(el("div", "mh", "Below the chart"));
   tg("RSI", "rsi", "#BF5AF2", String(S.rsiLen)); tg("MACD", "macd", "#2962FF", "12, 26, 9");
+  mi.appendChild(el("div", "mh", "Relative strength line"));
+  tg("RS line", "rs", S.rsUp, "vs " + S.rsIdx);
+  mi.appendChild(item("Draw it on the price chart", S.rsPlace === "price", function(){ S.rsPlace = S.rsPlace === "price" ? "pane" : "price"; S.rs = true; saveS(); build(true); menus(); $("menu-ind").classList.add("open"); }));
+  RS_LIST.forEach(function(x){ if (!(P.ix || {})[x]) return; var it = item("Compare with " + x, S.rsIdx === x, function(){ S.rsIdx = x; S.rs = true; saveS(); build(true); menus(); $("menu-ind").classList.add("open"); });
+    it.querySelector(".ck").style.borderRadius = "50%"; mi.appendChild(it); });
   mi.appendChild(el("div", "mh", "Levels"));
   tg("Previous day high and low", "pd", "#FF9F0A"); tg("52-week high and low", "wk52", "#30D158");
   mi.appendChild(item("Lengths and colours…", null, function(){ closeMenus(); openSettings(); }));
@@ -680,6 +829,7 @@ window.addEventListener("resize", fit);
 if (window.ResizeObserver) new ResizeObserver(fit).observe($("panes"));
 menus(); build(false);
 setTimeout(function(){ fit(); setRange(rng); }, 60);
+if (S.rs && !(P.ix || {})[S.rsIdx]) { var hn = Object.keys(P.ix || {}).length ? S.rsIdx + " did not load, so the RS line is hidden. Pick another index under Indicators." : "Index data did not load, so the RS line is hidden. Reopen the chart in a minute."; hint(hn); setTimeout(function(){ if (tool === "cursor") hint(""); }, 6000); }
 window.__arkaChart = {S:function(){ return S; }, charts:function(){ return charts; }, ind:function(){ return ind; }, draws:function(){ return draws; }};
 })();
 </script></body></html>"""
@@ -690,6 +840,7 @@ def _doc(mode: str, payload: str = "{}", sym: str = "", default_range: str = "6M
             .replace("__PAYLOAD__", payload)
             .replace("__SYM__", json.dumps(sym).replace("</", "<\\/"))
             .replace("__MODE__", mode)
+            .replace("__RSLIST__", json.dumps(list(RS_INDICES)))
             .replace("__RANGE__", default_range))
 
 
@@ -709,6 +860,6 @@ def render_pro_chart(symbol: str, height: int = 660, default_range: str = "6M") 
     return True
 
 
-def render_chart_settings(height: int = 1150) -> None:
+def render_chart_settings(height: int = 1560) -> None:
     """Chart settings for the Account page. Saved in this browser; every chart on this device opens with them."""
     components.html(_doc("settings"), height=height, scrolling=True)
