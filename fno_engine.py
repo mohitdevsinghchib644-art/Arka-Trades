@@ -79,12 +79,26 @@ SIGNALS = [
     ("flow_pos", "Breadth", "Buyers building across stocks", "Far more F&O stocks show long build-up than short build-up.", "idx"),
     ("flow_neg", "Breadth", "Sellers building across stocks", "Far more F&O stocks show short build-up than long build-up.", "idx"),
 ]
+# The model's inputs. key, label, used for the indexes, used for stocks
+FACTORS = [
+    ("trend", "Trend", 1, 1), ("mom", "20-day momentum", 1, 1), ("rev", "5-day move", 1, 1), ("oiflow", "Open interest with price", 1, 1),
+    ("oi", "Open-interest change", 1, 1), ("pcr", "Put-call ratio", 1, 1), ("pcr_d", "Put-call ratio change", 1, 1), ("iv", "Implied volatility", 1, 1),
+    ("iv_d", "Volatility change", 1, 1), ("skew", "Put skew", 1, 1), ("cal", "Next-month premium", 1, 1), ("pain", "Distance from max pain", 1, 1),
+    ("roll", "Rollover", 0, 1), ("fii", "FII long share", 1, 0), ("fii_d", "FII positioning change", 1, 0), ("cli", "Retail long share", 1, 0),
+    ("fii_opt", "FII index options", 1, 0), ("breadth", "Breadth", 1, 0), ("flow", "Build-up balance", 1, 0)]
+F_LABEL = {f[0]: f[1] for f in FACTORS}
+IDX_F = [f[0] for f in FACTORS if f[2]]
+STK_F = [f[0] for f in FACTORS if f[3]]
+IDX_LAM, STK_LAM = 1.0, 0.1        # how hard the model is held back from over-fitting (ridge penalty)
+MODEL_STEP = 63                    # the model is re-learnt every quarter, only from data before that day
+COST = 0.0005                      # cost charged each time the test strategy enters or leaves the market
+
 SIG_KEYS = [s[0] for s in SIGNALS]
 SIG_INFO = {s[0]: {"group": s[1], "label": s[2], "note": s[3], "scope": s[4]} for s in SIGNALS}
 BUILDUP = {"bu_long": "Long build-up", "bu_short": "Short build-up", "bu_cover": "Short covering", "bu_unwind": "Long unwinding"}
 
 VERDICTS = {2: ("Rally setup", "up"), 1: ("Stay invested", "up"), 0: ("No proven edge", "flat"), -1: ("Reduce risk", "dn"), -2: ("Correction risk", "dn")}
-STOCK_VERDICTS = {2: ("Strong setup", "up"), 1: ("Leaning up", "up"), 0: ("Neutral", "flat"), -1: ("Leaning down", "dn"), -2: ("Weak setup", "dn")}
+STOCK_VERDICTS = {2: ("Top fifth", "up"), 1: ("Upper", "up"), 0: ("Middle", "flat"), -1: ("Lower", "dn"), -2: ("Bottom fifth", "dn")}
 
 
 # ───────────── loading ─────────────
@@ -119,7 +133,9 @@ def load_history(root=ROOT) -> pd.DataFrame:
     df = df[df["fut"] > 0]
     # index contracts other than NIFTY and BANK NIFTY trade too thinly for their numbers to mean anything
     df = df[(df["kind"] != "IDX") | df["sym"].isin(INDEXES)]
-    return df.drop_duplicates(["sym", "date"], keep="last").sort_values(["sym", "date"]).reset_index(drop=True)
+    df = df.drop_duplicates(["sym", "date"], keep="last").sort_values(["sym", "date"]).reset_index(drop=True)
+    df["sym"], df["kind"] = df["sym"].astype("category"), df["kind"].astype("category")      # names stored once, not on every row
+    return df
 
 
 def load_participants(root=ROOT) -> pd.DataFrame:
@@ -162,7 +178,7 @@ def load_chain(root=ROOT) -> pd.DataFrame:
 
 # ───────────── features ─────────────
 def _grp_roll(D, by, col, n, minp, how):
-    r = D.groupby(by, sort=False)[col].rolling(n, min_periods=minp)
+    r = D.groupby(by, sort=False, observed=True)[col].rolling(n, min_periods=minp)
     r = r.rank(pct=True) if how == "rank" else (r.mean() if how == "mean" else r.sum())
     return r.reset_index(level=0, drop=True).reindex(D.index)
 
@@ -171,7 +187,7 @@ def prepare(df: pd.DataFrame, P: pd.DataFrame | None = None) -> pd.DataFrame:
     """Adds a clean return series, forward returns, every measure and every signal column (s_<key>) to the history."""
     D = df                                  # worked on in place: the history is large and a second copy would double the memory
     idx = (D["kind"] == "IDX").to_numpy()
-    g = D.groupby("sym", sort=False)
+    g = D.groupby("sym", sort=False, observed=True)
     pf, pn, pe, pdte, poi = g["fut"].shift(1), g["fut_next"].shift(1), g["m_exp"].shift(1), g["date"].shift(1), g["fut_oi"].shift(1)
     rolled = (D["m_exp"] != pe) & pe.notna()
     # the day after expiry the "near" contract is a new one: compare it with yesterday's price of that same contract
@@ -186,6 +202,7 @@ def prepare(df: pd.DataFrame, P: pd.DataFrame | None = None) -> pd.DataFrame:
     D["sid"] = brk.cumsum()
     D["lr"] = np.log1p(D["ret"].fillna(0.0))
     s = D.groupby("sid", sort=False)
+    by_sym = lambda c: D.groupby("sym", sort=False, observed=True)[c]
     D["lpx"] = s["lr"].cumsum()
     D["px"] = np.exp(D["lpx"])
     for h in HORIZONS:
@@ -203,7 +220,7 @@ def prepare(df: pd.DataFrame, P: pd.DataFrame | None = None) -> pd.DataFrame:
     D["pcr_pct"] = _grp_roll(D, "sym", "pcr", YEAR, 120, "rank")
     D["iv"] = D["iv"].where((D["iv"] > 0.04) & (D["iv"] < np.where(idx, 0.8, 1.5)))
     D["iv_pct"] = _grp_roll(D, "sym", "iv", YEAR, 120, "rank")
-    D["iv_d5"] = D["iv"] / g["iv"].shift(5) - 1
+    D["iv_d5"] = D["iv"] / by_sym("iv").shift(5) - 1
     ok_w = lambda c: D[c].where((D[c] > 0.04) & (D[c] < 2.0))
     D["skew"] = ok_w("iv_put") - ok_w("iv_call")
     D["skew_pct"] = _grp_roll(D, "sym", "skew", YEAR, 120, "rank")
@@ -251,6 +268,38 @@ def prepare(df: pd.DataFrame, P: pd.DataFrame | None = None) -> pd.DataFrame:
         if SIG_INFO[k]["scope"] == "idx":
             v = v & idx
         D["s_" + k] = v
+
+    # everything from here on only needs four significant digits: halve the memory
+    D.drop(columns=[c for c in ("ce_oi", "pe_oi", "iv_put", "iv_call", "straddle", "iv_dte", "fut_oi_near", "fut_oi_next", "lr", "doi") if c in D.columns], inplace=True)
+    for c in D.columns:
+        if D[c].dtype == "float64" and c not in ("fut", "fut_next", "lpx", "px", "ret"):
+            D[c] = D[c].astype("float32")
+
+    # the model's inputs, as continuous measures. For stocks each is ranked against the other stocks on the same day;
+    # for an index it is compared with that index's own last year. Both use only information available on the day.
+    D["n2"] = s["ret"].shift(-2)                      # the return earned the day after acting at the next close
+    lp = np.log(D["pcr"])
+    D["lp"] = lp
+    V = {"trend": D["px"] / D["ma50"] - 1, "mom": D["r20"], "rev": D["r5"], "oiflow": np.sign(D["r5"]) * D["oi5"], "oi": D["oi5"], "pcr": lp,
+         "pcr_d": lp - by_sym("lp").shift(5), "iv": D["iv"], "iv_d": D["iv_d5"], "skew": D["skew"], "cal": D["cal"],
+         "pain": D["pain_gap"], "roll": D["roll"], "fii": D["fii_ls"], "fii_d": D["fii_ls_d5"], "cli": D["cli_ls"], "fii_opt": D["fii_opt"],
+         "breadth": D["br_above"], "flow": D["br_flow"]}
+    stk_dates = D.loc[~idx, "date"]
+    import warnings
+    warnings.simplefilter("ignore", pd.errors.PerformanceWarning)     # columns are added one by one on purpose: it avoids copying the whole table
+    for k, v in V.items():
+        v = v.replace([np.inf, -np.inf], np.nan).astype("float32")
+        D["v_" + k] = v
+        x = pd.Series(np.nan, index=D.index, dtype="float32")
+        if k in STK_F and (~idx).any():
+            x[~idx] = ((v[~idx].groupby(stk_dates).rank(pct=True) - 0.5) * 3.464).astype("float32")
+        if k in IDX_F:
+            for sym in INDEXES:
+                m = (D["sym"] == sym).to_numpy()
+                if m.any():
+                    r = v[m].rolling(YEAR, min_periods=120)
+                    x[m] = ((v[m] - r.mean()) / r.std().replace(0, np.nan)).clip(-3, 3).astype("float32")
+        D["x_" + k] = x
     return D
 
 
@@ -437,6 +486,308 @@ def _d(x):
         return None
 
 
+# ───────────── the forecasting model ─────────────
+def _fit(X, y, lam):
+    """Ridge regression: next-10-session return explained by the inputs, held back so that noise is not learnt as signal."""
+    mu = float(y.mean())
+    n, k = X.shape
+    b = np.linalg.solve(X.T @ X + lam * n * np.eye(k), X.T @ (y - mu))
+    return b, mu
+
+
+def _rank_corr(a, b) -> float:
+    if len(a) < 20:
+        return float("nan")
+    ra, rb = pd.Series(a).rank().to_numpy(), pd.Series(b).rank().to_numpy()
+    c = np.corrcoef(ra, rb)[0, 1]
+    return float(c) if c == c else float("nan")
+
+
+def _expanding_pct(p):
+    """Where each forecast sits among the forecasts made before it (0 to 1). Never looks forward."""
+    import bisect
+    out, seen = np.full(len(p), np.nan), []
+    for i, v in enumerate(p):
+        if v == v:
+            if len(seen) >= 60:
+                out[i] = bisect.bisect_left(seen, v) / len(seen)
+            bisect.insort(seen, v)
+    return out
+
+
+def _pct_level(q):
+    return 0 if q != q else 2 if q >= 0.8 else 1 if q >= 0.6 else -2 if q <= 0.2 else -1 if q <= 0.4 else 0
+
+
+def _curve_stats(r) -> dict:
+    r = np.asarray(r, dtype=float)
+    if len(r) < 40:
+        return {}
+    eq = np.cumprod(1 + r)
+    sd = float(r.std())
+    return {"total": float(eq[-1] - 1), "cagr": float(eq[-1] ** (YEAR / len(r)) - 1), "dd": float((eq / np.maximum.accumulate(eq) - 1).min()),
+            "sharpe": float(r.mean() / sd * math.sqrt(YEAR)) if sd > 0 else 0.0}
+
+
+def _thin(dates, *series, n=160):
+    """A curve cut down to at most n points for drawing."""
+    idx = np.unique(np.linspace(0, len(dates) - 1, min(n, len(dates))).astype(int)) if len(dates) else []
+    return [pd.Timestamp(dates[i]).date().isoformat() for i in idx], [[_f(s_[i], 5) for i in idx] for s_ in series]
+
+
+def _confidence(t) -> tuple:
+    if t != t:
+        return "Untested", 0
+    return ("High", 3) if t >= 2.5 else ("Medium", 2) if t >= 1.5 else ("Low", 1) if t >= 1.0 else ("None shown", 0)
+
+
+def _fval(k, r) -> str:
+    """One input said in words, with today's number."""
+    v = _f(r.get("v_" + k))
+    if v is None:
+        return "no reading"
+    p = v * 100
+    T = {"trend": lambda: f"{p:+.1f}% from the 50-day average", "mom": lambda: f"{p:+.1f}% in 20 sessions", "rev": lambda: f"{p:+.1f}% in 5 sessions",
+         "oiflow": lambda: "open interest rising with price" if v > 0 else "open interest rising against price" if v < 0 else "open interest flat",
+         "oi": lambda: f"open interest {p:+.1f}% in 5 sessions", "pcr": lambda: f"put-call ratio {math.exp(v):.2f}",
+         "pcr_d": lambda: f"put-call ratio {'up' if v > 0 else 'down'} {abs(math.expm1(v)) * 100:.0f}% in 5 sessions",
+         "iv": lambda: f"implied volatility {p:.1f}%", "iv_d": lambda: f"volatility {p:+.0f}% in 5 sessions", "skew": lambda: f"puts {p:+.1f} vol points over calls",
+         "cal": lambda: f"next month at {p:+.2f}% to this month", "pain": lambda: f"{p:+.1f}% from max pain", "roll": lambda: f"{p:.0f}% rolled to next month",
+         "fii": lambda: f"FIIs {p:.0f}% long", "fii_d": lambda: f"FII long share {p:+.1f} pts in 5 sessions", "cli": lambda: f"retail {p:.0f}% long",
+         "fii_opt": lambda: f"FII index options net {v:+,.0f} contracts", "breadth": lambda: f"{p:.0f}% of F&O stocks in uptrends",
+         "flow": lambda: f"build-up balance {p:+.0f} pts"}
+    try:
+        return T[k]()
+    except Exception:
+        return "no reading"
+
+
+def _drivers(keys, b, xrow, row) -> list:
+    out = [{"key": k, "label": F_LABEL[k], "x": _f(xrow[i], 2), "beta": float(b[i]), "contrib": float(b[i] * xrow[i]), "text": _fval(k, row)} for i, k in enumerate(keys)]
+    return sorted(out, key=lambda d: -abs(d["contrib"]))
+
+
+def analogs(X, F, dates, i, w, has, k=24, h=MAIN_H) -> dict | None:
+    """The past days that looked most like today across every input, and what the price did next. Days are kept at least
+    h sessions apart so that one episode is not counted many times."""
+    n = len(X)
+    cand = np.nonzero(~np.isnan(F[h]) & (np.arange(n) < i - h) & has)[0]
+    if len(cand) < 80:
+        return None
+    ww = np.sqrt(np.abs(w)) + 1e-9
+    ww = ww / ww.sum()
+    d = np.sqrt((((X[cand] - X[i]) ** 2) * ww).sum(axis=1))
+    order = np.argsort(d)[:600]
+    picks = []
+    for j in order:
+        c = int(cand[j])
+        if all(abs(c - p_) >= h for p_, _ in picks):
+            picks.append((c, float(d[j])))
+            if len(picks) >= k:
+                break
+    if len(picks) < 8:
+        return None
+    ix = np.array([p_ for p_, _ in picks])
+    out = {"n": len(picks), "h": {}, "rows": [], "f": [_f(v, 5) for v in F[h][ix]]}
+    for hh in HORIZONS:
+        v, allv = F[hh][ix], F[hh][cand]
+        v = v[~np.isnan(v)]
+        if len(v):
+            out["h"][hh] = {"median": float(np.median(v)), "mean": float(v.mean()), "up": float((v > 0).mean()), "worst": float(v.min()), "best": float(v.max()),
+                            "base_up": float((allv[~np.isnan(allv)] > 0).mean()), "base": float(np.nanmean(allv))}
+    for c, dist in picks[:10]:
+        out["rows"].append({"date": pd.Timestamp(dates[c]).date().isoformat(), "dist": dist, **{f"f{hh}": _f(F[hh][c], 5) for hh in HORIZONS}})
+    return out
+
+
+def index_model(G: pd.DataFrame) -> dict | None:
+    """Forecast of the next 10 sessions for one index, with its record on days it had not seen and a simple test strategy."""
+    h, n = MAIN_H, len(G)
+    cols = ["x_" + k for k in IDX_F]
+    Xn = G[cols].to_numpy(dtype=float)
+    has = (~np.isnan(Xn)).sum(axis=1) >= 4
+    X = np.nan_to_num(Xn)
+    y = G[f"f{h}"].to_numpy(dtype=float)
+    pos = np.arange(n)
+    okf = ~np.isnan(y) & has
+    if int(okf.sum()) < 200:
+        return None
+    pred = np.full(n, np.nan)
+    for cut in range(WF_START, n, MODEL_STEP):
+        tr = okf & (pos + 1 + h < cut)
+        if int(tr.sum()) < 150:
+            continue
+        b, mu = _fit(X[tr], y[tr], IDX_LAM)
+        rows = slice(cut, min(cut + MODEL_STEP, n))
+        pred[rows] = np.where(has[rows], X[rows] @ b + mu, np.nan)
+    b, mu = _fit(X[okf], y[okf], IDX_LAM)
+    full = np.where(has, X @ b + mu, np.nan)
+    out = {"forecast": _f(full[-1]), "drift": mu, "swing": float(np.nanstd(y)), "betas": [{"key": k, "label": F_LABEL[k], "beta": float(b[i])} for i, k in enumerate(IDX_F)],
+           "drivers": _drivers(IDX_F, b, X[-1], G.iloc[-1]), "oos_days": 0, "by": {}, "curve": None, "stats": {}}
+    fv = full[~np.isnan(full)]
+    q = float((fv < full[-1]).mean()) if full[-1] == full[-1] and len(fv) else float("nan")
+    out["pct"], out["level"] = _f(q, 3), _pct_level(q)
+    # record on unseen days
+    v = ~np.isnan(pred) & ~np.isnan(y)
+    out["oos_days"] = int(v.sum())
+    if int(v.sum()) >= 120:
+        ic = _rank_corr(pred[v], y[v])
+        neff = max(int(v.sum()) / h, 3)
+        out["ic"], out["ic_t"] = ic, float(ic * math.sqrt(neff - 2) / math.sqrt(max(1 - ic * ic, 1e-9))) if ic == ic else float("nan")
+        pq = _expanding_pct(pred)
+        lvl = np.array([_pct_level(x) for x in pq])
+        ok = v & ~np.isnan(pq)
+        half = int(np.median(pos[ok])) if ok.any() else n // 2
+        for L in (2, 1, 0, -1, -2):
+            st_ = stat_series(lvl == L, y, ok, pos, h, half)
+            if st_:
+                out["by"][L] = st_
+        # the test strategy: hold the index future unless the forecast is in the bottom 40% of what the model has said before
+        i0 = int(np.argmax(~np.isnan(pq))) if (~np.isnan(pq)).any() else None
+        if i0 is not None and n - i0 > 60:
+            r = np.nan_to_num(G["n2"].to_numpy(dtype=float)[i0:])
+            inm = np.where(np.isnan(pq[i0:]), 1.0, (pq[i0:] > 0.4).astype(float))
+            sw = np.abs(np.diff(np.concatenate([[1.0], inm])))
+            strat = inm * r - sw * COST
+            d_, (c1, c2) = _thin(G["date"].to_numpy()[i0:], np.cumprod(1 + strat) - 1, np.cumprod(1 + r) - 1)
+            out["curve"] = {"date": d_, "model": c1, "hold": c2}
+            out["stats"] = {"model": _curve_stats(strat), "hold": _curve_stats(r), "in_market": float(inm.mean()), "switches": int(sw.sum()),
+                            "from": pd.Timestamp(G["date"].iloc[i0]).date().isoformat()}
+    out["conf"], out["conf_n"] = _confidence(out.get("ic_t", float("nan")))
+    st_ = out["by"].get(out["level"])
+    out["p_up"] = st_["hit"] if st_ else None
+    out["base_up"] = float((y[~np.isnan(y)] > 0).mean())
+    out["analogs"] = analogs(X, {hh: G[f"f{hh}"].to_numpy(dtype=float) for hh in HORIZONS}, G["date"].to_numpy(), n - 1, b, has)
+    return out
+
+
+def stock_model(K: pd.DataFrame, last) -> dict | None:
+    """One model for all stocks: which stocks should beat or lag the other F&O stocks over the next 10 sessions.
+    Tested by ranking the stocks every day on days the model had not seen, and following the top fifth against the bottom fifth."""
+    h = MAIN_H
+    cols = ["x_" + k for k in STK_F]
+    Xn = K[cols].to_numpy(dtype=np.float32)
+    has = (~np.isnan(Xn)).sum(axis=1) >= 4
+    X = np.nan_to_num(Xn).astype(np.float64)
+    codes, dates = pd.factorize(K["date"], sort=True)
+    nd = len(dates)
+    f = K[f"f{h}"].to_numpy(dtype=float)
+    okf0 = ~np.isnan(f)
+    U = pooled_base(f, okf0, codes, nd)
+    y = f - U["mean"][codes]                          # return against the average F&O stock on the same day
+    okf = okf0 & has
+    if int(okf.sum()) < 3000:
+        return None
+    pred = np.full(len(K), np.nan)
+    for cut in range(WF_START, nd, MODEL_STEP):
+        tr = okf & (codes + 1 + h < cut)
+        if int(tr.sum()) < 3000:
+            continue
+        b, mu = _fit(X[tr], y[tr], STK_LAM)
+        rows = (codes >= cut) & (codes < cut + MODEL_STEP) & has
+        pred[rows] = X[rows] @ b + mu
+    b, mu = _fit(X[okf], y[okf], STK_LAM)
+    out = {"betas": [{"key": k, "label": F_LABEL[k], "beta": float(b[i])} for i, k in enumerate(STK_F)], "b": b, "mu": mu, "oos_days": 0,
+           "swing": float(np.nanstd(y[okf]))}
+    v = ~np.isnan(pred) & ~np.isnan(y)
+    if int(v.sum()) > 3000:
+        d = codes[v]
+        T = pd.DataFrame({"d": d, "p": pred[v], "y": y[v], "n2": np.nan_to_num(K["n2"].to_numpy(dtype=float)[v])})
+        T["rp"] = T.groupby("d")["p"].rank(pct=True)
+        T["ry"] = T.groupby("d")["y"].rank(pct=True)
+        cnt = T.groupby("d")["p"].transform("count")
+        T = T[cnt >= 30]
+        a_, b_ = T["rp"] - T.groupby("d")["rp"].transform("mean"), T["ry"] - T.groupby("d")["ry"].transform("mean")
+        g_ = pd.DataFrame({"d": T["d"], "ab": a_ * b_, "aa": a_ * a_, "bb": b_ * b_}).groupby("d").sum()
+        ics = (g_["ab"] / np.sqrt(g_["aa"] * g_["bb"])).dropna()
+        T["q"] = np.minimum((T["rp"] * 5).apply(np.ceil).astype(int), 5).clip(1, 5)
+        qm = T.groupby(["d", "q"])["y"].mean().unstack()
+        n2 = T.groupby(["d", "q"])["n2"].mean().unstack()
+        out["oos_days"] = int(len(ics))
+        if len(ics) >= 60:
+            neff = max(len(ics) / h, 3)
+            out["ic"], out["ic_t"] = float(ics.mean()), float(ics.mean() / (ics.std() / math.sqrt(neff))) if ics.std() > 0 else 0.0
+            out["quint"] = [float(qm[q].mean()) if q in qm else None for q in (1, 2, 3, 4, 5)]
+            if 1 in n2 and 5 in n2:
+                ls = (n2[5] - n2[1]).fillna(0.0).to_numpy()
+                top = (n2[5] - n2.mean(axis=1)).fillna(0.0).to_numpy()
+                d_, (c1, c2) = _thin(dates[n2.index.to_numpy()], np.cumprod(1 + ls) - 1, np.cumprod(1 + top) - 1)
+                out["curve"] = {"date": d_, "ls": c1, "top": c2}
+                out["stats"] = {"ls": _curve_stats(ls), "top": _curve_stats(top), "from": d_[0]}
+    out["conf"], out["conf_n"] = _confidence(out.get("ic_t", float("nan")))
+    return out
+
+
+# ───────────── option chain analytics ─────────────
+def _ncdf(x):
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _b76(F, K, T, v, call):
+    if T <= 0 or v <= 0:
+        return max(F - K, 0.0) if call else max(K - F, 0.0)
+    d1 = (math.log(F / K) + 0.5 * v * v * T) / (v * math.sqrt(T))
+    d2 = d1 - v * math.sqrt(T)
+    return F * _ncdf(d1) - K * _ncdf(d2) if call else K * _ncdf(-d2) - F * _ncdf(-d1)
+
+
+def _iv(px, F, K, T, call):
+    if not (px and px > 0 and F > 0 and K > 0 and T > 0) or px <= (max(F - K, 0.0) if call else max(K - F, 0.0)) + 1e-9:
+        return None
+    lo, hi = 0.01, 4.0
+    if _b76(F, K, T, hi, call) < px:
+        return None
+    for _ in range(50):
+        mid = 0.5 * (lo + hi)
+        if _b76(F, K, T, mid, call) > px:
+            hi = mid
+        else:
+            lo = mid
+    return 0.5 * (lo + hi)
+
+
+def _gamma(F, K, T, v):
+    if not (v and v > 0 and T > 0):
+        return 0.0
+    d1 = (math.log(F / K) + 0.5 * v * v * T) / (v * math.sqrt(T))
+    return math.exp(-0.5 * d1 * d1) / math.sqrt(2 * math.pi) / (F * v * math.sqrt(T))
+
+
+def chain_view(sym: str, exp, F: float, asof, chain: pd.DataFrame) -> dict | None:
+    """Everything read off one expiry's option chain: open interest and its change by strike, the volatility smile, max
+    pain, and an estimate of dealer gamma (assuming, as is standard, that dealers have sold the puts and bought the calls
+    that customers hold; the true split is not published, so treat the gamma numbers as an estimate)."""
+    if not len(chain) or not exp or not F:
+        return None
+    ch = chain[(chain["sym"] == sym) & (chain["exp"] == pd.Timestamp(exp))].sort_values("strike")
+    if len(ch) < 6:
+        return None
+    T = max((pd.Timestamp(exp) - pd.Timestamp(asof)).days, 0.5) / 365
+    K = ch["strike"].to_numpy(dtype=float)
+    g = lambda c: np.nan_to_num(ch[c].to_numpy(dtype=float))
+    co, po, cc, pc, cp, pp = g("ce_oi"), g("pe_oi"), g("ce_chg"), g("pe_chg"), g("ce_px"), g("pe_px")
+    iv = [(_iv(pp[i], F, K[i], T, False) if K[i] < F else _iv(cp[i], F, K[i], T, True)) for i in range(len(K))]
+    known = [v for v in iv if v]
+    fill = float(np.median(known)) if known else None
+    ivf = [v or fill for v in iv]
+    out = {"sym": sym, "exp": _d(exp), "dte": int(round(T * 365)), "strike": K.tolist(), "ce_oi": co.tolist(), "pe_oi": po.tolist(), "ce_chg": cc.tolist(),
+           "pe_chg": pc.tolist(), "iv": [_f(v, 4) for v in iv], "F": F, "pcr": float(po.sum() / co.sum()) if co.sum() > 0 else None}
+    pain = [float((np.maximum(k - K, 0) * co).sum() + (np.maximum(K - k, 0) * po).sum()) for k in K]
+    out["pain"], out["max_pain"] = pain, float(K[int(np.argmin(pain))])
+    out["call_wall"], out["put_wall"] = float(K[int(np.argmax(co))]), float(K[int(np.argmax(po))])
+    out["call_add"], out["put_add"] = float(K[int(np.argmax(cc))]), float(K[int(np.argmax(pc))])
+    if fill:
+        def net_gamma(S):
+            return sum((co[i] - po[i]) * _gamma(S, K[i], T, ivf[i]) for i in range(len(K))) * S * S * 0.01
+        out["gex"] = [float((co[i] - po[i]) * _gamma(F, K[i], T, ivf[i]) * F * F * 0.01) for i in range(len(K))]
+        out["net_gex"] = float(sum(out["gex"]))
+        grid = np.linspace(K.min(), K.max(), 81)
+        prof = [net_gamma(float(S)) for S in grid]
+        flips = [float(grid[i] + (grid[i + 1] - grid[i]) * (0 - prof[i]) / (prof[i + 1] - prof[i])) for i in range(len(grid) - 1) if prof[i] * prof[i + 1] < 0]
+        out["flip"] = min(flips, key=lambda x: abs(x - F)) if flips else None
+    return out
+
+
 def _levels(r) -> dict:
     """The numbers a trader reads off the chain, plus the move the option market is pricing."""
     fut, iv, dte = _f(r["fut"]), _f(r["iv"]), _f(r["dte"])
@@ -492,11 +843,11 @@ def _index_line(level: int, lv: dict, reasons: list, name: str) -> str:
 
 
 def _stock_line(level: int, mk: int) -> str:
-    rel = {2: "is set up to beat other F&O stocks", 1: "leans stronger than other F&O stocks", 0: "has no proven edge either way",
-           -1: "leans weaker than other F&O stocks", -2: "is set up to lag other F&O stocks"}[level]
+    rel = {2: "ranks in the top fifth of F&O stocks", 1: "ranks above the middle", 0: "ranks in the middle",
+           -1: "ranks below the middle", -2: "ranks in the bottom fifth of F&O stocks"}[level]
     mkt = {2: "the market view is positive", 1: "the market view is mildly positive", 0: "the market view is neutral",
            -1: "the market view is mildly negative", -2: "the market view is negative"}[mk]
-    return f"On its own positioning this stock {rel}; {mkt}."
+    return f"On the model's inputs this stock {rel} for the next {MAIN_H} sessions; {mkt}."
 
 
 # ───────────── option structures ─────────────
@@ -594,6 +945,123 @@ def option_idea(sym: str, lv: dict, level: int, chain: pd.DataFrame) -> dict:
     return out
 
 
+# ───────────── the written read ─────────────
+def _pp(x, d=1):
+    return "n/a" if x is None or x != x else f"{x * 100:+.{d}f}%"
+
+
+def _n0(x):
+    return "n/a" if x is None or x != x else f"{x:,.0f}"
+
+
+def desk_note(name: str, lv: dict, M: dict | None, cm: dict | None, mk: dict, reasons: list, ma50_level) -> list:
+    """The analyst's note: the same numbers as the page, put in order. Each line is built from the data by fixed rules."""
+    N = []
+    if M and M.get("forecast") is not None:
+        trusted = M["conf_n"] >= 1
+        shown = M["level"] if M["conf_n"] >= 2 else max(-1, min(1, M["level"]))
+        verdict = VERDICTS[shown][0] if trusted else f"No tested edge. The model leans towards '{VERDICTS[M['level']][0].lower()}' but has not earned a say"
+        N.append({"h": "View", "t": f"{verdict}. The model expects {name} to move {_pp(M['forecast'])} over the next {MAIN_H} sessions, against {_pp(M['drift'])} on a normal day. "
+                                    f"That forecast is higher than {(M['pct'] or 0) * 100:.0f}% of the readings it has given over the stored history."})
+        st_ = M["by"].get(M["level"])
+        if M.get("ic") is not None and M["ic"] == M["ic"]:
+            skill = (f"On {M['oos_days']:,} sessions it had not seen, its forecasts lined up with what happened next with a rank correlation of {M['ic']:+.2f} "
+                     f"(confidence: {M['conf'].lower()}).")
+            if st_:
+                skill += (f" When it gave this verdict before ({st_['n']:,} sessions, {st_['neff']} separate episodes) the index moved {_pp(st_['mean'])} on average "
+                          f"and ended higher {st_['hit'] * 100:.0f}% of the time, against {st_['base_hit'] * 100:.0f}% normally.")
+            if M["conf_n"] == 1:
+                skill += " With a record this thin the model is only allowed to lean, not to make its strong calls."
+            if M["conf_n"] == 0:
+                skill += " That is no better than chance, so the page shows the positioning but takes no view from it."
+            N.append({"h": "Record", "t": skill})
+        up = [d for d in M["drivers"] if d["contrib"] > 0 and d["x"] is not None][:3]
+        dn = [d for d in M["drivers"] if d["contrib"] < 0 and d["x"] is not None][:3]
+        t = ""
+        if up:
+            t += "Pulling the forecast up: " + "; ".join(f"{d['label']} ({d['text']})" for d in up) + ". "
+        if dn:
+            t += "Pulling it down: " + "; ".join(f"{d['label']} ({d['text']})" for d in dn) + "."
+        if t:
+            N.append({"h": "Drivers", "t": t.strip()})
+    else:
+        N.append({"h": "View", "t": f"There is not yet enough stored history to fit and test a model for {name}. The levels and positioning below are still live."})
+    o = []
+    if lv.get("pcr") is not None:
+        o.append(f"Put-call ratio {lv['pcr']:.2f}" + (f", higher than {lv['pcr_pct'] * 100:.0f}% of the last year" if lv.get("pcr_pct") is not None else ""))
+    if lv.get("iv") is not None:
+        o.append(f"implied volatility {lv['iv'] * 100:.1f}%" + (f" (higher than {lv['iv_pct'] * 100:.0f}% of the last year)" if lv.get("iv_pct") is not None else ""))
+    if lv.get("move10") and lv.get("fut"):
+        o.append(f"which prices a normal {MAIN_H}-session range of {_n0(lv['fut'] - lv['move10'])} to {_n0(lv['fut'] + lv['move10'])}")
+    t = ", ".join(o) + "." if o else ""
+    if lv.get("put_wall") and lv.get("call_wall"):
+        t += f" Heaviest put open interest sits at {_n0(lv['put_wall'])} and heaviest call open interest at {_n0(lv['call_wall'])}; max pain is {_n0(lv.get('max_pain'))}."
+    if cm and cm.get("net_gex") is not None:
+        if cm["net_gex"] > 0:
+            t += " Estimated dealer gamma is positive, which tends to damp moves and pin price between the walls"
+        else:
+            t += " Estimated dealer gamma is negative, which tends to make moves run further in either direction"
+        t += (f"; it changes sign near {_n0(cm['flip'])}." if cm.get("flip") else ".")
+    if t:
+        N.append({"h": "Options market", "t": t[0].upper() + t[1:]})
+    p = []
+    if mk.get("fii_ls") is not None:
+        p.append(f"FIIs hold {mk['fii_ls'] * 100:.0f}% of their index futures long" + (f" ({mk['fii_ls_d5'] * 100:+.1f} pts in 5 sessions)" if mk.get("fii_ls_d5") is not None else ""))
+    if mk.get("cli_ls") is not None:
+        p.append(f"retail clients {mk['cli_ls'] * 100:.0f}% long")
+    if mk.get("br_above") is not None:
+        p.append(f"{mk['br_above'] * 100:.0f}% of F&O stocks are above their 50-day average")
+    if p:
+        N.append({"h": "Positioning", "t": (", ".join(p) + ".")[0].upper() + (", ".join(p) + ".")[1:]})
+    A = M.get("analogs") if M else None
+    if A and A["h"].get(MAIN_H):
+        a = A["h"][MAIN_H]
+        N.append({"h": "Days like today", "t": f"The {A['n']} past days closest to today across every input were followed, over {MAIN_H} sessions, by a median move of {_pp(a['median'])}; "
+                                               f"{a['up'] * 100:.0f}% ended higher (normal {a['base_up'] * 100:.0f}%), the worst lost {_pp(a['worst'])} and the best gained {_pp(a['best'])}."})
+    if reasons:
+        N.append({"h": "Tested readings on today", "t": " ".join(r["text"] for r in reasons[:3])})
+    w = []
+    if lv.get("put_wall") and lv.get("fut") and lv["put_wall"] < lv["fut"]:
+        w.append(f"a close below {_n0(lv['put_wall'])}, the put wall, means put writers are losing and support has failed")
+    if ma50_level:
+        w.append(f"the 50-day average is near {_n0(ma50_level)}")
+    if lv.get("call_wall") and lv.get("fut") and lv["call_wall"] > lv["fut"]:
+        w.append(f"a close above {_n0(lv['call_wall'])}, the call wall, forces call writers to cover")
+    if w:
+        N.append({"h": "Levels that change the picture", "t": ("; ".join(w) + ".")[0].upper() + ("; ".join(w) + ".")[1:]})
+    return N
+
+
+def participants_table(root=ROOT) -> dict | None:
+    """Net positions of each group today and five sessions ago, in contracts."""
+    p = Path(root) / "participants.csv"
+    if not p.exists():
+        return None
+    try:
+        raw = pd.read_csv(p)
+        raw["date"] = pd.to_datetime(raw["date"], errors="coerce")
+        raw = raw.dropna(subset=["date"])
+        days = np.sort(raw["date"].unique())
+        if not len(days):
+            return None
+        now, then = days[-1], days[max(len(days) - 6, 0)]
+        rows = []
+        for who, name in (("FII", "FIIs"), ("Client", "Retail clients"), ("Pro", "Pro desks"), ("DII", "DIIs")):
+            a = raw[(raw["who"].astype(str).str.upper() == who.upper())]
+            x, y = a[a["date"] == now], a[a["date"] == then]
+            if x.empty:
+                continue
+            f = lambda d: {"idx_fut": float(d["fi_long"].iloc[0] - d["fi_short"].iloc[0]), "stk_fut": float(d["fs_long"].iloc[0] - d["fs_short"].iloc[0]),
+                           "idx_call": float(d["oi_call_long"].iloc[0] - d["oi_call_short"].iloc[0]), "idx_put": float(d["oi_put_long"].iloc[0] - d["oi_put_short"].iloc[0]),
+                           "ls": float(d["fi_long"].iloc[0] / max(d["fi_long"].iloc[0] + d["fi_short"].iloc[0], 1))}
+            cur = f(x)
+            prev = f(y) if not y.empty else cur
+            rows.append({"who": name, **cur, **{"d_" + k: cur[k] - prev[k] for k in cur}})
+        return {"date": pd.Timestamp(now).date().isoformat(), "rows": rows}
+    except Exception:
+        return None
+
+
 # ───────────── the full run ─────────────
 def run(root=ROOT) -> dict:
     df = load_history(root)
@@ -604,16 +1072,20 @@ def run(root=ROOT) -> dict:
     P = load_participants(root)
     chain = load_chain(root)
     D = prepare(df, P)
-    D = D.drop(columns=[c for c in ("lr", "lpx", "doi", "fut_oi_near", "fut_oi_next", "iv_put", "iv_call", "straddle", "iv_dte", "ce_oi", "pe_oi", "sid") if c in D.columns])
+    D = D.drop(columns=[c for c in ("lr", "lpx", "doi", "fut_oi_near", "fut_oi_next", "iv_put", "iv_call", "straddle", "iv_dte", "ce_oi", "pe_oi", "sid", "lp") if c in D.columns])
     dates = np.sort(D["date"].unique())
     last = pd.Timestamp(dates[-1])
     res.update({"ok": True, "asof": last.date().isoformat(), "first": pd.Timestamp(dates[0]).date().isoformat(), "days": int(len(dates)),
-                "cuts": int(D["cut"].sum()), "rows": int(len(D)), "horizons": list(HORIZONS), "main_h": MAIN_H})
+                "cuts": int(D["cut"].sum()), "rows": int(len(D)), "horizons": list(HORIZONS), "main_h": MAIN_H, "_chain": chain})
     if len(dates) < YEAR:
-        res["notes"].append(f"Only {len(dates)} trading days are stored. Signals need about a year before they can be tested; "
+        res["notes"].append(f"Only {len(dates)} trading days are stored. The model needs about two years before it can be tested; "
                             "run the F&O data workflow with 5 in the years box.")
+    res["participants"] = participants_table(root)
+    if len(P):
+        tail = P.iloc[-130:]
+        res["part_hist"] = {"date": [d.date().isoformat() for d in tail.index], **{k: [_f(v, 4) for v in tail[k]] for k in ("fii_ls", "cli_ls", "pro_ls", "dii_ls", "fii_net", "fii_opt") if k in tail}}
 
-    # indexes: each one tested on its own history
+    # indexes: each one modelled and tested on its own history
     market_level = 0
     for sym in INDEXES:
         G = D[D["sym"] == sym].reset_index(drop=True)
@@ -621,64 +1093,97 @@ def run(root=ROOT) -> dict:
             continue
         T = Tester(G, pooled=False)
         by_h = {h: T.stats(h)[0] for h in HORIZONS}
-        st, sd = T.stats(MAIN_H)
-        w = _weights(st)
-        z = float(_score(T.M[-1:], w)[0] / sd) if sd and sd == sd else 0.0
-        level = _level(z, IDX_MILD, IDX_STRONG)
         row = G.iloc[-1]
         lv = _levels(row)
         table = _signal_table(row, by_h)
         reasons = _reasons(table, NAMES[sym], relative=False)
+        M = index_model(G)
+        # a model with no record on unseen days gets no say; one with a thin record may only lean, never make the strong call
+        level = 0 if not M or M["conf_n"] == 0 else M["level"] if M["conf_n"] >= 2 else max(-1, min(1, M["level"]))
+        mk = {"br_above": _f(row["br_above"], 3), "br_flow": _f(row["br_flow"], 3),
+              **{k: _f(row[k], 4) for k in ("fii_ls", "fii_ls_pct", "fii_ls_d5", "cli_ls", "cli_ls_pct", "pro_ls", "dii_ls", "fii_opt")}}
+        cm = chain_view(sym, row["m_exp"], lv["fut"], last, chain)
+        cw = chain_view(sym, row["w_exp"], lv["fut"], last, chain) if pd.notna(row.get("w_exp")) else None
+        ma50_level = _f(row["fut"] * row["ma50"] / row["px"]) if pd.notna(row["ma50"]) and row["px"] else None
+        tail = G.iloc[-130:]
         res["indexes"][sym] = {
-            "sym": sym, "name": NAMES[sym], "level": level, "verdict": VERDICTS[level][0], "tone": VERDICTS[level][1], "z": z,
-            "tilt": float(_score(T.M[-1:], w)[0]), "swing": sd, "line": _index_line(level, lv, reasons, NAMES[sym]), "reasons": reasons,
-            "levels": lv, "signals": table, "track": T.walk_forward(MAIN_H, IDX_MILD, IDX_STRONG), "days": int(len(G)),
+            "sym": sym, "name": NAMES[sym], "level": level, "verdict": VERDICTS[level][0], "tone": VERDICTS[level][1], "model": M,
+            "reasons": reasons, "levels": lv, "ma50": ma50_level, "signals": table, "days": int(len(G)),
             "counts": {g: sum(1 for s in table if s["grade"] == g) for g in ("proven", "leaning", "unproven", "thin")},
-            "idea": option_idea(sym, lv, level, chain),
-            "hist": {"date": [d.date().isoformat() for d in G["date"].iloc[-130:]], "px": [_f(v, 2) for v in G["fut"].iloc[-130:]],
-                     "pcr": [_f(v, 3) for v in G["pcr"].iloc[-130:]], "iv": [_f(v, 4) for v in G["iv"].iloc[-130:]],
-                     "oi": [_f(v) for v in G["fut_oi"].iloc[-130:]]}}
+            "chain": {"m": cm, "w": cw}, "idea": option_idea(sym, lv, level, chain),
+            "note": desk_note(NAMES[sym], lv, M, cm, mk, reasons, ma50_level),
+            "hist": {"date": [d.date().isoformat() for d in tail["date"]], **{k: [_f(v, 4) for v in tail[c]] for k, c in
+                     (("px", "fut"), ("pcr", "pcr"), ("iv", "iv"), ("oi", "fut_oi"), ("fii", "fii_ls"), ("breadth", "br_above"))}}}
         if sym == "NIFTY":
-            market_level = level
-            res["market"] = {"br_above": _f(row["br_above"], 3), "br_flow": _f(row["br_flow"], 3),
-                             **{k: _f(row[k], 4) for k in ("fii_ls", "fii_ls_pct", "fii_ls_d5", "cli_ls", "cli_ls_pct", "pro_ls", "dii_ls", "fii_opt")}}
+            market_level, res["market"] = level, mk
     res["market_level"] = market_level
 
-    # stocks: tested together, each day against the other F&O stocks
-    K = D[D["kind"] != "IDX"].reset_index(drop=True)
+    # stocks: one model for all of them, each day against the other F&O stocks
+    is_stk = (D["kind"] != "IDX").to_numpy()
+    Tday = D[is_stk & (D["date"] == last).to_numpy()].reset_index(drop=True)          # today's stock rows, with every column
+    slim_cols = (["date", "sym", "kind", "fut", "fut_oi", "pcr", "iv", "m_exp", "n2"] + ["s_" + k for k in SIG_KEYS] + ["x_" + k for k in STK_F]
+                 + [f"f{h}" for h in HORIZONS])
+    K = D.loc[is_stk, slim_cols].reset_index(drop=True)                                # the history, cut down to what the tests need
+    del D
+    import gc
+    gc.collect()
     if len(K):
         T = Tester(K, pooled=True)
         by_h = {h: T.stats(h)[0] for h in HORIZONS}
-        st, sd = T.stats(MAIN_H)
-        w = _weights(st)
-        today = np.nonzero((K["date"] == last).to_numpy())[0]
-        sc = _score(T.M[today], w)
         res["stock_signals"] = [{"key": k, **SIG_INFO[k], "grade": grade(by_h[MAIN_H].get(k)), "stats": {h: by_h[h].get(k) for h in HORIZONS}}
                                 for k in SIG_KEYS if SIG_INFO[k]["scope"] == "all"]
-        res["stock_track"] = T.walk_forward(MAIN_H, STK_MILD, STK_STRONG)
-        res["stock_swing"] = sd
-        for i, s_ in zip(today, sc):
-            row = K.iloc[i]
-            z = float(s_ / sd) if sd and sd == sd else 0.0
-            level = _level(z, STK_MILD, STK_STRONG)
-            on = [k for j, k in enumerate(SIG_KEYS) if T.M[i, j] and SIG_INFO[k]["scope"] == "all"]
+        SM = stock_model(K, last)
+        res["stock_model"] = {k: v for k, v in (SM or {}).items() if k not in ("b",)} if SM else None
+        today = np.nonzero((K["date"] == last).to_numpy())[0]
+        Xt = np.nan_to_num(Tday[["x_" + k for k in STK_F]].to_numpy(dtype=float))
+        score = (Xt @ SM["b"] + SM["mu"]) if SM else np.zeros(len(today))
+        rk = pd.Series(score).rank(pct=True).to_numpy() if SM else np.full(len(today), 0.5)
+        bu_code = np.zeros(len(K), dtype=np.int8)
+        for c, k in enumerate(BUILDUP, start=1):
+            bu_code[K["s_" + k].to_numpy()] = c
+        K["bu"] = bu_code
+        for j, i in enumerate(today):
+            row = Tday.iloc[j]
+            level = _pct_level(float(rk[j])) if SM else 0
+            on = [k for jj, k in enumerate(SIG_KEYS) if T.M[i, jj] and SIG_INFO[k]["scope"] == "all"]
             lv = _levels(row)
-            res["stocks"].append({"sym": row["sym"], "level": level, "verdict": STOCK_VERDICTS[level][0], "tone": STOCK_VERDICTS[level][1], "z": z, "tilt": float(s_),
-                                  "on": on, "buildup": next((BUILDUP[k] for k in BUILDUP if k in on), ""), "levels": lv, "line": _stock_line(level, market_level)})
-        res["stocks"].sort(key=lambda x: -x["z"])
+            res["stocks"].append({"sym": row["sym"], "level": level, "verdict": STOCK_VERDICTS[level][0], "tone": STOCK_VERDICTS[level][1], "score": float(score[j]),
+                                  "pct": float(rk[j]), "on": on, "buildup": next((BUILDUP[k] for k in BUILDUP if k in on), ""), "levels": lv,
+                                  "doi": _f(row.get("oi5"), 4), "drivers": _drivers(STK_F, SM["b"], Xt[j], row)[:6] if SM else [],
+                                  "line": _stock_line(level, market_level)})
+        res["stocks"].sort(key=lambda x: -x["score"])
+        for n_, s_ in enumerate(res["stocks"], start=1):
+            s_["rank"] = n_
         res["n_stocks"] = len(res["stocks"])
+        keep = ["date", "sym", "fut", "fut_oi", "pcr", "iv", "bu", "m_exp"] + ["x_" + k for k in STK_F] + [f"f{h}" for h in HORIZONS]
+        slim = K[keep].copy()
+        slim["sym"] = slim["sym"].astype("category")
+        res["_K"], res["_b"] = slim, (SM["b"] if SM else None)
     if res.get("cuts"):
         res["notes"].append(f"{res['cuts']} one-day jumps of 20% or more (bonuses, splits, demergers) were cut out of the price series so they cannot fake a signal.")
     return res
 
 
 def stock_detail(res: dict, sym: str) -> dict | None:
-    """Everything shown when one stock is opened: its readings, each with the pooled record."""
+    """Everything shown when one stock is opened: its drivers, history, days like today, option chain and tested readings."""
     s = next((x for x in res.get("stocks", []) if x["sym"] == sym), None)
     if not s:
         return None
+    out = dict(s)
     table = [{**sig, "on": sig["key"] in s["on"]} for sig in res.get("stock_signals", [])]
-    return {**s, "signals": table, "reasons": _reasons(table, "stocks like this", relative=True)}
+    out["signals"], out["reasons"] = table, _reasons(table, "stocks like this", relative=True)
+    K = res.get("_K")
+    if K is not None:
+        g = K[K["sym"] == sym]
+        tail = g.iloc[-130:]
+        out["hist"] = {"date": [d.date().isoformat() for d in tail["date"]], **{k: [_f(v, 4) for v in tail[c]] for k, c in (("px", "fut"), ("oi", "fut_oi"), ("pcr", "pcr"), ("iv", "iv"))},
+                       "bu": [int(v) for v in g["bu"].iloc[-40:]]}
+        if res.get("_b") is not None and len(g) > 120:
+            Xn = g[["x_" + k for k in STK_F]].to_numpy(dtype=float)
+            has = (~np.isnan(Xn)).sum(axis=1) >= 4
+            out["analogs"] = analogs(np.nan_to_num(Xn), {h: g[f"f{h}"].to_numpy(dtype=float) for h in HORIZONS}, g["date"].to_numpy(), len(g) - 1, res["_b"], has, k=16)
+        out["chain"] = chain_view(sym, g["m_exp"].iloc[-1], s["levels"]["fut"], res["asof"], res.get("_chain", pd.DataFrame()))
+    return out
 
 
 _CACHE: dict = {}
@@ -719,43 +1224,29 @@ def run_soon(root=ROOT) -> dict | None:
 
 
 # ───────────── text report ─────────────
-def _p(x, d=1):
-    return "n/a" if x is None or x != x else f"{x * 100:+.{d}f}%"
-
-
 def report(res: dict) -> str:
     if not res.get("ok"):
         return "\n".join(res.get("notes") or ["No data."])
     L = [f"F&O engine · data to {res['asof']} · {res['days']} trading days from {res['first']} · {res.get('n_stocks', 0)} stocks", ""]
-    for sym, x in res["indexes"].items():
-        lv = x["levels"]
-        L += [f"{x['name']}: {x['verdict']}  (score {x['z']:+.2f} of a normal {MAIN_H}-day swing)", "  " + x["line"],
-              f"  future {lv['fut']:,.1f} · PCR {lv['pcr']} · IV {(lv['iv'] or 0) * 100:.1f}% · max pain {lv['max_pain']} · walls {lv['put_wall']} / {lv['call_wall']}",
-              f"  signals: {x['counts']}"]
-        for r in x["reasons"]:
-            L.append("  - " + r["text"])
-        tr = x["track"]
-        for lvl, st in tr.get("by", {}).items():
-            L.append(f"  record when it said '{VERDICTS[lvl][0]}': {st['n']} days, {st['neff']} episodes, next {MAIN_H} sessions {_p(st['mean'])}, up {st['hit'] * 100:.0f}% of the time")
-        if x["idea"].get("name"):
-            L.append(f"  option structure: {x['idea']['name']} · {x['idea']['why']}")
+    for x in res["indexes"].values():
+        L.append(f"{x['name']}: {x['verdict']}")
+        L += [f"  {n['h']}: {n['t']}" for n in x["note"]]
+        M = x.get("model") or {}
+        for lvl, st in (M.get("by") or {}).items():
+            L.append(f"  record '{VERDICTS[lvl][0]}': {st['n']} days, {st['neff']} episodes, next {MAIN_H} sessions {_pp(st['mean'])}, up {st['hit'] * 100:.0f}%")
+        if M.get("stats"):
+            a, b = M["stats"]["model"], M["stats"]["hold"]
+            L.append(f"  test strategy since {M['stats']['from']}: {_pp(a.get('cagr'))} a year, worst fall {_pp(a.get('dd'))} | buy and hold {_pp(b.get('cagr'))}, worst fall {_pp(b.get('dd'))}")
         L.append("")
-    if res.get("stock_signals"):
-        L.append("Stock signals (against other F&O stocks, next 10 sessions):")
-        for s in res["stock_signals"]:
-            st = s["stats"].get(MAIN_H)
-            if st:
-                L.append(f"  {s['label']:<32} {s['grade']:<9} edge {_p(st['edge'], 2)}  t {st['t']:+.1f}  episodes {st['neff']}")
-        L.append("")
-        L.append("Top 5: " + ", ".join(f"{s['sym']} ({s['verdict']})" for s in res["stocks"][:5]))
-        L.append("Bottom 5: " + ", ".join(f"{s['sym']} ({s['verdict']})" for s in res["stocks"][-5:]))
-    L += [""] + res.get("notes", [])
-    return "\n".join(L)
+    SM = res.get("stock_model")
+    if SM and SM.get("ic") is not None:
+        L.append(f"Stock model: rank correlation {SM['ic']:+.3f} (t {SM['ic_t']:+.1f}) on {SM['oos_days']} unseen days; fifths {[round(q * 100, 2) if q is not None else None for q in SM.get('quint', [])]}")
+    if res.get("stocks"):
+        L.append("Top 5: " + ", ".join(s["sym"] for s in res["stocks"][:5]) + " | Bottom 5: " + ", ".join(s["sym"] for s in res["stocks"][-5:]))
+    return "\n".join(L + [""] + res.get("notes", []))
 
 
 if __name__ == "__main__":
     import sys
     r = run(Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT)
     print(report(r))
-    if "--json" in sys.argv:
-        print(json.dumps({k: v for k, v in r.items() if k not in ("stocks",)}, default=str)[:4000])
