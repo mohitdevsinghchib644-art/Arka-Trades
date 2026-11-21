@@ -74,7 +74,7 @@ except Exception:  # pragma: no cover
     create_client = None
 
 IST = timezone(timedelta(hours=5, minutes=30))
-APP_VERSION = "v9.2"
+APP_VERSION = "v9.6"
 
 
 def _secret(name: str, default=""):
@@ -188,9 +188,12 @@ def _screen_state() -> str:
 
 with st.container(key="akbridge"):
     try:
-        auth.bridge(_AUTH_KEY, nav=_screen_state())
+        auth.bridge(_AUTH_KEY, nav=_screen_state(), back=st.session_state.get("_ak_backtag"))
     except TypeError:                                     # an older auth.py without screen history
-        auth.bridge(_AUTH_KEY)
+        try:
+            auth.bridge(_AUTH_KEY, nav=_screen_state())
+        except TypeError:
+            auth.bridge(_AUTH_KEY)
 
 name = st.session_state.profile.get("name", "Trader") or "Trader"
 initial = name[0].upper()
@@ -401,6 +404,74 @@ div[class*="st-key-search"] [data-baseweb="select"] input,div[class*="st-key-sea
 .ak-ov{background:var(--s1);border:1px solid var(--line);border-radius:var(--r);padding:4px 14px;}
 .ak-desc{background:var(--s1);border:1px solid var(--line);border-radius:var(--r);padding:14px;font:13.5px var(--sans);color:var(--tx2);line-height:1.7;}
 .ak-pt2{font:600 14px var(--sans);color:var(--tx);padding:14px 0 8px;}
+/* ── stock screen (security workspace) v2 ── */
+div[class*="st-key-swback"]{margin:6px 0 2px;}
+div[class*="st-key-swback"] button{min-height:34px !important;padding:4px 14px 4px 10px !important;border-radius:999px !important;background:transparent !important;
+  border:1px solid var(--line2) !important;color:var(--tx2) !important;font:500 13px var(--sans) !important;}
+div[class*="st-key-swback"] button:hover{border-color:#4a4a52 !important;color:var(--tx) !important;background:var(--s2) !important;}
+div[class*="st-key-swback"] button p{font:500 13px var(--sans) !important;}
+.sw-hero{position:relative;overflow:hidden;background:linear-gradient(180deg,#141416,#101012);border:1px solid var(--line);border-radius:16px;padding:22px 24px 0;margin-top:8px;}
+.sw-hero::before{content:"";position:absolute;inset:0 0 auto 0;height:120px;pointer-events:none;
+  background:radial-gradient(600px 120px at 12% 0,rgba(255,159,10,.10),transparent 70%);}
+.sw-top{position:relative;display:flex;justify-content:space-between;align-items:flex-start;gap:24px;padding-bottom:20px;}
+.sw-id{display:flex;gap:16px;align-items:flex-start;min-width:0;}
+.sw-av{flex:0 0 auto;width:52px;height:52px;border-radius:14px;display:flex;align-items:center;justify-content:center;font:650 18px var(--sans);letter-spacing:.3px;
+  color:var(--amber);background:rgba(255,159,10,.10);border:1px solid rgba(255,159,10,.28);}
+.sw-nm{min-width:0;} .sw-nm .s{font:650 26px var(--sans);letter-spacing:-.5px;color:var(--tx);line-height:1.1;}
+.sw-nm .n{font:15px var(--sans);color:var(--tx2);margin-top:5px;overflow:hidden;text-overflow:ellipsis;}
+.sw-tags{display:flex;gap:6px;flex-wrap:wrap;margin-top:11px;}
+.sw-tag{font:500 12px var(--sans);color:var(--tx2);background:var(--s3);border:1px solid var(--line);padding:3px 10px;border-radius:999px;white-space:nowrap;}
+.sw-px{text-align:right;flex:0 0 auto;}
+.sw-px .v{font:650 36px var(--sans);font-variant-numeric:tabular-nums;letter-spacing:-.9px;color:var(--tx);line-height:1.05;}
+.sw-chg{display:inline-flex;align-items:center;gap:10px;margin-top:9px;font:600 15px var(--sans);font-variant-numeric:tabular-nums;}
+.sw-chg b{font:600 13px var(--sans);padding:4px 10px;border-radius:999px;}
+.sw-chg.up{color:var(--green);} .sw-chg.up b{background:rgba(48,209,88,.12);} .sw-chg.dn{color:var(--red);} .sw-chg.dn b{background:rgba(255,69,58,.12);}
+.sw-px .a{font:12.5px var(--sans);color:var(--tx3);margin-top:8px;}
+.sw-rets{position:relative;display:grid;grid-template-columns:repeat(6,1fr);border-top:1px solid var(--line);margin:0 -24px;}
+.sw-rt{padding:13px 8px 14px;text-align:center;border-right:1px solid var(--line);} .sw-rt:last-child{border-right:0;}
+.sw-rt small{display:block;font:500 12px var(--sans);color:var(--tx3);} .sw-rt b{display:block;font:600 14.5px var(--sans);font-variant-numeric:tabular-nums;margin-top:4px;}
+.sw-hero .up,.sw-card .up{color:var(--green);} .sw-hero .dn,.sw-card .dn{color:var(--red);}
+div[class*="st-key-swact"]{margin:12px 0 4px;}
+div[class*="st-key-swact"] button{min-height:44px !important;border-radius:12px !important;}
+.sw-sec{font:600 15px var(--sans);color:var(--tx);padding:18px 0 10px;}
+.sw-two{display:grid;grid-template-columns:1.25fr 1fr;gap:14px;margin-top:10px;align-items:stretch;}
+.sw-stack{display:flex;flex-direction:column;gap:14px;margin-top:14px;} .sw-stack.side{margin-top:46px;}
+.sw-card{background:var(--s1);border:1px solid var(--line);border-radius:14px;padding:16px 18px;min-width:0;}
+.sw-h{display:flex;justify-content:space-between;align-items:center;gap:10px;font:600 14.5px var(--sans);color:var(--tx);margin-bottom:12px;}
+.sw-h span{font:500 12px var(--sans);color:var(--tx3);}
+.sw-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px 18px;} .sw-grid.two{grid-template-columns:repeat(2,1fr);margin-top:14px;padding-top:14px;border-top:1px solid var(--line);}
+.sw-st{min-width:0;} .sw-st small{display:block;font:500 12px var(--sans);color:var(--tx3);line-height:1.35;}
+.sw-st b{display:block;font:600 15px var(--sans);font-variant-numeric:tabular-nums;color:var(--tx);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.sw-rg{margin-top:16px;} .sw-rg .t{display:flex;justify-content:space-between;gap:10px;font:500 12px var(--sans);color:var(--tx3);margin-bottom:8px;font-variant-numeric:tabular-nums;}
+.sw-rg .t .m{color:var(--tx2);}
+.sw-rg .b{position:relative;height:6px;background:var(--s3);border-radius:3px;} .sw-rg .b u{position:absolute;left:0;top:0;bottom:0;border-radius:3px;
+  background:linear-gradient(90deg,rgba(255,159,10,.25),rgba(255,159,10,.75));}
+.sw-rg .b i{position:absolute;top:-4px;width:14px;height:14px;border-radius:50%;background:var(--amber);border:3px solid var(--s1);transform:translateX(-7px);}
+.sw-ck{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--line);font:13.5px var(--sans);color:var(--tx2);}
+.sw-ck:last-of-type{border-bottom:0;}
+.sw-ck i{flex:0 0 auto;width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;font:700 11px var(--sans);font-style:normal;}
+.sw-ck.y i{color:var(--green);background:rgba(48,209,88,.13);} .sw-ck.n i{color:var(--red);background:rgba(255,69,58,.13);}
+.sw-ck span{flex:1;min-width:0;} .sw-ck b{font:500 12.5px var(--sans);font-variant-numeric:tabular-nums;color:var(--tx3);white-space:nowrap;}
+.sw-score{padding:3px 10px;border-radius:999px;font:600 12px var(--sans) !important;}
+.sw-score.up{color:var(--green) !important;background:rgba(48,209,88,.12);} .sw-score.dn{color:var(--red) !important;background:rgba(255,69,58,.12);}
+.sw-score.mid{color:var(--amber) !important;background:rgba(255,159,10,.12);}
+.sw-note{font:12px var(--sans);color:var(--tx3);margin-top:12px;line-height:1.5;}
+.sw-lv{display:grid;grid-template-columns:1fr auto 62px;gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line);font:13.5px var(--sans);color:var(--tx2);}
+.sw-lv:last-child{border-bottom:0;} .sw-lv b{font:600 13.5px var(--sans);font-variant-numeric:tabular-nums;color:var(--tx);}
+.sw-lv em{font:500 12.5px var(--sans);font-style:normal;font-variant-numeric:tabular-nums;text-align:right;color:var(--tx3);}
+.sw-lv.cur{margin:4px -18px;padding:9px 18px;background:rgba(255,159,10,.08);border-top:1px solid rgba(255,159,10,.3);border-bottom:1px solid rgba(255,159,10,.3);
+  color:var(--amber);font-weight:600;} .sw-lv.cur b{color:var(--amber);}
+.sw-about{font:14px var(--sans);color:var(--tx2);line-height:1.7;}
+@media (max-width:820px){
+  .sw-hero{padding:16px 16px 0;border-radius:14px;} .sw-top{flex-direction:column;gap:14px;padding-bottom:16px;}
+  .sw-av{width:44px;height:44px;border-radius:12px;font-size:16px;} .sw-nm .s{font-size:22px;} .sw-nm .n{font-size:14px;}
+  .sw-px{text-align:left;} .sw-px .v{font-size:32px;}
+  .sw-rets{grid-template-columns:repeat(3,1fr);margin:0 -16px;} .sw-rt:nth-child(3){border-right:0;} .sw-rt:nth-child(-n+3){border-bottom:1px solid var(--line);}
+  .sw-two{grid-template-columns:1fr;} .sw-grid{grid-template-columns:repeat(2,1fr);} .sw-card{padding:14px 15px;} .sw-lv.cur{margin:4px -15px;padding:9px 15px;}
+  .sw-stack.side{margin-top:14px;}
+  div[class*="st-key-swact"] [data-testid="stHorizontalBlock"]{display:grid !important;grid-template-columns:1fr 1fr;gap:8px !important;}
+  div[class*="st-key-swact"] [data-testid="stColumn"],div[class*="st-key-swact"] [data-testid="column"]{width:auto !important;min-width:0 !important;flex:none !important;}
+}
 
 /* news rail + footer */
 .news-rail-collapsed{padding:10px 12px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--s1);font:500 12.5px var(--sans);color:var(--tx3);}
@@ -845,12 +916,52 @@ if not _ss.get("_ak_url_done"):
 _nav_in = _ss.pop("_ak_nav_in", None)                    # back / forward in the browser
 if _nav_in is not None:
     if _nav_in != _screen_state() and _apply_screen(_nav_in):
+        _trail = _ss.get("_ak_trail") or []
+        if _screen_state() in _trail:                     # a step (or jump) back: keep the in-app trail in step
+            _at = len(_trail) - 1 - _trail[::-1].index(_screen_state())
+            _ss["_ak_trail"] = _trail[:_at]
+            _ss["_ak_trail_skip"] = True
         st.rerun()
 _open_in = _ss.pop("_ak_open_in", None)                  # a stock was tapped anywhere in the app
 if _open_in:
     _open_in = str(_open_in).strip().upper()
     if _SYM_OK.match(_open_in):
         _open_security(_open_in)
+
+# the trail of screens behind the one on show (used by the Back button on the stock screen)
+if _ss.get("_ak_url_done"):
+    _now = _screen_state()
+    if _now and _now != _ss.get("_ak_trail_last"):
+        _prev = _ss.get("_ak_trail_last")
+        if _prev and not _ss.pop("_ak_trail_skip", False):
+            _ss["_ak_trail"] = ((_ss.get("_ak_trail") or []) + [_prev])[-30:]
+        _ss["_ak_trail_last"] = _now
+    _ss.pop("_ak_trail_skip", None)
+
+
+def _back_target() -> str:
+    trail = st.session_state.get("_ak_trail") or []
+    return trail[-1] if trail else "home|"
+
+
+def _back_cb():
+    """The Back button: return to the screen that was open before this one."""
+    ss = st.session_state
+    trail = ss.get("_ak_trail") or []
+    target = trail.pop() if trail else "home|"
+    ss["_ak_trail"] = trail
+    if _apply_screen(target):
+        ss["_ak_trail_skip"] = True
+        ss["_ak_backtag"] = f"b{time.time():.3f}"        # tells the browser to step back rather than add a screen
+    else:
+        ss.page = "home"
+
+
+def _screen_label(state: str) -> str:
+    p_, _, s_ = (state or "home|").partition("|")
+    if p_ == "security" and s_:
+        return s_
+    return (PAGE_META.get(p_) or ("Home",))[0] if p_ != "home" else "Home"
 
 
 def _security_candidates():
@@ -1037,88 +1148,249 @@ def _fmt_num(value, prefix="", suffix=""):
     return f"{prefix}{value}{suffix}"
 
 
+def _sw_metrics(hist):
+    """Everything the stock screen shows that comes from daily candles. Returns {} when there is no usable history."""
+    try:
+        if hist is None or len(hist) < 2:
+            return {}
+        h = hist.dropna(subset=["Close"])
+        if len(h) < 2:
+            return {}
+        c, hi, lo = h["Close"].astype(float), h["High"].astype(float), h["Low"].astype(float)
+        vol = h["Volume"].astype(float) if "Volume" in h else None
+        px, prev = float(c.iloc[-1]), float(c.iloc[-2])
+        n = len(c)
+        m = {"price": px, "prev": prev, "chg_abs": px - prev, "chg": (px - prev) / prev * 100 if prev else None,
+             "open": float(h["Open"].iloc[-1]) if "Open" in h else None, "day_hi": float(hi.iloc[-1]), "day_lo": float(lo.iloc[-1]),
+             "pdh": float(hi.iloc[-2]), "pdl": float(lo.iloc[-2]), "n": n}
+        try:
+            m["date"] = h.index[-1].strftime("%d %b %Y")
+        except Exception:
+            m["date"] = ""
+        y = h.tail(252)
+        m["hi52"], m["lo52"] = float(y["High"].max()), float(y["Low"].min())
+        if n >= 21:
+            m["hi20"], m["lo20"] = float(hi.iloc[-21:-1].max()), float(lo.iloc[-21:-1].min())      # the 20 sessions before today
+        rets = {}
+        for lab, k in (("1W", 5), ("1M", 21), ("3M", 63), ("6M", 126), ("1Y", 252)):
+            if n > k and float(c.iloc[-1 - k]):
+                rets[lab] = (px / float(c.iloc[-1 - k]) - 1) * 100
+        try:
+            yr = c[c.index.year == c.index[-1].year]
+            before = c[c.index.year < c.index[-1].year]
+            base = float(before.iloc[-1]) if len(before) else float(yr.iloc[0])
+            if base:
+                rets["YTD"] = (px / base - 1) * 100
+        except Exception:
+            pass
+        m["rets"] = rets
+        for lab, k, kind in (("ema10", 10, "e"), ("ema21", 21, "e"), ("sma50", 50, "s"), ("sma200", 200, "s")):
+            if n >= k:
+                m[lab] = float(c.ewm(span=k, adjust=False).mean().iloc[-1]) if kind == "e" else float(c.rolling(k).mean().iloc[-1])
+        if n >= 15:
+            d = c.diff()
+            up = d.clip(lower=0).ewm(alpha=1 / 14, adjust=False).mean()
+            dn = (-d.clip(upper=0)).ewm(alpha=1 / 14, adjust=False).mean()
+            last_dn = float(dn.iloc[-1])
+            m["rsi"] = 100.0 if last_dn == 0 else float(100 - 100 / (1 + float(up.iloc[-1]) / last_dn))
+            pc = c.shift(1)
+            tr = (hi - lo).combine((hi - pc).abs(), max).combine((lo - pc).abs(), max)
+            atr = float(tr.ewm(alpha=1 / 14, adjust=False).mean().iloc[-1])
+            m["atr"], m["atr_pct"] = atr, atr / px * 100 if px else None
+        if vol is not None and n >= 21:
+            v, avg = float(vol.iloc[-1]), float(vol.iloc[-21:-1].mean())
+            m["vol"], m["vol_avg"] = v, avg
+            m["rel_vol"] = v / avg if avg else None
+        return m
+    except Exception:
+        return {}
+
+
+def _sw_qty(v):
+    if v is None or v != v:
+        return "—"
+    for div, suf in ((1e7, " Cr"), (1e5, " L"), (1e3, " K")):
+        if abs(v) >= div:
+            return f"{v / div:,.2f}{suf}"
+    return f"{v:,.0f}"
+
+
+def _sw_range(lo, hi, px, left, right, mid):
+    """A low-to-high bar with a marker at the current price."""
+    if lo is None or hi is None or px is None or hi <= lo:
+        return ""
+    pos = max(0.0, min(100.0, (px - lo) / (hi - lo) * 100))
+    return (f'<div class="sw-rg"><div class="t"><span>{left}</span><span class="m">{mid.format(pos=pos)}</span><span>{right}</span></div>'
+            f'<div class="b"><u style="width:{pos:.1f}%"></u><i style="left:{pos:.1f}%"></i></div></div>')
+
+
 def _render_security_workspace(symbol: str):
     symbol = symbol.upper().strip()
     with st.spinner(f"Loading {symbol}…"):
         B, hist = warm_security(symbol)
+    B = B or {}
     s = B.get("summary") or {}
     sec = B.get("sector") or {}
     name_ = B.get("name") or symbol
-    price = prev = None
-    if hist is not None and len(hist) >= 2:
-        price, prev = float(hist["Close"].iloc[-1]), float(hist["Close"].iloc[-2])
-    elif to_float(s.get("current_price")):
+    m = _sw_metrics(hist)
+    price = m.get("price")
+    if price is None and to_float(s.get("current_price")):
         price = to_float(s.get("current_price"))
-    chg = ((price - prev) / prev * 100) if (price is not None and prev) else None
-    if hist is not None and len(hist) >= 2:
-        h252 = hist.tail(252)
-        hi52, lo52 = float(h252["High"].max()), float(h252["Low"].min())
-        pdh, pdl = float(hist["High"].iloc[-2]), float(hist["Low"].iloc[-2])
-    else:
-        hi52, lo52, pdh, pdl = to_float(s.get("year_high")), to_float(s.get("year_low")), None, None
+    chg = m.get("chg")
+    hi52 = m.get("hi52") or to_float(s.get("year_high"))
+    lo52 = m.get("lo52") or to_float(s.get("year_low"))
     f = lambda v: f"₹{v:,.2f}" if v is not None else "—"
+    cls = lambda v: "up" if (v is not None and v >= 0) else "dn"
+    pct = lambda v, d=2: "—" if v is None else f"{v:+.{d}f}%"
 
+    # ── back and breadcrumb ──
+    back_to = _back_target()
+    with _hbox("swback"):
+        _btn(f"Back to {_screen_label(back_to)}", "sw_back", icon=":material/arrow_back:", on_click=_back_cb)
+
+    # ── quote header ──
     sector_txt = sec.get("Sector", sec.get("Broad Sector", "")) or ""
     industry_txt = sec.get("Industry", sec.get("Broad Industry", "")) or ""
-    chg_html = ""
+    tags = "".join(f'<span class="sw-tag">{_esc(t)}</span>' for t in dict.fromkeys(["NSE", sector_txt, industry_txt]) if t and t != "—")
     if chg is not None:
-        chg_html = f'<span class="c {"ak-up" if chg >= 0 else "ak-dn"}">{"▲" if chg >= 0 else "▼"} {abs(chg):.2f}% today</span>'
-    tags = "".join(f'<span class="ak-tag">{_esc(t)}</span>' for t in dict.fromkeys([sector_txt, industry_txt, "NSE"]) if t and t != "—")
-    st.markdown(f'<div class="ak-sh"><div><span class="sym">{_esc(symbol)}</span><div class="nm">{_esc(name_)}</div><div class="tg">{tags}</div></div>'
-                f'<div class="px"><div class="v">{f(price)}</div>{chg_html}</div></div>', unsafe_allow_html=True)
-    stats = [("52W high", f(hi52)), ("52W low", f(lo52)), ("Prev. high", f(pdh)), ("Prev. low", f(pdl)),
-             ("Market cap", _fmt_num(s.get("market_cap"), "₹", " Cr")), ("P/E", _fmt_num(s.get("pe_ratio"), "", "x")),
-             ("ROE", _fmt_num(s.get("roe"), "", "%")), ("ROCE", _fmt_num(s.get("roce"), "", "%")), ("Div. yield", _fmt_num(s.get("dividend_yield"), "", "%"))]
-    st.markdown('<div class="ak-stats">' + "".join(f'<div class="ak-st"><div class="l">{k}</div><div class="v">{v}</div></div>' for k, v in stats) + '</div>',
-                unsafe_allow_html=True)
-    if price is not None and hi52 and lo52 and hi52 > lo52:
-        pos = max(0.0, min(100.0, (price - lo52) / (hi52 - lo52) * 100))
-        st.markdown(f'<div class="ak-rng"><div class="t"><span>52W low {f(lo52)}</span><span>{pos:.0f}% of the 52-week range</span>'
-                    f'<span>52W high {f(hi52)}</span></div><div class="b"><i style="left:{pos:.1f}%"></i></div></div>', unsafe_allow_html=True)
+        chg_html = (f'<div class="sw-chg {cls(chg)}"><span>{m["chg_abs"]:+,.2f}</span><b>{"▲" if chg >= 0 else "▼"} {abs(chg):.2f}%</b></div>')
+    else:
+        chg_html = ""
+    _, mk_cls, _ = _market_status()
+    asof = f'{"Last price" if mk_cls == "live" else "Closing price"} · {m["date"]}' if m.get("date") else ""
+    rets = m.get("rets") or {}
+    ret_html = "".join(f'<div class="sw-rt"><small>{k}</small><b class="{cls(v)}">{pct(v, 1)}</b></div>' for k, v in rets.items())
+    st.markdown(
+        f'<div class="sw-hero"><div class="sw-top"><div class="sw-id"><div class="sw-av">{_esc(symbol[:2])}</div>'
+        f'<div class="sw-nm"><div class="s">{_esc(symbol)}</div><div class="n">{_esc(name_)}</div><div class="sw-tags">{tags}</div></div></div>'
+        f'<div class="sw-px"><div class="v">{f(price)}</div>{chg_html}<div class="a">{_esc(asof)}</div></div></div>'
+        + (f'<div class="sw-rets">{ret_html}</div>' if ret_html else "") + '</div>', unsafe_allow_html=True)
+    if not m:
+        st.caption("Price history could not be loaded right now, so ranges and trend are missing. Reopen the stock in a minute to retry.")
     if not B.get("resolved"):
         st.caption("Fundamentals from Screener could not be loaded right now; the chart and technicals still work. Reopen the stock in a minute to retry.")
 
-    a1, a2, a3, a4 = st.columns(4, gap="small")
+    # ── actions ──
+    in_wl = symbol in (st.session_state.get("watchlist") or [])
     msg = None
-    if a1.button("Add to watchlist", key=f"sec_wl_{symbol}", use_container_width=True):
-        try:
-            added, err = ud.add_symbols(supabase, [symbol], ud.W_TABLE)
-        except Exception as e:
-            added, err = False, str(e)
-        msg = ("success", f"{symbol} added to your watchlist") if added else ("info", f"{symbol} is already in your watchlist")
-        if err:
-            msg = ("warning" if added else "error", err)
-    if a2.button("Add to portfolio", key=f"sec_pf_{symbol}", use_container_width=True):
-        st.session_state.page = "portfolio"
-        st.rerun()
-    if IS_ADMIN and a3.button("Arka AI analysis", key=f"sec_ai_{symbol}", use_container_width=True):
-        if hasattr(ud, "go_analysis"):
-            ud.go_analysis(symbol)
-        st.session_state.page = "analysis"
-        st.rerun()
-    if a4.button("Full research", key=f"sec_rs_{symbol}", use_container_width=True, type="primary"):
-        st.session_state.page = "research"
-        st.rerun()
+    with st.container(key="swact"):
+        cols = st.columns(4 if IS_ADMIN else 3, gap="small")
+        if cols[0].button("In watchlist" if in_wl else "Add to watchlist", key=f"sec_wl_{symbol}", use_container_width=True,
+                          icon=":material/check:" if in_wl else ":material/add:"):
+            try:
+                added, err = ud.add_symbols(supabase, [symbol], ud.W_TABLE)
+            except Exception as e:
+                added, err = False, str(e)
+            msg = ("success", f"{symbol} added to your watchlist") if added else ("info", f"{symbol} is already in your watchlist")
+            if err:
+                msg = ("warning" if added else "error", err)
+        if cols[1].button("Add to portfolio", key=f"sec_pf_{symbol}", use_container_width=True, icon=":material/work:"):
+            st.session_state.page = "portfolio"
+            st.rerun()
+        if IS_ADMIN and cols[2].button("Arka AI analysis", key=f"sec_ai_{symbol}", use_container_width=True, icon=":material/auto_awesome:"):
+            if hasattr(ud, "go_analysis"):
+                ud.go_analysis(symbol)
+            st.session_state.page = "analysis"
+            st.rerun()
+        if cols[-1].button("Full research", key=f"sec_rs_{symbol}", use_container_width=True, type="primary", icon=":material/query_stats:"):
+            st.session_state.page = "research"
+            st.rerun()
     if msg:
         getattr(st, msg[0])(msg[1])
 
-    chart_col, info_col = st.columns([3.2, 1.55], gap="medium")
-    with chart_col:
-        st.markdown('<div class="ak-pt2">Price chart</div>', unsafe_allow_html=True)
-        render_pro_chart = _load("chart_engine", "render_pro_chart")
-        _run("chart_engine", render_pro_chart, symbol, height=480 if IS_PHONE else 640)
-    with info_col:
-        st.markdown('<div class="ak-pt2">Company</div>', unsafe_allow_html=True)
-        items = [("Sector", sector_txt or "—"), ("Industry", industry_txt or "—"), ("Market cap", _fmt_num(s.get("market_cap"), "₹", " Cr")),
-                 ("P/E", _fmt_num(s.get("pe_ratio"), "", "x")), ("Book value", _fmt_num(s.get("book_value"), "₹", "")),
-                 ("Dividend yield", _fmt_num(s.get("dividend_yield"), "", "%")), ("ROCE", _fmt_num(s.get("roce"), "", "%")), ("ROE", _fmt_num(s.get("roe"), "", "%"))]
-        st.markdown('<div class="ak-ov">' + "".join(f'<div class="ak-kv"><span>{k}</span><b>{_esc(v)}</b></div>' for k, v in items) + '</div>',
-                    unsafe_allow_html=True)
-        about = (B.get("about") or "").strip()
-        desc = about[:420] + ("…" if len(about) > 420 else "") if about else f"{name_} is listed on NSE{', classified under ' + sector_txt if sector_txt else ''}."
-        st.markdown(f'<div class="ak-pt2">About</div><div class="ak-desc">{_esc(desc)}</div>', unsafe_allow_html=True)
+    # ── panels (built once, placed differently on phone and desktop) ──
+    def stat(k, v, c=""):
+        return f'<div class="sw-st"><small>{k}</small><b class="{c}">{v}</b></div>'
 
-    st.markdown('<div class="ak-pt2" style="margin-top:12px">Research</div>', unsafe_allow_html=True)
+    rv = m.get("rel_vol")
+    session = "".join([
+        stat("Open", f(m.get("open"))), stat("Previous close", f(m.get("prev"))),
+        stat("Day high", f(m.get("day_hi"))), stat("Day low", f(m.get("day_lo"))),
+        stat("Volume", _sw_qty(m.get("vol"))),
+        stat("Volume vs 20-day average", f"{rv:.2f}×" if rv is not None else "—", "up" if rv is not None and rv >= 1.5 else ""),
+    ])
+    day_rng = _sw_range(m.get("day_lo"), m.get("day_hi"), price, f'Low {f(m.get("day_lo"))}', f'High {f(m.get("day_hi"))}', "Today's range")
+    yr_rng = _sw_range(lo52, hi52, price, f"Low {f(lo52)}", f"High {f(hi52)}", "52-week range · {pos:.0f}%")
+    session_html = (f'<div class="sw-card"><div class="sw-h">Session<span>{_esc(m.get("date", ""))}</span></div>'
+                    f'<div class="sw-grid">{session}</div>{day_rng}{yr_rng}</div>') if m else ""
+
+    funda = "".join([
+        stat("Market cap", _esc(_fmt_num(s.get("market_cap"), "₹", " Cr"))), stat("P/E", _esc(_fmt_num(s.get("pe_ratio"), "", "×"))),
+        stat("ROE", _esc(_fmt_num(s.get("roe"), "", "%"))), stat("ROCE", _esc(_fmt_num(s.get("roce"), "", "%"))),
+        stat("Book value", _esc(_fmt_num(s.get("book_value"), "₹", ""))), stat("Dividend yield", _esc(_fmt_num(s.get("dividend_yield"), "", "%"))),
+    ])
+    funda_html = f'<div class="sw-card"><div class="sw-h">Fundamentals<span>Screener.in</span></div><div class="sw-grid">{funda}</div></div>'
+
+    # trend check: plain facts a swing trader looks at first
+    checks = []
+
+    def above(lab, key):
+        v = m.get(key)
+        if v is None or price is None:
+            return
+        d = (price / v - 1) * 100 if v else None
+        checks.append((price >= v, f"Price {'above' if price >= v else 'below'} {lab}", f"{f(v)} · {pct(d, 1)}"))
+    above("10-day EMA", "ema10"); above("21-day EMA", "ema21"); above("50-day average", "sma50"); above("200-day average", "sma200")
+    if m.get("sma50") is not None and m.get("sma200") is not None:
+        ok = m["sma50"] >= m["sma200"]
+        checks.append((ok, f"50-day average {'above' if ok else 'below'} 200-day", f'{pct((m["sma50"] / m["sma200"] - 1) * 100, 1)}'))
+    if price is not None and hi52:
+        off = (price / hi52 - 1) * 100
+        checks.append((off >= -15, "Within 15% of 52-week high" if off >= -15 else "More than 15% below 52-week high", pct(off, 1)))
+    passed = sum(1 for ok, _, _ in checks if ok)
+    rows = "".join(f'<div class="sw-ck {"y" if ok else "n"}"><i>{"✓" if ok else "✕"}</i><span>{_esc(t)}</span><b>{_esc(v)}</b></div>' for ok, t, v in checks)
+    extra = []
+    if m.get("rsi") is not None:
+        r = m["rsi"]
+        extra.append(stat("RSI 14", f"{r:.0f}", "dn" if r >= 75 else ""))
+    if m.get("atr_pct") is not None:
+        extra.append(stat("Average daily range (ATR 14)", f'{m["atr_pct"]:.1f}% · {f(m["atr"])}'))
+    trend_html = ""
+    if checks:
+        tone = "up" if passed >= len(checks) - 1 else "dn" if passed <= 1 else "mid"
+        trend_html = (f'<div class="sw-card"><div class="sw-h">Trend check<span class="sw-score {tone}">{passed} of {len(checks)}</span></div>{rows}'
+                      + (f'<div class="sw-grid two">{"".join(extra)}</div>' if extra else "")
+                      + '<div class="sw-note">Facts from daily closing prices. Not a buy or sell signal.</div></div>')
+
+    # key levels ladder: every level sorted by price, with today's price in its place
+    levels = [("52-week high", hi52), ("20-day high", m.get("hi20")), ("Previous day high", m.get("pdh")), ("10-day EMA", m.get("ema10")),
+              ("21-day EMA", m.get("ema21")), ("50-day average", m.get("sma50")), ("200-day average", m.get("sma200")),
+              ("Previous day low", m.get("pdl")), ("20-day low", m.get("lo20")), ("52-week low", lo52)]
+    levels = sorted([(k, v) for k, v in levels if v is not None], key=lambda x: -x[1])
+    ladder_html = ""
+    if levels and price is not None:
+        out, placed = [], False
+        for k, v in levels:
+            if not placed and v < price:
+                out.append(f'<div class="sw-lv cur"><span>Price now</span><b>{f(price)}</b><em></em></div>')
+                placed = True
+            d = (v / price - 1) * 100 if price else None
+            out.append(f'<div class="sw-lv {"r" if v >= price else "s"}"><span>{k}</span><b>{f(v)}</b><em>{pct(d, 1)}</em></div>')
+        if not placed:
+            out.append(f'<div class="sw-lv cur"><span>Price now</span><b>{f(price)}</b><em></em></div>')
+        ladder_html = (f'<div class="sw-card"><div class="sw-h">Key levels<span>distance from price</span></div>{"".join(out)}</div>')
+
+    about = (B.get("about") or "").strip()
+    desc = about[:520] + ("…" if len(about) > 520 else "") if about else f"{name_} is listed on NSE{', classified under ' + sector_txt if sector_txt else ''}."
+    about_html = f'<div class="sw-card"><div class="sw-h">About</div><div class="sw-about">{_esc(desc)}</div></div>'
+
+    def chart():
+        st.markdown('<div class="sw-sec">Price chart</div>', unsafe_allow_html=True)
+        _run("chart_engine", _load("chart_engine", "render_pro_chart"), symbol, height=480 if IS_PHONE else 640)
+
+    if IS_PHONE:
+        chart()
+        st.markdown(f'<div class="sw-stack">{trend_html}{ladder_html}{session_html}{funda_html}{about_html}</div>', unsafe_allow_html=True)
+    else:
+        st.markdown(f'<div class="sw-two">{session_html}{funda_html}</div>', unsafe_allow_html=True)
+        chart_col, info_col = st.columns([3.1, 1.5], gap="medium")
+        with chart_col:
+            chart()
+        with info_col:
+            st.markdown(f'<div class="sw-stack side">{trend_html}{ladder_html}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="sw-stack">{about_html}</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="sw-sec" style="margin-top:18px">Research</div>', unsafe_allow_html=True)
     panel = _load("research_page", "render_research_panel")
     news_fn = _load("news_feed", "_fetch_news_for_stock")
     if panel is not None:
