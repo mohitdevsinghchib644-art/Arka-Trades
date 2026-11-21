@@ -74,7 +74,7 @@ except Exception:  # pragma: no cover
     create_client = None
 
 IST = timezone(timedelta(hours=5, minutes=30))
-APP_VERSION = "v9.8"
+APP_VERSION = "v9.9"
 
 
 def _secret(name: str, default=""):
@@ -789,7 +789,7 @@ if not st.session_state.logged_in:
     st.stop()
 
 IS_ADMIN = st.session_state.get("is_admin", False)       # the bridge may have just signed this device in
-ADMIN_PAGES = {"smart_scan": "Screener", "analysis": "Arka AI"}   # pages only admins can open
+ADMIN_PAGES = {}                                         # pages only admins can open (none: Screener and Arka AI are open to every signed-in user)
 
 
 def _allowed(page: str) -> bool:
@@ -1305,7 +1305,7 @@ def _render_security_workspace(symbol: str):
     in_wl = symbol in (st.session_state.get("watchlist") or [])
     msg = None
     with st.container(key="swact"):
-        cols = st.columns(4 if IS_ADMIN else 3, gap="small")
+        cols = st.columns(4, gap="small")
         if cols[0].button("In watchlist" if in_wl else "Add to watchlist", key=f"sec_wl_{symbol}", use_container_width=True,
                           icon=":material/check:" if in_wl else ":material/add:"):
             try:
@@ -1318,7 +1318,7 @@ def _render_security_workspace(symbol: str):
         if cols[1].button("Add to portfolio", key=f"sec_pf_{symbol}", use_container_width=True, icon=":material/work:"):
             st.session_state.page = "portfolio"
             st.rerun()
-        if IS_ADMIN and cols[2].button("Arka AI analysis", key=f"sec_ai_{symbol}", use_container_width=True, icon=":material/auto_awesome:"):
+        if cols[2].button("Arka AI analysis", key=f"sec_ai_{symbol}", use_container_width=True, icon=":material/auto_awesome:"):
             if hasattr(ud, "go_analysis"):
                 ud.go_analysis(symbol)
             st.session_state.page = "analysis"
