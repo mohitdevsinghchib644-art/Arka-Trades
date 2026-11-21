@@ -1,21 +1,63 @@
+# Arka Trades · keep the app awake
+# Streamlit Community Cloud puts an app to sleep after 12 hours without a visitor. A plain web request (curl) does not
+# count as a visitor and cannot press the wake-up button, so this job opens the app in a real browser instead:
+# if the app is asleep it presses "Yes, get this app back up!", otherwise it just stays on the page for a moment.
+# It runs every 4 hours, every day (6 short runs a day).
 name: Keep Streamlit App Awake
 
 on:
   schedule:
-    # Runs every 5 minutes from 3:30 AM UTC to 10:30 AM UTC (9:00 AM to 4:00 PM IST), Monday to Friday
-    - cron: '30,35,40,45,50,55 3 * * 1-5'
-    - cron: '*/5 4-9 * * 1-5'
-    - cron: '0,5,10,15,20,25,30 10 * * 1-5'
-  workflow_dispatch: # Allows manual trigger from the GitHub Actions tab
+    - cron: "15 */4 * * *"        # 05:45, 09:45, 13:45, 17:45, 21:45 and 01:45 IST
+  workflow_dispatch:              # manual start from the Actions tab
+
+permissions:
+  contents: read
+
+concurrency:
+  group: keep-awake
+  cancel-in-progress: true
 
 jobs:
-  ping-app:
+  visit-app:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Ping Streamlit App
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install a browser
         run: |
-          APP_URL="https://arka-trades-1.streamlit.app"
-          
-          echo "Pinging $APP_URL to keep active..."
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$APP_URL")
-          echo "HTTP Status Code: $STATUS"
+          pip install --quiet playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Visit the app
+        env:
+          APP_URL: https://arka-trades-1.streamlit.app
+        run: |
+          python - <<'PY'
+          import os, sys
+          from playwright.sync_api import sync_playwright
+
+          url = os.environ["APP_URL"]
+          with sync_playwright() as p:
+              browser = p.chromium.launch()
+              page = browser.new_page()
+              try:
+                  page.goto(url, wait_until="domcontentloaded", timeout=120_000)
+                  page.wait_for_timeout(8_000)
+                  wake = page.get_by_role("button", name="get this app back up")
+                  if wake.count():
+                      wake.first.click()
+                      print("The app was asleep: wake-up button pressed. Waiting for it to start.")
+                      page.wait_for_timeout(120_000)
+                      if page.get_by_role("button", name="get this app back up").count():
+                          print("The app is still asleep after two minutes.")
+                          sys.exit(1)
+                  else:
+                      print("The app is awake.")
+                  page.wait_for_timeout(20_000)      # stay long enough to count as a visit
+                  print("Page title:", page.title())
+              finally:
+                  browser.close()
+          PY
