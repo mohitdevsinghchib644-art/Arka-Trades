@@ -1,4 +1,18 @@
-"""Arka Trades — Research Terminal v15.
+"""Arka Trades — Research Terminal v16.
+
+v16: a research desk, not only a data viewer.
+* Search with suggestions, like the Home search: type a few letters of the symbol or of the company name (hdfc shows
+  HDFCBANK, HDFCLIFE, HDFCAMC …). A "Same name" row offers the sister companies of the stock you are on.
+* SC    Scorecard: five pillars (quality, growth, valuation, momentum, ownership), each out of 100, with every input,
+        its score and the rule shown, plus what stands out (strengths and watch-outs). Also a strip on the dashboard.
+* SWG   Swing setup: trend checklist, breakout level, stretch above the 50-day, ATR stop, support, what a bad day looks
+        like, and a position-size calculator.
+* FNO   F&O positioning for stocks that trade in futures and options: model rank, build-up, option chain, days like
+        today and today's signal status (from fno_engine.py / fno_page.py). Also a card on the dashboard.
+* VAL   adds a value range: what the price would be under its own P/E range, the Graham number, a cash-flow value at
+        past growth and analyst targets, on one scale with today's price.
+
+v15 notes follow.
 
 v15: redesign and a new function.
 * PB  Price behaviour: in the last 20 / 60 / 90 / 120 / 250 sessions (or any number) how many up and down days or
@@ -120,7 +134,8 @@ T0 = {
 # ═══════════════════════════ Function map ═══════════════════════════
 GROUPS = [
     ("OVERVIEW", [
-        ("OV", "Dashboard", "Chart, performance, valuation, quality, earnings, ownership, contradictions and filings on one screen"),
+        ("OV", "Dashboard", "Scorecard, chart, performance, valuation, quality, earnings, ownership, contradictions and filings on one screen"),
+        ("SC", "Scorecard", "Five pillars out of 100 with every input and rule shown, plus what stands out"),
         ("DES", "Description", "Company profile, key fundamentals, management, growth snapshot, pros and cons"),
         ("SYN", "Research Intel", "Evidence sheet, contradiction detection and AI synthesis"),
     ]),
@@ -145,6 +160,7 @@ GROUPS = [
     ]),
     ("PRICE", [
         ("GP", "Chart", "Full-size price chart"),
+        ("SWG", "Swing setup", "Trend checklist, breakout level, ATR stop, support, downside numbers and position size"),
         ("PB", "Price behaviour", "Up vs down days, average moves, biggest days, volume and delivery on up vs down days, streaks and gaps"),
         ("HP", "Price History", "Daily open / high / low / close / volume table with CSV export"),
         ("TECH", "Technicals", "Trend, momentum, moving averages and pivot levels"),
@@ -161,6 +177,7 @@ GROUPS = [
     ("OWNERSHIP", [
         ("HDS", "Shareholding", "Promoter / FII / DII / public holding trend"),
         ("DLV", "Deliveries", "Delivered vs traded quantity and delivery %, daily / weekly / monthly (NSE)"),
+        ("FNO", "F&O positioning", "Futures and options: model rank, build-up, option chain, days like today and signal status"),
         ("MF", "MF Holdings", "Mutual fund positions (ScanX, optional source)"),
     ]),
     ("EVENTS", [
@@ -187,7 +204,8 @@ GROUP_LABEL = {"OVERVIEW": "Overview", "FINANCIALS": "Financials", "QUALITY": "Q
 FUNCS = list(FN)
 
 ALIASES = {
-    "OVERVIEW": "OV", "DASH": "OV", "DASHBOARD": "OV", "PROFILE": "DES", "MGMT": "DES", "HEALTH": "HC", "SCORE": "HC", "PIOTROSKI": "HC",
+    "SCORE": "SC", "SCORECARD": "SC", "RATING": "SC", "SWING": "SWG", "SETUP": "SWG", "TREND": "SWG", "FO": "FNO", "OI": "FNO", "OPTIONS": "FNO", "FUTURES": "FNO",
+    "OVERVIEW": "OV", "DASH": "OV", "DASHBOARD": "OV", "PROFILE": "DES", "MGMT": "DES", "HEALTH": "HC", "PIOTROSKI": "HC",
     "VALUATION": "VAL", "PE": "VAL", "FINANCIALS": "FA", "RESULTS": "FA", "PL": "FA", "IS": "FA",
     "BALANCE": "BS", "CASH": "CF", "CASHFLOW": "CF", "RATIOS": "RAT", "SHAREHOLDING": "HDS",
     "OWN": "HDS", "HOLDING": "HDS", "MFH": "MF", "PEERS": "RV", "COMPARE": "COMP", "PERFORMANCE": "PERF",
@@ -804,6 +822,10 @@ def _valuation(sym, B, T, key, nf):
            ("Graham number", _rs(graham), "√(22.5 × EPS × BVPS)"),
            ("Price vs Graham", _pct((price / graham - 1) * 100, 1, True) if graham else "N/A",
             "Negative = below Graham value", (T["green"] if graham and price < graham else T["red"]) if graham else None)], T, 3)
+    try:
+        _value_field(sym, B, T, key, close)
+    except Exception:
+        pass
 
     q = B.get("quarterly")
     eps = _nums(_row(q, "EPS"))
@@ -1705,6 +1727,10 @@ def _dashboard(sym, B, T, key, nf):
     F = {f["label"]: f["value"] for f in E["facts"]}
     s = B.get("summary") or {}
 
+    try:
+        _score_strip(scorecard(sym, B, _close(sym), b500, st.session_state.get(f"rp_dlv_last_{sym}")), T)
+    except Exception:
+        pass
     left, right = st.columns([2.1, 1], gap="small")
     with left:
         drawn = False
@@ -1745,6 +1771,10 @@ def _dashboard(sym, B, T, key, nf):
                     trade.append((f"vs {n}-day average", f"{(c_.iloc[-1] / c_.tail(n).mean() - 1) * 100:+.1f}%"))
             _mini("Trading", trade, T, "TECH")
         _pb_mini(sym, T)
+        try:
+            _fno_mini(sym, T)
+        except Exception:
+            pass
 
     a, b, c = st.columns(3, gap="small")
     with a:
@@ -2448,6 +2478,479 @@ def _pb_mini(sym, T):
         ("Longest up / down streak", f"{S['streak_up']} / {S['streak_dn']}")], T, "PB")
 
 
+# ═══════════════════════════ v16: scorecard, swing setup, F&O positioning, value range, search ═══════════════════════════
+_CSS16 = """<style>
+.rp-sc{display:grid;grid-template-columns:1.25fr repeat(5,minmax(0,1fr));gap:10px;margin:4px 0 14px;font-family:var(--rp-s);font-variant-numeric:tabular-nums}
+.rp-sc .c{background:var(--rp-p);border:1px solid var(--rp-b);border-radius:12px;padding:13px 15px;min-width:0}
+.rp-sc .c.all{background:linear-gradient(135deg,#15130E,#0E0E10 70%);border-color:rgba(255,159,10,.28)}
+.rp-sc .l{font-size:12.5px;color:var(--rp-t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rp-sc .v{display:flex;align-items:baseline;gap:8px;margin-top:5px}
+.rp-sc .v b{font-size:22px;font-weight:650;letter-spacing:-.3px;color:var(--rp-tx)} .rp-sc .v i{font-style:normal;font-size:12px;font-weight:600}
+.rp-sc .t{height:5px;border-radius:5px;background:#1F1F24;margin-top:9px;overflow:hidden} .rp-sc .t u{display:block;height:5px;border-radius:5px}
+.rp-sc .s{font-size:11.5px;color:var(--rp-t3);margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media(max-width:900px){.rp-sc{grid-template-columns:repeat(2,minmax(0,1fr))} .rp-sc .c.all{grid-column:1/-1}}
+.rp-two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px} @media(max-width:900px){.rp-two{grid-template-columns:1fr}}
+.rp-li{display:flex;gap:10px;padding:8px 0;border-bottom:1px solid #18181C;font-size:13px;line-height:1.5;color:var(--rp-t2)} .rp-li:last-child{border-bottom:0}
+.rp-li i{flex:0 0 7px;height:7px;border-radius:50%;margin-top:7px} .rp-li b{color:var(--rp-tx);font-weight:600}
+.rp-vf{font-family:var(--rp-s);font-variant-numeric:tabular-nums;padding:6px 0 2px}
+.rp-vf .r{display:grid;grid-template-columns:minmax(120px,1.1fr) minmax(0,2.4fr) minmax(110px,.9fr);gap:14px;align-items:center;padding:9px 0;border-bottom:1px solid #18181C;font-size:13px}
+.rp-vf .r:last-child{border-bottom:0} .rp-vf .r>span{color:var(--rp-tx);font-weight:500} .rp-vf .r>span small{display:block;font-size:11.5px;font-weight:400;color:var(--rp-t3);margin-top:1px}
+.rp-vf .tk{position:relative;height:16px} .rp-vf .tk:before{content:"";position:absolute;left:0;right:0;top:7px;height:2px;background:#1F1F24;border-radius:2px}
+.rp-vf .tk u{position:absolute;top:3px;height:10px;border-radius:5px;opacity:.85} .rp-vf .tk s{position:absolute;top:1px;width:2px;height:14px;background:#0E0E10}
+.rp-vf .tk em{position:absolute;top:-3px;width:2px;height:22px;background:#fff;border-radius:1px}
+.rp-vf .r>b{text-align:right;font-weight:600;color:var(--rp-t2);font-size:12.5px}
+@media(max-width:700px){.rp-vf .r{grid-template-columns:1fr 1.4fr} .rp-vf .r>b{grid-column:1/-1;text-align:left}}
+</style>"""
+
+
+def _lin(v, bad, good):
+    """Score an input: 0 at `bad`, 100 at `good`, a straight line in between. Works when lower is better (good < bad)."""
+    if v is None or v != v or good == bad:
+        return None
+    return max(0.0, min(100.0, (v - bad) / (good - bad) * 100))
+
+
+def _word(score):
+    return ("Strong", "g") if score >= 70 else ("Good", "g") if score >= 55 else ("Mixed", "a") if score >= 40 else ("Weak", "r")
+
+
+def _ttm_growth(q, *names):
+    v = _nums(_row(q, *names))
+    if len(v) >= 8 and all(x is not None for x in v[-8:]) and sum(v[-8:-4]) > 0:
+        return (sum(v[-4:]) / sum(v[-8:-4]) - 1) * 100
+    return None
+
+
+def _cagr3(y, *names):
+    m = _annual_map(y, *names)
+    ks = [p for p in (y or {}).get("periods", []) if p in m]
+    if len(ks) >= 4 and m[ks[-4]] > 0 and m[ks[-1]] > 0:
+        return ((m[ks[-1]] / m[ks[-4]]) ** (1 / 3) - 1) * 100
+    return None
+
+
+def scorecard(sym, B, close, bench, dlv=None) -> dict:
+    """Five pillars. Each is the plain average of a few inputs, and each input is scored 0 to 100 between two fixed anchors
+    that are shown on the SC screen. It sums up the numbers on this page; it is not a forecast and has not been backtested."""
+    s, q, y, cf, sh = B.get("summary") or {}, B.get("quarterly"), B.get("yearly"), B.get("cash_flow"), B.get("shareholding")
+    P = {k: [] for k in ("Quality", "Growth", "Valuation", "Momentum", "Ownership")}
+
+    def add(p, label, text, score, rule):
+        if score is not None:
+            P[p].append({"label": label, "text": text, "score": float(score), "rule": rule})
+
+    res = _piotroski(B)
+    if res:
+        av = [x for x in res[0] if x[1] is not None]
+        if av:
+            n_ok = sum(1 for x in av if x[1])
+            add("Quality", "Quality tests passed", f"{n_ok} of {len(av)}", n_ok / len(av) * 100, "share of the HC tests passed")
+    roe, roce = _f(s.get("roe")), _f(s.get("roce"))
+    if roe is not None:
+        add("Quality", "Return on equity", f"{roe:.1f}%", _lin(roe, 5, 22), "0 at 5%, 100 at 22%")
+    if roce is not None:
+        add("Quality", "Return on capital employed", f"{roce:.1f}%", _lin(roce, 6, 25), "0 at 6%, 100 at 25%")
+    de = _debt_equity(B)
+    if de is not None and _row(y, "Financing Profit", "Financing Margin") is None:
+        add("Quality", "Debt / equity", f"{de:.2f}x", _lin(de, 2.0, 0.0), "0 at 2x, 100 at no debt (not scored for lenders)")
+    npm, cfo = _annual_map(y, "Net Profit", "Profit for the period"), _annual_map(cf, "Cash from Operating", "Operating")
+    cm = [p for p in (y or {}).get("periods", []) if p in npm and p in cfo][-3:]
+    if len(cm) == 3 and sum(npm[p] for p in cm) > 0:
+        conv = sum(cfo[p] for p in cm) / sum(npm[p] for p in cm) * 100
+        add("Quality", "Cash flow as % of profit, 3 years", f"{conv:.0f}%", _lin(conv, 30, 100), "0 at 30%, 100 at 100%")
+
+    sg, pg = _ttm_growth(q, "Sales", "Revenue"), _ttm_growth(q, "Net Profit", "Profit for the period")
+    if sg is not None:
+        add("Growth", "Sales, last 4 quarters", f"{sg:+.1f}%", _lin(sg, -5, 25), "0 at -5%, 100 at +25%")
+    if pg is not None:
+        add("Growth", "Net profit, last 4 quarters", f"{pg:+.1f}%", _lin(pg, -10, 30), "0 at -10%, 100 at +30%")
+    for lab, names in (("Sales, 3-year growth a year", ("Sales", "Revenue")), ("Net profit, 3-year growth a year", ("Net Profit", "Profit for the period"))):
+        c3 = _cagr3(y, *names)
+        if c3 is not None:
+            add("Growth", lab, f"{c3:+.1f}%", _lin(c3, 0, 20), "0 at 0%, 100 at +20%")
+    opm = [v for v in _nums(_row(q, "OPM", "Financing Margin")) if v is not None]
+    if len(opm) >= 5:
+        add("Growth", "Operating margin vs a year ago", f"{opm[-1] - opm[-5]:+.1f} pp", _lin(opm[-1] - opm[-5], -4, 4), "0 at -4 pp, 100 at +4 pp")
+
+    pe, pct = _pe_stats(B, close) if close is not None else (None, None)
+    if pe and pct is not None:
+        add("Valuation", "P/E against its own history", f"{pe:.1f}x · {pct:.0f}th percentile", 100 - pct, "100 at its cheapest, 0 at its dearest")
+    if pe:
+        add("Valuation", "Earnings yield", f"{100 / pe:.1f}%", _lin(100 / pe, 1.5, 8), "0 at 1.5%, 100 at 8%")
+        if pg is not None and pg > 0:
+            add("Valuation", "P/E ÷ profit growth", f"{pe / pg:.2f}", _lin(pe / pg, 3, 0.7), "0 at 3, 100 at 0.7")
+    price, bv = (float(close.iloc[-1]) if close is not None and len(close) else None), _f(s.get("book_value"))
+    if price and bv and bv > 0 and roe is not None and roe > 0:
+        add("Valuation", "P/B ÷ return on equity", f"{price / bv / roe * 100:.1f}", _lin(price / bv / roe * 100, 40, 8), "0 at 40, 100 at 8 (price paid per unit of return)")
+
+    if close is not None and len(close) > 70:
+        for lab, n in (("3 months vs the index", 63), ("6 months vs the index", 126), ("12 months vs the index", 252)):
+            if bench is not None:
+                df = pd.concat([close.rename("s"), bench.rename("b")], axis=1).dropna()
+                if len(df) > n:
+                    d = (df["s"].iloc[-1] / df["s"].iloc[-1 - n] - df["b"].iloc[-1] / df["b"].iloc[-1 - n]) * 100
+                    add("Momentum", lab, f"{d:+.1f} pp", _lin(d, -15, 15), "0 at -15 pp, 100 at +15 pp")
+        if len(close) >= 200:
+            x = (close.iloc[-1] / close.tail(200).mean() - 1) * 100
+            add("Momentum", "Price vs 200-day average", f"{x:+.1f}%", _lin(x, -10, 15), "0 at -10%, 100 at +15%")
+        hi = float(close.tail(252).max())
+        add("Momentum", "Distance from 52-week high", f"{(close.iloc[-1] / hi - 1) * 100:+.1f}%", _lin((close.iloc[-1] / hi - 1) * 100, -35, -3), "0 at -35%, 100 at -3%")
+
+    pr = [v for v in _nums(_row(sh, "Promoters")) if v is not None]
+    if len(pr) >= 5:
+        add("Ownership", "Promoter holding, 4 quarters", f"{pr[-1] - pr[-5]:+.2f} pp", _lin(pr[-1] - pr[-5], -3, 1), "0 at -3 pp, 100 at +1 pp")
+    inst = None
+    for nd in ("FII", "DII"):
+        v = [x for x in _nums(_row(sh, nd)) if x is not None]
+        if len(v) >= 5:
+            inst = (inst or 0.0) + v[-1] - v[-5]
+    if inst is not None:
+        add("Ownership", "FII + DII holding, 4 quarters", f"{inst:+.2f} pp", _lin(inst, -2, 2), "0 at -2 pp, 100 at +2 pp")
+    if dlv is not None and len(dlv) >= 40 and dlv["deliv_pct"].notna().sum() >= 40:
+        dd = dlv["deliv_pct"].dropna()
+        now, base = float(dd.tail(10).mean()), float(dd.iloc[:-10].mean())
+        if base > 0:
+            add("Ownership", "Delivery share, last 10 sessions vs before", f"{base:.0f}% → {now:.0f}%", _lin(now / base, 0.8, 1.3), "0 at 0.8x, 100 at 1.3x of its own normal")
+
+    pillars = [{"name": k, "score": sum(i["score"] for i in v) / len(v), "items": v} for k, v in P.items() if v]
+    overall = sum(p["score"] for p in pillars) / len(pillars) if pillars else None
+    return {"pillars": pillars, "overall": overall, "missing": [k for k, v in P.items() if not v]}
+
+
+def _score_strip(SC, T):
+    if not SC or SC.get("overall") is None:
+        return
+    colr = {"g": T["green"], "a": T["amber"], "r": T["red"]}
+
+    def tile(name, score, sub, cls=""):
+        w, c = _word(score)
+        return (f'<div class="c {cls}"><div class="l">{_esc(name)}</div><div class="v"><b>{score:.0f}</b><i style="color:{colr[c]}">{w}</i></div>'
+                f'<div class="t"><u style="width:{score:.0f}%;background:{colr[c]}"></u></div><div class="s">{_esc(sub)}</div></div>')
+    body = tile("Arka score", SC["overall"], f'average of {len(SC["pillars"])} pillars · out of 100', "all")
+    for p in SC["pillars"]:
+        best = max(p["items"], key=lambda i: abs(i["score"] - 50))
+        body += tile(p["name"], p["score"], f'{best["label"]}: {best["text"]}')
+    st.markdown(f'<div class="rp-sc">{body}</div>', unsafe_allow_html=True)
+
+
+def _sc_inputs(sym, B):
+    close = _close(sym, "5y", "2y")
+    b = _bench("NIFTY 500")
+    return close, (b if b is not None else _bench("NIFTY 50"))
+
+
+def _scorecard(sym, B, T, key, nf):
+    close, bench = _sc_inputs(sym, B)
+    SC = scorecard(sym, B, close, bench, st.session_state.get(f"rp_dlv_last_{sym}"))
+    if SC["overall"] is None:
+        _unavailable("Scorecard", "Screener fundamentals or Yahoo price history", T, B.get("reason"))
+        return
+    _header("Scorecard · five pillars, each out of 100", T, "live",
+            "Every input is scored between two fixed anchors shown in the table below, and a pillar is the plain average of its inputs. "
+            "It sums up the numbers on this page. It is not a forecast, not a recommendation, and it has not been backtested.")
+    _score_strip(SC, T)
+    good = [(i["score"], f'<b>{_esc(i["label"])}</b> {_esc(i["text"])}') for p in SC["pillars"] for i in p["items"] if i["score"] >= 75]
+    bad = [(-i["score"], f'<b>{_esc(i["label"])}</b> {_esc(i["text"])}') for p in SC["pillars"] for i in p["items"] if i["score"] <= 25]
+    for text, ok, detail in _flags(B):
+        (good if ok else bad).append((50 if ok else -50, f"<b>{_esc(text)}</b> {_esc(detail)}"))
+    if rd is not None:
+        pe, pct = _pe_stats(B, close) if close is not None else (None, None)
+        for c in rd.evidence(B, close, pe, pct, st.session_state.get(f"rp_dlv_last_{sym}"))["contradictions"]:
+            bad.append((-60, f'<b>{_esc(c["name"])}</b> {_esc(c["numbers"])}'))
+    li = lambda rows, col: "".join(f'<div class="rp-li"><i style="background:{col}"></i><span>{t}</span></div>' for _, t in sorted(rows, key=lambda r: -r[0])[:7]) \
+        or '<div class="rp-li"><span>Nothing crossed the threshold.</span></div>'
+    st.markdown(f'<div class="rp-two"><div class="rp-panel"><div class="t">What stands out · strengths</div><div class="b tight">{li(good, T["green"])}</div></div>'
+                f'<div class="rp-panel"><div class="t">What stands out · watch-outs</div><div class="b tight">{li(bad, T["red"])}</div></div></div>', unsafe_allow_html=True)
+    rows = []
+    for p in SC["pillars"]:
+        rows.append({"label": f'{p["name"]} · {p["score"]:.0f}', "values": ["", "", ""]})
+        rows += [{"label": "   " + i["label"], "values": [i["text"], f'{i["score"]:.0f}', i["rule"]]} for i in p["items"]]
+    _header("How each score is made", T)
+    _table(["Reading", "Score", "How it is scored"], rows, T, [p["name"] + " ·" for p in SC["pillars"]], dl=f"{sym}_scorecard_{key}")
+    if SC["missing"]:
+        st.caption("No data for: " + ", ".join(SC["missing"]) + ". Those pillars are left out of the average rather than guessed.")
+    st.caption("Open DLV once to add the delivery input to Ownership. Anchors are the same for every company, so compare banks with banks and makers with makers.")
+
+
+# ---------- value range ("football field") ----------
+def _pe_history(B, close):
+    q = B.get("quarterly")
+    eps, out = _nums(_row(q, "EPS")), []
+    for i in range(3, len(eps)):
+        w = eps[i - 3:i + 1]
+        d = _quarter_end(q["periods"][i]) if q and i < len(q["periods"]) else None
+        if d is None or any(v is None for v in w) or sum(w) <= 0 or d < close.index[0]:
+            continue
+        px = close.asof(d)
+        if pd.notna(px):
+            out.append(float(px) / sum(w))
+    return out
+
+
+def value_rows(sym, B, close, info=None, targets=None) -> list:
+    """(method, note, low, mid, high) in rupees per share. Arithmetic on reported numbers; nothing here is a target."""
+    s = B.get("summary") or {}
+    price = float(close.iloc[-1])
+    ttm, bv, rows = _ttm_eps(B), _f(s.get("book_value")), []
+    pes = sorted(_pe_history(B, close))
+    if ttm and ttm > 0 and len(pes) >= 4:
+        rows.append(("Its own P/E range", f"today's EPS at its lowest, median and highest P/E ({pes[0]:.0f}x · {pes[len(pes) // 2]:.0f}x · {pes[-1]:.0f}x)",
+                     ttm * pes[0], ttm * pes[len(pes) // 2], ttm * pes[-1]))
+    if ttm and bv and ttm > 0 and bv > 0:
+        g = math.sqrt(22.5 * ttm * bv)
+        rows.append(("Graham number", "√(22.5 × EPS × book value), a conservative yardstick", g, g, g))
+    mcap, npq = _f(s.get("market_cap")), _nums(_row(B.get("quarterly"), "Net Profit", "Profit for the period"))
+    np4 = sum(npq[-4:]) if len(npq) >= 4 and all(v is not None for v in npq[-4:]) else None
+    past = _cagr3(B.get("yearly"), "Net Profit", "Profit for the period")
+    if mcap and np4 and np4 > 0 and past is not None:
+        g = max(0.0, min(0.30, past / 100))
+        v = [_dcf_value(np4, g, r, 0.05) / mcap * price for r in (0.14, 0.12, 0.10)]
+        rows.append(("Cash-flow value at past growth", f"profit keeps growing {g * 100:.0f}% a year for 5 years, then fades; discount rate 14% · 12% · 10%", v[0], v[1], v[2]))
+    tg, info = targets or {}, info or {}
+    lo, mid, hi = tg.get("low") or info.get("targetLowPrice"), tg.get("mean") or info.get("targetMeanPrice"), tg.get("high") or info.get("targetHighPrice")
+    if all(isinstance(x, (int, float)) and x > 0 for x in (lo, mid, hi)):
+        rows.append(("Analyst targets", "lowest, average and highest published target (Yahoo)", float(lo), float(mid), float(hi)))
+    w = close.tail(252)
+    rows.append(("52-week trading range", "where it actually traded, for scale", float(w.min()), float(w.median()), float(w.max())))
+    return rows
+
+
+def _value_field(sym, B, T, key, close):
+    rows = value_rows(sym, B, close, yf_attr(sym, "info") or {}, yf_attr(sym, "analyst_price_targets") or {})
+    if len(rows) < 2:
+        return
+    price = float(close.iloc[-1])
+    lo, hi = min([r[2] for r in rows] + [price]), max([r[4] for r in rows] + [price])
+    pad = (hi - lo) * 0.06 or price * 0.05
+    lo, hi = lo - pad, hi + pad
+    pos = lambda v: max(0.0, min(100.0, (v - lo) / (hi - lo) * 100))
+    pal = [T["cyan"], T["purple"], T["amber"], T["green"], "#6B6B73"]
+    body = ""
+    for i, (name, note, a, m, b) in enumerate(rows):
+        col = pal[min(i, len(pal) - 1)] if name != "52-week trading range" else pal[-1]
+        bar = (f'<u style="left:{pos(a):.1f}%;width:{max(1.2, pos(b) - pos(a)):.1f}%;background:{col}"></u>'
+               + (f'<s style="left:{pos(m):.1f}%"></s>' if b > a else ""))
+        rng = _rs(a, 0) if a == b else f"{_rs(a, 0)} – {_rs(b, 0)}"
+        vs = (m / price - 1) * 100
+        body += (f'<div class="r"><span>{_esc(name)}<small>{_esc(note)}</small></span><div class="tk">{bar}<em style="left:{pos(price):.1f}%" title="Price {_rs(price)}"></em></div>'
+                 f'<b>{rng}<br><span class="{"pos" if vs > 0 else "neg"}" style="color:{T["green"] if vs > 0 else T["red"]};font-weight:500">{"" if a == b else "middle "}{vs:+.0f}% vs price</span></b></div>')
+    _header("Value range · what the price would be under each method", T, "live",
+            f"The white line is today's price, {_rs(price)}. The dark tick inside a bar is that method's middle value.")
+    st.markdown(f'<div class="rp-panel"><div class="b"><div class="rp-vf">{body}</div></div></div>', unsafe_allow_html=True)
+    st.caption("Arithmetic on reported numbers, not price targets. The methods disagree because they assume different things; a price inside most bars is "
+               "ordinary, a price above all of them is paying for growth that has not shown up yet.")
+
+
+# ---------- SWG: swing setup ----------
+def swing_stats(h: pd.DataFrame, bench=None) -> dict | None:
+    """Trend checklist, levels and risk numbers a swing trader looks at, from daily OHLCV."""
+    if h is None or len(h) < 210:
+        return None
+    c, hi, lo, vol = (_naive(h[k].astype(float)) for k in ("Close", "High", "Low", "Volume"))
+    px = float(c.iloc[-1])
+    ma = {n: float(c.tail(n).mean()) for n in (20, 50, 150, 200)}
+    ma200_prev = float(c.iloc[-221:-21].mean()) if len(c) >= 221 else None
+    h52, l52 = float(hi.tail(252).max()), float(lo.tail(252).min())
+    prev = c.shift(1)
+    tr = pd.concat([hi - lo, (hi - prev).abs(), (lo - prev).abs()], axis=1).max(axis=1)
+    atr = float(tr.ewm(alpha=1 / 14, adjust=False).mean().iloc[-1])
+    rs6 = None
+    if bench is not None:
+        df = pd.concat([c.rename("s"), bench.rename("b")], axis=1).dropna()
+        if len(df) > 126:
+            rs6 = float((df["s"].iloc[-1] / df["s"].iloc[-127] - df["b"].iloc[-1] / df["b"].iloc[-127]) * 100)
+    checks = [("Price above the 150-day and 200-day averages", px > ma[150] and px > ma[200], f"{_rs(ma[150], 0)} · {_rs(ma[200], 0)}"),
+              ("150-day average above the 200-day", ma[150] > ma[200], ""),
+              ("200-day average rising for a month", None if ma200_prev is None else ma[200] > ma200_prev, ""),
+              ("50-day average above the 150-day and 200-day", ma[50] > ma[150] and ma[50] > ma[200], _rs(ma[50], 0)),
+              ("Price above the 50-day average", px > ma[50], f"{(px / ma[50] - 1) * 100:+.1f}%"),
+              ("At least 30% above the 52-week low", px >= l52 * 1.30, f"{(px / l52 - 1) * 100:+.0f}% above {_rs(l52, 0)}"),
+              ("Within 25% of the 52-week high", px >= h52 * 0.75, f"{(px / h52 - 1) * 100:+.0f}% from {_rs(h52, 0)}"),
+              ("Beating the index over 6 months", None if rs6 is None else rs6 > 0, f"{rs6:+.1f} pp" if rs6 is not None else "index not available")]
+    r = c.pct_change().dropna().tail(252)
+    w5 = (c / c.shift(5) - 1).dropna().tail(252)
+    v10, v50 = float(vol.tail(10).mean()), float(vol.tail(50).mean())
+    return {"px": px, "ma": ma, "atr": atr, "atr_pct": atr / px * 100, "checks": checks, "h52": h52, "l52": l52,
+            "hi20": float(hi.iloc[-21:-1].max()), "lo10": float(lo.tail(10).min()), "lo20": float(lo.tail(20).min()),
+            "ext50": (px / ma[50] - 1) * 100, "vol_dry": v10 / v50 if v50 else None,
+            "var95": float(r.quantile(0.05) * 100) if len(r) > 60 else None, "worst5": float(w5.min() * 100) if len(w5) else None,
+            "dd": float((c.tail(252) / c.tail(252).cummax() - 1).min() * 100), "rs6": rs6,
+            "tight": float((hi.tail(10).max() - lo.tail(10).min()) / px * 100)}
+
+
+def _swing(sym, B, T, key, nf):
+    S = swing_stats(_hist(sym, "2y", "1y"), _bench("NIFTY 500"))
+    if not S:
+        _unavailable("Swing setup", "At least 210 sessions of Yahoo daily history", T)
+        return
+    av = [x for x in S["checks"] if x[1] is not None]
+    ok = sum(1 for x in av if x[1])
+    stage, col = (("In an uptrend", T["green"]) if ok == len(av) else ("Mostly in gear", T["green"]) if ok >= len(av) - 2
+                  else ("Mixed", T["amber"]) if ok >= len(av) // 2 else ("In a downtrend", T["red"]))
+    px, atr = S["px"], S["atr"]
+    stop = max(px - 2 * atr, 0.01)
+    _header("Swing setup · trend, levels and risk", T, "live",
+            "The trend checklist is the well-known trend template used by momentum traders. It describes where the stock is now; it is not a signal and has not been backtested here.")
+    _kpis([("Trend", stage, f"{ok} of {len(av)} checks pass", col),
+           ("Stretch above the 50-day", _pct(S["ext50"], 1, True), "above +15% is extended, wait for a pause", T["red"] if S["ext50"] > 15 else None),
+           ("Breakout level", _rs(S["hi20"], 2), "highest high of the previous 20 sessions"),
+           ("Last 10 sessions' range", _pct(S["tight"], 1), "tight ranges come before clean breakouts"),
+           ("ATR 14", _rs(atr, 2), f"{S['atr_pct']:.2f}% of price · a normal day's range"),
+           ("Volume, 10 vs 50 sessions", f"{S['vol_dry']:.2f}×" if S["vol_dry"] else "N/A", "below 0.8× = volume drying up in the base"),
+           ("Stop at 2 × ATR", _rs(stop, 2), f"{(stop / px - 1) * 100:+.1f}% from the price"),
+           ("Nearest support", _rs(max(S["lo10"], 0), 2), f"10-session low · 20-session low {_rs(S['lo20'], 0)}")], T, 4)
+    a, b = st.columns(2, gap="medium")
+    with a:
+        _panel("Trend checklist", _checklist(S["checks"], T), T)
+    with b:
+        _mini("If it goes wrong · last year", [
+            ("A bad day (1 in 20)", _pct(S["var95"], 2, True), T["red"]), ("Worst 5 sessions", _pct(S["worst5"], 1, True), T["red"]),
+            ("Deepest fall from a peak", _pct(S["dd"], 1, True), T["red"]), ("6 months vs NIFTY 500", f"{S['rs6']:+.1f} pp" if S["rs6"] is not None else "N/A")], T)
+        c1, c2 = st.columns(2)
+        cap = c1.number_input("Capital ₹", min_value=0.0, value=float(st.session_state.get(f"{key}_swg_cap", 100000.0)), step=10000.0, key=f"{key}_swg_cap")
+        risk = c2.number_input("Risk per trade %", min_value=0.1, max_value=5.0, value=float(st.session_state.get(f"{key}_swg_risk", 1.0)), step=0.1, key=f"{key}_swg_risk")
+        per = px - stop
+        qty = int(min(cap * risk / 100 / per, cap * 0.25 / px)) if per > 0 and px > 0 else 0
+        _mini("Position size for that stop", [("Shares", f"{qty:,}"), ("Money in the trade", _rs(qty * px, 0)), ("Loss if the stop is hit", _rs(qty * per, 0), T["red"]),
+                                              ("Reward at 2 × the risk", _rs(px + 2 * per, 2), T["green"])], T)
+    st.caption("Size = (capital × risk %) ÷ (price − stop), capped at a quarter of capital in one stock. Levels use Yahoo daily prices; check the live price before acting.")
+
+
+# ---------- FNO: futures and options positioning ----------
+def _fno_get(wait=False):
+    try:
+        import fno_engine as fe
+        return fe, (fe.run_cached() if wait else fe.run_soon())
+    except Exception:
+        return None, None
+
+
+def _fno_signal(res, sym):
+    ST = (res or {}).get("stock_trade") or {}
+    tier = ST.get("tier", "off") if ST.get("trusted") else "off"
+    for name, rows in (("Buy signal today", ST.get("buy")), ("Open signal: hold", [h for h in ST.get("hold") or [] if not h.get("sell")]),
+                       ("Sell at the next close", [h for h in ST.get("hold") or [] if h.get("sell")]), ("On the stay-away list", ST.get("avoid"))):
+        if any(r.get("sym") == sym for r in rows or []):
+            return name, tier
+    return "No signal", tier
+
+
+def _fno_pos(sym, B, T, key, nf):
+    with st.spinner("Reading the stored F&O history…"):
+        fe, res = _fno_get(wait=True)
+    if fe is None or not res or not res.get("ok"):
+        _unavailable("F&O positioning", "fno_engine.py and the stored F&O history (arka_data/fno)", T, "Run the F&O data workflow once, then open this screen again.")
+        return
+    d = fe.stock_detail(res, sym)
+    if not d:
+        _unavailable("F&O positioning", "a stock that trades in futures and options", T, f"{sym} is not in the F&O list on {res.get('asof')}.")
+        return
+    name, tier = _fno_signal(res, sym)
+    tl = {"on": "approved", "trial": "on trial", "off": "switched off"}[tier]
+    st.markdown(f'<div class="rp-read"><b>{_esc(name)}</b> · stock signals are <b>{tl}</b>. Data to {_esc(res.get("asof"))}. '
+                'The full record and the rules are on the F&O page, Signals tab.</div>', unsafe_allow_html=True)
+    try:
+        import fno_page as fp
+        st.markdown(fp.CSS + f'<div class="fo">{fp._stock_detail(d)}</div>', unsafe_allow_html=True)
+    except Exception as e:
+        lv = d["levels"]
+        _kpis([("Model rank", f"{d.get('rank', '—')}", d["verdict"]), ("Build-up", d["buildup"] or "none", "5 sessions"),
+               ("Put-call ratio", f"{lv.get('pcr') or 0:.2f}", ""), ("Max pain", _rs(lv.get("max_pain"), 0), "")], T, 4)
+        st.caption(f"fno_page.py could not draw the full view ({type(e).__name__}).")
+
+
+def _fno_mini(sym, T):
+    fe, res = _fno_get(wait=False)
+    if fe is None or not res or not res.get("ok"):
+        return
+    s = next((x for x in res.get("stocks", []) if x["sym"] == sym), None)
+    if not s:
+        return
+    lv = s["levels"]
+    name, _ = _fno_signal(res, sym)
+    _mini("F&O positioning", [("Model rank", f'{s.get("rank", "—")} of {res.get("n_stocks", "—")} · {s["verdict"]}'), ("Build-up", s["buildup"] or "none"),
+                              ("Put-call ratio", f'{lv["pcr"]:.2f}' if lv.get("pcr") is not None else "N/A"),
+                              ("Put wall · max pain · call wall", " · ".join(f"{v:,.0f}" if v else "—" for v in (lv.get("put_wall"), lv.get("max_pain"), lv.get("call_wall")))),
+                              ("Signal", name)], T, "FNO")
+
+
+# ---------- search with suggestions ----------
+_GENERIC = {"THE", "INDIA", "INDIAN", "NATIONAL", "STATE", "UNITED", "GENERAL", "SHREE", "SHRI", "SRI", "NEW", "ORIENTAL", "HINDUSTAN", "BHARAT", "BANK",
+            "STEEL", "POWER", "GLOBAL", "STANDARD", "UNIVERSAL", "SUPREME", "ROYAL", "ASIAN", "CENTRAL", "FIRST", "MAHARASHTRA", "GUJARAT", "KERALA", "TAMILNADU"}
+
+
+def _names() -> dict:
+    """{SYMBOL: company name} for every NSE stock, from the same list the Home search uses. {} if it cannot be read."""
+    try:
+        import watchlist_page as wp
+        raw = wp.equity_names() or {}
+        return {str(k).upper(): str(v[0] if isinstance(v, (tuple, list)) else v) for k, v in raw.items()}
+    except Exception:
+        return {}
+
+
+def resolve_pick(raw: str, names: dict) -> str:
+    """What the search box returned -> a symbol. Accepts 'SYMBOL · Company', a symbol, or part of a company name."""
+    q = str(raw or "").split(" · ")[0].strip().upper()
+    if not q:
+        return ""
+    if q in names or (not names and re.fullmatch(r"[A-Z0-9&\-]{1,20}", q)):
+        return q
+    hits = match_list(q, names)
+    if len(hits) == 1:
+        return hits[0]
+    if hits:
+        return ""                                            # several companies match: the page lists them instead of guessing
+    return q.replace(" ", "") if re.fullmatch(r"[A-Z0-9&\- ]{1,24}", q) else ""
+
+
+def match_list(raw: str, names: dict, limit: int = 14) -> list:
+    """Every listed company whose symbol starts with the text or whose name contains it, best match first."""
+    q = str(raw or "").split(" · ")[0].strip().upper()
+    if not q or not names:
+        return []
+    hits = [s for s, n in names.items() if s.startswith(q) or q in n.upper()]
+    return sorted(hits, key=lambda s: (not s.startswith(q), not names[s].upper().startswith(q), len(s), s))[:limit]
+
+
+def same_group(sym: str, names: dict, limit: int = 8) -> list:
+    """Other listed companies whose name starts with the same word (HDFC Bank -> HDFC Life, HDFC AMC). A name match, not a legal group."""
+    n = names.get(sym, "")
+    w = re.split(r"[\s\-\.&]+", n.strip().upper())[0] if n else ""
+    if len(w) < 3 or w in _GENERIC:
+        return []
+    out = [s for s, x in names.items() if s != sym and re.split(r"[\s\-\.&]+", x.strip().upper())[0] == w]
+    return sorted(out, key=len)[:limit]
+
+
+def _search_box(active, names, T):
+    """Search with suggestions: type a few letters of the symbol or of the company name. False if this Streamlit cannot do it."""
+    if not names:
+        return False
+    recent = [s for s in st.session_state.get("research_recent", []) if s]
+    wl = [str(s).upper().replace(".NS", "") for s in list(st.session_state.get("watchlist", [])) + list(st.session_state.get("admin_watchlist", []))]
+    first = list(dict.fromkeys(recent + wl))
+    lab = lambda s: f"{s} · {names[s]}" if names.get(s) else s
+    seen = set(first)
+    opts = [lab(s) for s in first] + [lab(s) for s in sorted(names) if s not in seen]
+
+    def _pick():
+        raw = st.session_state.get("research_pick")
+        st.session_state["research_pick"] = None
+        sym = resolve_pick(raw, names)
+        st.session_state["research_matches"] = None
+        if sym:
+            _load_symbol(sym)
+        elif raw:
+            st.session_state["research_matches"] = (str(raw).strip(), match_list(raw, names))
+    try:
+        st.selectbox("Research security", opts, index=None, key="research_pick", on_change=_pick, accept_new_options=True, label_visibility="collapsed",
+                     placeholder="Search any stock by symbol or company name · type hdfc to see every HDFC company")
+        return True
+    except TypeError:
+        return False
+
+
 HANDLERS = {
     "DES": _overview, "HC": _health, "VAL": _valuation,
     "FA": _financials, "BS": _balance, "CF": _cashflow, "RAT": _ratios,
@@ -2459,6 +2962,7 @@ HANDLERS = {
     "NOTE": _thesis, "SRC": _sources,
     "OV": _dashboard, "GP": _graph, "HP": _hist_prices, "COMP": _compare, "BETA": _beta, "HVG": _volatility,
     "TRA": _total_return, "DCF": _dcf, "DUP": _dupont, "GRW": _growth, "EVTS": _events, "PB": _price_behaviour,
+    "SC": _scorecard, "SWG": _swing, "FNO": _fno_pos,
 }
 assert set(HANDLERS) == set(FN), set(HANDLERS) ^ set(FN)
 
@@ -2551,6 +3055,7 @@ def _css(T):
     div[class*="st-key-rprecent"] button{{border-radius:999px !important;min-height:30px !important;padding:1px 12px !important}}
     div[class*="st-key-rprecent"] button p{{font:500 12.5px var(--rp-s) !important}}
     </style>""", unsafe_allow_html=True)
+    st.markdown(_CSS16, unsafe_allow_html=True)
 
 
 def _resolve_code(tok: str):
@@ -2693,20 +3198,23 @@ def _remember(sym):
 def _load_symbol(sym):
     st.session_state.active_security = sym
     st.session_state.research_last_query = sym
+    st.session_state["research_matches"] = None
 
 
 def render_research_page(T=None, news_fetch_fn=None):
     T = _theme(T)
     _css(T)
     active = st.session_state.get("active_security") or st.session_state.get("research_last_query") or ""
-    with st.form("research_load_form", clear_on_submit=False):
-        c1, c2 = st.columns([5, 1])
-        q = c1.text_input("Research security", value=active, placeholder="Search a stock: RELIANCE, HDFCBANK, TCS…",
-                          label_visibility="collapsed", key=f"research_q_{active}")
-        go_ = c2.form_submit_button("Open", type="primary", use_container_width=True)
-    if go_ and q.strip():
-        _load_symbol(q.strip().upper())
-        st.rerun()
+    names = _names()
+    if not _search_box(active, names, T):                    # no company list, or an older Streamlit: the plain box
+        with st.form("research_load_form", clear_on_submit=False):
+            c1, c2 = st.columns([5, 1])
+            q = c1.text_input("Research security", value=active, placeholder="Search a stock: RELIANCE, HDFCBANK, TCS…",
+                              label_visibility="collapsed", key=f"research_q_{active}")
+            go_ = c2.form_submit_button("Open", type="primary", use_container_width=True)
+        if go_ and q.strip():
+            _load_symbol(resolve_pick(q, names) or q.strip().upper())
+            st.rerun()
 
     recent = [s for s in st.session_state.get("research_recent", []) if s != active]
     if recent:
@@ -2715,6 +3223,22 @@ def render_research_page(T=None, news_fetch_fn=None):
             cols[0].markdown(f'<div style="font:500 12.5px Inter,sans-serif;color:{T["t3"]};padding-top:7px">Recent</div>', unsafe_allow_html=True)
             for c, s in zip(cols[1:], recent):
                 c.button(s, key=f"rprecent_{s}", on_click=_load_symbol, args=(s,), use_container_width=True)
+
+    typed, hits = st.session_state.get("research_matches") or ("", [])
+    if hits:
+        with st.container(key="rprecent_hit"):
+            st.markdown(f'<div style="font:500 12.5px Inter,sans-serif;color:{T["t3"]};margin:2px 0 6px">{len(hits)} companies match “{_esc(typed)}”. Pick one:</div>',
+                        unsafe_allow_html=True)
+            cols = st.columns(min(len(hits), 7))
+            for i, s_ in enumerate(hits):
+                cols[i % len(cols)].button(f"{s_} · {names.get(s_, '')[:26]}", key=f"rphit_{s_}", on_click=_load_symbol, args=(s_,), use_container_width=True)
+    sis = same_group(active, names) if active else []
+    if sis:
+        with st.container(key="rprecent_grp"):
+            cols = st.columns([0.9] + [1] * len(sis) + [max(1, 9 - len(sis))])
+            cols[0].markdown(f'<div style="font:500 12.5px Inter,sans-serif;color:{T["t3"]};padding-top:7px">Same name</div>', unsafe_allow_html=True)
+            for c, s_ in zip(cols[1:], sis):
+                c.button(s_, key=f"rpgrp_{s_}", on_click=_load_symbol, args=(s_,), use_container_width=True, help=names.get(s_))
 
     symbol = st.session_state.get("active_security") or st.session_state.get("research_last_query") or ""
     if not symbol:
