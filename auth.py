@@ -338,11 +338,15 @@ _BRIDGE_HTML = r"""<!doctype html><html><head><meta charset="utf-8"></head><body
     if (a[1]) u.searchParams.set("s", a[1]); else u.searchParams.delete("s");
     return u.pathname + u.search + u.hash;
   }
+  // The last screen is remembered per TAB (sessionStorage): it survives a reload and the phone putting the tab to
+  // sleep, and it is gone once the tab is closed, so a newly opened tab starts on Home.
+  function tabStore() { try { var s = window.sessionStorage; s.getItem("__arka"); return s; } catch (e) { return null; } }
   function saveNav(state) {
-    try { var ls = storage(); if (ls) ls.setItem("arka_nav", JSON.stringify({s: state, t: Date.now()})); } catch (e) {}
+    try { var ts = tabStore(); if (ts) ts.setItem("arka_nav", JSON.stringify({s: state, t: Date.now()})); } catch (e) {}
   }
   function savedNav() {
-    try { var ls = storage(), raw = ls ? ls.getItem("arka_nav") : null; return raw ? JSON.parse(raw) : null; } catch (e) { return null; }
+    try { var ls = storage(); if (ls) ls.removeItem("arka_nav"); } catch (e) {}     // earlier versions kept it for every tab
+    try { var ts = tabStore(), raw = ts ? ts.getItem("arka_nav") : null; return raw ? JSON.parse(raw) : null; } catch (e) { return null; }
   }
   function onPop(w) {
     var st = null;
