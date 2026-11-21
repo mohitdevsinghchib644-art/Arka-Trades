@@ -1,39 +1,31 @@
 """
-portfolio_page.py — Arka Trades Portfolio v3 (professional edition)
+portfolio_page.py — Arka Trades Portfolio v4
 
-What changed vs v2
-------------------
-FIXES
-  * Splits / bonus issues: Yahoo prices are split-adjusted but your buy price was not, so a 1:1 bonus showed a
-    fake −50 %. Every lot (and every sell) is now adjusted automatically with the stock's split history.
-  * REFRESH really refreshes (it called get_quotes.clear(), which no longer exists, and silently did nothing).
-  * Lag: st.tabs built all five tabs — every chart — on each click, and each holding had two buttons.
-    Views are now a selector (only the open view is built) and holdings are one table with an action bar.
-  * "Remove holding" in one book no longer deletes the same stock in your other books.
+v4 (on top of v3)
+  FIXES
+    * Speed: the five Supabase reads and the news fetch ran on every click. They are now kept for a short time and
+      refreshed after any change you make (or with Refresh).
+    * Risk view crashed on older pandas (month-end resampling). Benchmark downloads now take turns with the other pages'
+      Yahoo downloads instead of colliding with them.
+    * A holding picked in the table stays picked when the filter changes; several small None / empty-data guards.
+  NEW FOR SWING TRADING  (view: Swing desk)
+    * Open trades: days held, open R, distance to stop, trend (10 / 21 EMA, 50-day), ATR, and what needs attention
+      (stop hit, no stop, closed below the 21 EMA, stalled trade, results soon is on Income).
+    * Trail levels for every position: 21 EMA, 10-day low and a 3 × ATR chandelier line, next to your stop.
+    * Position size calculator: capital, risk %, entry and stop → shares, position value, 1R / 2R / 3R prices.
+    * Trade journal from your recorded sells: win rate, average win and loss, payoff ratio, expectancy per trade,
+      profit factor, holding time of winners against losers, month by month.
+  DESIGN
+    * Inter, sentence case, soft rounded cards; no uppercase monospace. Views are pills.
 
-NEW
-  * SELLS + REALISED P&L — FIFO matching against your oldest lots, realised vs unrealised, per lot.
-  * TAX — STCG / LTCG by Indian financial year with set-off rules, ₹1.25 L LTCG exemption, cess; editable rates
-    (defaults: STCG 20 %, LTCG 12.5 % — unchanged in Budget 2026). Lots about to turn long-term, tax-free LTCG
-    headroom left this year.
-  * STOP-LOSS / TARGET per holding — ₹ at risk, R-multiple, reward:risk, portfolio heat, SL-hit flags.
-  * MULTIPLE BOOKS (e.g. Long-term · Trading · Family) — filter everything by book; move lots between books.
-  * PERFORMANCE — true time-weighted return with sells, benchmark with identical cash flows (NIFTY 50 / 500 /
-    MIDCAP 100), monthly returns heatmap, contribution by stock and sector, saved daily history.
-  * RISK & STRESS — per-stock beta, market and sector shock scenarios, the worst historical NIFTY day / month
-    replayed on today's portfolio.
-  * REBALANCE assistant — max-per-stock / max-per-sector rules → exact quantities, with the tax impact of each trim.
-  * INCOME & EVENTS — estimated dividends received (from Yahoo dividend history and your holding dates),
-    yield on cost, upcoming results / ex-dividend dates.
-  * LINKS — sector rotation stage from Money Flow, news tone per holding from the News Desk, Piotroski-style
-    quality score from Research.
-  * MONTHLY REVIEW — a printable HTML report.
+Everything from v3 is still here: splits / bonus adjustment, FIFO sells and realised P&L, tax by financial year, books,
+stop-loss / target per holding, time-weighted performance against a benchmark with the same cash flows, risk and stress,
+rebalance assistant, dividends and events, monthly review report.
 
-Storage: buy lots stay in your existing `portfolio` table (user_data.py). Sells, books, stop-loss / targets,
-settings and daily snapshots use five small new tables — the page shows the SQL once. Until they exist, those
-features still work for the current session.
+Storage: buy lots stay in the `portfolio` table (user_data.py). Sells, books, stop-loss / targets, settings and daily
+snapshots use five small tables; the page shows the SQL once. Until they exist those features work for the session.
 
-Informational only — not investment or tax advice. P&L excludes brokerage, STT and other charges.
+Informational only, not investment or tax advice. P&L excludes brokerage, STT and other charges.
 """
 from __future__ import annotations
 
@@ -84,9 +76,10 @@ except Exception:  # pragma: no cover
 # ═════════════════════════ theme / constants ═════════════════════════
 AMBER, GREEN, RED, CYAN, YELLOW = "#FF9F0A", "#30D158", "#FF453A", "#5AC8FA", "#FFD60A"
 PURPLE, PINK, INDIGO = "#BF5AF2", "#FF6482", "#5E8CFF"
-DARK, DARK2, DARK3, BORDER = "#000000", "#0A0A0A", "#111111", "#262626"
-IVORY, T2, T3 = "#E8E8E8", "#8A8A8A", "#5A5A5A"
-MONO = "'JetBrains Mono',monospace"
+DARK, DARK2, DARK3, BORDER = "#0B0B0C", "#111113", "#161618", "#232326"
+IVORY, T2, T3 = "#F2F2F5", "#A4A4AC", "#7C7C85"
+SANS = "Inter,system-ui,-apple-system,'Segoe UI',sans-serif"
+MONO = SANS                                        # numbers use Inter with tabular figures, not a monospace face
 IST = timezone(timedelta(hours=5, minutes=30))
 PALETTE = ["#FF9F0A", "#5AC8FA", "#BF5AF2", "#30D158", "#FF6482", "#5E8CFF",
            "#FFD60A", "#40C8E0", "#AC8E68", "#FF7A45", "#7D7AFF", "#8E8E93"]
@@ -97,8 +90,9 @@ TAX_DEFAULTS = {"stcg": 20.0, "ltcg": 12.5, "exempt": 125000.0, "cess": 4.0}
 REB_DEFAULTS = {"max_stock": 15.0, "max_sector": 30.0, "redeploy": True, "cash": 0.0}
 BENCHMARKS = {"NIFTY 50": ("^NSEI",), "NIFTY 500": ("^CRSLDX",), "NIFTY MIDCAP 100": ("^CRSMID", "NIFTY_MIDCAP_100.NS")}
 STAGE_COLORS = {"ROTATING IN": GREEN, "LEADING": "#8AD66B", "EXTENDED": YELLOW, "IMPROVING": CYAN, "FADING": AMBER, "WEAK": RED}
-VIEWS = ["DASHBOARD", "HOLDINGS", "ANALYSIS", "PERFORMANCE", "RISK & STRESS", "REBALANCE", "INCOME & EVENTS",
-         "TAX & REALISED", "TRANSACTIONS", "NEWS"]
+VIEWS = ["Dashboard", "Swing desk", "Holdings", "Analysis", "Performance", "Risk and stress", "Rebalance", "Income and events",
+         "Tax and realised", "Transactions", "News"]
+ALL_BOOKS = "All books"
 
 SQL_EXTRA = """-- Arka Portfolio v3 · run once in Supabase → SQL Editor
 create table if not exists portfolio_lot_meta (
@@ -120,50 +114,63 @@ create table if not exists portfolio_settings (
 _CSS = """
 <style>
 :root{--pf-amber:#FF9F0A;--pf-green:#30D158;--pf-red:#FF453A;--pf-cyan:#5AC8FA;--pf-yellow:#FFD60A;
-      --pf-border:#262626;--pf-panel:#0A0A0A;--pf-ivory:#E8E8E8;--pf-t2:#8A8A8A;--pf-t3:#5A5A5A;}
-.pf-hero{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;padding:14px 16px;background:linear-gradient(180deg,#0e0e0e,#080808);border:1px solid var(--pf-border);border-top:2px solid var(--pf-amber);margin-bottom:8px;}
-.pf-hero .k{font:700 8px 'JetBrains Mono',monospace;letter-spacing:1.5px;color:var(--pf-t3);}
-.pf-hero .t{font:800 24px 'JetBrains Mono',monospace;color:var(--pf-ivory);margin-top:3px;letter-spacing:-.3px;}
-.pf-hero .d{font:700 12px 'JetBrains Mono',monospace;margin-top:3px;}
-.pf-hero .m{font:10px 'JetBrains Mono',monospace;color:var(--pf-t2);text-align:right;line-height:1.7;}
-.pf-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:6px 0 10px;}
-.pf-kpi{border:1px solid var(--pf-border);border-top:2px solid var(--a,#444);background:var(--pf-panel);padding:11px 13px;min-height:80px;min-width:0;}
-.pf-kpi .l{font:700 8px 'JetBrains Mono',monospace;color:var(--pf-t3);letter-spacing:1px;text-transform:uppercase;}
-.pf-kpi .v{font:700 18px 'JetBrains Mono',monospace;color:var(--pf-ivory);margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.pf-kpi .s{font:10px 'JetBrains Mono',monospace;margin-top:4px;color:var(--pf-t2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.pf-ph{display:flex;align-items:baseline;gap:10px;border-bottom:1px solid var(--pf-border);padding:14px 0 7px;margin:6px 0 10px;}
-.pf-ph:before{content:"";width:3px;height:11px;background:var(--pf-amber);display:inline-block;align-self:center;}
-.pf-ph-t{font:700 10px 'JetBrains Mono',monospace;letter-spacing:1.4px;color:var(--pf-amber);text-transform:uppercase;}
-.pf-ph-s{font:10px 'Inter',sans-serif;color:var(--pf-t3);}
-.pf-note{font:10.5px 'JetBrains Mono',monospace;color:var(--pf-t2);border-left:2px solid #444;padding:7px 11px;background:rgba(255,255,255,.02);margin:8px 0;line-height:1.7;}
-.pf-note b{color:var(--pf-ivory);}
-.pf-empty{border:1px dashed #333;background:#080808;padding:34px 24px;text-align:center;margin:14px 0;}
-.pf-empty .a{font:800 18px 'Inter',sans-serif;color:var(--pf-ivory);} .pf-empty .b{font:11px 'Inter',sans-serif;color:var(--pf-t2);margin-top:8px;line-height:1.7;}
-.pf-flag{display:flex;gap:10px;padding:9px 11px;border:1px solid var(--pf-border);border-left:3px solid var(--fc,#444);background:var(--pf-panel);margin-bottom:6px;}
-.pf-flag .lv{font:800 8px 'JetBrains Mono',monospace;letter-spacing:1px;color:var(--fc,#888);min-width:44px;padding-top:2px;}
-.pf-flag .ft{font:700 12px 'Inter',sans-serif;color:var(--pf-ivory);} .pf-flag .fd{font:11px 'Inter',sans-serif;color:var(--pf-t2);margin-top:2px;line-height:1.55;}
-.pf-score{font:800 9px 'JetBrains Mono',monospace;letter-spacing:1.4px;text-align:center;margin-top:-6px;}
-.pf-tw{overflow:auto;border:1px solid var(--pf-border);background:#080808;max-height:640px;}
-.pf-tbl{width:100%;border-collapse:separate;border-spacing:0;font-size:11px;}
-.pf-tbl th{position:sticky;top:0;z-index:2;background:#0e0e0e;font:700 8px 'JetBrains Mono',monospace;letter-spacing:.9px;color:var(--pf-t2);text-align:left;padding:8px 7px;border-bottom:1px solid var(--pf-border);text-transform:uppercase;white-space:nowrap;}
-.pf-tbl td{padding:8px 7px;border-bottom:1px solid #161616;color:var(--pf-ivory);vertical-align:middle;white-space:nowrap;}
-.pf-tbl tr:hover td{background:rgba(255,159,10,.035);}
-.pf-tbl th.r,.pf-tbl td.r{text-align:right;font-family:'JetBrains Mono',monospace;}
-.pf-tbl td .sub{font-size:9px;color:var(--pf-t3);margin-top:2px;white-space:nowrap;}
-.pf-sym{font:800 12px 'JetBrains Mono',monospace;color:var(--pf-amber);}
-.pf-chip{display:inline-block;font:700 8px 'JetBrains Mono',monospace;letter-spacing:.5px;padding:1px 6px;margin:2px 3px 0 0;border:1px solid var(--c,#444);color:var(--c,#aaa);background:rgba(255,255,255,.02);text-transform:uppercase;}
-.pf-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--pf-yellow);margin-left:6px;vertical-align:middle;box-shadow:0 0 6px var(--pf-yellow);animation:pfpulse 1.8s ease-in-out infinite;cursor:help;}
-@keyframes pfpulse{0%,100%{opacity:1}50%{opacity:.35}}
-.pf-sw{display:inline-block;width:8px;height:8px;margin-right:7px;vertical-align:middle;}
-.pf-wbar{display:inline-block;width:56px;height:5px;background:#1a1a1a;vertical-align:middle;margin-right:6px;} .pf-wbar i{display:block;height:100%;}
-.pf-rng{position:relative;display:inline-block;width:64px;height:4px;background:linear-gradient(90deg,#FF453A55,#333,#30D15855);vertical-align:middle;}
-.pf-rng i{position:absolute;top:-3px;width:3px;height:10px;background:#FF9F0A;transform:translateX(-1px);}
-.pf-mini{font:10px 'JetBrains Mono',monospace;color:var(--pf-t2);}
-.pf-mover{display:flex;justify-content:space-between;padding:7px 2px;border-bottom:1px solid #161616;font:11px 'JetBrains Mono',monospace;}
-.pf-mover b{color:var(--pf-amber);}
-.pf-pill{display:inline-block;padding:1px 7px;border-radius:999px;font:800 8px 'JetBrains Mono',monospace;letter-spacing:.6px;border:1px solid currentColor;}
-div[class*="st-key-pf_act"]{border:1px solid var(--pf-border);border-top:2px solid var(--pf-amber);background:#0a0a0a;padding:10px 12px 4px;margin-top:8px;}
-div[class*="st-key-pf_views"] [role="radiogroup"]{gap:4px !important;}
+      --pf-border:#232326;--pf-panel:#111113;--pf-ivory:#F2F2F5;--pf-t2:#A4A4AC;--pf-t3:#7C7C85;
+      --pf-sans:Inter,system-ui,-apple-system,'Segoe UI',sans-serif;}
+.pf-hero{position:relative;overflow:hidden;display:flex;justify-content:space-between;align-items:flex-end;gap:16px;padding:22px 24px;
+  background:linear-gradient(180deg,#151517,#101012);border:1px solid var(--pf-border);border-radius:16px;margin:6px 0 14px;font-family:var(--pf-sans);}
+.pf-hero::before{content:"";position:absolute;inset:0 0 auto 0;height:120px;pointer-events:none;background:radial-gradient(560px 120px at 10% 0,rgba(255,159,10,.10),transparent 70%);}
+.pf-hero>div{position:relative;}
+.pf-hero .k{font:500 13px var(--pf-sans);color:var(--pf-t3);}
+.pf-hero .t{font:650 36px var(--pf-sans);font-variant-numeric:tabular-nums;color:var(--pf-ivory);margin-top:6px;letter-spacing:-.9px;line-height:1.05;}
+.pf-hero .d{font:600 14.5px var(--pf-sans);font-variant-numeric:tabular-nums;margin-top:9px;}
+.pf-hero .m{font:13px/1.8 var(--pf-sans);color:var(--pf-t2);text-align:right;}
+.pf-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:10px;margin:8px 0 14px;}
+.pf-kpi{border:1px solid var(--pf-border);background:var(--pf-panel);border-radius:14px;padding:14px 16px;min-height:92px;min-width:0;font-family:var(--pf-sans);}
+.pf-kpi .l{display:flex;align-items:center;gap:7px;font:500 12.5px var(--pf-sans);color:var(--pf-t3);}
+.pf-kpi .l::before{content:"";flex:0 0 7px;width:7px;height:7px;border-radius:50%;background:var(--a,#555);}
+.pf-kpi .v{font:650 21px var(--pf-sans);font-variant-numeric:tabular-nums;letter-spacing:-.3px;color:var(--pf-ivory);margin-top:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.pf-kpi .s{font:12.5px var(--pf-sans);font-variant-numeric:tabular-nums;margin-top:5px;color:var(--pf-t2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.pf-ph{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:20px 0 10px;margin:0;font-family:var(--pf-sans);}
+.pf-ph-t{font:600 16px var(--pf-sans);letter-spacing:-.1px;color:var(--pf-ivory);}
+.pf-ph-s{font:13px var(--pf-sans);color:var(--pf-t3);}
+.pf-note{font:13.5px/1.65 var(--pf-sans);color:var(--pf-t2);border:1px solid var(--pf-border);border-radius:12px;padding:12px 15px;background:var(--pf-panel);margin:8px 0;}
+.pf-note b{color:var(--pf-ivory);font-weight:600;}
+.pf-empty{border:1px dashed #34343a;border-radius:16px;background:var(--pf-panel);padding:44px 26px;text-align:center;margin:14px 0;font-family:var(--pf-sans);}
+.pf-empty .a{font:650 20px var(--pf-sans);color:var(--pf-ivory);} .pf-empty .b{font:14px/1.7 var(--pf-sans);color:var(--pf-t2);margin-top:10px;}
+.pf-flag{display:flex;gap:12px;align-items:flex-start;padding:12px 14px;border:1px solid var(--pf-border);border-radius:12px;background:var(--pf-panel);margin-bottom:8px;font-family:var(--pf-sans);}
+.pf-flag .lv{flex:0 0 auto;font:600 11.5px var(--pf-sans);color:var(--fc,#888);background:color-mix(in srgb,var(--fc,#888) 14%,transparent);padding:3px 9px;border-radius:999px;margin-top:1px;}
+.pf-flag .ft{font:600 14px var(--pf-sans);color:var(--pf-ivory);} .pf-flag .fd{font:13px/1.55 var(--pf-sans);color:var(--pf-t2);margin-top:3px;}
+.pf-score{font:600 13.5px var(--pf-sans);text-align:center;margin:-6px 0 10px;}
+.pf-tw{overflow:auto;border:1px solid var(--pf-border);border-radius:14px;background:var(--pf-panel);max-height:660px;}
+.pf-tbl{width:100%;border-collapse:separate;border-spacing:0;font:13.5px var(--pf-sans);font-variant-numeric:tabular-nums;}
+.pf-tbl th{position:sticky;top:0;z-index:2;background:#151517;font:500 12.5px var(--pf-sans);color:var(--pf-t3);text-align:left;padding:11px 12px;border-bottom:1px solid var(--pf-border);white-space:nowrap;}
+.pf-tbl td{padding:11px 12px;border-bottom:1px solid #1B1B1E;color:var(--pf-ivory);vertical-align:middle;white-space:nowrap;}
+.pf-tbl tr:last-child td{border-bottom:0;}
+.pf-tbl tr:hover td{background:rgba(255,255,255,.025);}
+.pf-tbl th.r,.pf-tbl td.r{text-align:right;}
+.pf-tbl td .sub{font-size:12px;color:var(--pf-t3);margin-top:3px;white-space:nowrap;}
+.pf-sym{font:650 14px var(--pf-sans);color:var(--pf-ivory);}
+.pf-chip{display:inline-block;font:500 11.5px var(--pf-sans);padding:2px 9px;margin:4px 4px 0 0;border-radius:999px;border:1px solid color-mix(in srgb,var(--c,#555) 45%,transparent);
+  color:var(--c,#aaa);background:color-mix(in srgb,var(--c,#555) 10%,transparent);}
+.pf-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--pf-yellow);margin-left:7px;vertical-align:middle;cursor:help;}
+.pf-sw{display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:8px;vertical-align:middle;}
+.pf-wbar{display:inline-block;width:60px;height:6px;border-radius:3px;background:#1E1E22;vertical-align:middle;margin-right:8px;overflow:hidden;} .pf-wbar i{display:block;height:100%;border-radius:3px;}
+.pf-rng{position:relative;display:inline-block;width:70px;height:6px;border-radius:3px;background:#1E1E22;vertical-align:middle;}
+.pf-rng i{position:absolute;top:-3px;width:12px;height:12px;border-radius:50%;background:#FF9F0A;border:2px solid var(--pf-panel);transform:translateX(-6px);}
+.pf-mini{font:13px var(--pf-sans);font-variant-numeric:tabular-nums;color:var(--pf-t2);}
+.pf-mover{display:flex;justify-content:space-between;gap:10px;padding:11px 2px;border-bottom:1px solid #1B1B1E;font:13.5px var(--pf-sans);font-variant-numeric:tabular-nums;}
+.pf-mover:last-child{border-bottom:0;} .pf-mover b{color:var(--pf-ivory);font-weight:600;}
+.pf-pill{display:inline-block;padding:2px 10px;border-radius:999px;font:600 11.5px var(--pf-sans);background:color-mix(in srgb,currentColor 13%,transparent);}
+.pf-lv{display:grid;grid-template-columns:1fr auto minmax(150px,auto);gap:10px;padding:9px 0;border-bottom:1px solid #1B1B1E;font:13.5px var(--pf-sans);font-variant-numeric:tabular-nums;color:var(--pf-t2);}
+.pf-lv:last-child{border-bottom:0;} .pf-lv b{color:var(--pf-ivory);font-weight:600;} .pf-lv em{font-style:normal;text-align:right;color:var(--pf-t3);font-size:12.5px;white-space:nowrap;}
+.pf-card{border:1px solid var(--pf-border);border-radius:14px;background:var(--pf-panel);padding:16px 18px;font-family:var(--pf-sans);margin-bottom:10px;}
+.pf-card h4{margin:0 0 10px;padding:0;font:600 14.5px var(--pf-sans);color:var(--pf-ivory);}
+.pf-big{font:650 30px var(--pf-sans);font-variant-numeric:tabular-nums;letter-spacing:-.6px;color:var(--pf-ivory);}
+div[class*="st-key-pf_act"]{border:1px solid var(--pf-border);border-radius:14px;background:var(--pf-panel);padding:12px 14px 6px;margin-top:10px;}
+div[class*="st-key-pf_views"]{margin:2px 0 6px;}
+div[class*="st-key-pf_views"] [role="radiogroup"]{gap:6px !important;}
+@media (max-width:760px){.pf-hero{flex-direction:column;align-items:flex-start;padding:18px;} .pf-hero .m{text-align:left;} .pf-hero .t{font-size:30px;}
+  .pf-kpis{grid-template-columns:repeat(2,minmax(0,1fr)) !important;} .pf-kpi{padding:12px 13px;} .pf-kpi .v{font-size:18px;}}
 </style>
 """
 
@@ -232,7 +239,9 @@ def _kpi(label, value, sub="", vcolor=IVORY, scolor=T2, accent=AMBER):
 
 
 def _kpis(cards):
-    st.markdown('<div class="pf-kpis">' + "".join(cards) + '</div>', unsafe_allow_html=True)
+    n = len(cards)
+    cols = n if n <= 5 else math.ceil(n / 2)               # 6 → 3 + 3, 8 → 4 + 4: no orphan card on the second row
+    st.markdown(f'<div class="pf-kpis" style="grid-template-columns:repeat({cols},minmax(0,1fr))">' + "".join(cards) + '</div>', unsafe_allow_html=True)
 
 
 def _ph(title, sub=""):
@@ -318,6 +327,7 @@ class Store:
 
     def upsert(self, t, row):
         keys = _KEYS[t]
+        self._touch()
         if self._remote(t):
             try:
                 self.sb.table(t).upsert(row, on_conflict=",".join(keys)).execute()
@@ -332,6 +342,7 @@ class Store:
         return None
 
     def insert(self, t, row):
+        self._touch()
         if self._remote(t):
             try:
                 self.sb.table(t).insert(row).execute()
@@ -347,6 +358,7 @@ class Store:
         return None
 
     def delete(self, t, **eq):
+        self._touch()
         if self._remote(t):
             try:
                 q = self.sb.table(t).delete()
@@ -361,7 +373,19 @@ class Store:
         rows[:] = [r for r in rows if not all(str(r.get(k)) == str(v) for k, v in eq.items())]
         return None
 
+    def _touch(self):
+        st.session_state.pop("_pfx_loaded", None)
+
     def load(self):
+        hit = st.session_state.get("_pfx_loaded")
+        if hit and time.time() - hit[0] < 60 and hit[1] == id(self.sb):
+            return hit[2]
+        D = self._load()
+        if not self.errors:
+            st.session_state["_pfx_loaded"] = (time.time(), id(self.sb), D)
+        return D
+
+    def _load(self):
         meta = {str(r["lot_id"]): (r.get("book") or DEFAULT_BOOK) for r in self.select("portfolio_lot_meta") if r.get("lot_id") is not None}
         plans = {(r.get("book") or DEFAULT_BOOK, str(r["symbol"]).upper()): {"sl": _f(r.get("stop_loss")), "target": _f(r.get("target"))}
                  for r in self.select("portfolio_plan") if r.get("symbol")}
@@ -431,6 +455,37 @@ def _events_list(series):
     return sorted(out)
 
 
+def _tech(hist):
+    """Daily-candle facts a swing trader checks: averages, ATR, RSI, recent highs and lows, volume against average."""
+    try:
+        if hist is None or len(hist) < 30:
+            return None
+        h = hist.dropna(subset=["Close"])
+        c, hi, lo = h["Close"].astype(float), h["High"].astype(float), h["Low"].astype(float)
+        idx = pd.to_datetime(h.index)
+        if getattr(idx, "tz", None) is not None:
+            idx = idx.tz_localize(None)
+        n = len(c)
+        pc = c.shift(1)
+        tr = pd.concat([hi - lo, (hi - pc).abs(), (lo - pc).abs()], axis=1).max(axis=1)
+        atr = float(tr.ewm(alpha=1 / 14, adjust=False).mean().iloc[-1])
+        d = c.diff()
+        up = d.clip(lower=0).ewm(alpha=1 / 14, adjust=False).mean().iloc[-1]
+        dn = (-d.clip(upper=0)).ewm(alpha=1 / 14, adjust=False).mean().iloc[-1]
+        out = {"close": float(c.iloc[-1]), "atr": atr, "rsi": 100.0 if dn == 0 else float(100 - 100 / (1 + up / dn)),
+               "ema10": float(c.ewm(span=10, adjust=False).mean().iloc[-1]), "ema21": float(c.ewm(span=21, adjust=False).mean().iloc[-1]),
+               "sma50": float(c.rolling(50).mean().iloc[-1]) if n >= 50 else None, "sma200": float(c.rolling(200).mean().iloc[-1]) if n >= 200 else None,
+               "lo10": float(lo.iloc[-10:].min()), "hi20": float(hi.iloc[-20:].max()),
+               "dates": [x.date() for x in idx.normalize()[-260:]], "highs": [float(x) for x in hi.iloc[-260:]]}
+        if "Volume" in h and n >= 21:
+            v = h["Volume"].astype(float)
+            avg = float(v.iloc[-21:-1].mean())
+            out["rel_vol"] = float(v.iloc[-1]) / avg if avg else None
+        return out
+    except Exception:
+        return None
+
+
 def _fscore(B):
     try:
         from research_page import _piotroski
@@ -472,13 +527,13 @@ def _fetch_info(sym):
     divs = _events_list(yf_attr(sym, "dividends")) if yf_attr else []
     sector = str(sec.get("Sector") or sec.get("Broad Sector") or "").strip()
     if not sector and close is None and not summ:
-        return {"partial": True, "splits": splits, "divs": divs, "close": None}
+        return {"partial": True, "splits": splits, "divs": divs, "close": None, "tech": None}
     return {
         "sector": sector or UNCLASSIFIED, "broad": str(sec.get("Broad Sector") or "").strip(),
         "industry": str(sec.get("Industry") or sec.get("Broad Industry") or "").strip() or UNCLASSIFIED,
         "mcap": _f(summ.get("market_cap")), "pe": _f(summ.get("pe_ratio")), "roe": _f(summ.get("roe")),
         "roce": _f(summ.get("roce")), "dy": _f(summ.get("dividend_yield")), "hi52": hi, "lo52": lo,
-        "name": str(B.get("name") or ""), "close": close, "splits": splits, "divs": divs,
+        "name": str(B.get("name") or ""), "close": close, "splits": splits, "divs": divs, "tech": _tech(hist),
         "fscore": _fscore(B) if B.get("resolved") else None, "partial": not sector,
     }
 
@@ -502,6 +557,12 @@ def _load_infos(symbols):
 @st.cache_data(ttl=3600, show_spinner=False, max_entries=8)
 def _bench_cached(tickers: tuple):
     import yfinance as yf
+    for mod in ("quant_data", "home_page"):                 # these wrap yf.download so simultaneous downloads take turns
+        try:
+            getattr(__import__(mod), "_lock_yfinance")()
+            break
+        except Exception:
+            continue
     for t in tickers:
         try:
             df = yf.download(t, period="10y", interval="1d", progress=False, auto_adjust=True, threads=False)
@@ -533,6 +594,16 @@ def _bench(name):
 def holding_news(symbols, names, days):
     if _fetch_news_for_stock is None or not symbols:
         return {}
+    key = (tuple(symbols), days)
+    hit = st.session_state.get("_pf_news")
+    if hit and hit[0] == key and time.time() - hit[1] < 600:
+        return hit[2]
+    out = _holding_news(symbols, names, days)
+    st.session_state["_pf_news"] = (key, time.time(), out)
+    return out
+
+
+def _holding_news(symbols, names, days):
 
     def one(sym):
         try:
@@ -668,7 +739,7 @@ def aggregate(alots, quotes, infos, plans, book_filter, rmap, news):
             chg = (ltp / prev - 1) * 100
         value = qty * ltp if ltp is not None else None
         books = sorted({l["book"] for l in ls})
-        plan_key = (books[0], sym) if len(books) == 1 else (book_filter if book_filter != "ALL BOOKS" else books[0], sym)
+        plan_key = (books[0], sym) if len(books) == 1 else (book_filter if book_filter != ALL_BOOKS else books[0], sym)
         plan = plans.get(plan_key) or {}
         sl, tgt = plan.get("sl"), plan.get("target")
         avg = invested / qty if qty else 0.0
@@ -687,7 +758,7 @@ def aggregate(alots, quotes, infos, plans, book_filter, rmap, news):
             "day_pnl": qty * (ltp - prev) if (ltp is not None and prev) else None,
             "lots": sorted(ls, key=lambda l: (l["date"] or date.min)), "books": books, "split_adj": any(l["factor"] != 1 for l in ls),
             "sl": sl, "target": tgt, "risk": risk, "reward": reward, "r_mult": r_mult, "sl_hit": sl is not None and ltp is not None and ltp <= sl,
-            "stage": _stage_for(info, rmap), "news_n": len(arts), "tone": _news_tone(arts), "first_date": min((l["date"] for l in ls if l["date"]), default=None),
+            "tech": info.get("tech"), "stage": _stage_for(info, rmap), "news_n": len(arts), "tone": _news_tone(arts), "first_date": min((l["date"] for l in ls if l["date"]), default=None),
         })
     total = sum(h["value"] for h in out if h["value"] is not None)
     for h in out:
@@ -1141,7 +1212,7 @@ def build_flags(A, holds, news, days_label):
     if A["tot"]["n_valid"] < n:
         add("watch", "Missing prices", f'{n - A["tot"]["n_valid"]} holding(s) have no live price and are excluded from totals.')
     if A.get("problems"):
-        add("alert", "Transaction data needs attention", A["problems"][0] + (f" (+{len(A['problems']) - 1} more — see TRANSACTIONS)" if len(A["problems"]) > 1 else ""))
+        add("alert", "Transaction data needs attention", A["problems"][0] + (f" (+{len(A['problems']) - 1} more, see Transactions)" if len(A["problems"]) > 1 else ""))
     adj = [h["symbol"] for h in holds if h["split_adj"]]
     if adj:
         add("info", "Adjusted for splits / bonus", "Quantities and buy prices adjusted automatically for: " + ", ".join(adj[:8]) + ".")
@@ -1153,8 +1224,8 @@ def build_flags(A, holds, news, days_label):
 def _layout(fig, h=260, margin=(0, 0, 0, 0), legend=False):
     fig.update_layout(height=h, margin=dict(l=margin[0], r=margin[1], t=margin[2], b=margin[3]),
                       paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", showlegend=legend,
-                      font=dict(family="Inter, sans-serif", size=11, color=T2),
-                      hoverlabel=dict(bgcolor=DARK2, bordercolor=BORDER, font=dict(family="JetBrains Mono, monospace", size=11, color=IVORY)))
+                      font=dict(family="Inter, sans-serif", size=12, color=T2),
+                      hoverlabel=dict(bgcolor=DARK2, bordercolor=BORDER, font=dict(family="Inter, sans-serif", size=11, color=IVORY)))
     return fig
 
 
@@ -1187,7 +1258,7 @@ def _fig_growth(df, bench_label):
     _layout(fig, 310, (0, 6, 6, 0), legend=True)
     fig.update_layout(legend=dict(orientation="h", y=1.08, x=0, font=dict(size=10)), hovermode="x unified")
     fig.update_xaxes(showgrid=False, linecolor=BORDER)
-    fig.update_yaxes(showgrid=True, gridcolor="#161616", zeroline=False)
+    fig.update_yaxes(showgrid=True, gridcolor="#1E1E22", zeroline=False)
     top = float(df[[c for c in ("Value", "Net invested", "Benchmark") if c in df]].max().max())
     _inr_axis(fig, 0.0, top * 1.05 if top > 0 else 1.0)
     return fig
@@ -1203,13 +1274,13 @@ def _fig_twr(df, bench_label):
     _layout(fig, 260, (0, 6, 6, 0), legend=True)
     fig.update_layout(legend=dict(orientation="h", y=1.1, x=0), hovermode="x unified")
     fig.update_xaxes(showgrid=False)
-    fig.update_yaxes(gridcolor="#161616")
+    fig.update_yaxes(gridcolor="#1E1E22")
     return fig
 
 
 def _fig_heat_months(m: pd.Series):
     t = pd.DataFrame({"y": m.index.year, "m": m.index.month, "v": m.values}).pivot(index="y", columns="m", values="v").reindex(columns=range(1, 13))
-    names = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+    names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
     z = t.values
     text = [[("" if pd.isna(v) else f"{v:+.1f}") for v in row] for row in z]
     fig = go.Figure(go.Heatmap(z=z, x=names, y=[str(y) for y in t.index], text=text, texttemplate="%{text}", zmid=0, showscale=False,
@@ -1226,8 +1297,8 @@ def _fig_donut(sectors, scol, total_value):
                            marker=dict(colors=[scol[s["name"]] for s in rows], line=dict(color="#050505", width=2)),
                            textinfo="percent", textfont=dict(size=10, color="#fff"), hovertemplate="<b>%{label}</b><br>%{percent}<extra></extra>"))
     _layout(fig, 250)
-    fig.add_annotation(text=f"<b>{_short(total_value)}</b><br><span style='font-size:9px'>VALUE</span>", showarrow=False,
-                       font=dict(size=14, color=IVORY, family="JetBrains Mono, monospace"))
+    fig.add_annotation(text=f"<b>{_short(total_value)}</b><br><span style='font-size:11px'>value</span>", showarrow=False,
+                       font=dict(size=14, color=IVORY, family="Inter, sans-serif"))
     return fig
 
 
@@ -1236,7 +1307,7 @@ def _fig_hbars(labels, vals, colors, suffix="%", h=None, fmt="{:.1f}"):
                            text=[(fmt.format(v) + suffix) if suffix else _short(v) for v in vals], textposition="outside", cliponaxis=False,
                            textfont=dict(size=10, color=T2), hovertemplate="<b>%{y}</b> %{x:,.2f}<extra></extra>"))
     _layout(fig, h or max(200, 26 * len(labels) + 40), (0, 60, 0, 0))
-    fig.update_yaxes(autorange="reversed", showgrid=False, tickfont=dict(color=IVORY, size=10, family="JetBrains Mono, monospace"))
+    fig.update_yaxes(autorange="reversed", showgrid=False, tickfont=dict(color=IVORY, size=10, family="Inter, sans-serif"))
     fig.update_xaxes(visible=False)
     return fig
 
@@ -1281,7 +1352,7 @@ def _fig_corr(corr):
 
 def _fig_gauge(score):
     color = GREEN if score >= 75 else AMBER if score >= 50 else RED
-    fig = go.Figure(go.Indicator(mode="gauge+number", value=score, number=dict(font=dict(size=34, color=color, family="JetBrains Mono, monospace")),
+    fig = go.Figure(go.Indicator(mode="gauge+number", value=score, number=dict(font=dict(size=34, color=color, family="Inter, sans-serif")),
                                  gauge=dict(axis=dict(range=[0, 100], tickcolor=T3, tickfont=dict(size=8, color=T3)), bar=dict(color=color, thickness=0.28),
                                             bgcolor="#111", borderwidth=0,
                                             steps=[dict(range=[0, 50], color="#241211"), dict(range=[50, 75], color="#241f10"), dict(range=[75, 100], color="#10241a")])))
@@ -1295,7 +1366,7 @@ def _flags_html(flags, limit=None):
     out = ""
     for f in (flags[:limit] if limit else flags):
         c = colors[f["level"]]
-        out += (f'<div class="pf-flag" style="--fc:{c}"><div class="lv">{f["level"].upper()}</div>'
+        out += (f'<div class="pf-flag" style="--fc:{c}"><div class="lv">{f["level"].capitalize()}</div>'
                 f'<div><div class="ft">{_esc(f["title"])}</div><div class="fd">{_esc(f["detail"])}</div></div></div>')
     return out
 
@@ -1303,7 +1374,7 @@ def _flags_html(flags, limit=None):
 def _stage_pill(stage):
     if not stage:
         return '<span style="color:#444">—</span>'
-    return f'<span class="pf-pill" style="color:{STAGE_COLORS.get(stage, T2)}">{_esc(stage)}</span>'
+    return f'<span class="pf-pill" style="color:{STAGE_COLORS.get(stage, T2)}">{_esc(str(stage).capitalize())}</span>'
 
 
 def _table(head, rows, right=()):
@@ -1356,7 +1427,7 @@ def _add_buy_form(supabase, store, D, key="main", preset="", book=None):
         when = c4.date_input("Buy date", value=_today(), max_value=_today())
         bk = c5.selectbox("Book", books, index=books.index(book) if book in books else 0)
         note = st.text_input("Note (optional)", placeholder="e.g. breakout entry")
-        go_btn = st.form_submit_button("＋ ADD BUY", type="primary", use_container_width=True)
+        go_btn = st.form_submit_button("Add buy", type="primary", use_container_width=True)
     if not go_btn:
         return
     s = ud.clean_symbol(sym)
@@ -1381,7 +1452,7 @@ def _add_buy_form(supabase, store, D, key="main", preset="", book=None):
             store.upsert("portfolio_lot_meta", {"lot_id": lid, "book": bk})
     if msg:
         st.warning(msg)
-    st.toast(f"BUY {s}: {qty:g} @ {_inr(price)} · {bk}")
+    st.toast(f"Bought {s}: {qty:g} at {_inr(price)} · {bk}")
     st.rerun()
 
 
@@ -1403,7 +1474,7 @@ def _sell_form(store, D, alots, key="main", preset_sym=None, preset_book=None):
         price = c3.number_input("Sell price (₹)", min_value=0.0, value=0.0, step=0.05, format="%.2f")
         when = c4.date_input("Sell date", value=_today(), max_value=_today())
         note = st.text_input("Note (optional)", placeholder="e.g. target hit, trailing SL")
-        ok = st.form_submit_button("− RECORD SELL", type="primary", use_container_width=True)
+        ok = st.form_submit_button("Record sell", type="primary", use_container_width=True)
     if not ok:
         return
     book, sym = options[labels.index(pick)]
@@ -1423,14 +1494,14 @@ def _sell_form(store, D, alots, key="main", preset_sym=None, preset_book=None):
     if err:
         st.error(f"Could not save the sell: {err}")
         return
-    st.toast(f"SELL {sym}: {qty:g} @ {_inr(price)} · {book}")
+    st.toast(f"Sold {sym}: {qty:g} at {_inr(price)} · {book}")
     st.rerun()
 
 
 # ═════════════════════════ views ═════════════════════════
 def _empty_state():
     st.markdown('<div class="pf-empty"><div class="a">Build your portfolio review</div>'
-                '<div class="b">Open <b>TRANSACTIONS</b> and add each purchase: stock, quantity, buy price, date and book.<br>'
+                '<div class="b">Open <b>Transactions</b> and add each purchase: stock, quantity, buy price, date and book.<br>'
                 'Record sells there too. The page then shows exposure, risk, performance versus the index, realised gains and tax, '
                 'dividends, a rebalance plan and an automatic health check.</div></div>', unsafe_allow_html=True)
 
@@ -1440,7 +1511,7 @@ def _view_dashboard(A, holds, news, days_label, bench_label):
     xi = A["xirr"]
     _kpis([
         _kpi("Invested (open)", _short(T["inv"]), f'{T["n"]} holdings · {T["n_lots"]} lots', accent=T3),
-        _kpi("Current value", _short(T["val"]), "live · delayed per source", accent=CYAN),
+        _kpi("Current value", _short(T["val"]), "last prices", accent=CYAN),
         _kpi("Unrealised P&L", _short(T["pnl"]), _pct(T["pnl_pct"]), _col(T["pnl"]), _col(T["pnl"]), _col(T["pnl"])),
         _kpi("Day P&L", _short(T["day"]), _pct(T["day_pct"]), _col(T["day"]), _col(T["day"]), _col(T["day"])),
         _kpi("Realised P&L", _short(A["realised_total"]), f'{A["realised_n"]} matched sells', _col(A["realised_total"]), T2, PURPLE),
@@ -1448,7 +1519,7 @@ def _view_dashboard(A, holds, news, days_label, bench_label):
              _col(xi) if xi is not None else T3, T2, PURPLE),
         _kpi("Dividends (est.)", _short(A["div_total"]), "gross, since you bought", GREEN, T2, GREEN),
         _kpi("Portfolio heat", _pct(A["heat"], 1, False) if A["heat"] is not None else "—",
-             "₹ at risk to stops ÷ value" if A["heat"] is not None else "set stop-losses in HOLDINGS", AMBER if (A["heat"] or 0) > 6 else IVORY, T2, RED),
+             "₹ at risk to stops ÷ value" if A["heat"] is not None else "set stop-losses in Holdings", AMBER if (A["heat"] or 0) > 6 else IVORY, T2, RED),
     ])
     if T["n_valid"] < T["n"]:
         st.caption("Some holdings have no live price right now and are excluded from the totals.")
@@ -1471,7 +1542,7 @@ def _view_dashboard(A, holds, news, days_label, bench_label):
         if A["score"] is not None:
             _plot(_fig_gauge, "pf_gauge", A["score"])
             s = A["score"]
-            lab, c = ("WELL DIVERSIFIED", GREEN) if s >= 75 else ("MODERATE", AMBER) if s >= 50 else ("CONCENTRATED", RED)
+            lab, c = ("Well diversified", GREEN) if s >= 75 else ("Moderate", AMBER) if s >= 50 else ("Concentrated", RED)
             st.markdown(f'<div class="pf-score" style="color:{c}">{lab}</div>', unsafe_allow_html=True)
         st.markdown(_flags_html(A["flags"], 4), unsafe_allow_html=True)
     d1, d2, d3 = st.columns(3)
@@ -1505,15 +1576,15 @@ def _view_holdings(supabase, store, D, A, holds, alots, news, on_open, book_filt
                             "P&L": None if h["pnl"] is None else round(h["pnl"], 2), "P&L %": None if h["pnl_pct"] is None else round(h["pnl_pct"], 2),
                             "Weight %": None if h["weight"] is None else round(h["weight"], 2), "Stop-loss": h["sl"], "Target": h["target"],
                             "Risk to SL": h["risk"], "Sector stage": h["stage"]} for h in holds])
-    c4.download_button("⤓ EXPORT CSV", export.to_csv(index=False), file_name="arka_portfolio.csv", mime="text/csv", key="pf_csv", use_container_width=True)
+    c4.download_button("Export CSV", export.to_csv(index=False), file_name="arka_portfolio.csv", mime="text/csv", key="pf_csv", use_container_width=True)
     rows = [h for h in holds if (sec_f == "All sectors" or h["sector"] == sec_f) and (not q or q in h["symbol"])]
     rows = sorted(rows, key=sorts[sort])
     trs = []
     for x in rows:
         arts = news.get(x["symbol"]) or []
         dot = f'<span class="pf-dot" title="{_esc(str(len(arts)) + " headlines · latest: " + arts[0].get("title", ""), True)}"></span>' if arts else ""
-        books = "".join(f'<span class="pf-chip" style="--c:{T2}">{_esc(b)}</span>' for b in x["books"]) if book_filter == "ALL BOOKS" else ""
-        adj = f'<span class="pf-chip" style="--c:{CYAN}" title="Adjusted for splits / bonus">ADJ</span>' if x["split_adj"] else ""
+        books = "".join(f'<span class="pf-chip" style="--c:{T2}">{_esc(b)}</span>' for b in x["books"]) if book_filter == ALL_BOOKS else ""
+        adj = f'<span class="pf-chip" style="--c:{CYAN}" title="Adjusted for splits / bonus">Adjusted</span>' if x["split_adj"] else ""
         name = f'<div class="sub">{_esc(x["name"][:34])}</div>' if x["name"] else ""
         chip = f'<span class="pf-chip" style="--c:{scol.get(x["sector"], T3)}">{_esc(x["sector"][:22])}</span>'
         w = x["weight"]
@@ -1521,29 +1592,32 @@ def _view_holdings(supabase, store, D, A, holds, alots, news, on_open, book_filt
         if x["sl"] is not None:
             slc = RED if x["sl_hit"] else T2
             plan = (f'<span style="color:{slc}">SL {_inr(x["sl"])}</span><div class="sub">'
-                    f'{"STOP HIT" if x["sl_hit"] else "risk " + _short(x["risk"])}{" · R " + format(x["r_mult"], ".1f") if x["r_mult"] is not None else ""}</div>')
+                    f'{"Stop hit" if x["sl_hit"] else "risk " + _short(x["risk"])}{" · R " + format(x["r_mult"], ".1f") if x["r_mult"] is not None else ""}</div>')
         else:
-            plan = '<span style="color:#444">set in DETAILS</span>'
+            plan = '<span style="color:#55555c">not set</span>'
         tgt = (f'{_inr(x["target"])}<div class="sub">{"+" + _short(x["reward"]) if x["reward"] else "reached"}</div>' if x["target"] is not None else "—")
         tone = x.get("tone")
         tone_html = (f'<span style="color:{GREEN if tone > 0.3 else RED if tone < -0.3 else T2}">{x["news_n"]} · {tone:+.1f}</span>'
                      if tone is not None else '<span style="color:#444">—</span>')
         fs = x.get("fscore")
         fs_html = (f'<span style="color:{GREEN if fs[0] / fs[1] >= 0.75 else AMBER if fs[0] / fs[1] >= 0.45 else RED}">{fs[0]}/{fs[1]}</span>' if fs else '<span style="color:#444">—</span>')
-        trs.append([f'<span class="pf-sym">{_esc(x["symbol"])}</span>{dot}{name}{chip}{books}{adj}', _qty(x["qty"]), _inr(x["avg"]), _inr(x["ltp"]),
+        trs.append([f'<span class="pf-sym" data-ak-sym="{_esc(x["symbol"], True)}" title="Open {_esc(x["symbol"], True)}">{_esc(x["symbol"])}</span>{dot}{name}{chip}{books}{adj}', _qty(x["qty"]), _inr(x["avg"]), _inr(x["ltp"]),
                     f'<span style="color:{_col(x["chg"])}">{_pct(x["chg"])}</span>', _inr(x["invested"], 0), _inr(x["value"], 0),
                     f'<span style="color:{_col(x["pnl"])}">{_inr(x["pnl"], 0)}</span><div class="sub" style="color:{_col(x["pnl"])}">{_pct(x["pnl_pct"])}</div>',
                     wbar, plan, tgt, _stage_pill(x["stage"]), tone_html, fs_html])
     _table(["Stock", "Qty", "Avg cost", "LTP", "Day", "Invested", "Value", "P&L", "Weight", "Stop-loss", "Target", "Sector stage", "News", "Quality"],
            trs, right={1, 2, 3, 4, 5, 6, 7})
-    st.caption("Yellow dot = fresh headlines. Sector stage comes from Money Flow → Sector Ranking (load it there once per session). "
-               "Quality = Piotroski-style score from Research. ADJ = split / bonus adjusted. P&L excludes charges.")
+    st.caption("Yellow dot: fresh headlines. Sector stage comes from Money flow → Sector ranking (open it there once per session). "
+               "Quality is the Piotroski-style score from Research. Adjusted means split or bonus adjusted. P&L excludes charges.")
     with st.container(key="pf_act"):
         a1, a2, a3 = st.columns([3, 1, 1])
-        pick = a1.selectbox("Selected holding", [h["symbol"] for h in rows] or [h["symbol"] for h in holds], key="pf_pick", label_visibility="collapsed")
-        if a2.button("OPEN ▸", key="pf_open", use_container_width=True, type="primary") and pick:
+        opts = [h["symbol"] for h in rows] or [h["symbol"] for h in holds]
+        if st.session_state.get("pf_pick") not in opts:
+            st.session_state.pop("pf_pick", None)
+        pick = a1.selectbox("Selected holding", opts, key="pf_pick", label_visibility="collapsed")
+        if a2.button("Open stock", key="pf_open", use_container_width=True, type="primary") and pick and on_open is not None:
             on_open(pick)
-        if a3.button("DETAILS / MANAGE", key="pf_det", use_container_width=True) and pick:
+        if a3.button("Details and manage", key="pf_det", use_container_width=True) and pick:
             st.session_state["pf_sel"] = pick
     if st.session_state.get("pf_sel"):
         _detail_panel(supabase, store, D, holds, alots, book_filter)
@@ -1560,7 +1634,7 @@ def _detail_panel(supabase, store, D, holds, alots, book_filter):
     top[0].markdown(f'<div class="pf-note"><b>{_esc(h["name"] or sym)}</b> · {_qty(h["qty"])} shares · average cost {_inr(h["avg"])} · '
                     f'invested {_inr(h["invested"], 0)} · value {_inr(h["value"], 0)} · P&L <span style="color:{_col(h["pnl"])}">{_inr(h["pnl"], 0)} ({_pct(h["pnl_pct"])})</span>'
                     f'{" · <b>split / bonus adjusted</b>" if h["split_adj"] else ""}</div>', unsafe_allow_html=True)
-    if top[1].button("CLOSE", key="pf_det_close", use_container_width=True):
+    if top[1].button("Close", key="pf_det_close", use_container_width=True):
         st.session_state.pop("pf_sel", None)
         st.rerun()
     today = _today()
@@ -1569,7 +1643,7 @@ def _detail_panel(supabase, store, D, holds, alots, book_filter):
         lp = (h["ltp"] - l["price"]) * l["open"] if h["ltp"] is not None else None
         lpp = (h["ltp"] / l["price"] - 1) * 100 if (h["ltp"] is not None and l["price"]) else None
         lt_on = _add_months(l["date"], 12) if l["date"] else None
-        term = "—" if not lt_on else ("LONG-TERM" if today > lt_on else f"LT on {lt_on:%d %b %y}")
+        term = "—" if not lt_on else ("Long-term" if today > lt_on else f"Long-term on {lt_on:%d %b %y}")
         adj = f'<div class="sub">entered {_qty(l["raw_qty"])} @ {_inr(l["raw_price"])} · ×{l["factor"]:g}</div>' if l["factor"] != 1 else ""
         rows.append([_esc(l["date"].isoformat() if l["date"] else "—"), _esc(l["book"]), _qty(l["open"]) + (f'<div class="sub">of {_qty(l["qty"])}</div>' if l["open"] < l["qty"] - 1e-9 else ""),
                      _inr(l["price"]) + adj, _inr(l["open"] * l["price"], 0), f'<span style="color:{_col(lp)}">{_inr(lp, 0)}</span>',
@@ -1579,13 +1653,13 @@ def _detail_panel(supabase, store, D, holds, alots, book_filter):
     p1, p2 = st.columns(2)
     with p1:
         _ph("Trade plan", "stop-loss and target for this holding")
-        plan_book = h["books"][0] if len(h["books"]) == 1 else (book_filter if book_filter != "ALL BOOKS" else h["books"][0])
+        plan_book = h["books"][0] if len(h["books"]) == 1 else (book_filter if book_filter != ALL_BOOKS else h["books"][0])
         with st.form(f"pf_plan_{sym}"):
             a, b = st.columns(2)
             sl = a.number_input("Stop-loss (₹)", min_value=0.0, value=float(h["sl"] or 0.0), step=0.05, format="%.2f")
             tg = b.number_input("Target (₹)", min_value=0.0, value=float(h["target"] or 0.0), step=0.05, format="%.2f")
             st.caption(f"Saved for book: {plan_book}. Enter 0 to clear.")
-            if st.form_submit_button("SAVE PLAN", type="primary", use_container_width=True):
+            if st.form_submit_button("Save plan", type="primary", use_container_width=True):
                 if sl and tg and tg <= sl:
                     st.error("Target must be above the stop-loss.")
                 else:
@@ -1602,10 +1676,10 @@ def _detail_panel(supabase, store, D, holds, alots, book_filter):
         with st.form(f"pf_move_{sym}"):
             li = st.selectbox("Lot", range(len(lot_labels)), format_func=lambda i: lot_labels[i])
             nb = st.selectbox("New book", books)
-            if st.form_submit_button("MOVE LOT", use_container_width=True):
+            if st.form_submit_button("Move lot", use_container_width=True):
                 l = h["lots"][li]
                 if any(s["symbol"] == sym and s["book"] == l["book"] for s in D["sells"]):
-                    st.warning("This position has recorded sells in its current book; they stay there. Check TRANSACTIONS afterwards.")
+                    st.warning("This position has recorded sells in its current book; they stay there. Check Transactions afterwards.")
                 err = store.upsert("portfolio_lot_meta", {"lot_id": str(l["id"]), "book": nb})
                 st.error(err) if err else st.rerun()
     s1, s2 = st.columns(2)
@@ -1617,7 +1691,7 @@ def _detail_panel(supabase, store, D, holds, alots, book_filter):
         _sell_form(store, D, alots, key=f"sell_{sym}", preset_sym=sym, preset_book=h["books"][0] if len(h["books"]) == 1 else None)
     with st.expander("Danger zone · delete lots"):
         li = st.selectbox("Lot to delete", range(len(h["lots"])), format_func=lambda i: lot_labels[i], key=f"pf_del_pick_{sym}")
-        if st.button("DELETE THIS LOT", key=f"pf_del_lot_{sym}"):
+        if st.button("Delete this lot", key=f"pf_del_lot_{sym}"):
             err = ud.delete_lot(supabase, h["lots"][li]["id"])
             if err:
                 st.error(err)
@@ -1625,7 +1699,7 @@ def _detail_panel(supabase, store, D, holds, alots, book_filter):
                 store.delete("portfolio_lot_meta", lot_id=str(h["lots"][li]["id"]))
                 st.rerun()
         sure = st.checkbox(f"Yes, delete every {sym} lot shown here ({len(h['lots'])}) and its recorded sells in these books", key=f"pf_sure_{sym}")
-        if st.button(f"REMOVE {sym} FROM {' / '.join(h['books']).upper()}", disabled=not sure, key=f"pf_rm_all_{sym}"):
+        if st.button(f"Remove {sym} from {' / '.join(h['books'])}", disabled=not sure, key=f"pf_rm_all_{sym}"):
             errs = [e for e in (ud.delete_lot(supabase, l["id"]) for l in h["lots"]) if e]
             for l in h["lots"]:
                 store.delete("portfolio_lot_meta", lot_id=str(l["id"]))
@@ -1637,6 +1711,181 @@ def _detail_panel(supabase, store, D, holds, alots, book_filter):
             else:
                 st.session_state.pop("pf_sel", None)
                 st.rerun()
+
+
+# ═════════════════════════ swing desk ═════════════════════════
+def _chandelier(tech, since, mult=3.0):
+    """Highest high since the buy date minus `mult` × ATR: a common trailing line. None when history is missing."""
+    try:
+        if not tech or not tech.get("atr"):
+            return None
+        highs = [hv for d, hv in zip(tech["dates"], tech["highs"]) if since is None or d >= since]
+        return (max(highs) - mult * tech["atr"]) if highs else None
+    except Exception:
+        return None
+
+
+def journal_stats(realised):
+    """Win rate, payoff, expectancy and holding time from FIFO-matched sells (each matched lot is one trade)."""
+    tr = [x for x in realised if x.get("cost")]
+    if not tr:
+        return None
+    rets = [x["gain"] / x["cost"] * 100 for x in tr]
+    wins = [(x, r) for x, r in zip(tr, rets) if x["gain"] > 0]
+    loss = [(x, r) for x, r in zip(tr, rets) if x["gain"] <= 0]
+    gw, gl = sum(x["gain"] for x, _ in wins), -sum(x["gain"] for x, _ in loss)
+    aw = sum(r for _, r in wins) / len(wins) if wins else 0.0
+    al = sum(r for _, r in loss) / len(loss) if loss else 0.0
+    days = lambda rows: (sum(x["days"] for x, _ in rows if x["days"] is not None) / max(1, sum(1 for x, _ in rows if x["days"] is not None))) if rows else None
+    streak = worst = 0
+    for x in sorted(tr, key=lambda x: (x["sell_date"] or date.min)):
+        streak = streak + 1 if x["gain"] <= 0 else 0
+        worst = max(worst, streak)
+    by_month = defaultdict(lambda: [0, 0, 0.0])
+    for x in tr:
+        if x["sell_date"]:
+            k = x["sell_date"].strftime("%Y-%m")
+            by_month[k][0] += 1
+            by_month[k][1] += 1 if x["gain"] > 0 else 0
+            by_month[k][2] += x["gain"]
+    return {"n": len(tr), "win": len(wins) / len(tr) * 100, "avg_win": aw, "avg_loss": al, "payoff": (aw / abs(al)) if al else None,
+            "exp": sum(rets) / len(rets), "pf": (gw / gl) if gl > 0 else None, "days_win": days(wins), "days_loss": days(loss),
+            "best": max(rets), "worst": min(rets), "streak": worst, "net": gw - gl, "months": dict(sorted(by_month.items(), reverse=True))}
+
+
+def _view_swing(A, holds, store, D):
+    today = _today()
+    tot = A["tot"]["val"] or 0.0
+
+    # ── what needs attention ──
+    rows, attention = [], []
+    n_stop = n_below21 = 0
+    for h in holds:
+        t, ltp = h.get("tech") or {}, h["ltp"]
+        held = (today - h["first_date"]).days if h.get("first_date") else None
+        e21, e10, s50, atr = t.get("ema21"), t.get("ema10"), t.get("sma50"), t.get("atr")
+        notes = []
+        if h["sl_hit"]:
+            notes.append(("Stop hit", RED))
+        elif h["sl"] is None:
+            notes.append(("No stop set", YELLOW))
+        elif ltp is not None and atr and (ltp - h["sl"]) < atr:
+            notes.append(("Stop within one day's range", AMBER))
+        if ltp is not None and e21 and ltp < e21:
+            n_below21 += 1
+            notes.append(("Below 21 EMA", AMBER))
+        if ltp is not None and s50 and ltp < s50:
+            notes.append(("Below 50-day", RED))
+        if h["r_mult"] is not None and held is not None and held >= 15 and h["r_mult"] < 0.5:
+            notes.append((f"Stalled: {held} days, under 0.5R", T2))
+        if h["target"] is not None and ltp is not None and ltp >= h["target"]:
+            notes.append(("Target reached", GREEN))
+        if h["sl"] is not None:
+            n_stop += 1
+        if notes and notes[0][1] in (RED, AMBER, YELLOW):
+            attention.append((h, notes))
+        trend = "—"
+        if ltp is not None and e21:
+            ok = [ltp >= x for x in (e10, e21, s50) if x]
+            trend = (f'<span style="color:{GREEN}">Above all</span>' if all(ok) else f'<span style="color:{RED}">Below all</span>' if not any(ok)
+                     else f'<span style="color:{AMBER}">Mixed</span>')
+            trend += f'<div class="sub">10 / 21 / 50: {" ".join("✓" if x else "✕" for x in ok)}</div>'
+        ch = _chandelier(t, h.get("first_date"))
+        lv = lambda v: "—" if v is None else f'{_inr(v)}<div class="sub">{_pct((v / ltp - 1) * 100, 1) if ltp else ""}</div>'
+        rows.append([
+            f'<span class="pf-sym" data-ak-sym="{_esc(h["symbol"], True)}">{_esc(h["symbol"])}</span><div class="sub">{f"{held} days" if held is not None else "no buy date"}</div>',
+            f'<span style="color:{_col(h["pnl_pct"])}">{_pct(h["pnl_pct"], 1)}</span><div class="sub">{_short(h["pnl"])}</div>',
+            (f'<span style="color:{_col(h["r_mult"])}">{h["r_mult"]:+.2f}R</span>' if h["r_mult"] is not None
+             else f'<span style="color:{GREEN}">Profit locked</span><div class="sub">stop above cost</div>' if (h["sl"] is not None and h["avg"] <= h["sl"])
+             else '<span style="color:#55555c">needs a stop</span>'),
+            lv(h["sl"]) if h["sl"] is not None else '<span style="color:#55555c">not set</span>',
+            trend, lv(e21), lv(t.get("lo10")), lv(ch),
+            (f'{atr / ltp * 100:.1f}%<div class="sub">{_inr(atr)}</div>' if (atr and ltp) else "—"),
+            (f'{t["rsi"]:.0f}' if t.get("rsi") is not None else "—"),
+            "".join(f'<span class="pf-chip" style="--c:{c}">{_esc(n)}</span>' for n, c in notes) or f'<span style="color:{GREEN}">In order</span>'])
+    risk_sum = sum(h["risk"] or 0 for h in holds if h["sl"] is not None)
+    _kpis([
+        _kpi("Open risk to stops", _short(risk_sum) if n_stop else "—", f"{risk_sum / tot * 100:.1f}% of value" if (tot and n_stop) else "set stops to see it", RED if (tot and risk_sum / tot > 0.06) else IVORY, T2, RED),
+        _kpi("Positions with a stop", f"{n_stop} of {len(holds)}", "every swing trade should have one", IVORY if n_stop == len(holds) else YELLOW, T2, AMBER),
+        _kpi("Need attention", str(len(attention)), "stop hit, no stop, or trend broken", RED if attention else GREEN, T2, RED if attention else GREEN),
+        _kpi("Below the 21 EMA", f"{n_below21} of {len(holds)}", "daily close against the 21-day EMA", AMBER if n_below21 else IVORY, T2, CYAN),
+    ])
+    if not holds:
+        _note("No open positions. The position size calculator and your trade journal are below.")
+    else:
+        _ph("Open trades", "trend, risk and the levels traders trail a stop with")
+        _table(["Stock", "P&L", "Open R", "Your stop", "Trend", "21 EMA", "10-day low", "3 × ATR trail", "ATR", "RSI", "Check"], rows, right={1, 2, 3, 5, 6, 7, 8, 9})
+        st.caption("Open R is the profit in units of the risk you took (buy price minus stop). The percentages under each level are its distance from the "
+                   "last price. The 3 × ATR trail is the highest high since you bought minus three times the 14-day ATR. These are reference levels "
+                   "from daily candles, not instructions; set your own stop in Holdings → Details and manage.")
+        missing = [h["symbol"] for h in holds if not h.get("tech")]
+        if missing:
+            st.caption("No price history yet for: " + ", ".join(missing[:8]) + ". Press Refresh to retry.")
+
+    # ── position size calculator ──
+    _ph("Position size calculator", "how many shares to buy so a stop-out costs exactly the risk you choose")
+    c1, c2, c3, c4 = st.columns(4)
+    cap = c1.number_input("Trading capital (₹)", min_value=0.0, value=float(round(tot, -3) or 500000.0), step=10000.0, format="%.0f", key="pf_ps_cap")
+    rpct = c2.number_input("Risk per trade (%)", min_value=0.1, max_value=10.0, value=1.0, step=0.25, key="pf_ps_risk")
+    entry = c3.number_input("Entry price (₹)", min_value=0.0, value=0.0, step=0.5, format="%.2f", key="pf_ps_entry")
+    stop = c4.number_input("Stop-loss (₹)", min_value=0.0, value=0.0, step=0.5, format="%.2f", key="pf_ps_stop")
+    if entry > 0 and stop > 0:
+        if stop >= entry:
+            _note("The stop-loss must be below the entry price for a long trade.")
+        else:
+            per = entry - stop
+            risk_rs = cap * rpct / 100
+            qty = math.floor(risk_rs / per)
+            val = qty * entry
+            capped = val > cap and entry > 0
+            if capped:
+                qty = math.floor(cap / entry)
+                val = qty * entry
+            _kpis([
+                _kpi("Shares to buy", f"{qty:,}", "limited by capital" if capped else f"risk {_inr(per)} per share", accent=AMBER),
+                _kpi("Position value", _short(val), f"{val / cap * 100:.0f}% of capital" if cap else "", accent=CYAN),
+                _kpi("Loss if stopped", _short(qty * per), f"{qty * per / cap * 100:.2f}% of capital" if cap else "", RED, T2, RED),
+                _kpi("Stop distance", f"{per / entry * 100:.1f}%", "below entry", accent=T3),
+            ])
+            st.markdown('<div class="pf-card"><h4>Price at each reward multiple</h4>'
+                        + "".join(f'<div class="pf-lv"><span>{k}R</span><b>{_inr(entry + k * per)}</b><em>{_pct(k * per / entry * 100, 1)} · {_short(qty * k * per)}</em></div>' for k in (1, 2, 3, 5))
+                        + "</div>", unsafe_allow_html=True)
+            if qty == 0:
+                _note("The risk amount is smaller than the risk on a single share. Raise the risk, or use a tighter stop.")
+    else:
+        _note("Enter an entry price and a stop-loss to see the size.")
+
+    # ── trade journal ──
+    _ph("Trade journal", "from the sells you recorded; each matched lot counts as one trade")
+    J = journal_stats(A["realised"])
+    if not J:
+        _note("No closed trades yet. Record sells in Transactions and this fills in: win rate, average win and loss, expectancy and how long you hold winners against losers.")
+        return
+    pf = "∞" if J["pf"] is None else f'{J["pf"]:.2f}'
+    _kpis([
+        _kpi("Closed trades", str(J["n"]), f'{J["win"]:.0f}% won', accent=T3),
+        _kpi("Expectancy", _pct(J["exp"], 2), "average result per trade", _col(J["exp"]), T2, _col(J["exp"])),
+        _kpi("Average win / loss", f'<span style="color:{GREEN}">{_pct(J["avg_win"], 1)}</span> / <span style="color:{RED}">{_pct(J["avg_loss"], 1)}</span>',
+             f'payoff {J["payoff"]:.2f}' if J["payoff"] else "no losing trades yet", accent=PURPLE),
+        _kpi("Profit factor", pf, "money won ÷ money lost", accent=CYAN),
+        _kpi("Holding time", f'{J["days_win"]:.0f} / {J["days_loss"]:.0f} days' if (J["days_win"] is not None and J["days_loss"] is not None) else "—",
+             "winners / losers", accent=AMBER),
+        _kpi("Net realised", _short(J["net"]), f'longest losing run {J["streak"]}', _col(J["net"]), T2, _col(J["net"])),
+    ])
+    tips = []
+    if J["n"] < 20:
+        tips.append(f'Only {J["n"]} closed trades: these numbers will move a lot until you have 30 or more.')
+    if J["payoff"] and J["win"] and J["exp"] < 0:
+        need = 100 / (1 + J["payoff"])
+        tips.append(f'With a payoff of {J["payoff"]:.2f} you need to win more than {need:.0f}% of trades to make money; you win {J["win"]:.0f}%.')
+    if J["days_win"] is not None and J["days_loss"] is not None and J["days_loss"] > J["days_win"] * 1.3:
+        tips.append(f'You hold losers longer ({J["days_loss"]:.0f} days) than winners ({J["days_win"]:.0f} days). Cutting losers sooner usually raises expectancy.')
+    if tips:
+        _note("<br>".join(_esc(t) for t in tips))
+    mrows = [[datetime.strptime(k, "%Y-%m").strftime("%b %Y"), str(v[0]), f"{v[1] / v[0] * 100:.0f}%", f'<span style="color:{_col(v[2])}">{_short(v[2])}</span>']
+             for k, v in list(J["months"].items())[:12]]
+    _table(["Month", "Trades closed", "Won", "Realised"], mrows, right={1, 2, 3})
+    st.caption("Percentages are on the buy cost of each matched lot, before brokerage and taxes. Informational only, not investment advice.")
 
 
 def _view_analysis(A, holds):
@@ -1656,12 +1905,12 @@ def _view_analysis(A, holds):
                _kpi("Top 5", _num(conc["top5"], 1, "%"), "of portfolio"), _kpi("Effective N", _num(conc["eff_n"], 1), f'behaves like · of {conc["n"]}', accent=CYAN)])
     d1, d2 = st.columns(2)
     with d1:
-        st.markdown('<div class="pf-mini">MARKET-CAP MIX (approximate AMFI buckets)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="pf-mini">Market-cap mix (approximate AMFI buckets)</div>', unsafe_allow_html=True)
         mc = [m for m in A["mcap"] if m["value"] > 0]
         cols = {"Large cap": CYAN, "Mid cap": AMBER, "Small cap": PURPLE, "Unknown": UNCLASSIFIED_COLOR}
         _plot(_fig_hbars, "pf_mcap", [m["name"] for m in mc], [m["weight"] for m in mc], [cols[m["name"]] for m in mc])
     with d2:
-        st.markdown('<div class="pf-mini">UNREALISED P&L BY HOLDING</div>', unsafe_allow_html=True)
+        st.markdown('<div class="pf-mini">Unrealised P&L by holding</div>', unsafe_allow_html=True)
         pv = sorted([h for h in holds if h["pnl"] is not None], key=lambda h: -h["pnl"])[:15]
         _plot(_fig_hbars, "pf_pnlbars", [h["symbol"] for h in pv], [h["pnl"] for h in pv], [_col(h["pnl"]) for h in pv], "")
     _ph("Valuation & quality", "value-weighted across holdings with data")
@@ -1677,7 +1926,7 @@ def _view_analysis(A, holds):
             pos = max(0.0, min(1.0, (h["ltp"] - h["lo52"]) / (h["hi52"] - h["lo52"])))
         rng = f'<span class="pf-rng"><i style="left:{pos * 100:.0f}%"></i></span> <span class="pf-mini">{pos * 100:.0f}%</span>' if pos is not None else "—"
         fs = h.get("fscore")
-        rows.append([f'<b style="color:{AMBER}">{_esc(h["symbol"])}</b><div class="sub">{_esc(h["sector"])}</div>', _num(h["pe"], 1, "x"), _num(h["roe"], 1, "%"),
+        rows.append([f'<b>{_esc(h["symbol"])}</b><div class="sub">{_esc(h["sector"])}</div>', _num(h["pe"], 1, "x"), _num(h["roe"], 1, "%"),
                      _num(h["roce"], 1, "%"), _num(h["dy"], 2, "%"), "—" if h["mcap"] is None else f'₹{h["mcap"]:,.0f} Cr',
                      f"{fs[0]}/{fs[1]}" if fs else "—", rng, _num(h["weight"], 1, "%")])
     _table(["Stock", "P/E", "ROE", "ROCE", "Div yld", "Mkt cap", "Quality", "52W position", "Weight"], rows, right={1, 2, 3, 4, 5, 6, 8})
@@ -1756,7 +2005,7 @@ def _view_performance(A, holds, store, D, bench_label):
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key="pf_snaps")
     else:
         _note(f"{len(snaps)} snapshot(s) recorded so far. The curve appears from the second day you open the portfolio"
-              + (" — create the new tables (TRANSACTIONS → Storage) to keep it permanently." if "portfolio_snapshots" in store.missing else "."))
+              + (" — create the new tables (Transactions → Storage) to keep it permanently." if "portfolio_snapshots" in store.missing else "."))
 
 
 def _view_risk(A, holds, bench_label):
@@ -1784,7 +2033,7 @@ def _view_risk(A, holds, bench_label):
                 for h in sorted(with_sl, key=lambda h: -(h["risk"] or 0))]
         _table(["Stock", "LTP", "Stop", "Distance", "₹ at risk", "Open R", "Target", "Reward:risk"], rows, right={1, 2, 3, 4, 5, 6, 7})
     else:
-        _note("No stop-losses set. Open HOLDINGS → select a stock → DETAILS / MANAGE → Trade plan.")
+        _note("No stop-losses set. Open Holdings, select a stock, then Details and manage → Trade plan.")
     _ph("Stress test", "estimated using each stock's beta to NIFTY 50 over the last year")
     betas = R["betas"]
     c1, c2, c3 = st.columns([1.2, 1.4, 1])
@@ -1810,12 +2059,16 @@ def _view_risk(A, holds, bench_label):
                                                     for h, b, m, i in rows[:15]], right={1, 2, 3})
     nifty = A["nifty"]
     port = R.get("port")
+    nr = m = None
     if nifty is not None and port is not None:
-        _ph("Historical replay", "the worst NIFTY 50 day and month of the last 5 years, applied to today's portfolio")
         nr = nifty.pct_change().dropna().tail(1250)
-        worst_day = nr.idxmin()
-        m = nifty.resample("ME").last().pct_change().dropna().tail(60) if True else None
-        worst_m = m.idxmin()
+        try:
+            m = nifty.resample("ME").last().pct_change().dropna().tail(60)
+        except ValueError:                                  # pandas older than 2.2 calls month-end "M"
+            m = nifty.resample("M").last().pct_change().dropna().tail(60)
+    if nr is not None and len(nr) and m is not None and len(m):
+        _ph("Historical replay", "the worst NIFTY 50 day and month of the last 5 years, applied to today's portfolio")
+        worst_day, worst_m = nr.idxmin(), m.idxmin()
         out = []
         for label, n_move, when in (("Worst day", nr.min() * 100, f"{worst_day:%d %b %Y}"), ("Worst month", m.min() * 100, f"{worst_m:%b %Y}")):
             est = sum(h["value"] * betas.get(h["symbol"], 1.0) * n_move / 100 for h in holds if h["value"])
@@ -1841,7 +2094,7 @@ def _view_rebalance(A, holds, store, D):
         mx = c2.number_input("Max per sector (%)", 5.0, 100.0, float(rules["max_sector"]), 1.0)
         cash = c3.number_input("New cash to invest (₹)", 0.0, value=float(rules.get("cash") or 0.0), step=1000.0)
         red = c4.checkbox("Redeploy freed cash", value=bool(rules["redeploy"]), help="Put trimmed cash (and new cash) into holdings that are under the caps")
-        if st.form_submit_button("BUILD PLAN", type="primary", use_container_width=True):
+        if st.form_submit_button("Build plan", type="primary", use_container_width=True):
             rules = {"max_stock": ms, "max_sector": mx, "cash": cash, "redeploy": red}
             store.upsert("portfolio_settings", {"key": "rebalance", "value": rules})
             D["settings"]["rebalance"] = rules
@@ -1858,7 +2111,7 @@ def _view_rebalance(A, holds, store, D):
             lt_tot += lg
             tax = f'<span style="color:{_col(sg + lg)}">{_short(sg + lg)}</span><div class="sub">ST {_short(sg)} · LT {_short(lg)}</div>'
         c = RED if p["action"] == "SELL" else GREEN
-        rows.append([f'<b style="color:{AMBER}">{_esc(p["symbol"])}</b><div class="sub">{_esc(p["sector"])}</div>', f'<span class="pf-pill" style="color:{c}">{p["action"]}</span>',
+        rows.append([f'<b style="color:{AMBER}">{_esc(p["symbol"])}</b><div class="sub">{_esc(p["sector"])}</div>', f'<span class="pf-pill" style="color:{c}">{p["action"].capitalize()}</span>',
                      _qty(p["qty"]), _inr(p["ltp"]), _short(p["amount"]), f'{p["now_w"]:.1f}%', f'{p["new_w"]:.1f}%', tax or "—"])
     sells = sum(p["amount"] for p in plan if p["action"] == "SELL")
     buys = sum(p["amount"] for p in plan if p["action"] == "BUY")
@@ -1906,7 +2159,7 @@ def _view_income(A, holds):
     else:
         _note("No dividends found for the periods you held these stocks.")
     _ph("Upcoming events", "results and ex-dividend dates published by Yahoo (often incomplete for NSE)")
-    if st.button("LOAD EVENT CALENDAR", key="pf_ev_load"):
+    if st.button("Load event calendar", key="pf_ev_load"):
         st.session_state["pf_ev"] = True
     if st.session_state.get("pf_ev") and yf_attr:
         ev = []
@@ -1938,7 +2191,7 @@ def _view_tax(A, store, D):
             r2 = c2.number_input("LTCG rate %", 0.0, 50.0, float(rates["ltcg"]), 0.5)
             r3 = c3.number_input("LTCG exemption ₹ / FY", 0.0, value=float(rates["exempt"]), step=5000.0)
             r4 = c4.number_input("Cess %", 0.0, 10.0, float(rates["cess"]), 0.5)
-            if st.form_submit_button("SAVE"):
+            if st.form_submit_button("Save"):
                 rates = {"stcg": r1, "ltcg": r2, "exempt": r3, "cess": r4}
                 store.upsert("portfolio_settings", {"key": "tax", "value": rates})
                 D["settings"]["tax"] = rates
@@ -1988,13 +2241,13 @@ def _view_tax(A, store, D):
         rows = [[x["sell_date"].strftime("%d %b %Y") if x["sell_date"] else "—", f'<b style="color:{AMBER}">{_esc(x["symbol"])}</b><div class="sub">{_esc(x["book"])}</div>',
                  _qty(x["qty"]), x["buy_date"].strftime("%d %b %Y") if x["buy_date"] else "—", _inr(x["buy_price"]), _inr(x["sell_price"]),
                  f'<span style="color:{_col(x["gain"])}">{_inr(x["gain"], 0)}</span>', f'{x["days"]}d' if x["days"] is not None else "—",
-                 f'<span class="pf-pill" style="color:{CYAN if x["term"] == "LT" else AMBER}">{"LONG" if x["term"] == "LT" else "SHORT"}</span>', x["fy"]]
+                 f'<span class="pf-pill" style="color:{CYAN if x["term"] == "LT" else AMBER}">{"Long-term" if x["term"] == "LT" else "Short-term"}</span>', x["fy"]]
                 for x in sorted(A["realised"], key=lambda x: x["sell_date"] or date.min, reverse=True)]
         _table(["Sold", "Stock", "Qty", "Bought", "Buy", "Sell", "Gain", "Held", "Term", "FY"], rows, right={2, 4, 5, 6, 7})
         df = pd.DataFrame([{k: (v.isoformat() if isinstance(v, date) else v) for k, v in x.items()} for x in A["realised"]])
-        st.download_button("⤓ REALISED P&L (CSV)", df.to_csv(index=False), "arka_realised_pnl.csv", "text/csv", key="pf_real_csv")
+        st.download_button("Download realised P&L (CSV)", df.to_csv(index=False), "arka_realised_pnl.csv", "text/csv", key="pf_real_csv")
     else:
-        _note("No sells recorded yet. Record them in TRANSACTIONS → Record a sell.")
+        _note("No sells recorded yet. Record them in Transactions → Record a sell.")
     st.caption("An estimate to help planning — not tax advice. Use your broker's capital-gains statement / AIS for filing.")
 
 
@@ -2010,15 +2263,15 @@ def _view_transactions(supabase, store, D, A, alots, lots):
     books = _book_options(D)
     c1, c2 = st.columns([3, 1])
     nb = c1.text_input("New book name", key="pf_new_book", placeholder="e.g. Trading", label_visibility="collapsed")
-    if c2.button("＋ CREATE BOOK", key="pf_new_book_btn", use_container_width=True):
+    if c2.button("Create book", key="pf_new_book_btn", use_container_width=True):
         nb = re.sub(r"\s+", " ", nb or "").strip()[:30]
         if not nb:
             st.error("Type a name first.")
-        elif nb.lower() in {b.lower() for b in books} or nb.upper() == "ALL BOOKS":
+        elif nb.lower() in {b.lower() for b in books} or nb.lower() == ALL_BOOKS.lower():
             st.error("That book already exists.")
         else:
             store.upsert("portfolio_settings", {"key": "books", "value": sorted(set((D["settings"].get("books") or []) + [nb]))})
-            st.toast(f"Book “{nb}” created — choose it when you add a buy, or move lots into it from HOLDINGS → DETAILS.")
+            st.toast(f"Book “{nb}” created — choose it when you add a buy, or move lots into it from Holdings → Details and manage.")
             st.rerun()
     st.markdown(" ".join(f'<span class="pf-chip" style="--c:{AMBER}">{_esc(b)}</span>' for b in books), unsafe_allow_html=True)
     if A and A.get("problems"):
@@ -2033,7 +2286,7 @@ def _view_transactions(supabase, store, D, A, alots, lots):
     led.sort(key=lambda x: (x["date"] or date.min), reverse=True)
     if led:
         _table(["Date", "Type", "Stock", "Book", "Qty", "Price", "Amount", "Note"],
-               [[x["date"].strftime("%d %b %Y") if x["date"] else "—", f'<span class="pf-pill" style="color:{GREEN if x["type"] == "BUY" else RED}">{x["type"]}</span>',
+               [[x["date"].strftime("%d %b %Y") if x["date"] else "—", f'<span class="pf-pill" style="color:{GREEN if x["type"] == "BUY" else RED}">{x["type"].capitalize()}</span>',
                  f'<b style="color:{AMBER}">{_esc(x["symbol"])}</b>', _esc(x["book"]), _qty(x["qty"]), _inr(x["price"]), _inr(x["qty"] * x["price"], 0), _esc(x["note"])]
                 for x in led], right={4, 5, 6})
         st.caption("Ledger shows quantities and prices exactly as entered; analysis uses split / bonus-adjusted figures.")
@@ -2042,7 +2295,7 @@ def _view_transactions(supabase, store, D, A, alots, lots):
             with st.expander("Delete a recorded sell"):
                 i = st.selectbox("Sell", range(len(sells_only)), format_func=lambda i: f'{sells_only[i]["date"]} · {sells_only[i]["symbol"]} · '
                                  f'{_qty(sells_only[i]["qty"])} @ {_inr(sells_only[i]["price"])} · {sells_only[i]["book"]}', key="pf_del_sell")
-                if st.button("DELETE SELL", key="pf_del_sell_btn"):
+                if st.button("Delete sell", key="pf_del_sell_btn"):
                     err = store.delete("portfolio_sells", id=sells_only[i]["ref"][1])
                     st.error(err) if err else st.rerun()
     _ph("Storage")
@@ -2074,8 +2327,8 @@ def _view_news(holds, news, days_label):
             sent = str(a.get("sentiment", "neutral"))
             c = GREEN if "positive" in sent else RED if "negative" in sent else T3
             st.markdown(f'<a href="{_esc(a.get("link", "#"), True)}" target="_blank" style="text-decoration:none"><div style="border-left:2px solid {c};padding:6px 0 6px 10px;margin-bottom:5px;">'
-                        f'<div style="font:600 12px Inter,sans-serif;color:{IVORY}">{_esc(a.get("title", ""))}</div>'
-                        f'<div style="font:9px {MONO};color:{T2};margin-top:3px">{_esc(a.get("source", ""))} · {_esc(a.get("time_str", ""))} · {_esc(a.get("event", "NEWS"))}</div></div></a>',
+                        f'<div style="font:600 14px Inter,sans-serif;color:{IVORY}">{_esc(a.get("title", ""))}</div>'
+                        f'<div style="font:12px {MONO};color:{T2};margin-top:3px">{_esc(a.get("source", ""))} · {_esc(a.get("time_str", ""))} · {_esc(a.get("event", "News"))}</div></div></a>',
                         unsafe_allow_html=True)
 
 
@@ -2122,7 +2375,8 @@ def _refresh():
         if isinstance(d, dict):
             d.clear()
     st.session_state.get("_pf_info_tried", {}).clear()
-    st.session_state.pop("_pf_info", None)
+    for k in ("_pf_info", "_pf_news", "_pfx_loaded"):
+        st.session_state.pop(k, None)
 
 
 def _snapshot(store, D, key, invested, value, realised, divs):
@@ -2151,9 +2405,9 @@ def render_portfolio(supabase, on_open):
 
     # ── header controls ──
     c1, c2, c3, c4 = st.columns([1.4, 1.3, 1, 1])
-    book_filter = c1.selectbox("Book", ["ALL BOOKS"] + books, key="pf_book", label_visibility="collapsed")
+    book_filter = c1.selectbox("Book", [ALL_BOOKS] + books, key="pf_book", label_visibility="collapsed")
     bench_label = c2.selectbox("Benchmark", list(BENCHMARKS), key="pf_bench", label_visibility="collapsed")
-    if c3.button("↻ REFRESH", key="pf_refresh", use_container_width=True, help="Reload live prices and fundamentals"):
+    if c3.button("Refresh", key="pf_refresh", use_container_width=True, help="Reload live prices and fundamentals"):
         _refresh()
         st.rerun()
     days_label = st.session_state.get("pf_news_window", "24 hours")
@@ -2164,7 +2418,7 @@ def render_portfolio(supabase, on_open):
         all_syms = sorted({l["symbol"] for l in lots} | {s["symbol"] for s in D["sells"]})
         infos = _load_infos(all_syms)
         alots_all, realised_all, problems, adj_sells_all = run_engine(lots, D["sells"], D["meta"], infos)
-        inb = (lambda b: True) if book_filter == "ALL BOOKS" else (lambda b: b == book_filter)
+        inb = (lambda b: True) if book_filter == ALL_BOOKS else (lambda b: b == book_filter)
         alots = [l for l in alots_all if inb(l["book"])]
         realised = [r for r in realised_all if inb(r["book"])]
         adj_sells = [s for s in adj_sells_all if inb(s["book"])]
@@ -2210,7 +2464,7 @@ def render_portfolio(supabase, on_open):
              "ltcg_headroom": cur["exempt_left"] if cur else rates["exempt"], "heat": heat, "problems": [p for p in problems],
              "avg_fscore": (sum(a * b for a, b in fs_w) / sum(b for _, b in fs_w) * 100) if fs_w else None,
              "timeline": _timeline, "nifty": nifty, "infos": infos, "quotes": quotes, "alots_book": alots,
-             "book_key": "ALL" if book_filter == "ALL BOOKS" else book_filter}
+             "book_key": "ALL" if book_filter == ALL_BOOKS else book_filter}
         A["xirr"], A["xirr_days"] = portfolio_xirr(alots, adj_sells, holds)
         A["score"] = diversification_score(A["conc"], sectors, risk)
         A["flags"] = build_flags(A, holds, news, days_label)
@@ -2219,47 +2473,64 @@ def render_portfolio(supabase, on_open):
         bench_label = bench_used
 
     if A:
-        c4.download_button("⤓ MONTHLY REVIEW", _report_html(A, holds, book_filter, bench_label).encode(),
+        c4.download_button("Monthly review", _report_html(A, holds, book_filter, bench_label).encode(),
                            f"arka_portfolio_review_{_today():%Y_%m}.html", "text/html", key="pf_report", use_container_width=True,
                            help="A printable HTML report — open it and use your browser's Print → Save as PDF")
     now = datetime.now(IST).strftime("%d %b %Y · %H:%M IST")
     if A:
         T = A["tot"]
-        st.markdown(f'<div class="pf-hero"><div><div class="k">ARKA TRADES · PORTFOLIO · {_esc(book_filter)}</div>'
+        st.markdown(f'<div class="pf-hero"><div><div class="k">Portfolio value · {_esc(book_filter)}</div>'
                     f'<div class="t">{_short(T["val"])}</div><div class="d" style="color:{_col(T["pnl"])}">{_short(T["pnl"])} ({_pct(T["pnl_pct"])}) unrealised · '
                     f'<span style="color:{_col(T["day"])}">{_short(T["day"])} today</span></div></div>'
                     f'<div class="m">{T["n"]} holdings · {len([s for s in A["sectors"] if s["name"] != UNCLASSIFIED])} sectors · {len(books)} book(s)<br>'
                     f'benchmark {_esc(bench_label)} · as of {now}</div></div>', unsafe_allow_html=True)
     else:
-        st.markdown(f'<div class="pf-hero"><div><div class="k">ARKA TRADES · PORTFOLIO</div><div class="t">Portfolio</div></div>'
+        st.markdown(f'<div class="pf-hero"><div><div class="k">Portfolio</div><div class="t">Portfolio</div></div>'
                     f'<div class="m">no holdings yet<br>as of {now}</div></div>', unsafe_allow_html=True)
 
+    if st.session_state.get("pf_view") not in VIEWS:
+        st.session_state["pf_view"] = VIEWS[0]
+
+    def _keep_view():
+        if st.session_state.get("pf_view") not in VIEWS:
+            st.session_state["pf_view"] = VIEWS[0]
     with st.container(key="pf_views"):
-        view = st.radio("Portfolio view", VIEWS, horizontal=True, key="pf_view", label_visibility="collapsed")
-    if not A and view not in ("TRANSACTIONS",):
+        view = None
+        if hasattr(st, "pills"):
+            try:
+                view = st.pills("Portfolio view", VIEWS, key="pf_view", label_visibility="collapsed", on_change=_keep_view)
+            except TypeError:
+                view = None
+        if view not in VIEWS and not hasattr(st, "pills"):
+            view = st.radio("Portfolio view", VIEWS, horizontal=True, key="pf_view", label_visibility="collapsed")
+        if view not in VIEWS:
+            view = st.session_state.get("pf_view") if st.session_state.get("pf_view") in VIEWS else VIEWS[0]
+    if not A and view not in ("Transactions",):
         _empty_state()
-        if view != "NEWS":
+        if view != "News":
             return
-    if not holds and A and view not in ("TRANSACTIONS", "TAX & REALISED", "PERFORMANCE"):
-        _note(f"No open positions in {_esc(book_filter)}. Realised trades and tax are under TAX & REALISED; add buys under TRANSACTIONS.")
+    if not holds and A and view not in ("Transactions", "Tax and realised", "Performance", "Swing desk"):
+        _note(f"No open positions in {_esc(book_filter)}. Realised trades and tax are under Tax and realised; add buys under Transactions.")
         return
-    if view == "DASHBOARD":
+    if view == "Dashboard":
         _view_dashboard(A, holds, news, days_label, bench_label)
-    elif view == "HOLDINGS":
+    elif view == "Swing desk":
+        _view_swing(A, holds, store, D)
+    elif view == "Holdings":
         _view_holdings(supabase, store, D, A, holds, alots, news, on_open, book_filter)
-    elif view == "ANALYSIS":
+    elif view == "Analysis":
         _view_analysis(A, holds)
-    elif view == "PERFORMANCE":
+    elif view == "Performance":
         _view_performance(A, holds, store, D, bench_label)
-    elif view == "RISK & STRESS":
+    elif view == "Risk and stress":
         _view_risk(A, holds, bench_label)
-    elif view == "REBALANCE":
+    elif view == "Rebalance":
         _view_rebalance(A, holds, store, D)
-    elif view == "INCOME & EVENTS":
+    elif view == "Income and events":
         _view_income(A, holds)
-    elif view == "TAX & REALISED":
+    elif view == "Tax and realised":
         _view_tax(A, store, D)
-    elif view == "TRANSACTIONS":
+    elif view == "Transactions":
         _view_transactions(supabase, store, D, A, alots, lots)
-    elif view == "NEWS":
+    elif view == "News":
         _view_news(holds, news, days_label)
