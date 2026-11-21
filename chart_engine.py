@@ -30,6 +30,7 @@ Usage:  render_pro_chart("RELIANCE")            render_chart_settings()
 from __future__ import annotations
 
 import json
+import re
 
 import pandas as pd
 import streamlit as st
@@ -37,14 +38,17 @@ import streamlit.components.v1 as components
 
 from data_engine import get_history
 
-CHART_VERSION = 4
+CHART_VERSION = 5
 
 # Indices the relative-strength line can be measured against (label → Yahoo tickers to try, in order).
 RS_INDICES = {
     "NIFTY 50": ("^NSEI",), "NIFTY 500": ("^CRSLDX",), "NIFTY NEXT 50": ("^NSMIDCP",), "NIFTY MIDCAP 100": ("NIFTY_MIDCAP_100.NS", "^CRSMID"),
     "NIFTY SMALLCAP 100": ("^CNXSC",), "BANK NIFTY": ("^NSEBANK",), "NIFTY IT": ("^CNXIT",), "NIFTY AUTO": ("^CNXAUTO",),
     "NIFTY PHARMA": ("^CNXPHARMA",), "NIFTY FMCG": ("^CNXFMCG",), "NIFTY METAL": ("^CNXMETAL",), "NIFTY ENERGY": ("^CNXENERGY",),
+    "NIFTY MIDSMALLCAP 400": ("NIFTYMIDSML400.NS", "NIFTY_MIDSML_400.NS"), "NIFTY PSU BANK": ("^CNXPSUBANK",), "NIFTY REALTY": ("^CNXREALTY",),
 }
+RS_DEFAULT = "NIFTY 50"
+RS_KEY = "ak_rs_index"            # st.session_state key holding the index the RS line is measured against
 
 
 # ───────────────────────── data preparation ─────────────────────────
@@ -90,65 +94,144 @@ def _yf():
     return yf
 
 
-@st.cache_data(ttl=6 * 3600, show_spinner=False, max_entries=2)
-def _index_closes(day: str) -> dict:
-    """{index label: daily close Series} for the relative-strength line. Raises when nothing loads, so a failure is not kept."""
-    yf = _yf()
-    tickers = sorted({t for ts in RS_INDICES.values() for t in ts})
-    df = yf.download(tickers, period="5y", interval="1d", auto_adjust=True, progress=False, group_by="ticker", threads=False)
-    out = {}
-    for label, ts in RS_INDICES.items():
-        for t in ts:
-            try:
-                c = pd.to_numeric(df[t]["Close"], errors="coerce").dropna()
-            except Exception:
-                continue
-            if len(c) < 200:
-                continue
-            idx = pd.to_datetime(c.index)
-            if getattr(idx, "tz", None) is not None:
-                idx = idx.tz_localize(None)
-            c.index = idx.normalize()
-            out[label] = c[~c.index.duplicated(keep="last")].sort_index()
-            break
-    if not out:
-        raise ValueError("no index history")
-    return out
-
-
-def index_payload(dates: pd.DatetimeIndex) -> dict:
-    """Index closes lined up with the stock's own trading days: {label: [close or None per day]}."""
+def _close_from(df, ticker):
+    """The Close column out of whatever layout this yfinance version returns (flat, or two-level in either order)."""
+    if df is None or len(df) == 0:
+        return None
     try:
-        closes = _index_closes(pd.Timestamp.now().strftime("%Y-%m-%d"))
+        if isinstance(df.columns, pd.MultiIndex):
+            for lvl in (0, 1):
+                names = [str(x) for x in df.columns.get_level_values(lvl)]
+                if "Close" in names:
+                    sub = df.xs("Close", axis=1, level=lvl)
+                    c = sub[ticker] if (hasattr(sub, "columns") and ticker in sub.columns) else (sub.iloc[:, 0] if hasattr(sub, "columns") else sub)
+                    break
+            else:
+                return None
+        else:
+            c = df["Close"]
+        c = pd.to_numeric(c, errors="coerce").dropna()
+        if len(c) < 100:
+            return None
+        idx = pd.to_datetime(c.index)
+        if getattr(idx, "tz", None) is not None:
+            idx = idx.tz_localize(None)
+        c.index = idx.normalize()
+        return c[~c.index.duplicated(keep="last")].sort_index()
     except Exception:
-        return {}
-    out = {}
-    for label, c in closes.items():
-        a = c.reindex(dates.union(c.index)).ffill().reindex(dates)
-        if a.notna().sum() >= 100:
-            out[label] = [None if pd.isna(v) else round(float(v), 2) for v in a.tolist()]
-    return out
+        return None
 
 
-def build_payload(h: pd.DataFrame, with_index: bool = True) -> dict:
+def rs_candidates(name: str) -> tuple:
+    """Yahoo tickers to try for an index name: a known label, or what the user typed (NSE:NIFTYMIDSML400, ^CNXIT, NIFTY_FIN_SERVICE.NS …)."""
+    raw = str(name or "").strip()
+    if raw.upper() in RS_INDICES:
+        return RS_INDICES[raw.upper()]
+    t = raw.upper().replace("NSE:", "").replace("BSE:", "").strip()
+    if not t or not re.fullmatch(r"[\^A-Z0-9_.&\- ]{1,40}", t):
+        return ()
+    if t.startswith("^") or t.endswith((".NS", ".BO")):
+        return (t,)
+    compact = t.replace(" ", "")
+    under = t.replace(" ", "_")
+    return tuple(dict.fromkeys([compact + ".NS", under + ".NS", "^" + compact, "^CNX" + compact.replace("NIFTY", "")]))
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False, max_entries=24)
+def _index_close(tickers: tuple, day: str):
+    """Daily closes of an index (first ticker that answers). Raises when none does, so a failure is not remembered."""
+    yf = _yf()
+    for t in tickers:
+        c = None
+        try:
+            c = _close_from(yf.download(t, period="5y", interval="1d", auto_adjust=True, progress=False, threads=False), t)
+        except Exception:
+            c = None
+        if c is None:
+            try:
+                c = _close_from(yf.Ticker(t).history(period="5y", interval="1d", auto_adjust=True), t)
+            except Exception:
+                c = None
+        if c is not None:
+            return t, c
+    raise ValueError("index unavailable")
+
+
+def rs_index_name() -> str:
+    """The index the RS line is measured against (set in Account; NIFTY 50 until changed)."""
+    try:
+        v = str(st.session_state.get(RS_KEY) or "").strip()
+    except Exception:
+        v = ""
+    return v or RS_DEFAULT
+
+
+def index_series(name: str):
+    """(label, Series) for an index name, or (label, None) when Yahoo has no data for it."""
+    label = str(name or RS_DEFAULT).strip()
+    label = label.upper() if label.upper() in RS_INDICES else label
+    cands = rs_candidates(label)
+    if not cands:
+        return label, None
+    try:
+        _, c = _index_close(cands, pd.Timestamp.now().strftime("%Y-%m-%d"))
+        return label, c
+    except Exception:
+        return label, None
+
+
+def index_payload(dates: pd.DatetimeIndex, name: str):
+    """The index lined up with the stock's own trading days: {"label", "v": [close or None per day]} or None."""
+    label, c = index_series(name)
+    if c is None:
+        return {"label": label, "v": None}
+    a = c.reindex(dates.union(c.index)).ffill().reindex(dates)
+    if a.notna().sum() < 60:
+        return {"label": label, "v": None}
+    return {"label": label, "v": [None if pd.isna(v) else round(float(v), 2) for v in a.tolist()]}
+
+
+def render_rs_index_setting() -> None:
+    """Account → the index the RS line compares every stock with. Pick one, or type any index symbol."""
+    cur = rs_index_name()
+    known = list(RS_INDICES)
+    other = "Another index (type its symbol)"
+    is_known = cur.upper() in RS_INDICES
+    pick = st.selectbox("Compare every stock with", known + [other], index=known.index(cur.upper()) if is_known else len(known), key="ak_rs_pick")
+    name = pick
+    if pick == other:
+        name = st.text_input("Index symbol", value="" if is_known else cur, key="ak_rs_custom", placeholder="e.g. NIFTYMIDSML400, NIFTY_FIN_SERVICE.NS, ^CNXIT",
+                             help="The NSE index symbol as TradingView shows it (without NSE:), or a Yahoo Finance ticker.").strip()
+    if name and name != other:
+        label, c = index_series(name)
+        if c is None:
+            st.warning(f"No price history found for \u201c{name}\u201d. Check the symbol; the RS line keeps using {cur} until one loads.")
+        else:
+            if label != cur:
+                st.session_state[RS_KEY] = label
+            st.caption(f"RS line is measured against {label}: {len(c):,} days of history loaded, latest {c.index[-1]:%d %b %Y} at {float(c.iloc[-1]):,.2f}. "
+                       "Open any chart to see it; the choice is remembered on this device.")
+
+
+def build_payload(h: pd.DataFrame, index_name: str | None = RS_DEFAULT) -> dict:
     d = _prep(h)
     if len(d) < 5:
         return {}
     y = d.tail(252)
     out = {"D": _rows(d), "W": _rows(_group(d, "W-FRI")), "M": _rows(_group(d, "M")),
            "hi52": round(float(y["High"].max()), 2), "lo52": round(float(y["Low"].min()), 2), "pdh": None, "pdl": None,
-           "ix": index_payload(d.index) if with_index else {}}
+           "ix": index_payload(d.index, index_name) if index_name else None}
     if len(d) >= 2:
         out["pdh"], out["pdl"] = round(float(d["High"].iloc[-2]), 2), round(float(d["Low"].iloc[-2]), 2)
     return out
 
 
 @st.cache_data(ttl=120, show_spinner=False, max_entries=24)
-def _payload_json(symbol: str, v: int = CHART_VERSION) -> str:
+def _payload_json(symbol: str, index_name: str = RS_DEFAULT, v: int = CHART_VERSION) -> str:
     h = get_history(symbol, "5y")
     if h is None or h.empty:
         raise ValueError("no history")
-    p = build_payload(h)
+    p = build_payload(h, index_name)
     if not p:
         raise ValueError("too little history")
     return json.dumps(p, separators=(",", ":"))
@@ -212,6 +295,7 @@ svg{display:block}
 #bot::-webkit-scrollbar{display:none}
 #bot .tb{height:26px;min-width:0;padding:0 8px;font-size:12.5px}
 #clock{font-size:12px;color:#6E6E76;padding:0 8px;font-variant-numeric:tabular-nums}
+#attr{font-size:11.5px;color:#55555c;text-decoration:none;padding:0 8px;white-space:nowrap}#attr:hover{color:#B2B5BE}
 /* menus */
 .menu{position:absolute;z-index:30;display:none;min-width:210px;max-height:76%;overflow:auto;background:#17171A;border:1px solid #2E2E33;border-radius:10px;padding:6px;
       box-shadow:0 14px 40px rgba(0,0,0,.55)}
@@ -290,7 +374,7 @@ body.page .sf{padding:14px 0 4px;border-top:0}
 <div id="bot">
   <button class="tb" data-rng="1M">1M</button><button class="tb" data-rng="3M">3M</button><button class="tb" data-rng="6M">6M</button><button class="tb" data-rng="YTD">YTD</button>
   <button class="tb" data-rng="1Y">1Y</button><button class="tb" data-rng="2Y">2Y</button><button class="tb" data-rng="5Y">5Y</button><button class="tb" data-rng="ALL">All</button>
-  <span class="grow"></span><span id="clock"></span><span class="sep"></span>
+  <span class="grow"></span><a id="attr" href="https://www.tradingview.com/" target="_blank" rel="noopener noreferrer" title="Charts use TradingView Lightweight Charts">Charts by TradingView</a><span id="clock"></span><span class="sep"></span>
   <button class="tb" data-sc="pct" title="Percent scale">%</button><button class="tb" data-sc="log" title="Logarithmic scale">log</button><button class="tb" data-sc="auto" title="Fit the price scale to the candles on screen">auto</button>
 </div>
 <script>
@@ -308,9 +392,9 @@ var DEFAULTS = {iv:"D", rng:"", type:"candles", palette:"green", log:false, pct:
   ma:[{on:false,kind:"EMA",len:10,color:"#FFD60A"},{on:true,kind:"EMA",len:21,color:"#F2F2F5"},{on:false,kind:"SMA",len:20,color:"#5AC8FA"},
       {on:true,kind:"SMA",len:50,color:"#FF9F0A"},{on:true,kind:"SMA",len:200,color:"#BF5AF2"}],
   vol:true, volma:true, volmaLen:20, bb:false, bbLen:20, bbK:2, rsi:true, rsiLen:14, macd:false, pd:true, wk52:false,
-  rs:true, rsIdx:"NIFTY 50", rsPlace:"price", rsColor:"dir", rsDir:10, rsMa:false, rsLen:21, rsKind:"EMA", rsHi:true, rsHiAll:true,
-  rsUp:"#30D158", rsDn:"#FF453A"};
-var RS_LIST = __RSLIST__;
+  rs:true, rsPlace:"above", rsColor:"ma", rsDir:10, rsMa:true, rsCloud:true, rsCross:true, rsLen:21, rsKind:"EMA", rsHi:true, rsHiAll:false,
+  rsUp:"#2196F3", rsDn:"#E040FB", rsMaCol:"#F23645"};
+var RS_NAME = (P && P.ix && P.ix.label) || "the index";
 function clone(o){ return JSON.parse(JSON.stringify(o)); }
 function loadS(){
   var s = clone(DEFAULTS);
@@ -328,8 +412,8 @@ function loadS(){
   s.ma.forEach(function(m){ m.len = clampInt(m.len, 2, 400, 20); m.kind = m.kind === "SMA" ? "SMA" : "EMA"; });
   s.volmaLen = clampInt(s.volmaLen, 2, 200, 20); s.bbLen = clampInt(s.bbLen, 2, 200, 20); s.rsiLen = clampInt(s.rsiLen, 2, 100, 14);
   s.bbK = Math.min(5, Math.max(0.5, Number(s.bbK) || 2));
-  s.rsDir = clampInt(s.rsDir, 1, 100, 10); if (["price","pane"].indexOf(s.rsPlace) < 0) s.rsPlace = "price"; if (["dir","ma"].indexOf(s.rsColor) < 0) s.rsColor = "dir";
-  s.rsLen = clampInt(s.rsLen, 2, 200, 21); s.rsKind = s.rsKind === "SMA" ? "SMA" : "EMA"; if (RS_LIST.indexOf(s.rsIdx) < 0) s.rsIdx = RS_LIST[0];
+  s.rsDir = clampInt(s.rsDir, 1, 100, 10); if (["above","pane","price"].indexOf(s.rsPlace) < 0) s.rsPlace = "above"; if (["dir","ma"].indexOf(s.rsColor) < 0) s.rsColor = "dir";
+  s.rsLen = clampInt(s.rsLen, 2, 200, 21); s.rsKind = s.rsKind === "SMA" ? "SMA" : "EMA"; 
   if (["D","W","M"].indexOf(s.iv) < 0) s.iv = "D";
   return s;
 }
@@ -401,25 +485,26 @@ function buildSettings(){
   rr.insertBefore(numInput("RSI length", function(){ return S.rsiLen; }, function(v){ S.rsiLen = v; }, 2, 100), rr.lastChild); b.appendChild(rr);
   b.appendChild(rowToggle("MACD", "12, 26, 9 in its own pane", function(){ return S.macd; }, function(v){ S.macd = v; }));
   b.appendChild(el("div", "ss", "Relative strength line"));
-  b.appendChild(rowToggle("Show the RS line", "The stock's price divided by an index", function(){ return S.rs; }, function(v){ S.rs = v; }));
-  b.appendChild(rowSelect("Compare with", RS_LIST.map(function(x){ return [x, x]; }), function(){ return S.rsIdx; }, function(v){ S.rsIdx = v; }));
-  b.appendChild(rowSelect("Where to draw it", [["price","On the price chart"],["pane","In its own pane below"]], function(){ return S.rsPlace; }, function(v){ S.rsPlace = v; }));
-  b.appendChild(rowSelect("Colour the line by", [["dir","Its direction: rising or falling"],["ma","Above or below its average"]], function(){ return S.rsColor; }, function(v){ S.rsColor = v; }));
-  var rd = el("div", "sr"), rdl = el("div", "l", "Direction look-back"); rdl.appendChild(el("small", "", "rising when the line is higher than this many candles ago"));
-  rd.appendChild(rdl); rd.appendChild(numInput("Direction look-back", function(){ return S.rsDir; }, function(v){ S.rsDir = v; }, 1, 100)); b.appendChild(rd);
-  var rc = el("div", "sr"), rcl = el("div", "l", "Colours"); rcl.appendChild(el("small", "", "strong (rising), weak (falling)"));
+  b.appendChild(rowToggle("Show the RS line", "The stock's price divided by an index. Choose the index in Account → Relative strength index", function(){ return S.rs; }, function(v){ S.rs = v; }));
+  b.appendChild(rowSelect("Where to draw it", [["above","In a pane above the chart"],["pane","In a pane below the chart"],["price","On the price chart"]], function(){ return S.rsPlace; }, function(v){ S.rsPlace = v; }));
+  b.appendChild(rowSelect("Colour the line by", [["ma","Above or below its average"],["dir","Its direction: rising or falling"]], function(){ return S.rsColor; }, function(v){ S.rsColor = v; }));
+  var rc = el("div", "sr"), rcl = el("div", "l", "Colours"); rcl.appendChild(el("small", "", "line up, line down, average"));
   rc.appendChild(rcl);
-  [["rsUp", "RS colour when strong"], ["rsDn", "RS colour when weak"]].forEach(function(x){ var c = el("input"); c.type = "color"; c.value = S[x[0]]; c.setAttribute("aria-label", x[1]); c.onchange = function(){ S[x[0]] = c.value; changed(); }; rc.appendChild(c); });
+  [["rsUp", "RS line up colour"], ["rsDn", "RS line down colour"], ["rsMaCol", "RS average colour"]].forEach(function(x){ var c = el("input"); c.type = "color"; c.value = S[x[0]]; c.setAttribute("aria-label", x[1]); c.onchange = function(){ S[x[0]] = c.value; changed(); }; rc.appendChild(c); });
   b.appendChild(rc);
   var rq = rowToggle("Average of the RS line", "Type and length", function(){ return S.rsMa; }, function(v){ S.rsMa = v; });
   var rqk = el("select"); rqk.setAttribute("aria-label", "RS average type"); [["EMA","EMA"],["SMA","SMA"]].forEach(function(o){ var op = el("option", "", o[1]); op.value = o[0]; rqk.appendChild(op); });
   rqk.value = S.rsKind; rqk.onchange = function(){ S.rsKind = rqk.value; changed(); };
   rq.insertBefore(rqk, rq.lastChild); rq.insertBefore(numInput("RS average length", function(){ return S.rsLen; }, function(v){ S.rsLen = v; }, 2, 200), rq.lastChild); b.appendChild(rq);
+  b.appendChild(rowToggle("Shade between the line and its average", "Shown when the RS line has its own pane", function(){ return S.rsCloud; }, function(v){ S.rsCloud = v; }));
+  b.appendChild(rowToggle("Triangle when the line crosses above its average", "", function(){ return S.rsCross; }, function(v){ S.rsCross = v; }));
   b.appendChild(rowToggle("Pink dot: RS new high before price", "The RS line makes a 52-week high while the price has not yet", function(){ return S.rsHi; }, function(v){ S.rsHi = v; }));
-  b.appendChild(rowToggle("Blue dot: RS new high with price", "Both at a 52-week high", function(){ return S.rsHiAll; }, function(v){ S.rsHiAll = v; }));
-  b.appendChild(el("div", "ss", "Levels"));
-  b.appendChild(rowToggle("Previous day high and low", "", function(){ return S.pd; }, function(v){ S.pd = v; }));
-  b.appendChild(rowToggle("52-week high and low", "", function(){ return S.wk52; }, function(v){ S.wk52 = v; }));
+  b.appendChild(rowToggle("Small dot: RS new high together with price", "", function(){ return S.rsHiAll; }, function(v){ S.rsHiAll = v; }));
+  var rd = el("div", "sr"), rdl = el("div", "l", "Direction look-back"); rdl.appendChild(el("small", "", "only when colouring by direction: rising means higher than this many candles ago"));
+  rd.appendChild(rdl); rd.appendChild(numInput("Direction look-back", function(){ return S.rsDir; }, function(v){ S.rsDir = v; }, 1, 100)); b.appendChild(rd);
+  b.appendChild(el("div", "ss", "Lines on the chart"));
+  b.appendChild(rowToggle("Previous day high and low (PDH / PDL)", "Turn off to hide the two dashed lines", function(){ return S.pd; }, function(v){ S.pd = v; }));
+  b.appendChild(rowToggle("52-week high and low", "Turn off to hide them", function(){ return S.wk52; }, function(v){ S.wk52 = v; }));
 }
 $("set-reset").onclick = function(){ S = clone(DEFAULTS); buildSettings(); changed(); };
 
@@ -460,14 +545,14 @@ function dataFor(iv){
   return D[iv];
 }
 
-var IXMAP = {};                      // index label -> Map(date -> close), built once from the daily rows
-function indexFor(label, T){
-  var arr = (P.ix || {})[label]; if (!arr) return null;
-  if (!IXMAP[label]) { var m = new Map(), DT = dataFor("D").T; for (var i = 0; i < DT.length; i++) if (arr[i] != null) m.set(DT[i], arr[i]); IXMAP[label] = m; }
-  var m2 = IXMAP[label]; return T.map(function(t){ var v = m2.get(t); return v == null ? null : v; });
+var IXMAP = null;                    // Map(date -> index close), built once from the daily rows
+function indexFor(T){
+  var arr = P.ix && P.ix.v; if (!arr) return null;
+  if (!IXMAP) { IXMAP = new Map(); var DT = dataFor("D").T; for (var i = 0; i < DT.length; i++) if (arr[i] != null) IXMAP.set(DT[i], arr[i]); }
+  return T.map(function(t){ var v = IXMAP.get(t); return v == null ? null : v; });
 }
 function rsCalc(d){
-  var ix = indexFor(S.rsIdx, d.T); if (!ix) return null;
+  var ix = indexFor(d.T); if (!ix) return null;
   var raw = d.close.map(function(c, i){ return ix[i] ? c / ix[i] : null; }), base = null, i;
   for (i = 0; i < raw.length; i++) if (raw[i] != null) { base = raw[i]; break; }
   if (base === null) return null;
@@ -485,23 +570,35 @@ function rsCalc(d){
   var w = [[per, 0.4], [per * 2, 0.2], [per * 3, 0.2], [per * 4, 0.2]], num = 0, den = 0, ws = 0;
   w.forEach(function(x){ if (n - x[0] < 0) return; var ps = perf(d.close, x[0]), pi = perf(ix, x[0]); if (ps == null || pi == null) return; num += ps * x[1]; den += pi * x[1]; ws += x[1]; });
   if (ws > 0 && den > 0) sc = num / den * 100;
-  return {line:line, ma:ma, hi:hi, bp:bp, up:up, win:win, score:sc};
+  var cross = line.map(function(v, k){ return k > 0 && v != null && ma[k] != null && ma[k - 1] != null && line[k - 1] != null && v > ma[k] && line[k - 1] <= ma[k - 1]; });
+  return {line:line, ma:ma, hi:hi, bp:bp, up:up, cross:cross, win:win, score:sc};
 }
-function rsSeries(chart, R, T, extra){
-  var sr = chart.addLineSeries(Object.assign({color:S.rsUp, lineWidth:2, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false, priceFormat:{type:"price", precision:2, minMove:0.01}}, extra || {}));
+function rsSeries(chart, R, T, extra, cloud){
+  var sid = extra && extra.priceScaleId ? {priceScaleId:extra.priceScaleId} : {};
+  var quiet = {priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false};
+  if (cloud && S.rsMa && S.rsCloud) {          // shade between the line and its average: colour above, then the pane colour painted back in below the lower of the two
+    var area = function(colTop, vals){ var a = chart.addAreaSeries(Object.assign({lineColor:"rgba(0,0,0,0)", lineWidth:1, topColor:colTop, bottomColor:colTop}, quiet, sid)); a.setData(pts(T, vals)); };
+    var upper = function(want){ return R.line.map(function(v, k){ if (v == null || R.ma[k] == null) return null; var isUp = v >= R.ma[k]; return isUp === want ? Math.max(v, R.ma[k]) : null; }); };
+    area(hexA(S.rsUp, 0.30), upper(true)); area(hexA(S.rsDn, 0.30), upper(false));
+    area(C.bg, R.line.map(function(v, k){ return v == null ? null : (R.ma[k] == null ? v : Math.min(v, R.ma[k])); }));
+  }
+  if (S.rsMa) chart.addLineSeries(Object.assign({color:S.rsMaCol, lineWidth:1}, quiet, sid)).setData(pts(T, R.ma));
+  var sr = chart.addLineSeries(Object.assign({color:S.rsUp, lineWidth:2, priceFormat:{type:"price", precision:2, minMove:0.01}}, quiet, extra || {}));
   sr.setData(T.map(function(t, i){ var v = R.line[i]; return v == null ? {time:t} : {time:t, value:Math.round(v * 100) / 100, color:R.up[i] ? S.rsUp : S.rsDn}; }));
-  if (S.rsMa) chart.addLineSeries(Object.assign({color:"rgba(180,180,190,.6)", lineWidth:1, lineStyle:2, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false}, extra && extra.priceScaleId ? {priceScaleId:extra.priceScaleId} : {})).setData(pts(T, R.ma));
   var mk = [];
-  R.hi.forEach(function(x, i){ if (!x) return; if (R.bp[i]) { if (S.rsHi) mk.push({time:T[i], position:"inBar", color:"#FF4FD8", shape:"circle", size:0.9}); } else if (S.rsHiAll) mk.push({time:T[i], position:"inBar", color:"#5AC8FA", shape:"circle", size:0.5}); });
+  R.line.forEach(function(_, i){
+    if (R.hi[i]) { if (R.bp[i]) { if (S.rsHi) mk.push({time:T[i], position:"inBar", color:"#FF4FD8", shape:"circle", size:1.3}); } else if (S.rsHiAll) mk.push({time:T[i], position:"inBar", color:S.rsUp, shape:"circle", size:0.5}); }
+    if (S.rsCross && S.rsMa && R.cross[i]) mk.push({time:T[i], position:"belowBar", color:"#2962FF", shape:"arrowUp", size:0.6});
+  });
   sr.setMarkers(mk);
   return sr;
 }
 function rsLegend(i){
   var R = ind.rs, v = R.line[i], strong = R.up[i], cc = strong ? S.rsUp : S.rsDn;
-  var word = S.rsColor === "ma" ? (strong ? "above its average" : "below its average") : (strong ? "rising: stronger than the index" : "falling: weaker than the index");
-  return 'RS line <span class="mut">vs ' + esc(S.rsIdx) + '</span> <span style="color:' + cc + '">' + fmt(v) + " " + (v == null ? "" : word) + "</span>" +
+  var word = S.rsColor === "ma" ? (strong ? "above its average: stronger than the index" : "below its average: weaker than the index") : (strong ? "rising: stronger than the index" : "falling: weaker than the index");
+  return 'RS line <span class="mut">vs ' + esc(RS_NAME) + '</span> <span style="color:' + cc + '">' + fmt(v) + " " + (v == null ? "" : word) + "</span>" +
     (R.score == null ? "" : ' &nbsp;<span class="mut">RS score</span> <span style="color:' + (R.score >= 100 ? S.rsUp : S.rsDn) + '">' + R.score.toFixed(0) + "</span>") +
-    (S.rsMa ? ' &nbsp;<span class="mut">' + S.rsKind + " " + S.rsLen + " " + fmt(R.ma[i]) + "</span>" : "") +
+    (S.rsMa ? ' &nbsp;<span style="color:' + S.rsMaCol + '">' + S.rsKind + " " + S.rsLen + " " + fmt(R.ma[i]) + "</span>" : "") +
     (R.hi[i] ? (R.bp[i] ? ' &nbsp;<span style="color:#FF4FD8">● RS new high before price</span>' : ' &nbsp;<span style="color:#5AC8FA">● RS new high</span>') : "");
 }
 var iv = S.iv, rng = S.rng || DEF_RNG || "6M", tool = "cursor";
@@ -518,13 +615,13 @@ function tkey(t){ if (t == null) return null; if (typeof t === "string") return 
 
 function opts(elm, showTime){
   return {width:elm.clientWidth || 800, height:elm.clientHeight || 300,
-    layout:{background:{type:"solid", color:C.bg}, textColor:C.text, fontFamily:FONT, fontSize:11},
+    layout:{background:{type:"solid", color:C.bg}, textColor:C.text, fontFamily:FONT, fontSize:11, attributionLogo:false},
     grid:{vertLines:{color:C.grid, visible:!!S.grid}, horzLines:{color:C.grid, visible:!!S.grid}},
     rightPriceScale:{borderColor:C.border, minimumWidth:76},
     timeScale:{borderColor:C.border, rightOffset:8, barSpacing:7, minBarSpacing:0.8, timeVisible:false, visible:showTime},
     crosshair:{mode:LW.CrosshairMode.Normal, vertLine:{color:"#5A5A63", labelBackgroundColor:"#2E2E33"}, horzLine:{color:"#5A5A63", labelBackgroundColor:"#2E2E33"}},
-    handleScroll:{mouseWheel:true, pressedMouseMove:true, horzTouchDrag:true, vertTouchDrag:false},
-    handleScale:{axisPressedMouseMove:true, mouseWheel:true, pinch:true},
+    handleScroll:{mouseWheel:true, pressedMouseMove:true, horzTouchDrag:true, vertTouchDrag:true},
+    handleScale:{axisPressedMouseMove:{time:true, price:true}, axisDoubleClickReset:{time:true, price:true}, mouseWheel:true, pinch:true},
     localization:{dateFormat:"dd MMM yyyy", priceFormatter:function(p){ return p.toFixed(2); }}};
 }
 function addPane(id, cls){
@@ -545,8 +642,10 @@ function build(keep){
   var d = dataFor(iv), T = d.T, cl = d.close, col = pal();
   var subs = [];
   ind.rs = S.rs ? rsCalc(d) : null;
-  if (ind.rs && S.rsPlace === "pane") subs.push("rs");
+  var rsPane = !!ind.rs && S.rsPlace !== "price";
+  if (rsPane && S.rsPlace === "pane") subs.push("rs");
   if (S.rsi) subs.push("rsi"); if (S.macd) subs.push("macd");
+  var nSub = subs.length + (rsPane && S.rsPlace === "above" ? 1 : 0), basis = (nSub >= 3 ? 17 : nSub === 2 ? 20 : 24) + "%";
   var pm = addPane("main", ""); pm.el.id = "p-main";
   main = LW.createChart(pm.cv, opts(pm.cv, subs.length === 0));
   if (S.wm) main.applyOptions({watermark:{visible:true, text:SYM, color:"rgba(255,255,255,.045)", fontSize:64, fontFamily:FONT, horzAlign:"center", vertAlign:"center"}});
@@ -588,10 +687,11 @@ function build(keep){
   }
   // lower panes
   subs.forEach(function(id, n){
-    var p = addPane(id, "sub"), last = n === subs.length - 1; p.el.style.flexBasis = (subs.length >= 3 ? 17 : subs.length === 2 ? 20 : 24) + "%";
+    var p = addPane(id, "sub"), last = n === subs.length - 1; p.el.style.flexBasis = basis;
     var ch = LW.createChart(p.cv, opts(p.cv, last)), rec = {id:id, chart:ch, el:p.el, cv:p.cv, lg:p.lg};
     if (id === "rs") {
-      rec.series = rsSeries(ch, ind.rs, T, {lastValueVisible:true});
+      ch.applyOptions({grid:{vertLines:{visible:false}, horzLines:{visible:false}}});
+      rec.series = rsSeries(ch, ind.rs, T, {lastValueVisible:true}, true);
     } else if (id === "rsi") {
       ind.rsi = rsiW(cl, S.rsiLen); ind.rsima = sma(ind.rsi.map(function(v){ return v == null ? 0 : v; }), 14).map(function(v, i){ return i < S.rsiLen + 13 ? null : v; });
       rec.series = ch.addLineSeries({color:"#BF5AF2", lineWidth:2, priceLineVisible:false, lastValueVisible:true, priceFormat:{type:"price", precision:2, minMove:0.01},
@@ -612,6 +712,14 @@ function build(keep){
     ch.priceScale("right").applyOptions({scaleMargins:{top:0.12, bottom:0.12}});
     charts.push(rec);
   });
+  if (rsPane && S.rsPlace === "above") {
+    var pa = addPane("rs", "sub"); pa.el.style.flexBasis = basis; pm.el.parentNode.insertBefore(pa.el, pm.el);
+    pa.el.style.borderTop = "0"; pm.el.style.borderTop = "1px solid #1E1E22";
+    var cha = LW.createChart(pa.cv, opts(pa.cv, false));
+    cha.applyOptions({grid:{vertLines:{visible:false}, horzLines:{visible:false}}});
+    cha.priceScale("right").applyOptions({scaleMargins:{top:0.3, bottom:0.12}});
+    charts.push({id:"rs", chart:cha, el:pa.el, cv:pa.cv, lg:pa.lg, series:rsSeries(cha, ind.rs, T, {lastValueVisible:true}, true)});
+  }
   charts[0].series = mainSeries;
 
   levels(); drawAll(); wire();
@@ -774,12 +882,11 @@ function menus(){
   mi.appendChild(el("div", "mh", "Below the chart"));
   tg("RSI", "rsi", "#BF5AF2", String(S.rsiLen)); tg("MACD", "macd", "#2962FF", "12, 26, 9");
   mi.appendChild(el("div", "mh", "Relative strength line"));
-  tg("RS line", "rs", S.rsUp, "vs " + S.rsIdx);
-  mi.appendChild(item("Draw it on the price chart", S.rsPlace === "price", function(){ S.rsPlace = S.rsPlace === "price" ? "pane" : "price"; S.rs = true; saveS(); build(true); menus(); $("menu-ind").classList.add("open"); }));
-  RS_LIST.forEach(function(x){ if (!(P.ix || {})[x]) return; var it = item("Compare with " + x, S.rsIdx === x, function(){ S.rsIdx = x; S.rs = true; saveS(); build(true); menus(); $("menu-ind").classList.add("open"); });
-    it.querySelector(".ck").style.borderRadius = "50%"; mi.appendChild(it); });
-  mi.appendChild(el("div", "mh", "Levels"));
-  tg("Previous day high and low", "pd", "#FF9F0A"); tg("52-week high and low", "wk52", "#30D158");
+  tg("RS line", "rs", S.rsUp, P.ix && P.ix.v ? "vs " + RS_NAME : "index not loaded");
+  [["above","Pane above the chart"],["pane","Pane below the chart"],["price","On the price chart"]].forEach(function(x){
+    var it = item(x[1], S.rsPlace === x[0], function(){ S.rsPlace = x[0]; S.rs = true; saveS(); build(true); menus(); $("menu-ind").classList.add("open"); }); it.querySelector(".ck").style.borderRadius = "50%"; mi.appendChild(it); });
+  mi.appendChild(el("div", "mh", "Lines on the chart"));
+  tg("Previous day high and low (PDH / PDL)", "pd", "#FF9F0A"); tg("52-week high and low", "wk52", "#30D158");
   mi.appendChild(item("Lengths and colours…", null, function(){ closeMenus(); openSettings(); }));
   var md = $("menu-draw"); md.innerHTML = "";
   [["hline","Horizontal line"],["trend","Trend line"],["measure","Measure"]].forEach(function(t){ md.appendChild(item(t[1], null, function(){ closeMenus(); setTool(t[0]); })); });
@@ -829,7 +936,7 @@ window.addEventListener("resize", fit);
 if (window.ResizeObserver) new ResizeObserver(fit).observe($("panes"));
 menus(); build(false);
 setTimeout(function(){ fit(); setRange(rng); }, 60);
-if (S.rs && !(P.ix || {})[S.rsIdx]) { var hn = Object.keys(P.ix || {}).length ? S.rsIdx + " did not load, so the RS line is hidden. Pick another index under Indicators." : "Index data did not load, so the RS line is hidden. Reopen the chart in a minute."; hint(hn); setTimeout(function(){ if (tool === "cursor") hint(""); }, 6000); }
+if (S.rs && !(P.ix && P.ix.v)) { hint("No data for " + RS_NAME + ", so the RS line is hidden. Choose the index in Account → Relative strength index."); setTimeout(function(){ if (tool === "cursor") hint(""); }, 9000); }
 window.__arkaChart = {S:function(){ return S; }, charts:function(){ return charts; }, ind:function(){ return ind; }, draws:function(){ return draws; }};
 })();
 </script></body></html>"""
@@ -840,7 +947,7 @@ def _doc(mode: str, payload: str = "{}", sym: str = "", default_range: str = "6M
             .replace("__PAYLOAD__", payload)
             .replace("__SYM__", json.dumps(sym).replace("</", "<\\/"))
             .replace("__MODE__", mode)
-            .replace("__RSLIST__", json.dumps(list(RS_INDICES)))
+
             .replace("__RANGE__", default_range))
 
 
@@ -850,7 +957,7 @@ def render_pro_chart(symbol: str, height: int = 660, default_range: str = "6M") 
     if not sym:
         return False
     try:
-        payload = _payload_json(sym)
+        payload = _payload_json(sym, rs_index_name())
     except Exception:
         st.warning(f"No chart for {sym}: Yahoo Finance returned no price history. Try again in a minute.")
         return False
@@ -860,6 +967,6 @@ def render_pro_chart(symbol: str, height: int = 660, default_range: str = "6M") 
     return True
 
 
-def render_chart_settings(height: int = 1560) -> None:
+def render_chart_settings(height: int = 1640) -> None:
     """Chart settings for the Account page. Saved in this browser; every chart on this device opens with them."""
     components.html(_doc("settings"), height=height, scrolling=True)
