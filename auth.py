@@ -225,6 +225,11 @@ _BRIDGE_HTML = r"""<!doctype html><html><head><meta charset="utf-8"></head><body
     window.parent.postMessage(Object.assign({isStreamlitMessage: true, type: type}, data || {}), "*");
   }
   var lastNonce = null, branded = false;
+  var lastResp = {}, navCur = null, navPending = null, navPendAt = 0, seq = 0;
+  function emit(extra) {                           // report an event to Python without losing the last storage answer
+    send("streamlit:setComponentValue", {dataType: "json", value: Object.assign({}, lastResp, extra || {})});
+  }
+  function tag() { seq += 1; return Date.now().toString(36) + "-" + seq; }
 
   function storage() { try { var s = window.localStorage; s.getItem("__arka"); return s; } catch (e) { return null; } }
   function readCookie(name) {
@@ -294,7 +299,9 @@ _BRIDGE_HTML = r"""<!doctype html><html><head><meta charset="utf-8"></head><body
       css.setAttribute("data-arka-fx", "1");
       css.textContent = ".ak-ripple{position:absolute;border-radius:50%;pointer-events:none;background:rgba(255,255,255,.16);transform:scale(0);" +
         "animation:akrip .55s ease-out forwards}@keyframes akrip{to{transform:scale(1);opacity:0}}" +
-        "button{-webkit-tap-highlight-color:transparent}@media (prefers-reduced-motion:reduce){.ak-ripple{display:none}}";
+        "button{-webkit-tap-highlight-color:transparent}" +
+        "[data-ak-sym]{cursor:pointer;-webkit-tap-highlight-color:transparent;transition:opacity .15s,transform .15s}" +
+        "[data-ak-sym]:active{transform:scale(.985)}.ak-opening{opacity:.55}@media (prefers-reduced-motion:reduce){.ak-ripple{display:none}}";
       d.head.appendChild(css);
       d.addEventListener("pointerdown", function (e) {
         var b = e.target && e.target.closest ? e.target.closest("button") : null;
@@ -312,16 +319,96 @@ _BRIDGE_HTML = r"""<!doctype html><html><head><meta charset="utf-8"></head><body
       }, {passive: true, capture: true});
     } catch (e) {}
   }
+  // ── in-app history: every page / stock the user opens becomes a browser history entry, so the phone's
+  //    back swipe (and the back button) walks back through the app instead of leaving it
+  function appWin() {
+    try { var w = window.parent; if (w && w.history && w.location && w.location.href) return w; } catch (e) {}
+    return null;
+  }
+  function navParse(search) {
+    try {
+      var q = new URLSearchParams(search || ""), p = q.get("p");
+      return p ? p + "|" + (q.get("s") || "") : null;
+    } catch (e) { return null; }
+  }
+  function urlFor(w, state) {
+    var u = new URL(w.location.href), a = state.split("|");
+    u.searchParams.set("p", a[0]);
+    if (a[1]) u.searchParams.set("s", a[1]); else u.searchParams.delete("s");
+    return u.pathname + u.search + u.hash;
+  }
+  function saveNav(state) {
+    try { var ls = storage(); if (ls) ls.setItem("arka_nav", JSON.stringify({s: state, t: Date.now()})); } catch (e) {}
+  }
+  function savedNav() {
+    try { var ls = storage(), raw = ls ? ls.getItem("arka_nav") : null; return raw ? JSON.parse(raw) : null; } catch (e) { return null; }
+  }
+  function onPop(w) {
+    var st = null;
+    try { st = (w.history.state && w.history.state.ak) || navParse(w.location.search); } catch (e) {}
+    if (!st) return;
+    navCur = st; navPending = st; navPendAt = Date.now();
+    saveNav(st);
+    emit({nav: st, navNonce: tag()});
+  }
+  function navRender(state) {
+    if (!state) return;                               // Python sends nothing until it has restored the last page
+    var w = appWin();
+    if (!w) return;
+    w.__arkaPop = function () { onPop(w); };          // the newest bridge instance always answers
+    if (!w.__arkaPopHooked) {
+      w.__arkaPopHooked = 1;
+      w.addEventListener("popstate", function () { try { if (w.__arkaPop) w.__arkaPop(); } catch (e) {} });
+    }
+    if (navPending) {                                 // a back step is on its way to Python: ignore older renders
+      if (state === navPending || Date.now() - navPendAt > 5000) navPending = null; else return;
+    }
+    if (state === navCur) return;
+    try {
+      var data = Object.assign({}, w.history.state || {}, {ak: state});
+      if (navCur === null) w.history.replaceState(data, "", urlFor(w, state));
+      else w.history.pushState(data, "", urlFor(w, state));
+    } catch (e) {}
+    navCur = state;
+    saveNav(state);
+  }
+  function tapOpen(w) {                             // any element with data-ak-sym opens that stock
+    try {
+      var d = w.document;
+      d.__arkaOpen = function (sym) { emit({open: sym, openNonce: tag()}); };
+      if (d.__arkaTapHooked) return;
+      d.__arkaTapHooked = 1;
+      d.addEventListener("click", function (e) {
+        var t = e.target;
+        if (!t || !t.closest) return;
+        var el = t.closest("[data-ak-sym]");
+        if (!el) return;
+        var inner = t.closest("details,summary,button,input,select,textarea,a,label");
+        if (inner && inner !== el && el.contains(inner)) return;   // chips and buttons inside a row keep their own job
+        var sym = (el.getAttribute("data-ak-sym") || "").trim();
+        if (!sym) return;
+        e.preventDefault(); e.stopPropagation();
+        try { if (w.navigator.vibrate) w.navigator.vibrate(8); } catch (_) {}
+        el.classList.add("ak-opening");
+        setTimeout(function () { try { el.classList.remove("ak-opening"); } catch (_) {} }, 1200);
+        try { if (d.__arkaOpen) d.__arkaOpen(sym); } catch (_) {}
+      }, true);
+    } catch (e) {}
+  }
   function handle(args) {
     if (!branded && args.brand) { brand(args.brand); branded = true; try { fx(window.parent); } catch (e) {} }
+    try { var aw = appWin(); if (aw) tapOpen(aw); } catch (e) {}
+    navRender(args.nav || "");
     var nonce = args.nonce;
     if (!nonce || nonce === lastNonce) return;          // nothing new to do
     lastNonce = nonce;
-    var ls = storage(), token = null, ok = true, err = "", key = args.skey || "arka_auth";
+    var ls = storage(), token = null, ok = true, err = "", key = args.skey || "arka_auth", loc = null, saved = null;
     try {
       if (args.op === "get") {
         token = ls ? ls.getItem(key) : null;
         if (!token) token = readCookie(key);
+        try { var hw = appWin(); loc = hw ? navParse(hw.location.search) : null; } catch (e) {}
+        saved = savedNav();
       } else if (args.op === "set") {
         if (ls) ls.setItem(key, args.value);
         writeCookie(key, args.value, args.max_age || 2592000);
@@ -333,8 +420,9 @@ _BRIDGE_HTML = r"""<!doctype html><html><head><meta charset="utf-8"></head><body
     } catch (e) { ok = false; err = String(e); }
     var standalone = false;
     try { standalone = !!(window.top.navigator.standalone || window.top.matchMedia("(display-mode: standalone)").matches); } catch (e) {}
-    send("streamlit:setComponentValue", {dataType: "json",
-         value: {nonce: nonce, op: args.op, token: token, ok: ok, err: err, storage: !!ls, width: viewport(), standalone: standalone}});
+    lastResp = {nonce: nonce, op: args.op, token: token, ok: ok, err: err, storage: !!ls, width: viewport(), standalone: standalone,
+                loc: loc, saved: saved};
+    emit({});
   }
   window.addEventListener("message", function (ev) {
     if (ev.data && ev.data.type === "streamlit:render") handle(ev.data.args || {});
@@ -403,8 +491,13 @@ def _accept(token, key: bytes):
     return True
 
 
-def bridge(key: bytes) -> None:
-    """Call once near the top of every run. Restores the session from this device and runs pending storage commands."""
+def bridge(key: bytes, nav: str | None = None) -> None:
+    """Call once near the top of every run. Restores the session from this device and runs pending storage commands.
+
+    nav: "page|SYMBOL" for the screen being shown (empty until the app has restored the last screen). The browser
+    turns each new value into a history entry, so back / the phone's back swipe return to the previous screen.
+    Events from the browser land in session state: "_ak_nav_in" (back/forward to a screen), "_ak_open_in" (a stock
+    was tapped) and "_ak_boot" (where this device was last, read once with the sign-in token)."""
     ss = st.session_state
     if "_ak_started" not in ss:
         ss["_ak_started"] = time.time()
@@ -419,7 +512,7 @@ def bridge(key: bytes) -> None:
     try:
         val = _bridge_component(op=cmd.get("op", "noop"), value=cmd.get("value"), nonce=cmd.get("nonce"), skey=COOKIE_NAME,
                                 max_age=COOKIE_MAX_AGE, brand={"name": APP_NAME, "short": SHORT_NAME, "theme": THEME_BG, "v": _ICON_VERSION},
-                                default=None, key="ak_bridge")
+                                nav=nav or "", default=None, key="ak_bridge")
     except Exception:
         ss["_ak_ready"] = True
         return
@@ -431,9 +524,21 @@ def bridge(key: bytes) -> None:
             ss["_ak_storage_ok"] = bool(val.get("storage"))
             if val.get("op") == "get":
                 ss["_ak_ready"] = True
+                ss["_ak_boot"] = {"loc": val.get("loc"), "saved": val.get("saved")}
                 _accept(val.get("token"), key)
             elif val.get("op") == "set":
                 ss["_ak_ready"] = True
+    if isinstance(val, dict):                               # browser events, each handled once
+        nn = val.get("navNonce")
+        if nn and nn != ss.get("_ak_nav_seen"):
+            ss["_ak_nav_seen"] = nn
+            if isinstance(val.get("nav"), str):
+                ss["_ak_nav_in"] = val["nav"]
+        on = val.get("openNonce")
+        if on and on != ss.get("_ak_open_seen"):
+            ss["_ak_open_seen"] = on
+            if isinstance(val.get("open"), str):
+                ss["_ak_open_in"] = val["open"]
     if not ss["_ak_ready"] and time.time() - ss["_ak_started"] > WAIT_S:
         ss["_ak_ready"] = True
 
