@@ -1,5 +1,8 @@
 """
-home_page.py — Arka Trades · Market overview (the HOME page), v4
+home_page.py — Arka Trades · Market overview (the HOME page), v4.1
+
+v4.1: a "Futures and options" section under the benchmarks: the F&O engine verdict for NIFTY 50 and BANK NIFTY with put-call
+      ratio, implied volatility, max pain and the open-interest walls (from fno_page.py; hidden if that file is not installed).
 
 v4 — rebuilt top to bottom so the most important thing is always highest on the page
   Reading order (desktop and phone):
@@ -1394,6 +1397,46 @@ def _health(M, mmi, B, span=""):
     return _card("Market health", "Trend, breadth and volatility", body, span)
 
 
+# ───────────── futures and options ─────────────
+def _fno(compact=False):
+    """The F&O engine's verdict for NIFTY 50 and BANK NIFTY, from fno_page.py. Shows nothing if that file is not installed."""
+    try:
+        import fno_page
+        rows = fno_page.home_rows()
+    except Exception:
+        return ""
+    if rows is None:
+        body = '<div class="hm-empty">Reading the stored F&O history. The verdict appears here in a moment; the F&O tab has the full picture.</div>'
+        return _sec("Futures and options", "" if compact else "What positioning says, tested on the stored history") + _grid(_card("F&O view", "", body, "c12 m2"))
+    if not rows:
+        return ""
+
+    def num(v, d=0):
+        return f"{v:,.{d}f}" if _ok(v) else "—"
+
+    cards = []
+    for r in rows:
+        col = GREEN if r["tone"] == "up" else RED if r["tone"] == "dn" else "var(--tx2)"
+        sub = f'next 10 sessions · {r["proven"]} proven reading{"" if r["proven"] == 1 else "s"}'
+        kv = [f'<div class="hm-kv"><span>Put-call ratio</span><b>{num(r["pcr"], 2)}</b></div>',
+              f'<div class="hm-kv"><span>Implied volatility</span><b>{num(r["iv"] * 100, 1) + "%" if _ok(r["iv"]) else "—"}</b></div>',
+              f'<div class="hm-kv"><span>Max pain</span><b>{num(r["max_pain"])}</b></div>',
+              f'<div class="hm-kv"><span>Put wall · call wall</span><b>{num(r["put_wall"])} · {num(r["call_wall"])}</b></div>']
+        if _ok(r.get("move5")):
+            kv.append(f'<div class="hm-kv"><span>Priced move, 5 sessions</span><b>±{num(r["move5"])} pts</b></div>')
+        if r.get("reason"):
+            kv.append(f'<div class="hm-kv"><span>Main reading</span><b>{_e(r["reason"])}</b></div>')
+        body = f'<div class="hm-vd"><b style="color:{col}">{_e(r["verdict"])}</b><span>{sub}</span></div><div class="hm-kvs" style="margin-top:10px">{"".join(kv)}</div>'
+        asof = ""
+        try:
+            d = date.fromisoformat(str(r["asof"]))
+            asof = f"Data to {d.day} {d.strftime('%b')}"
+        except Exception:
+            pass
+        cards.append(_card(_e(r["name"]) + " · F&O view", asof, body, "" if compact else "c6"))
+    return _sec("Futures and options", "" if compact else "What positioning says, tested on the stored history · full evidence in the F&O tab") + _grid("".join(cards))
+
+
 # ───────────── benchmarks ─────────────
 def _bench(M, labels=BENCH):
     out = []
@@ -1707,6 +1750,7 @@ def _draw(M, groups, n50, wl, wl_label, base, quotes, mmi, compact):
         book = (_holdings(holds, realised, "", True) + _watch(wl, wl_label, quotes, "")) if has_book else empty_book
         html_ = (top
                  + _grid(_hero(M, S, "", True)) + _bench(M) + _grid(_health(M, mmi, B))
+                 + _fno(True)
                  + _sec("Your book") + _grid(book)
                  + _sec("Leadership", "today")
                  + _grid(_card("Top movers", "NIFTY 50", _movers(nq), flush=True)
@@ -1731,6 +1775,7 @@ def _draw(M, groups, n50, wl, wl_label, base, quotes, mmi, compact):
     html_ = (top
              + _grid(_hero(M, S, "c7 m2") + _health(M, mmi, B, "c5 m2"))
              + _bench(M)
+             + _fno()
              + _sec("Your book", "Holdings and the stocks you are watching") + _grid(book)
              + _sec("Leadership", "Sectors and stocks moving the market today")
              + _grid(_card("Sectors", sec_right, _sector_matrix(M), "c7 m2", True) + lead_right
