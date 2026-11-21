@@ -1,5 +1,21 @@
 """
-news_feed.py — Arka News Desk v11
+news_feed.py — Arka News Desk v12
+
+v12 (faster and sharper; the look and the public API are unchanged)
+  FASTER
+  * The page no longer waits for the news. Once a feed has been built, an expired copy is shown at once and rebuilt
+    in the background; the fresh version appears on the next refresh. Only the very first load can take a few seconds.
+  * Tagging your stocks in a headline is one pass over the text instead of two searches per stock (about 100 times
+    fewer searches with a large watchlist). Tone, sector, theme and story type are worked out once per headline.
+  * One shared connection to each source, and sources are asked "anything new since last time?" so an unchanged feed
+    costs almost nothing.
+  * The news desk redraws only itself when you change a view, and refreshes on its own every two minutes.
+  SHARPER
+  * Stories are merged only when they are really the same story: the subject, the numbers and the tagged stocks must
+    agree, so "TCS Q2 profit rises 9%" is no longer folded into "Infosys Q2 profit rises 12%".
+  * Tone knows more market wording (USFDA letters, pledges, guidance cuts, order inflows, rating changes, tax demands).
+  * News desk: each stock chip shows today's price move, and two new views: Movers (news on your stocks that moved
+    2% or more today) and Developing (stories carried by three or more outlets).
 
 v11 (look only; data, scoring and the public API are unchanged)
   * Rebuilt on the app design system: Inter, sentence case, rounded story cards, soft pills; no uppercase monospace.
@@ -73,7 +89,10 @@ MONO = "'JetBrains Mono','Consolas',monospace"
 GOLD, DARK, DARK2, DARK3, BORDER, T2, T3, IVORY, BLUE = AMBER, "#000000", "#090909", "#111111", "#242424", "#8E8E8E", "#5C5C5C", "#E8E8E8", CYAN
 
 FEED_TTL = 300              # seconds a source is reused before it is fetched again
-ASSEMBLE_TTL = 300          # assembled feed memo
+ASSEMBLE_TTL = 300          # an assembled feed is fresh for this long
+STALE_MAX = 3 * 3600        # after that it is still shown at once (and rebuilt in the background) for up to this long
+AUTO_REFRESH_S = 120        # the news desk redraws itself this often
+MOVE_PCT = 2.0              # "Movers": news on a stock that moved at least this much today
 FETCH_BUDGET_S = 9.0        # hard wall-clock budget per assembly; slow sources are picked up on the next run
 HTTP_TIMEOUT = 7
 MAX_COMPANY_FETCH = 10      # stocks queried on Google News per cycle (pinned stock + rotation)
@@ -161,6 +180,13 @@ EVENT_COLORS = {"REGULATORY": RED, "FILING": CYAN, "ORDER": GREEN, "STAKE": AMBE
 EVENT_WEIGHT = {"REGULATORY": 3, "ORDER": 3, "STAKE": 3, "PROMOTER": 2, "EARNINGS": 3, "CORP ACTION": 2, "FILING": 2,
                 "IPO": 1, "RATING": 2, "CAPEX": 2, "MANAGEMENT": 2, "MACRO": 1, "NEWS": 0}
 SENT = [  # (pattern, weight); longer phrases first
+    (r"usfda (approval|nod|clearance)|eir from (the )?usfda|order inflows?|record order book|debt[- ]free|stake hike|"
+     r"special dividend|bonus issue|guidance raised|raises? full[- ]year|margin expansion|turns? profitable|rating upgrade|"
+     r"npas? (fall|falls|decline|declines|ease|eases)", 2),
+    (r"usfda (warning letter|import alert|observations?)|form 483|pledge[sd]? (more )?shares|rating downgrade|guidance cut|"
+     r"cuts? (guidance|outlook|forecast)|margin contraction|npas? (rise|rises|surge|surges|jump|jumps)|show[- ]cause notice|"
+     r"(tax|gst) demand|data breach|recalls?|write[- ]?offs?|qualified opinion|auditor (resigns|quits)|fire (at|in) (the )?(plant|factory|unit)|"
+     r"promoters? (sell|sells|offload|offloads)", -2),
     (r"record (high|profit|revenue|sales)|all[- ]time high|52[- ]week high|upper circuit|multibagger", 2),
     (r"beats? (estimates?|expectations?|street)|raises? (guidance|outlook|target)|target raised", 2),
     (r"(wins?|bags?|secures?|receives?) (an? )?(?:[\w₹$.,-]+ ){0,4}(orders?|contracts?|deals?)", 2),   # v11: "bags ₹1,200 crore order"
@@ -190,6 +216,17 @@ _HEALTH: dict = {}          # url -> {"name", "ok", "n", "t", "err"}
 _LAST_GOOD: dict = {}
 _COOL: dict = {}
 _MEMO: dict = {}
+_INFLIGHT: set = set()      # feeds being rebuilt in the background right now
+_DOTS: dict = {}            # memo key -> symbols with a story in the last 24 h (for get_news_dot)
+_VALID: dict = {}           # url -> (etag, last-modified, rows): lets a source answer "nothing new"
+
+_SESSION = requests.Session()   # one connection per source instead of a new handshake for every fetch
+try:
+    _adapter = requests.adapters.HTTPAdapter(pool_connections=16, pool_maxsize=16, max_retries=0)
+    _SESSION.mount("https://", _adapter)
+    _SESSION.mount("http://", _adapter)
+except Exception:  # pragma: no cover
+    pass
 
 
 def _bucket(ttl=FEED_TTL) -> int:
@@ -223,7 +260,16 @@ def _clean_html(s: str, n=260) -> str:
 
 @st.cache_data(ttl=FEED_TTL * 2, show_spinner=False, max_entries=256)
 def _rss_cached(url: str, bucket: int) -> list:
-    r = requests.get(url, timeout=HTTP_TIMEOUT, headers={"User-Agent": UA, "Accept": "application/rss+xml,application/xml,text/xml,*/*"})
+    head = {"User-Agent": UA, "Accept": "application/rss+xml,application/xml,text/xml,*/*"}
+    prev = _VALID.get(url)
+    if prev:                                              # ask only for what changed since the last fetch
+        if prev[0]:
+            head["If-None-Match"] = prev[0]
+        if prev[1]:
+            head["If-Modified-Since"] = prev[1]
+    r = _SESSION.get(url, timeout=HTTP_TIMEOUT, headers=head)
+    if r.status_code == 304 and prev:
+        return prev[2]
     r.raise_for_status()
     feed = feedparser.parse(r.content)
     rows = []
@@ -234,6 +280,8 @@ def _rss_cached(url: str, bucket: int) -> list:
                      "src": src.get("title") if isinstance(src, dict) else None})
     if not rows:
         raise RuntimeError("empty feed")
+    if r.headers.get("ETag") or r.headers.get("Last-Modified"):
+        _VALID[url] = (r.headers.get("ETag"), r.headers.get("Last-Modified"), rows)
     return rows
 
 
@@ -262,7 +310,7 @@ def _gnews_url(query: str, days: int) -> str:
 @st.cache_data(ttl=600, show_spinner=False, max_entries=8)
 def _bse_cached(d_from: str, d_to: str, bucket: int) -> list:
     """BSE corporate announcements (exchange filings), market-wide, newest first."""
-    r = requests.get("https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w",
+    r = _SESSION.get("https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w",
                      params={"pageno": 1, "strCat": -1, "strPrevDate": d_from, "strScrip": "", "strSearch": "P",
                              "strToDate": d_to, "strType": "C", "subcategory": -1},
                      headers={"User-Agent": UA, "Referer": "https://www.bseindia.com/", "Origin": "https://www.bseindia.com",
@@ -291,6 +339,7 @@ def _bse_cached(d_from: str, d_to: str, bucket: int) -> list:
 
 
 # ═════════════════════════ scoring / tagging ═════════════════════════
+@lru_cache(maxsize=8192)
 def _sentiment(text: str) -> int:
     t = (text or "").lower()
     score = 0
@@ -312,11 +361,22 @@ _SENT_LABEL = {"strong_positive": "POS", "mild_positive": "pos", "neutral": "—
 _SENT_COLOR = {"strong_positive": GREEN, "mild_positive": "#6FD98F", "neutral": TX3, "mild_negative": "#FF8A80", "strong_negative": RED}
 
 
-def _event(text: str, macro: bool) -> str:
+@lru_cache(maxsize=8192)
+def _event_of(text: str) -> str:
     for name, rx in _EVENT_RX:
         if rx.search(text or ""):
             return name
-    return "MACRO" if macro else "NEWS"
+    return ""
+
+
+def _event(text: str, macro: bool) -> str:
+    return _event_of(text or "") or ("MACRO" if macro else "NEWS")
+
+
+@lru_cache(maxsize=8192)
+def _topics(low: str) -> tuple:
+    """(sectors, macro themes) named in a lower-cased headline + summary."""
+    return (tuple(k for k, rx in _SECTOR_RX.items() if rx.search(low)), tuple(k for k, rx in _MACRO_RX.items() if rx.search(low)))
 
 
 def _amount_cr(text: str):
@@ -334,9 +394,10 @@ def _amount_cr(text: str):
 
 @lru_cache(maxsize=64)
 def _tagger(symbols: tuple, names: tuple):
-    """Compiled matchers for the user's universe: ticker (case-sensitive) + aliases / company names (case-insensitive)."""
-    out = []
+    """One compiled matcher for the whole universe: tickers (case-sensitive, in the headline) and aliases / company
+    names (case-insensitive, in headline + summary). Longest names are tried first, so "SBI Life" is SBILIFE, not SBIN."""
     name_map = dict(names)
+    alias_map = {}                                    # alias -> [symbols]
     for sym in symbols:
         pats = [a for a in ALIASES.get(sym, [])]
         nm = name_map.get(sym)
@@ -344,19 +405,25 @@ def _tagger(symbols: tuple, names: tuple):
             words = [w for w in re.sub(r"[^A-Za-z0-9& ]", " ", nm).split() if w.lower() not in {"ltd", "limited", "the", "india", "co", "corporation"}]
             if words and (len(words) > 1 or len(words[0]) >= 5):
                 pats.append(" ".join(words[:2]).lower())
-        alias_rx = re.compile(r"(?<![a-z0-9])(?:" + "|".join(re.escape(p) for p in pats) + r")(?![a-z0-9])") if pats else None
-        tick_rx = re.compile(rf"(?<![A-Za-z0-9]){re.escape(sym)}(?![A-Za-z0-9])") if len(sym) >= 3 else None
-        out.append((sym, tick_rx, alias_rx))
-    return out
+        for p_ in pats:
+            if sym not in alias_map.setdefault(p_, []):
+                alias_map[p_].append(sym)
+    ticks = sorted((s_ for s_ in symbols if len(s_) >= 3), key=len, reverse=True)
+    tick_rx = re.compile(r"(?<![A-Za-z0-9])(" + "|".join(re.escape(t) for t in ticks) + r")(?![A-Za-z0-9])") if ticks else None
+    alias_rx = (re.compile(r"(?<![a-z0-9])(" + "|".join(re.escape(p_) for p_ in sorted(alias_map, key=len, reverse=True)) + r")(?![a-z0-9])")
+                if alias_map else None)
+    return tick_rx, alias_rx, alias_map, {sym: i for i, sym in enumerate(symbols)}
 
 
 def _tag(title: str, summary: str, tagger) -> list:
-    low = f"{title} {summary}".lower()
-    found = []
-    for sym, tick_rx, alias_rx in tagger:
-        if (tick_rx and tick_rx.search(title)) or (alias_rx and alias_rx.search(low)):
-            found.append(sym)
-    return found
+    tick_rx, alias_rx, alias_map, order = tagger
+    found = set()
+    if tick_rx is not None:
+        found.update(tick_rx.findall(title))
+    if alias_rx is not None:
+        for m in alias_rx.findall(f"{title} {summary}".lower()):
+            found.update(alias_map[m])
+    return sorted(found, key=lambda x: order.get(x, 1 << 30))
 
 
 def _norm_title(t: str) -> str:
@@ -365,10 +432,19 @@ def _norm_title(t: str) -> str:
 
 
 def _similar(a: str, b: str) -> bool:
-    sa, sb = set(a.split()), set(b.split())
+    """Same story told by two outlets? Most words shared, the subject (first word) of each appears in the other, and
+    if both quote numbers they share one. So two companies' look-alike results headlines stay two stories."""
+    wa, wb = a.split(), b.split()
+    sa, sb = set(wa), set(wb)
     if not sa or not sb:
         return False
-    return len(sa & sb) / max(1, min(len(sa), len(sb))) >= 0.72 and len(sa & sb) >= 4
+    inter = len(sa & sb)
+    if inter < 4 or inter / max(1, min(len(sa), len(sb))) < 0.72:
+        return False
+    if wa[0] not in sb or wb[0] not in sa:
+        return False
+    na, nb = {w for w in sa if w[0].isdigit()}, {w for w in sb if w[0].isdigit()}
+    return not (na and nb and not (na & nb))
 
 
 def _make(row: dict, kind: str, source: str, symbol: str | None, tagger) -> dict | None:
@@ -391,8 +467,7 @@ def _make(row: dict, kind: str, source: str, symbol: str | None, tagger) -> dict
     syms = _tag(title, summary if kind != "company" else "", tagger)
     if symbol and symbol not in syms and kind == "company":
         syms.insert(0, symbol)
-    sectors = [k for k, rx in _SECTOR_RX.items() if rx.search(low)]
-    macro = [k for k, rx in _MACRO_RX.items() if rx.search(low)]
+    sectors, macro = (list(x) for x in _topics(low))
     event = _event(title if kind != "filing" else f"{title} {summary}", macro=kind == "macro" or (bool(macro) and not syms))
     amt = _amount_cr(text)
     link = row.get("link") or ""
@@ -411,7 +486,8 @@ def _cluster(items: list) -> list:
         if a["link"] and a["link"] in by_link:
             continue
         k = _norm_title(a["title"])
-        hit = next((i for i, kk in enumerate(keys[-150:], start=max(0, len(keys) - 150)) if _similar(k, kk)), None)
+        hit = next((i for i, kk in enumerate(keys[-150:], start=max(0, len(keys) - 150))
+                    if _similar(k, kk) and not (a["symbols"] and out[i]["symbols"] and not set(a["symbols"]) & set(out[i]["symbols"]))), None)
         if hit is None:
             keys.append(k)
             out.append(dict(a))
@@ -482,7 +558,8 @@ def _company_query(sym: str, name: str | None) -> str:
 
 
 def assemble(symbols=(), names=(), current="", days=1, include_filings=True) -> list:
-    """The shared feed for a universe of stocks. Memoised ASSEMBLE_TTL seconds; never blocks longer than FETCH_BUDGET_S."""
+    """The shared feed for a universe of stocks. Fresh for ASSEMBLE_TTL seconds; after that the last copy is returned
+    at once while a new one is built in the background, so only the first load ever waits (at most FETCH_BUDGET_S)."""
     symbols = tuple(dict.fromkeys(str(s).upper().strip() for s in symbols if str(s).strip()))
     current = (current or "").upper().strip()
     if current and current not in symbols:
@@ -491,8 +568,36 @@ def assemble(symbols=(), names=(), current="", days=1, include_filings=True) -> 
     days = max(1, min(int(days or 1), 30))
     key = (symbols, names, current, days, include_filings)
     hit = _MEMO.get(key)
-    if hit and time.time() - hit[0] < (ASSEMBLE_TTL if hit[2] else 20):
-        return hit[1]
+    if hit:
+        age = time.time() - hit[0]
+        if age < (ASSEMBLE_TTL if hit[2] else 20):
+            return hit[1]
+        if age < STALE_MAX:                               # expired: show it now, rebuild behind the scenes
+            _rebuild_later(key)
+            return _score(hit[1], set(symbols), current)   # ages and "breaking" flags brought up to date
+    return _build(key)
+
+
+def _rebuild_later(key):
+    with _LOCK:
+        if key in _INFLIGHT:
+            return
+        _INFLIGHT.add(key)
+
+    def work():
+        try:
+            _build(key)
+        except Exception:
+            pass
+        finally:
+            with _LOCK:
+                _INFLIGHT.discard(key)
+    threading.Thread(target=work, name="arka-news", daemon=True).start()
+
+
+def _build(key) -> list:
+    """Fetch every source (never longer than FETCH_BUDGET_S), tag, merge, score and remember the result."""
+    symbols, names, current, days, include_filings = key
     tagger = _tagger(symbols, names)
     name_map = dict(names)
     jobs = [(u, n, "wire", None, None) for n, u in WIRE_SOURCES]
@@ -524,19 +629,29 @@ def assemble(symbols=(), names=(), current="", days=1, include_filings=True) -> 
     out = _score(_cluster(items), set(symbols), current)
     out.sort(key=lambda a: (a["priority"], a["pub_dt"]), reverse=True)
     _MEMO[key] = (time.time(), out, not pending)
+    _DOTS[key] = frozenset(s_ for a in out if a["age_min"] <= 24 * 60 for s_ in a["symbols"])
     if len(_MEMO) > 64:
-        _MEMO.pop(next(iter(_MEMO)))
+        old = next(iter(_MEMO))
+        _MEMO.pop(old, None)
+        _DOTS.pop(old, None)
     return out
 
 
 # ═════════════════════════ views & metrics ═════════════════════════
 MODES_RAIL = ["TOP", "LIVE", "MINE", "RISK", "MACRO"]
-MODES_FULL = ["TOP", "LIVE", "MY STOCKS", "CATALYSTS", "RISK", "EARNINGS", "CORP ACTIONS", "FILINGS", "MACRO"]
+MODES_FULL = ["TOP", "LIVE", "MY STOCKS", "MOVERS", "DEVELOPING", "CATALYSTS", "RISK", "EARNINGS", "CORP ACTIONS", "FILINGS", "MACRO"]
 
 
-def _view(items: list, mode: str, query: str = "", current: str = "") -> list:
+def _view(items: list, mode: str, query: str = "", current: str = "", moves: dict | None = None) -> list:
     m = mode.upper()
-    if m == "LIVE":
+    moves = moves or {}
+    if m == "MOVERS":                                     # news on a stock that is actually moving today
+        def big(a):
+            return max((abs(moves.get(s_, 0.0)) for s_ in a["symbols"]), default=0.0)
+        out = sorted([a for a in items if big(a) >= MOVE_PCT], key=lambda a: (big(a), a["pub_dt"]), reverse=True)
+    elif m == "DEVELOPING":                               # carried by three or more outlets
+        out = sorted([a for a in items if a["source_count"] >= 3], key=lambda a: (a["source_count"], a["pub_dt"]), reverse=True)
+    elif m == "LIVE":
         out = sorted(items, key=lambda a: a["pub_dt"], reverse=True)
     elif m in ("MINE", "MY STOCKS"):
         out = [a for a in items if a["mine"]]
@@ -639,7 +754,8 @@ SANS = "Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif"
 EVENT_LABEL = {"REGULATORY": "Regulatory", "FILING": "Filing", "ORDER": "Order win", "STAKE": "Stake / M&A", "PROMOTER": "Promoter",
                "EARNINGS": "Results", "CORP ACTION": "Corporate action", "IPO": "IPO", "RATING": "Rating", "CAPEX": "Capex",
                "MANAGEMENT": "Management", "MACRO": "Macro", "NEWS": "News"}
-MODE_LABEL = {"TOP": "Top", "LIVE": "Latest", "MINE": "My stocks", "MY STOCKS": "My stocks", "CATALYSTS": "Catalysts", "RISK": "Risk",
+MODE_LABEL = {"TOP": "Top", "LIVE": "Latest", "MINE": "My stocks", "MY STOCKS": "My stocks", "MOVERS": "Movers", "DEVELOPING": "Developing",
+              "CATALYSTS": "Catalysts", "RISK": "Risk",
               "EARNINGS": "Results", "CORP ACTIONS": "Corporate actions", "FILINGS": "Filings", "MACRO": "Macro"}
 TAG_LABEL = {"BANKS & FIN": "Banks & finance", "IT": "IT", "AUTO": "Auto", "PHARMA": "Pharma & health", "METALS": "Metals",
              "ENERGY": "Oil & gas", "FMCG": "FMCG", "REALTY": "Realty", "POWER": "Power", "CAP GOODS": "Capital goods",
@@ -753,7 +869,28 @@ def _clock(dt) -> str:
     return dt.strftime("%H:%M") if dt.date() == now.date() else dt.strftime("%d %b, %H:%M")
 
 
-def _story(a: dict, full: bool = False, current: str = "") -> str:
+def _moves(symbols) -> dict:
+    """Today's change in percent for the reader's stocks, from the app's own quote cache (no extra source)."""
+    syms = tuple(dict.fromkeys(symbols))[:80]
+    if not syms:
+        return {}
+    try:
+        import data_engine as de
+        q = de.get_quotes(syms) or {}
+    except Exception:
+        return {}
+    out = {}
+    for s_, v in q.items():
+        try:
+            c = float((v or {}).get("chg"))
+        except (TypeError, ValueError):
+            continue
+        if c == c:
+            out[s_] = c
+    return out
+
+
+def _story(a: dict, full: bool = False, current: str = "", moves: dict | None = None) -> str:
     sc = _SENT_COLOR[a["sentiment"]]
     ev = a["event"]
     pills = []
@@ -771,7 +908,12 @@ def _story(a: dict, full: bool = False, current: str = "") -> str:
     ago = a["time_str"] + ("" if a["time_str"] == "now" or not a["time_str"][-1:] in "mh" else " ago")
     meta = (f'<span class="t">{_clock(a["pub_dt"])}</span><span class="dot">·</span><span>{html.escape(ago)}</span>'
             f'<span class="dot">·</span><span>{src}</span>')
-    syms = "".join(f'<span class="nd-sym{" cur" if s == current else ""}" data-ak-sym="{html.escape(s)}" title="Open {html.escape(s)}">{html.escape(s)}</span>' for s in a["symbols"][:4])
+    def _mv(s_):
+        c = (moves or {}).get(s_)
+        if c is None:
+            return ""
+        return f'<i style="font-style:normal;font-weight:600;margin-left:5px;color:{GREEN if c > 0.005 else RED if c < -0.005 else TX3}">{c:+.1f}%</i>'
+    syms = "".join(f'<span class="nd-sym{" cur" if s == current else ""}" data-ak-sym="{html.escape(s)}" title="Open {html.escape(s)}">{html.escape(s)}{_mv(s)}</span>' for s in a["symbols"][:4])
     if not syms:
         syms = f'<span class="nd-sym">{"Macro" if a["kind"] == "macro" or a["macro"] else "Market"}</span>'
     tone = f'<span><span class="nd-tone-dot" style="--c:{sc}"></span>{TONE_WORD[a["sentiment"]]}</span>'
@@ -788,11 +930,11 @@ def _story(a: dict, full: bool = False, current: str = "") -> str:
             f'<div class="nd-f">{syms}{tone}{amt}{f"<span>{extra}</span>" if extra else ""}{react}</div></a>')
 
 
-def _stories(items, full=False, current="", empty="No stories in this view."):
+def _stories(items, full=False, current="", empty="No stories in this view.", moves=None):
     if not items:
         st.markdown(f'<div class="nd-empty">{html.escape(empty)}</div>', unsafe_allow_html=True)
         return
-    st.markdown('<div class="nd-root">' + "".join(_story(a, full, current) for a in items) + "</div>", unsafe_allow_html=True)
+    st.markdown('<div class="nd-root">' + "".join(_story(a, full, current, moves) for a in items) + "</div>", unsafe_allow_html=True)
 
 
 def _mark_new(items):
@@ -866,10 +1008,7 @@ def get_security_news(symbol: str, days: int = 7) -> list:
 
 def get_news_dot(sym: str) -> str:
     s = (sym or "").upper().strip()
-    for _, (t, items, _) in list(_MEMO.items()):
-        if any(s in a["symbols"] and a["age_min"] <= 24 * 60 for a in items):
-            return "1"
-    return ""
+    return "1" if s and any(s in d for d in list(_DOTS.values())) else ""
 
 
 def render_news_rail(watchlist, label: str = "WATCHLIST", current_security: str | None = None, sector: str | None = None):
@@ -948,14 +1087,13 @@ def _side_cards(items, universe):
     return out
 
 
-def render_news_terminal(watchlist=None, on_open=None, current_security: str | None = None):
-    """Full news desk: breaking strip, summary cards, the wire with views, your stocks, sector tone, sources."""
-    _ensure_news_state()
-    _css()
+def _desk(watchlist=None, on_open=None, current_security: str | None = None):
+    """The news desk body. Runs as a fragment: changing a view redraws only the desk, and it refreshes by itself."""
     current = (current_security or st.session_state.get("active_security") or "").upper().strip()
     universe = _universe(watchlist)
     phone = _phone()
-    st.markdown(f'<div class="nd-sec" style="font-size:20px;margin-top:4px">News desk<em>{_now():%a %d %b, %H:%M} IST</em></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="nd-sec" style="font-size:20px;margin-top:4px">News desk<em>{_now():%a %d %b, %H:%M} IST · updates by itself every '
+                f'{AUTO_REFRESH_S // 60} minutes</em></div>', unsafe_allow_html=True)
     if phone:
         days = WINDOWS[_choice("Window", list(WINDOWS), "nd_fwin2")]
         query = st.text_input("Search", key="nd_fq", placeholder="Search: RBI, order, HDFCBANK, pharma…", label_visibility="collapsed")
@@ -981,6 +1119,7 @@ def render_news_terminal(watchlist=None, on_open=None, current_security: str | N
         st.markdown('<div class="nd-empty">No stories yet; some sources may be slow. Press Refresh in a few seconds.</div>', unsafe_allow_html=True)
         return
 
+    moves = _moves(universe)
     tone = news_tone(items)
     pos, neg = sum(a["score"] > 0 for a in items), sum(a["score"] < 0 for a in items)
     health = source_health()
@@ -1004,12 +1143,15 @@ def render_news_terminal(watchlist=None, on_open=None, current_security: str | N
         modes = (["SECURITY"] if current else []) + MODES_FULL
         with st.container(key="nd_fmode"):
             mode = _choice("Desk view", modes, "nd_fmode_v2", lambda m: current if m == "SECURITY" else MODE_LABEL.get(m, m.capitalize()), pills=True)
-        shown = _view(items, mode, query, current)
+        shown = _view(items, mode, query, current, moves)
         if sort == "Newest":
             shown = sorted(shown, key=lambda a: a["pub_dt"], reverse=True)
         title = current if mode == "SECURITY" else MODE_LABEL.get(mode, mode.capitalize())
         st.markdown(f'<div class="nd-sec">{html.escape(title)}<em>{len(shown)} {"story" if len(shown) == 1 else "stories"}</em></div>', unsafe_allow_html=True)
-        _stories(shown[:45], True, current, "Nothing in this view for the selected window.")
+        empty = ("None of your stocks with news moved 2% or more today." if mode == "MOVERS"
+                 else "No story is carried by three or more outlets in this window." if mode == "DEVELOPING"
+                 else "Nothing in this view for the selected window.")
+        _stories(shown[:45], True, current, empty, moves)
         tagged = list(dict.fromkeys(s for a in shown[:45] for s in a["symbols"]))
         if on_open and tagged:
             o1, o2 = st.columns([3, 1], gap="small")
@@ -1035,3 +1177,13 @@ def render_news_terminal(watchlist=None, on_open=None, current_security: str | N
         with right:
             st.markdown("".join(side), unsafe_allow_html=True)
     st.caption("Tone and story types are tagged automatically from the headline wording. Treat them as a reading aid, not a recommendation. Tap any story to read it at the source.")
+
+
+_desk_frag = st.fragment(run_every=AUTO_REFRESH_S)(_desk) if hasattr(st, "fragment") else _desk
+
+
+def render_news_terminal(watchlist=None, on_open=None, current_security: str | None = None):
+    """Full news desk: breaking strip, summary cards, the wire with views, your stocks, sector tone, sources."""
+    _ensure_news_state()
+    _css()
+    _desk_frag(watchlist, on_open, current_security)
