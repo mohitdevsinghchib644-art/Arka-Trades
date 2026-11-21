@@ -225,6 +225,7 @@ _BRIDGE_HTML = r"""<!doctype html><html><head><meta charset="utf-8"></head><body
     window.parent.postMessage(Object.assign({isStreamlitMessage: true, type: type}, data || {}), "*");
   }
   var lastNonce = null, branded = false;
+  var lastPrefs = null;
   var lastResp = {}, navCur = null, navPending = null, navPendAt = 0, seq = 0, expectPop = null, usedBack = null;
   function emit(extra) {                           // report an event to Python without losing the last storage answer
     send("streamlit:setComponentValue", {dataType: "json", value: Object.assign({}, lastResp, extra || {})});
@@ -409,16 +410,21 @@ _BRIDGE_HTML = r"""<!doctype html><html><head><meta charset="utf-8"></head><body
     if (!branded && args.brand) { brand(args.brand); branded = true; try { fx(window.parent); } catch (e) {} }
     try { var aw = appWin(); if (aw) tapOpen(aw); } catch (e) {}
     navRender(args.nav || "", args.navback || "");
+    if (typeof args.prefs === "string" && args.prefs && args.prefs !== lastPrefs) {      // small per-device settings (e.g. the RS index)
+      try { var pls = storage(); if (pls) pls.setItem("arka_prefs", args.prefs); } catch (e) {}
+      lastPrefs = args.prefs;
+    }
     var nonce = args.nonce;
     if (!nonce || nonce === lastNonce) return;          // nothing new to do
     lastNonce = nonce;
-    var ls = storage(), token = null, ok = true, err = "", key = args.skey || "arka_auth", loc = null, saved = null;
+    var ls = storage(), token = null, ok = true, err = "", key = args.skey || "arka_auth", loc = null, saved = null, prefs = null;
     try {
       if (args.op === "get") {
         token = ls ? ls.getItem(key) : null;
         if (!token) token = readCookie(key);
         try { var hw = appWin(); loc = hw ? navParse(hw.location.search) : null; } catch (e) {}
         saved = savedNav();
+        try { prefs = ls ? ls.getItem("arka_prefs") : null; } catch (e) {}
       } else if (args.op === "set") {
         if (ls) ls.setItem(key, args.value);
         writeCookie(key, args.value, args.max_age || 2592000);
@@ -431,7 +437,7 @@ _BRIDGE_HTML = r"""<!doctype html><html><head><meta charset="utf-8"></head><body
     var standalone = false;
     try { standalone = !!(window.top.navigator.standalone || window.top.matchMedia("(display-mode: standalone)").matches); } catch (e) {}
     lastResp = {nonce: nonce, op: args.op, token: token, ok: ok, err: err, storage: !!ls, width: viewport(), standalone: standalone,
-                loc: loc, saved: saved};
+                loc: loc, saved: saved, prefs: prefs};
     emit({});
   }
   window.addEventListener("message", function (ev) {
@@ -503,12 +509,13 @@ def _accept(token, key: bytes):
     return True
 
 
-def bridge(key: bytes, nav: str | None = None, back: str | None = None) -> None:
+def bridge(key: bytes, nav: str | None = None, back: str | None = None, prefs: str | None = None) -> None:
     """Call once near the top of every run. Restores the session from this device and runs pending storage commands.
 
     nav: "page|SYMBOL" for the screen being shown (empty until the app has restored the last screen). The browser
     turns each new value into a history entry, so back / the phone's back swipe return to the previous screen.
     back: a one-off tag set when the in-app Back button caused this screen (the browser then steps back instead).
+    prefs: a small JSON string of per-device settings to remember in this browser (handed back once in "_ak_boot").
     Events from the browser land in session state: "_ak_nav_in" (back/forward to a screen), "_ak_open_in" (a stock
     was tapped) and "_ak_boot" (where this device was last, read once with the sign-in token)."""
     ss = st.session_state
@@ -525,7 +532,7 @@ def bridge(key: bytes, nav: str | None = None, back: str | None = None) -> None:
     try:
         val = _bridge_component(op=cmd.get("op", "noop"), value=cmd.get("value"), nonce=cmd.get("nonce"), skey=COOKIE_NAME,
                                 max_age=COOKIE_MAX_AGE, brand={"name": APP_NAME, "short": SHORT_NAME, "theme": THEME_BG, "v": _ICON_VERSION},
-                                nav=nav or "", navback=back or "", default=None, key="ak_bridge")
+                                nav=nav or "", navback=back or "", prefs=prefs or "", default=None, key="ak_bridge")
     except Exception:
         ss["_ak_ready"] = True
         return
@@ -537,7 +544,7 @@ def bridge(key: bytes, nav: str | None = None, back: str | None = None) -> None:
             ss["_ak_storage_ok"] = bool(val.get("storage"))
             if val.get("op") == "get":
                 ss["_ak_ready"] = True
-                ss["_ak_boot"] = {"loc": val.get("loc"), "saved": val.get("saved")}
+                ss["_ak_boot"] = {"loc": val.get("loc"), "saved": val.get("saved"), "prefs": val.get("prefs")}
                 _accept(val.get("token"), key)
             elif val.get("op") == "set":
                 ss["_ak_ready"] = True
