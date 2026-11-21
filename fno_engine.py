@@ -179,7 +179,7 @@ def load_chain(root=ROOT) -> pd.DataFrame:
 # ───────────── features ─────────────
 def _grp_roll(D, by, col, n, minp, how):
     r = D.groupby(by, sort=False, observed=True)[col].rolling(n, min_periods=minp)
-    r = r.rank(pct=True) if how == "rank" else (r.mean() if how == "mean" else r.sum())
+    r = r.rank(pct=True) if how == "rank" else r.mean() if how == "mean" else r.std() if how == "std" else r.sum()
     return r.reset_index(level=0, drop=True).reindex(D.index)
 
 
@@ -212,6 +212,7 @@ def prepare(df: pd.DataFrame, P: pd.DataFrame | None = None) -> pd.DataFrame:
     D["r5"] = np.exp(D["lpx"] - s["lpx"].shift(5)) - 1
     D["r20"] = np.exp(D["lpx"] - s["lpx"].shift(20)) - 1
     D["ma50"] = _grp_roll(D, "sid", "px", 50, 50, "mean")
+    D["swing"] = _grp_roll(D, "sid", "ret", 60, 30, "std") * math.sqrt(10)        # a normal 10-session move, from the last 60 sessions
     # futures open interest: day-to-day change, ignoring the day the contract rolls and any cut day
     doi = np.log(D["fut_oi"].where(D["fut_oi"] > 0) / poi.where(poi > 0))
     D["doi"] = doi.where(~(rolled | brk), 0.0).clip(-1, 1).fillna(0.0)
@@ -651,6 +652,8 @@ def index_model(G: pd.DataFrame) -> dict | None:
             strat = inm * r - sw * COST
             d_, (c1, c2) = _thin(G["date"].to_numpy()[i0:], np.cumprod(1 + strat) - 1, np.cumprod(1 + r) - 1)
             out["curve"] = {"date": d_, "model": c1, "hold": c2}
+            out["trade"] = {"long": index_signals(G, lvl, i0, 1), "short": index_signals(G, lvl, i0, -1)}
+            out["_wf"] = {pd.Timestamp(d): int(v) for d, v in zip(G["date"].to_numpy()[i0:], lvl[i0:])}
             out["stats"] = {"model": _curve_stats(strat), "hold": _curve_stats(r), "in_market": float(inm.mean()), "switches": int(sw.sum()),
                             "from": pd.Timestamp(G["date"].iloc[i0]).date().isoformat()}
     out["conf"], out["conf_n"] = _confidence(out.get("ic_t", float("nan")))
@@ -688,7 +691,7 @@ def stock_model(K: pd.DataFrame, last) -> dict | None:
         pred[rows] = X[rows] @ b + mu
     b, mu = _fit(X[okf], y[okf], STK_LAM)
     out = {"betas": [{"key": k, "label": F_LABEL[k], "beta": float(b[i])} for i, k in enumerate(STK_F)], "b": b, "mu": mu, "oos_days": 0,
-           "swing": float(np.nanstd(y[okf]))}
+           "swing": float(np.nanstd(y[okf])), "pred": pred}
     v = ~np.isnan(pred) & ~np.isnan(y)
     if int(v.sum()) > 3000:
         d = codes[v]
@@ -716,6 +719,245 @@ def stock_model(K: pd.DataFrame, last) -> dict | None:
                 out["stats"] = {"ls": _curve_stats(ls), "top": _curve_stats(top), "from": d_[0]}
     out["conf"], out["conf_n"] = _confidence(out.get("ic_t", float("nan")))
     return out
+
+
+# ───────────── trade signals ─────────────
+# A signal is a complete trade: when to enter, where the stop and target are, and what ends it. Each kind of signal
+# (index buy, index short, stock buy) is replayed over every session the model had not seen, trade by trade, after costs.
+# A kind of signal is only switched on if that replay made money.
+SIG_STOP, SIG_TARGET, SIG_HOLD = 1.0, 2.0, 10        # stop and target in "normal 10-session swings"; time limit in sessions
+IDX_COST, STK_COST = 0.0005, 0.0015                  # cost per side: index future, stock (brokerage, taxes and slippage)
+SLOTS = 10                                           # the stock test portfolio holds at most ten stocks, a tenth of the money each
+MIN_PF = 1.2                                         # money won must be at least 1.2 times money lost
+MIN_TRADES_IDX, MIN_TRADES_STK = 12, 40
+
+
+def _trade_stats(rets, bars=None) -> dict:
+    r = np.asarray(rets, dtype=float)
+    if not len(r):
+        return {"n": 0}
+    w, l = r[r > 0], r[r <= 0]
+    eq = np.cumprod(1 + r)
+    streak = worst = 0
+    for v in r:
+        streak = streak + 1 if v <= 0 else 0
+        worst = max(worst, streak)
+    return {"n": int(len(r)), "win": float(len(w) / len(r)), "avg_win": float(w.mean()) if len(w) else 0.0, "avg_loss": float(l.mean()) if len(l) else 0.0,
+            "exp": float(r.mean()), "pf": float(w.sum() / -l.sum()) if len(l) and l.sum() < 0 else (99.0 if len(w) else 0.0), "worst": float(r.min()),
+            "best": float(r.max()), "total": float(eq[-1] - 1), "dd": float((eq / np.maximum.accumulate(eq) - 1).min()), "losing_run": int(worst),
+            "bars": float(np.mean(bars)) if bars is not None and len(bars) else None}
+
+
+def _live(st: dict, need: int, t_need: float) -> bool:
+    """A kind of signal is switched on only if its replay made money after costs, won clearly more than it lost, AND did
+    better than simply being in the market over the same days by more than luck would explain."""
+    return bool(st.get("n", 0) >= need and st["exp"] > 0 and st["pf"] >= MIN_PF and st.get("edge", 0) > 0 and st.get("t", 0) >= t_need)
+
+
+def _tier(st: dict, need: int, t_need: float) -> str:
+    """on: passed the full test. trial: made money and beat simply holding, but not by enough to rule out luck. off: failed."""
+    if _live(st, need, t_need):
+        return "on"
+    if st.get("n", 0) >= need and st["exp"] > 0 and st["pf"] >= MIN_PF and st.get("edge", 0) > 0:
+        return "trial"
+    return "off"
+
+
+def _t_mean(x) -> float:
+    x = np.asarray(x, dtype=float)
+    sd = x.std(ddof=1) if len(x) > 2 else 0.0
+    return float(x.mean() / (sd / math.sqrt(len(x)))) if sd > 0 else 0.0
+
+
+def index_signals(G: pd.DataFrame, lvl, i0: int, side: int) -> dict:
+    """Replays one kind of index trade (buy when the verdict is positive, or short when it is negative) over the unseen
+    sessions. Entry at the next close after the signal; stop and target checked on closing prices."""
+    px, fut, dates = G["px"].to_numpy(dtype=float), G["fut"].to_numpy(dtype=float), G["date"].to_numpy()
+    sw = G["swing"].to_numpy(dtype=float)
+    n = len(px)
+    L = np.nan_to_num(np.asarray(lvl, dtype=float)) * side
+    trades, daily = [], np.zeros(n)
+    cur = pend_in = pend_out = None
+
+    def close(t, why):
+        nonlocal cur
+        ret = side * (px[t] / cur["p"] - 1) - 2 * IDX_COST
+        trades.append({"in": _d(dates[cur["e"]]), "out": _d(dates[t]), "in_px": float(fut[cur["e"]]), "out_px": float(fut[t]), "ret": float(ret), "why": why,
+                       "bars": t - cur["e"], "x": t})
+        daily[t] -= IDX_COST
+        cur = None
+
+    for t in range(i0, n):
+        if cur is not None and t > cur["e"]:
+            daily[t] += side * (px[t] / px[t - 1] - 1)
+        if pend_out and cur is not None:
+            close(t, pend_out)
+        pend_out = None
+        if pend_in is not None and cur is None:
+            cur = {"e": t, "p": px[t], "stop": px[t] * (1 - side * SIG_STOP * pend_in), "target": px[t] * (1 + side * SIG_TARGET * pend_in), "sw": pend_in}
+            daily[t] -= IDX_COST
+            pend_in = None
+        elif cur is not None and t > cur["e"]:
+            if side * (px[t] - cur["stop"]) <= 0:
+                close(t, "Stop hit")
+            elif side * (px[t] - cur["target"]) >= 0:
+                close(t, "Target hit")
+            elif L[t] <= -1:
+                pend_out = "Verdict turned against it"
+            elif t - cur["e"] >= SIG_HOLD and L[t] < 1:
+                pend_out = "Time limit reached"
+        pend_in = None if cur is not None else pend_in
+        if cur is None and pend_in is None and L[t] >= 1 and sw[t] == sw[t] and sw[t] > 0:
+            pend_in = float(sw[t])
+    st_ = _trade_stats([x["ret"] for x in trades], [x["bars"] for x in trades])
+    hold_r = np.nan_to_num(G["ret"].to_numpy(dtype=float))[i0:] * side
+    drift = float(hold_r.mean()) if len(hold_r) else 0.0
+    if trades:                                            # each trade against what simply sitting in the position for as many days would have earned
+        ex = [x["ret"] - drift * x["bars"] for x in trades]
+        st_["edge"], st_["t"] = float(np.mean(ex)), _t_mean(ex)
+    last = n - 1
+    f, s_now = float(fut[last]), (float(sw[last]) if sw[last] == sw[last] else None)
+    state = {"action": "flat"}
+    if cur is not None:
+        k = f / px[last]                                  # turns levels on the continuous series into today's contract prices
+        state = {"action": "exit_next" if pend_out else "hold", "why": pend_out, "since": _d(dates[cur["e"]]), "entry": float(fut[cur["e"]]), "bars": last - cur["e"],
+                 "pnl": float(side * (px[last] / cur["p"] - 1)), "stop": float(cur["stop"] * k), "target": float(cur["target"] * k), "left": max(SIG_HOLD - (last - cur["e"]), 0)}
+    elif trades and trades[-1]["x"] == last:
+        state = {"action": "closed_today", "why": trades[-1]["why"], "since": trades[-1]["in"], "entry": trades[-1]["in_px"], "pnl": trades[-1]["ret"]}
+    elif pend_in is not None and s_now:
+        state = {"action": "new", "entry": f, "stop": f * (1 - side * SIG_STOP * s_now), "target": f * (1 + side * SIG_TARGET * s_now), "swing": s_now}
+    hold = np.nan_to_num(G["ret"].to_numpy(dtype=float))[i0:] * side
+    d_, (c1, c2) = _thin(dates[i0:], np.cumprod(1 + daily[i0:]) - 1, np.cumprod(1 + hold) - 1)
+    return {"side": side, "stats": st_, "live": _live(st_, MIN_TRADES_IDX, 1.5), "tier": _tier(st_, MIN_TRADES_IDX, 1.5), "state": state, "trades": [{k: v for k, v in x.items() if k != "x"} for x in trades[-10:]][::-1],
+            "curve": {"date": d_, "sys": c1, "hold": c2}, "from": _d(dates[i0])}
+
+
+def stock_signals(K: pd.DataFrame, pred, mkt: dict) -> dict | None:
+    """Replays the stock buy signal as a ten-stock portfolio over the unseen sessions. A stock is bought when the model ranks
+    it in the top fifth, it is in an uptrend and the market verdict is not negative. It is sold on its stop, its target,
+    when its rank falls below 40 of 100, or after ten sessions if it has left the top fifth."""
+    dcode, dates = pd.factorize(K["date"], sort=True)
+    scode, syms = pd.factorize(K["sym"].astype(str), sort=True)
+    nd, ns = len(dates), len(syms)
+
+    def mat(col, fill=np.nan, dtype=float):
+        m = np.full((nd, ns), fill, dtype=dtype)
+        m[dcode, scode] = col
+        return m
+    R, PR, FUT, SW = mat(K["ret"].to_numpy(dtype=float)), mat(np.asarray(pred, dtype=float)), mat(K["fut"].to_numpy(dtype=float)), mat(K["swing"].to_numpy(dtype=float))
+    TU = mat(K["s_trend_up"].to_numpy(dtype=float), 0.0) > 0
+    have = ~np.isnan(PR)
+    days = np.nonzero(have.sum(axis=1) >= 30)[0]
+    if len(days) < 120:
+        return None
+    d0 = int(days[0])
+    RP = pd.DataFrame(PR).rank(axis=1, pct=True).to_numpy()
+    mk = np.array([mkt.get(pd.Timestamp(d), 0) for d in dates], dtype=float)
+    pos, trades, pend_in, pend_out = {}, [], [], {}
+    port, bench, inv = np.zeros(nd), np.zeros(nd), np.zeros(nd)
+
+    def close(j, t, why):
+        p = pos.pop(j)
+        trades.append({"sym": syms[j], "in": _d(dates[p["e"]]), "out": _d(dates[t]), "in_px": float(FUT[p["e"], j]), "out_px": float(FUT[t, j]) if FUT[t, j] == FUT[t, j] else None,
+                       "ret": float(p["f"] - 1 - 2 * STK_COST), "why": why, "bars": t - p["e"], "x": t})
+        port[t] -= STK_COST / SLOTS
+
+    for t in range(d0, nd):
+        r = R[t]
+        ok = ~np.isnan(r)
+        bench[t] = float(r[ok].mean()) if ok.any() else 0.0
+        inv[t] = sum(1 for j in pos if pos[j]["e"] < t) / SLOTS
+        for j in list(pos):
+            if pos[j]["e"] == t:
+                continue
+            if not ok[j]:
+                close(j, t, "Series broke (corporate action)")
+            else:
+                pos[j]["f"] *= 1 + r[j]
+                port[t] += r[j] / SLOTS
+        for j, why in pend_out.items():
+            if j in pos:
+                close(j, t, why)
+        for j, s_ in pend_in:
+            if len(pos) < SLOTS and j not in pos and ok[j]:
+                pos[j] = {"e": t, "f": 1.0, "sw": s_}
+                port[t] -= STK_COST / SLOTS
+        pend_in, pend_out = [], {}
+        for j in list(pos):
+            p = pos[j]
+            if p["e"] == t:
+                continue
+            rp = RP[t, j]
+            if p["f"] <= 1 - SIG_STOP * p["sw"]:
+                close(j, t, "Stop hit")
+            elif p["f"] >= 1 + SIG_TARGET * p["sw"]:
+                close(j, t, "Target hit")
+            elif rp != rp or rp < 0.4:
+                pend_out[j] = "Rank fell below 40"
+            elif t - p["e"] >= SIG_HOLD and rp < 0.8:
+                pend_out[j] = "Time limit reached"
+        free = SLOTS - len(pos) + len(pend_out)
+        if free > 0 and mk[t] > -1:
+            c = np.nonzero((RP[t] >= 0.8) & TU[t] & (SW[t] > 0) & ok)[0]
+            c = [j for j in c[np.argsort(-RP[t, c])] if j not in pos][:free]
+            pend_in = [(int(j), float(SW[t, j])) for j in c]
+    last = nd - 1
+    st_ = _trade_stats([x["ret"] for x in trades], [x["bars"] for x in trades])
+    ex = (port - bench * inv)[d0:]                        # each day against holding the average F&O stock with the same amount of money
+    st_["edge"], st_["t"] = float(ex.mean() * (st_.get("bars") or 0) * SLOTS / max(inv[d0:].mean() * SLOTS, 1e-9)) if st_.get("n") else 0.0, _t_mean(ex)
+    d_, (c1, c2) = _thin(dates[d0:], np.cumprod(1 + port[d0:]) - 1, np.cumprod(1 + bench[d0:]) - 1)
+    hold = []
+    for j, p in pos.items():
+        f = float(FUT[last, j]) if FUT[last, j] == FUT[last, j] else None
+        hold.append({"sym": syms[j], "since": _d(dates[p["e"]]), "entry": float(FUT[p["e"], j]), "price": f, "pnl": float(p["f"] - 1), "bars": last - p["e"],
+                     "stop": f * (1 - SIG_STOP * p["sw"]) / p["f"] if f else None, "target": f * (1 + SIG_TARGET * p["sw"]) / p["f"] if f else None,
+                     "rank": _f(RP[last, j], 3), "sell": pend_out.get(j), "left": max(SIG_HOLD - (last - p["e"]), 0)})
+    buy = [{"sym": syms[j], "entry": float(FUT[last, j]), "stop": float(FUT[last, j] * (1 - SIG_STOP * s_)), "target": float(FUT[last, j] * (1 + SIG_TARGET * s_)),
+            "rank": _f(RP[last, j], 3), "swing": s_} for j, s_ in pend_in]
+    sold = [{k: v for k, v in x.items() if k != "x"} for x in trades if x["x"] == last]
+    avoid_ix = np.nonzero((RP[last] <= 0.2) & ~TU[last] & ~np.isnan(R[last]))[0]
+    avoid = [{"sym": syms[j], "rank": _f(RP[last, j], 3), "price": _f(FUT[last, j])} for j in avoid_ix[np.argsort(RP[last, avoid_ix])][:15]]
+    return {"stats": st_, "live": _live(st_, MIN_TRADES_STK, 2.0), "tier": _tier(st_, MIN_TRADES_STK, 2.0), "from": _d(dates[d0]), "invested": float(inv[d0:].mean()), "curve": {"date": d_, "sys": c1, "bench": c2},
+            "port": _curve_stats(port[d0:]), "bench": _curve_stats(bench[d0:]), "buy": buy, "hold": sorted(hold, key=lambda h: -h["pnl"]), "sold": sold, "avoid": avoid,
+            "trades": [{k: v for k, v in x.items() if k != "x"} for x in trades[-12:]][::-1], "market_ok": bool(mk[last] > -1), "slots": SLOTS}
+
+
+def index_call(x: dict) -> dict:
+    """Today's instruction for one index, in one word, with the reason. Buy and short signals are only passed on when the
+    model has a record on unseen days AND that kind of trade made money in the replay."""
+    M = x.get("model") or {}
+    T = M.get("trade") or {}
+    if not T:
+        return {"word": "No signal", "tone": "flat", "why": "There is not enough stored history yet to test trade signals for this index."}
+    trusted = M.get("conf_n", 0) >= 1
+    for key, name, tone in (("long", "Buy", "up"), ("short", "Short", "dn")):
+        S_ = T[key]
+        st_, a = S_["state"], S_["state"]["action"]
+        if a == "flat":
+            continue
+        rec = f"{S_['stats'].get('n', 0)} past trades, {S_['stats'].get('win', 0) * 100:.0f}% won, money won to money lost {S_['stats'].get('pf', 0):.2f}"
+        if not (trusted and S_["tier"] != "off"):
+            reason = ("the model has not shown skill on unseen days" if not trusted else f"this kind of trade did not pass its test ({rec})")
+            if a == "new":
+                return {"word": "Stay out", "tone": "flat", "side": key, "blocked": True, "why": f"The model points to a {name.lower()} but {reason}. No trade."}
+            continue
+        st_ = {**st_, "tier": S_["tier"]}
+        if a == "new":
+            return {"word": name, "tone": tone, "side": key, **st_, "why": f"New {name.lower()} signal. Act at the next session's close. Record of this signal: {rec}."}
+        if a == "hold":
+            return {"word": "Hold" if key == "long" else "Hold short", "tone": tone, "side": key, **st_,
+                    "why": f"A {name.lower()} signal from {st_['since']} is still open. Keep the stop where it is. Record of this signal: {rec}."}
+        if a == "exit_next":
+            return {"word": "Sell" if key == "long" else "Cover", "tone": "dn" if key == "long" else "up", "side": key, **st_,
+                    "why": f"Close the {name.lower()} trade from {st_['since']} at the next session's close: {str(st_['why']).lower()}."}
+        if a == "closed_today":
+            return {"word": "Sell now" if key == "long" else "Cover now", "tone": "dn" if key == "long" else "up", "side": key, **st_,
+                    "why": f"The {name.lower()} trade from {st_['since']} ended at today's close: {str(st_['why']).lower()}."}
+    if not trusted:
+        return {"word": "Stay out", "tone": "flat", "off": True, "why": "Signals for this index are switched off: the model has not shown skill on sessions it had not seen."}
+    if all(T[k]["tier"] == "off" for k in ("long", "short")):
+        return {"word": "Stay out", "tone": "flat", "off": True, "why": "Signals for this index are switched off: neither buying nor shorting on the model's verdict passed its test."}
+    return {"word": "Stay out", "tone": "flat", "why": "No trade is open and the model is not giving a new signal today."}
 
 
 # ───────────── option chain analytics ─────────────
@@ -1111,9 +1353,10 @@ def run(root=ROOT) -> dict:
             "reasons": reasons, "levels": lv, "ma50": ma50_level, "signals": table, "days": int(len(G)),
             "counts": {g: sum(1 for s in table if s["grade"] == g) for g in ("proven", "leaning", "unproven", "thin")},
             "chain": {"m": cm, "w": cw}, "idea": option_idea(sym, lv, level, chain),
-            "note": desk_note(NAMES[sym], lv, M, cm, mk, reasons, ma50_level),
+            "note": desk_note(NAMES[sym], lv, M, cm, mk, reasons, ma50_level), "swing10": _f(row.get("swing"), 5),
             "hist": {"date": [d.date().isoformat() for d in tail["date"]], **{k: [_f(v, 4) for v in tail[c]] for k, c in
                      (("px", "fut"), ("pcr", "pcr"), ("iv", "iv"), ("oi", "fut_oi"), ("fii", "fii_ls"), ("breadth", "br_above"))}}}
+        res["indexes"][sym]["call"] = index_call(res["indexes"][sym])
         if sym == "NIFTY":
             market_level, res["market"] = level, mk
     res["market_level"] = market_level
@@ -1121,7 +1364,7 @@ def run(root=ROOT) -> dict:
     # stocks: one model for all of them, each day against the other F&O stocks
     is_stk = (D["kind"] != "IDX").to_numpy()
     Tday = D[is_stk & (D["date"] == last).to_numpy()].reset_index(drop=True)          # today's stock rows, with every column
-    slim_cols = (["date", "sym", "kind", "fut", "fut_oi", "pcr", "iv", "m_exp", "n2"] + ["s_" + k for k in SIG_KEYS] + ["x_" + k for k in STK_F]
+    slim_cols = (["date", "sym", "kind", "fut", "fut_oi", "pcr", "iv", "m_exp", "n2", "ret", "swing"] + ["s_" + k for k in SIG_KEYS] + ["x_" + k for k in STK_F]
                  + [f"f{h}" for h in HORIZONS])
     K = D.loc[is_stk, slim_cols].reset_index(drop=True)                                # the history, cut down to what the tests need
     del D
@@ -1133,7 +1376,15 @@ def run(root=ROOT) -> dict:
         res["stock_signals"] = [{"key": k, **SIG_INFO[k], "grade": grade(by_h[MAIN_H].get(k)), "stats": {h: by_h[h].get(k) for h in HORIZONS}}
                                 for k in SIG_KEYS if SIG_INFO[k]["scope"] == "all"]
         SM = stock_model(K, last)
-        res["stock_model"] = {k: v for k, v in (SM or {}).items() if k not in ("b",)} if SM else None
+        res["stock_model"] = {k: v for k, v in (SM or {}).items() if k not in ("b", "pred")} if SM else None
+        nifty = (res["indexes"].get("NIFTY") or {}).get("model") or {}
+        try:
+            res["stock_trade"] = stock_signals(K, SM["pred"], nifty.get("_wf") or {}) if SM else None
+        except Exception as e:
+            res["stock_trade"] = None
+            res["notes"].append(f"Stock signals could not be replayed ({type(e).__name__}).")
+        if res.get("stock_trade") is not None:
+            res["stock_trade"]["trusted"] = bool(SM.get("conf_n", 0) >= 1)
         today = np.nonzero((K["date"] == last).to_numpy())[0]
         Xt = np.nan_to_num(Tday[["x_" + k for k in STK_F]].to_numpy(dtype=float))
         score = (Xt @ SM["b"] + SM["mu"]) if SM else np.zeros(len(today))
