@@ -964,18 +964,18 @@ _CSS = """<style>
 .db-n b{font:600 14.5px var(--sans);color:var(--tx);} .db-n em{font:500 12.5px var(--sans);font-style:normal;margin-left:7px;}
 .db-n u{display:block;text-decoration:none;font:11.5px var(--sans);color:var(--tx3);margin-top:1px;}
 .db-reg{padding:14px;border-top:1px solid var(--line);} .db-reg:first-child{border-top:0;}
-.db-reg h4{margin:0 0 9px;font:600 13px var(--sans);color:var(--tx);display:flex;justify-content:space-between;gap:10px;}
-.db-reg h4 span{font:12px var(--sans);color:var(--tx3);font-weight:400;}
+.db-h4{margin:0 0 9px;font:600 13px var(--sans);color:var(--tx);display:flex;justify-content:space-between;align-items:baseline;gap:10px;}
+.db-h4 span{font:12px var(--sans);color:var(--tx3);font-weight:400;white-space:nowrap;}
 /* stories */
 .db-st{padding:16px;}
-.db-st h3{margin:8px 0 12px;font:650 17px/1.3 var(--sans);letter-spacing:-.2px;color:var(--tx);}
+.db-h3{margin:8px 0 12px;font:650 17px/1.3 var(--sans);letter-spacing:-.2px;color:var(--tx);}
 .db-tags{display:flex;gap:6px;flex-wrap:wrap;align-items:center;}
 .db-tag{display:inline-block;padding:2px 8px;border-radius:6px;font:600 11.5px var(--sans);white-space:nowrap;color:var(--c,var(--tx3));background:color-mix(in srgb,var(--c,#71717A) 14%,transparent);}
 .db-num{font:700 12px var(--sans);color:var(--tx3);margin-right:2px;}
 .db-part{display:grid;grid-template-columns:118px minmax(0,1fr);gap:4px 14px;padding:9px 0;border-top:1px solid var(--line);}
 .db-part small{font:600 12px var(--sans);color:var(--tx3);padding-top:3px;}
-.db-part p{margin:0;font:14px/1.65 var(--sans);color:var(--tx2);}
-.db-part.chg p{color:var(--tx);} .db-part.chg small{color:var(--amber);}
+.db-part .tx{margin:0;font:14px/1.65 var(--sans);color:var(--tx2);}
+.db-part.chg .tx{color:var(--tx);} .db-part.chg small{color:var(--amber);}
 @container (max-width:619.98px){.db-part{grid-template-columns:minmax(0,1fr);} .db-part small{padding-top:0;}}
 .db-foot{display:flex;gap:6px 10px;flex-wrap:wrap;align-items:center;margin-top:10px;padding-top:10px;border-top:1px solid var(--line);font:12px var(--sans);color:var(--tx3);}
 .db a{color:var(--tx2);text-decoration:none;border-bottom:1px solid var(--line2,#2E2E33);} .db a:hover{color:var(--amber);border-color:var(--amber);}
@@ -984,13 +984,13 @@ _CSS = """<style>
 /* radar and rapid fire */
 .db-li{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 14px;align-items:center;padding:10px 14px;border-top:1px solid var(--line);}
 .db-li:first-child{border-top:0;}
-.db-li p{margin:0;font:13.5px/1.5 var(--sans);color:var(--tx);} .db-li p small{font:12px var(--sans);color:var(--tx3);margin-left:6px;white-space:nowrap;}
+.db-li .tx{margin:0;font:13.5px/1.5 var(--sans);color:var(--tx);} .db-li .tx small{font:12px var(--sans);color:var(--tx3);margin-left:6px;white-space:nowrap;}
 .db-imp{justify-self:end;display:inline-flex;align-items:center;gap:6px;padding:4px 9px;border-radius:7px;font:600 12px var(--sans);white-space:nowrap;
   color:var(--c,var(--tx2));background:color-mix(in srgb,var(--c,#A1A1AA) 13%,transparent);}
 .db-imp::before{content:"›";font-weight:700;opacity:.7;}
 @container (max-width:619.98px){.db-li{grid-template-columns:minmax(0,1fr);} .db-imp{justify-self:start;}}
 .db-rf{display:grid;grid-template-columns:74px minmax(0,1fr);gap:4px 12px;align-items:baseline;padding:9px 14px;border-top:1px solid var(--line);}
-.db-rf:first-child{border-top:0;} .db-rf p{margin:0;font:13.5px/1.5 var(--sans);color:var(--tx);} .db-rf p small{font:12px var(--sans);color:var(--tx3);margin-left:6px;}
+.db-rf:first-child{border-top:0;} .db-rf .tx{margin:0;font:13.5px/1.5 var(--sans);color:var(--tx);} .db-rf .tx small{font:12px var(--sans);color:var(--tx3);margin-left:6px;}
 .db-kv{padding:9px 14px;border-top:1px solid var(--line);font:13.5px/1.5 var(--sans);color:var(--tx2);} .db-kv:first-child{border-top:0;}
 .db-mine{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px;padding:10px 14px;border:1px solid rgba(255,159,10,.3);border-radius:12px;background:rgba(255,159,10,.06);font:13px var(--sans);color:var(--tx2);}
 .db-note{font:12px/1.6 var(--sans);color:var(--tx3);padding:18px 0 0;}
@@ -1106,7 +1106,7 @@ def brief_html(brief: dict, mine=(), valid=None, compact: bool = False) -> str:
     for title, group, key in (("United States", "United States", "us"), ("Europe", "Europe", "europe"), ("Asia", "Asia", "asia")):
         body = _nums_html(rows, group, day) + (f'<div class="db-say">{_fix(g.get(key, ""))}</div>' if g.get(key) else "")
         if body:
-            regs += f'<div class="db-reg"><h4>{title}<span>{_e(_stamp(_group_day(rows, group), day))}</span></h4>{body}</div>'
+            regs += f'<div class="db-reg"><div class="db-h4"><b>{title}</b><span>{_e(_stamp(_group_day(rows, group), day))}</span></div>{body}</div>'
     wrap = _panel("Global session wrap", "Overnight and this morning", regs, "c7", pad=False) if regs else ""
     india = _nums_html(rows, "India", day) + (f'<div class="db-say">{_fix(brief.get("india", ""))}</div>' if brief.get("india") else "")
     comm = (_nums_html(rows, "Commodities", day) + _nums_html(rows, "Currencies and rates", day)
@@ -1125,19 +1125,19 @@ def brief_html(brief: dict, mine=(), valid=None, compact: bool = False) -> str:
                 + ('<span class="db-tag" style="--c:#FF9F0A">Update</span>' if d.get("update") else ""))
         parts = ""
         if d.get("update") and d.get("changed"):
-            parts += f'<div class="db-part chg"><small>What changed</small><p>{_fix(d["changed"])}</p></div>'
-        parts += f'<div class="db-part"><small>What happened</small><p>{_fix(d["what"])}</p></div>'
-        parts += f'<div class="db-part"><small>Why it matters</small><p>{_fix(d["why"])}</p></div>'
+            parts += f'<div class="db-part chg"><small>What changed</small><div class="tx">{_fix(d["changed"])}</div></div>'
+        parts += f'<div class="db-part"><small>What happened</small><div class="tx">{_fix(d["what"])}</div></div>'
+        parts += f'<div class="db-part"><small>Why it matters</small><div class="tx">{_fix(d["why"])}</div></div>'
         if d.get("watch"):
-            parts += f'<div class="db-part"><small>Watch next</small><p>{_fix(d["watch"])}</p></div>'
+            parts += f'<div class="db-part"><small>Watch next</small><div class="tx">{_fix(d["watch"])}</div></div>'
         foot = f'<div class="db-foot">{_sym_html(d.get("nse", []), mine, valid)}<span>Sources: {_src_html(d["src"])}</span></div>'
-        stories.append(f'<div class="db-p {span}"><div class="db-st"><div class="db-tags">{tags}</div><h3>{_fix(d["title"])}</h3>{parts}{foot}</div></div>')
+        stories.append(f'<div class="db-p {span}"><div class="db-st"><div class="db-tags">{tags}</div><div class="db-h3">{_fix(d["title"])}</div>{parts}{foot}</div></div>')
     radar = "".join(
-        f'<div class="db-li"><p>{_fix(r["line"])} {_sym_html(r.get("nse", []), mine, valid)}<small>{_src_html(r["src"][:1])}</small></p>'
+        f'<div class="db-li"><div class="tx">{_fix(r["line"])} {_sym_html(r.get("nse", []), mine, valid)}<small>{_src_html(r["src"][:1])}</small></div>'
         f'<span class="db-imp" style="--c:{_imp_color(r["tag"])}">{_fix(r["tag"])}</span></div>' for r in brief.get("radar", []))
     rapid = "".join(
-        f'<div class="db-rf"><span class="db-tag">{_TYPES.get(r["type"], "Also")}</span><p>{_fix(r["line"])} {_sym_html(r.get("nse", []), mine, valid)}'
-        f'<small>{_src_html(r["src"][:1])}</small></p></div>' for r in brief.get("rapid", []))
+        f'<div class="db-rf"><span class="db-tag">{_TYPES.get(r["type"], "Also")}</span><div class="tx">{_fix(r["line"])} {_sym_html(r.get("nse", []), mine, valid)}'
+        f'<small>{_src_html(r["src"][:1])}</small></div></div>' for r in brief.get("rapid", []))
     today_ = "".join(f'<div class="db-kv">{_fix(x)}</div>' for x in brief.get("today", []))
     out = head + book + f'<div class="db-g">{bottom}</div><div class="db-g">{order}</div>'
     if stories:
