@@ -1,0 +1,71 @@
+# Arka Trades · Signals
+# Every weekday evening this rebuilds the price history, replays the trading rules, moves the two live books forward by
+# one session and saves the result in the repository under arka_data/signals/. The app only reads those files.
+#
+# Where the prices come from (all free and public):
+#   - github.com/BennyThadikaran/eod2_data   NSE end-of-day history with delivery, adjusted for splits and bonuses
+#   - nsearchives.nseindia.com               the newest sessions (NSE's own daily file), and today's bulk and block deals
+#   - arka_data/fno/ in this repository      futures and options context (written by the "F&O data" workflow)
+#
+# First time: Actions tab -> "Signals" -> "Run workflow". It takes about three minutes.
+# After that it runs by itself at about 8:20 pm and 11:20 pm IST, Monday to Friday (after "F&O data").
+#
+# Secrets (optional, names only; the same two the morning brief already uses):
+#   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID    if both are set, the day's orders are sent to Telegram once per session
+name: Signals
+
+on:
+  schedule:
+    - cron: "50 14 * * 1-5"       # 20:20 IST
+    - cron: "50 17 * * 1-5"       # 23:20 IST, in case NSE published late
+  workflow_dispatch:
+    inputs:
+      telegram:
+        description: "Send today's orders to Telegram (yes / no)"
+        required: false
+        default: "yes"
+
+permissions:
+  contents: write                 # needed to save the result files in the repository
+
+concurrency:
+  group: signals
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install --quiet requests "pandas>=3,<4" numpy      # the versions the engine was tested with
+
+      - name: Price history
+        run: git clone --quiet --depth 1 https://github.com/BennyThadikaran/eod2_data.git "$RUNNER_TEMP/eod2_data"
+
+      - name: Run the engine
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SEND: ${{ (github.event_name == 'schedule' || github.event.inputs.telegram != 'no') && '--send' || '' }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && '--force' || '' }}      # a run started by hand always rewrites the files
+        run: python signal_engine.py --eod "$RUNNER_TEMP/eod2_data" $SEND $FORCE
+
+      - name: Save to the repository
+        run: |
+          git config user.name "arka-data-bot"
+          git config user.email "arka-data-bot@users.noreply.github.com"
+          git add arka_data/signals || true
+          if git diff --cached --quiet; then
+            echo "Nothing new to save."
+            exit 0
+          fi
+          git commit -m "Signals $(date -u +%Y-%m-%d)"
+          git pull --rebase --autostash origin "$GITHUB_REF_NAME" || true
+          git push
