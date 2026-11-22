@@ -1,6 +1,8 @@
 """
-home_page.py — Arka Trades · Market overview (the HOME page), v4.1
+home_page.py — Arka Trades · Market overview (the HOME page), v4.2
 
+v4.2: the F&O section is now the signal desk in brief (fno_page.py v3): orders for the next open, the Leaders book and the two
+      index setups. With an earlier fno_page.py the v4.1 card is shown instead.
 v4.1: a "Futures and options" section under the benchmarks: the F&O engine verdict for NIFTY 50 and BANK NIFTY with put-call
       ratio, implied volatility, max pain and the open-interest walls (from fno_page.py; hidden if that file is not installed).
 
@@ -1399,7 +1401,77 @@ def _health(M, mmi, B, span=""):
 
 # ───────────── futures and options ─────────────
 def _fno(compact=False):
-    """The F&O engine's verdict for NIFTY 50 and BANK NIFTY, from fno_page.py. Shows nothing if that file is not installed."""
+    """The signal desk in brief, from fno_page.py v3: orders for the next open, the Leaders book and the two index setups.
+    With an earlier fno_page.py it falls back to that version's card. Shows nothing if the file is not installed."""
+    try:
+        import fno_page
+    except Exception:
+        return ""
+    desk = getattr(fno_page, "home_desk", None)
+    if desk is None:
+        return _fno_v2(compact)
+    try:
+        D = desk()
+    except Exception:
+        D = None
+    if not D:
+        return ""
+
+    def num(v, d=0):
+        return f"{v:,.{d}f}" if _ok(v) else "—"
+
+    def pct(v, d=1):
+        return f"{v * 100:+.{d}f}%" if _ok(v) else "—"
+
+    def px(v):
+        return "—" if not _ok(v) else f"{v:,.0f}" if abs(v) >= 5000 else f"{v:,.1f}" if abs(v) >= 100 else f"{v:,.2f}"
+
+    word = {"on": "approved", "trial": "on trial", "off": "switched off"}
+    L, W, od = D["leaders"], D["swing"], D.get("orders") or []
+    if od:
+        kv = "".join(f'<div class="hm-kv"><span>{_e(o["book"])} · {_e(str(o["act"]).lower())}{(" · stop " + px(o["stop"])) if _ok(o.get("stop")) else ""}</span>'
+                     f'<b class="{"hm-up" if o["act"] == "Buy" else "hm-dn"}">{_e(o["sym"])} {px(o["ref"])}</b></div>' for o in od[:6])
+        if len(od) > 6:
+            kv += f'<div class="hm-kv"><span>and {len(od) - 6} more in the F&O tab</span><b></b></div>'
+        b1 = f'<div class="hm-vd"><b>{len(od)}</b><span>to place at the next open · last close shown</span></div><div class="hm-kvs" style="margin-top:10px">{kv}</div>'
+    else:
+        kv = (f'<div class="hm-kv"><span>Leaders book</span><b>{"checked today, no change" if L.get("check_today") else "next check next week"}</b></div>'
+              f'<div class="hm-kv"><span>Swing trades open</span><b>{W.get("open", 0)}</b></div>'
+              f'<div class="hm-kv"><span>Swing record</span><b>{num((W.get("win") or 0) * 100)}% won · {pct(W.get("exp"), 2)} a trade</b></div>')
+        b1 = f'<div class="hm-vd"><b style="color:var(--tx2)">No orders</b><span>for the next open</span></div><div class="hm-kvs" style="margin-top:10px">{kv}</div>'
+    col = GREEN if (_ok(L.get("cagr")) and L["cagr"] > 0) else RED
+    tops = ", ".join(f'{_e(t["sym"])} {pct(t.get("pnl"), 0)}' for t in (L.get("top") or [])[:2]) or "—"
+    kv = (f'<div class="hm-kv"><span>NIFTY 500, same period</span><b>{pct(L.get("index"))} a year</b></div>'
+          f'<div class="hm-kv"><span>Status</span><b>{word.get(L.get("status"), "—")}</b></div>'
+          f'<div class="hm-kv"><span>Holding</span><b>{L.get("held", 0)} stocks</b></div>'
+          f'<div class="hm-kv"><span>From its peak now</span><b class="{"hm-dn" if (_ok(L.get("dd_now")) and L["dd_now"] < -0.001) else ""}">{pct(L.get("dd_now"))}</b></div>'
+          f'<div class="hm-kv"><span>Best holdings</span><b>{tops}</b></div>')
+    b2 = f'<div class="hm-vd"><b style="color:{col}">{pct(L.get("cagr"))}</b><span>a year in the test, after costs</span></div><div class="hm-kvs" style="margin-top:10px">{kv}</div>'
+    act = {"buy": ("Buy the dip at the open", GREEN), "sell": ("Sell at the open", RED), "hold": ("In a dip trade", "var(--amber)"), "none": ("No signal", "var(--tx2)")}
+    kv, head = "", None
+    for x in D.get("index") or []:
+        w_, c_ = act.get(x.get("action"), act["none"])
+        if x.get("action") != "none" and head is None:
+            head = (f'{x["name"]}: {w_.lower()}', c_)
+        note = w_ if x.get("action") != "none" else (f'buys at or below {px(x.get("trigger"))}' if x.get("above200") else "below its 200-day average")
+        kv += (f'<div class="hm-kv"><span>{_e(x["name"])} · {word.get(x.get("status"), "")}</span><b style="color:{c_ if x.get("action") != "none" else "var(--tx)"}">{_e(note)}</b></div>'
+               f'<div class="hm-kv"><span>Put-call ratio · max pain</span><b>{num(x.get("pcr"), 2)} · {num(x.get("max_pain"))}</b></div>'
+               f'<div class="hm-kv"><span>Put wall · call wall</span><b>{num(x.get("put_wall"))} · {num(x.get("call_wall"))}</b></div>')
+    head = head or ("No index signal", "var(--tx2)")
+    b3 = f'<div class="hm-vd"><b style="color:{head[1]}">{_e(head[0])}</b><span>dip in an uptrend</span></div><div class="hm-kvs" style="margin-top:10px">{kv}</div>'
+    asof = ""
+    try:
+        d = date.fromisoformat(str(D["asof"]))
+        asof = f"Signals from {d.day} {d.strftime('%b')} close"
+    except Exception:
+        pass
+    span = "" if compact else "c4"
+    cards = _card("Orders for the next open", asof, b1, span) + _card("Leaders book · 20 strongest stocks", "trend", b2, span) + _card("NIFTY 50 and BANK NIFTY", "index", b3, span)
+    return _sec("Signal desk", "" if compact else "Fixed rules tested on real prices · records, stops and sizes in the F&O tab") + _grid(cards)
+
+
+def _fno_v2(compact=False):
+    """The card of the earlier F&O page (kept so Home still works if fno_page.py is an older version)."""
     try:
         import fno_page
         rows = fno_page.home_rows()
