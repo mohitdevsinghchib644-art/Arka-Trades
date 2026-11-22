@@ -1,119 +1,178 @@
 """
-Arka Trades · Futures and options desk (fno_page.py), v2
+Arka Trades · F&O and signal desk (fno_page.py) v3
 
-A research desk built on fno_engine.py. Six views:
-  Overview      the verdict for NIFTY 50 and BANK NIFTY, how much to trust it, the written desk note, market internals
-  NIFTY 50      the model and its record on unseen days, a test strategy against buy and hold, what is driving the forecast,
-  BANK NIFTY    the past days most like today, the option chain (open interest, fresh positions, volatility smile, dealer
-                gamma, max pain), six months of history, levels, an option structure, and every tested reading
-  Stocks        one model ranking all F&O stocks, its record, the price / open-interest map, a filterable table and a full
-                page for any single stock
-  Participants  who holds what: FIIs, retail clients, pro desks and DIIs, today and over six months
-  Method        how every number is made and tested, and the model's weights
+A dense, numbers-first desk. It does no heavy work: everything on it is read from the small files that the "Signals"
+workflow writes every evening into arka_data/signals/ (see signal_engine.py for the rules and the tests behind them).
 
-Nothing here calls an outside service or an AI model. The data comes from the files the "F&O data" workflow saves in
-arka_data/fno/. Charts are drawn as plain SVG so the page stays fast on a phone.
+  Desk         orders for the next open, the state of each book, market and big-player snapshot
+  Leaders      the trend book: 20 strongest stocks, weekly changes, full record against NIFTY 500, charts
+  Swing        leader-pullback trades: new signals with stops and sizes, open trades, record
+  Index        NIFTY 50 and BANK NIFTY: dip signal, record, futures and option levels, open interest by strike
+  Big players  FII / prop / retail / DII positions, futures build-ups, delivery footprints, bulk and block deals
+  Options map  the earlier positioning views (option chain, gamma, history, F&O stock table) from fno_legacy.py
+  Evidence     every idea that was tested, kept or rejected, with its numbers; rules; limits; the live log
 
-Public API:  render_fno(supabase=None, on_open=None)   ·   home_rows()
+Sizes are worked out from the capital and risk you type on the page; those numbers stay in your browser session.
+Nothing on this page is investment advice.
+
+Other pages still import a few things from here: home_rows() and home_desk() (Home), signal_for() (Research), and CSS /
+_stock_detail, which are passed through from fno_legacy.py when that file is installed.
 """
 from __future__ import annotations
 
+import csv
 import html
+import json
 import math
 from datetime import date
+from pathlib import Path
 
 import streamlit as st
 
-import fno_engine as E
+HERE = Path(__file__).resolve().parent
+ROOT = HERE / "arka_data" / "signals"
+FNO = HERE / "arka_data" / "fno"
+GREEN, RED, AMBER, BLUE, VIOLET = "var(--green,#30D158)", "var(--red,#FF453A)", "var(--amber,#FF9F0A)", "var(--cyan,#5AC8FA)", "var(--purple,#BF5AF2)"
+STATUS = {"on": ("Approved", "g"), "trial": ("On trial", "a"), "off": ("Switched off", "n")}
+TABS = ["Desk", "Leaders", "Swing", "Index", "Big players", "Options map", "Evidence"]
+_LEGACY = ("CSS", "_stock_detail")
 
-GRADE = {"proven": ("Proven", "g"), "leaning": ("Leaning", "a"), "unproven": ("Not proven", "n"), "thin": ("Too few", "n")}
-TONE = {"up": "up", "dn": "dn", "flat": "fl"}
-GREEN, RED, AMBER, BLUE, GREY = "var(--green,#22C55E)", "var(--red,#EF4444)", "var(--amber,#F59E0B)", "var(--c,#3B82F6)", "var(--tx3)"
-BU_NAME = {0: "No pattern", 1: "Long build-up", 2: "Short build-up", 3: "Short covering", 4: "Long unwinding"}
-BU_COL = {0: "var(--s3)", 1: "#22C55E", 2: "#EF4444", 3: "#86EFAC", 4: "#FCA5A5"}
 
-CSS = """<style>
-.fo{font-family:var(--sans,'Inter',system-ui,sans-serif);font-variant-numeric:tabular-nums;container-type:inline-size;width:100%;color:var(--tx);}
-.fo *{box-sizing:border-box;}
-.fo .up{color:var(--green,#22C55E);} .fo .dn{color:var(--red,#EF4444);} .fo .fl{color:var(--tx2);} .fo .am{color:var(--amber,#F59E0B);} .fo .mu{color:var(--tx3);}
-.fo-chips{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 12px;}
-.fo-chip{display:inline-flex;gap:6px;align-items:center;padding:5px 10px;border-radius:7px;background:var(--s1);border:1px solid var(--line);font:500 12px var(--sans);color:var(--tx2);white-space:nowrap;}
-.fo-chip b{font-weight:600;color:var(--tx);}
-.fo-g{display:grid;grid-template-columns:minmax(0,1fr);gap:12px;margin-bottom:12px;}
-.fo-card{background:var(--s1);border:1px solid var(--line);border-radius:10px;min-width:0;display:flex;flex-direction:column;}
-.fo-ct{display:flex;justify-content:space-between;align-items:baseline;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);}
-.fo-ct b{font:600 13px var(--sans);color:var(--tx);} .fo-ct span{font:400 11.5px var(--sans);color:var(--tx3);text-align:right;}
-.fo-cb{padding:14px;flex:1;min-width:0;}
-.fo-sec{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 10px;margin:18px 0 9px;padding-left:9px;border-left:3px solid var(--amber,#F59E0B);}
-.fo-sec b{font:650 14.5px var(--sans);white-space:nowrap;} .fo-sec span{font:400 12px var(--sans);color:var(--tx3);}
-.fo-vd{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
-.fo-vd b{font:650 25px/1.15 var(--sans);letter-spacing:-.01em;} .fo-vd span{font:500 12px var(--sans);color:var(--tx3);}
-.fo-conf{display:inline-flex;align-items:center;gap:6px;margin-left:auto;padding:4px 9px;border-radius:7px;border:1px solid var(--line2);font:500 11.5px var(--sans);color:var(--tx2);white-space:nowrap;}
-.fo-conf i{width:7px;height:7px;border-radius:50%;background:var(--s3);} .fo-conf i.on{background:var(--amber,#F59E0B);}
-.fo-meter{position:relative;height:6px;border-radius:3px;margin:12px 0 4px;background:linear-gradient(90deg,rgba(239,68,68,.6),rgba(113,113,122,.3) 40%,rgba(113,113,122,.3) 60%,rgba(34,197,94,.6));}
-.fo-meter i{position:absolute;top:-4px;width:3px;height:14px;border-radius:2px;background:var(--tx);transform:translateX(-50%);}
-.fo-scale{display:flex;justify-content:space-between;font:400 11px var(--sans);color:var(--tx3);}
-.fo-tx{font:400 13px/1.55 var(--sans);color:var(--tx2);margin-top:10px;}
-.fo-tiles{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));border:1px solid var(--line);border-radius:9px;overflow:hidden;gap:1px;background:var(--s1);margin-top:12px;}
-.fo-tile{padding:9px 11px;min-width:0;box-shadow:0 0 0 1px var(--line);}
-.fo-tile small{display:block;font:500 11px var(--sans);color:var(--tx3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.fo-tile b{display:block;font:600 15.5px/1.3 var(--sans);color:var(--tx);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.fo-tile em{display:block;font:400 11.5px var(--sans);font-style:normal;color:var(--tx3);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.fo-note2{display:grid;gap:11px;}
-.fo-note2 div{font:400 13px/1.6 var(--sans);color:var(--tx2);} .fo-note2 small{display:block;font:600 11.5px var(--sans);color:var(--tx);margin-bottom:1px;}
-.fo-bar{position:relative;height:30px;margin:4px 0 2px;}
-.fo-bar .tr{position:absolute;left:0;right:0;top:13px;height:4px;border-radius:2px;background:var(--s3);}
-.fo-bar .bd{position:absolute;top:9px;height:12px;border-radius:3px;background:rgba(161,161,170,.18);border:1px solid var(--line2);}
-.fo-bar i{position:absolute;top:5px;width:3px;height:20px;border-radius:2px;transform:translateX(-50%);}
-.fo-leg{display:flex;gap:6px 14px;flex-wrap:wrap;font:400 11.5px var(--sans);color:var(--tx3);margin-bottom:6px;} .fo-leg i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:5px;}
-.fo-leg b{font-weight:600;color:var(--tx2);}
-.fo-ch{position:relative;width:100%;}
-.fo-ch svg{position:absolute;left:0;top:0;width:calc(100% - 54px);height:100%;overflow:visible;}
-.fo-ch .yl{position:absolute;right:0;width:50px;text-align:right;font:400 10.5px var(--sans);color:var(--tx3);transform:translateY(-50%);white-space:nowrap;}
-.fo-xl{display:flex;justify-content:space-between;margin:4px 54px 0 0;font:400 10.5px var(--sans);color:var(--tx3);}
-.fo-drv{display:grid;gap:5px;}
-.fo-drv .r{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr) 54px;gap:10px;align-items:center;font:400 12.5px var(--sans);}
-.fo-drv .r>span{color:var(--tx);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;} .fo-drv .r>span small{color:var(--tx3);font-size:11.5px;margin-left:6px;}
-.fo-drv .t{position:relative;height:10px;background:var(--s2);border-radius:2px;} .fo-drv .t:before{content:"";position:absolute;left:50%;top:-2px;bottom:-2px;width:1px;background:var(--line2);}
-.fo-drv .t i{position:absolute;top:0;bottom:0;border-radius:2px;} .fo-drv .r b{text-align:right;font-weight:600;font-size:12px;}
-.fo-strip{position:relative;height:44px;margin:6px 4px 0;}
-.fo-strip .ax{position:absolute;left:0;right:0;top:21px;height:2px;background:var(--s3);}
-.fo-strip i{position:absolute;top:15px;width:9px;height:14px;border-radius:2px;transform:translateX(-50%);opacity:.85;}
-.fo-strip .z{position:absolute;top:6px;bottom:6px;width:1px;background:var(--tx3);} .fo-strip .m{position:absolute;top:2px;bottom:2px;width:2px;background:var(--amber,#F59E0B);}
-.fo-quad{position:relative;height:400px;border:1px solid var(--line);border-radius:8px;background:var(--s2);overflow:hidden;}
-.fo-quad .h,.fo-quad .v{position:absolute;background:var(--line2);} .fo-quad .h{left:0;right:0;height:1px;} .fo-quad .v{top:0;bottom:0;width:1px;}
-.fo-quad i{position:absolute;width:8px;height:8px;border-radius:50%;transform:translate(-50%,-50%);opacity:.9;}
-.fo-quad em{position:absolute;font:500 10px var(--sans);font-style:normal;color:var(--tx2);transform:translate(7px,-50%);white-space:nowrap;}
-.fo-quad .q{position:absolute;font:600 11px var(--sans);color:var(--tx3);padding:8px 10px;}
-.fo-bu{display:flex;gap:2px;margin-top:4px;} .fo-bu i{flex:1;height:16px;border-radius:2px;}
-.fo-legs{display:grid;gap:6px;margin-top:10px;}
-.fo-legs div{display:flex;justify-content:space-between;gap:10px;padding:7px 10px;border-radius:8px;background:var(--s2);font:500 13px var(--sans);}
-.fo-legs div b{font-weight:600;} .fo-legs div span{color:var(--tx3);}
-.fo-tag{font:500 11px var(--sans);color:var(--tx3);border:1px solid var(--line2);border-radius:6px;padding:2px 7px;margin-left:8px;white-space:nowrap;}
-.fo-tw{overflow:auto;max-height:600px;}
-.fo-t{width:100%;border-collapse:collapse;font:400 12.5px var(--sans);}
-.fo-t th{position:sticky;top:0;z-index:1;background:var(--s1);text-align:right;font:600 11px var(--sans);color:var(--tx3);padding:8px 8px;border-bottom:1px solid var(--line);white-space:nowrap;}
-.fo-t td{text-align:right;padding:7px 8px;border-bottom:1px solid var(--line);white-space:nowrap;color:var(--tx2);}
-.fo-t th:first-child,.fo-t td:first-child{text-align:left;padding-left:14px;} .fo-t th:last-child,.fo-t td:last-child{padding-right:14px;}
-.fo-t td:first-child{color:var(--tx);font-weight:600;}
-.fo-t td.l,.fo-t th.l{text-align:left;} .fo-t td.w{white-space:normal;min-width:150px;} .fo-t td.b{color:var(--tx);font-weight:600;}
-.fo-t tr:last-child td{border-bottom:0;} .fo-t tr.on td:first-child{box-shadow:inset 3px 0 0 var(--c,#3B82F6);} .fo-t tr.now td{background:var(--s2);}
-.fo-t small{display:block;font:400 11.5px var(--sans);color:var(--tx3);font-weight:400;white-space:normal;}
-.fo-pill{display:inline-block;padding:2px 8px;border-radius:6px;font:600 11px var(--sans);white-space:nowrap;}
-.fo-pill.g{background:rgba(34,197,94,.14);color:var(--green,#22C55E);} .fo-pill.r{background:rgba(239,68,68,.14);color:var(--red,#EF4444);}
-.fo-pill.a{background:rgba(245,158,11,.14);color:var(--amber,#F59E0B);} .fo-pill.n{background:var(--s3);color:var(--tx3);}
-.fo-note{font:400 12px/1.6 var(--sans);color:var(--tx3);margin-top:10px;}
-.fo-empty{padding:16px;font:400 13px/1.6 var(--sans);color:var(--tx2);}
-.fo-mini{display:grid;grid-template-columns:minmax(0,1fr);gap:16px;}
-.fo-stack{display:grid;gap:12px;align-content:start;min-width:0;} .fo-tiles.two{grid-template-columns:repeat(2,minmax(0,1fr)) !important;}
-.fo .xw{display:none;}
-@container (min-width:620px){.fo-tiles{grid-template-columns:repeat(3,minmax(0,1fr));} .fo-tiles.four{grid-template-columns:repeat(4,minmax(0,1fr));} .fo .xw{display:table-cell;}
-  .fo-t td.w{min-width:170px;} .fo-mini{grid-template-columns:repeat(2,minmax(0,1fr));}}
-@container (min-width:900px){.fo-g.two{grid-template-columns:repeat(2,minmax(0,1fr));} .fo-g.three{grid-template-columns:repeat(3,minmax(0,1fr));}
-  .fo-g.s57{grid-template-columns:minmax(0,5fr) minmax(0,7fr);} .fo-g.s75{grid-template-columns:minmax(0,7fr) minmax(0,5fr);} .fo-vd b{font-size:28px;}
-  .fo-tiles.six{grid-template-columns:repeat(6,minmax(0,1fr));} .fo-mini.four{grid-template-columns:repeat(4,minmax(0,1fr));}}
-@container (max-width:619px){.fo-cb{padding:12px;} .fo-conf{margin-left:0;} .fo-quad{height:280px;} .fo-drv .r{grid-template-columns:minmax(0,1.3fr) minmax(0,.8fr) 46px;}}
+def __getattr__(name):
+    """CSS and _stock_detail belong to the earlier page (now fno_legacy.py); the Research page still asks for them here."""
+    if name in _LEGACY:
+        try:
+            import fno_legacy
+        except ImportError:
+            raise AttributeError(name) from None
+        return getattr(fno_legacy, name)
+    raise AttributeError(name)
+
+
+CSS3 = """<style>
+.fd{font-family:var(--sans,'Inter',system-ui,sans-serif);font-variant-numeric:tabular-nums;container-type:inline-size;width:100%;color:var(--tx);font-size:12.5px;line-height:1.35;}
+.fd *{box-sizing:border-box;}
+.fd .up{color:var(--green,#30D158);} .fd .dn{color:var(--red,#FF453A);} .fd .mu{color:var(--tx3);} .fd .am{color:var(--amber,#FF9F0A);} .fd .fl{color:var(--tx2);}
+.fd-tk{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));border:1px solid var(--line);border-radius:6px;background:var(--s1);overflow:hidden;margin-bottom:8px;}
+.fd-tk>div{padding:6px 11px;box-shadow:0 0 0 .5px var(--line);min-width:0;}
+.fd-tk small{display:block;font:500 10.5px var(--sans);color:var(--tx3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.fd-tk b{display:block;font:600 13px/1.3 var(--sans);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.fd-g{display:grid;grid-template-columns:minmax(0,1fr);gap:8px;margin-bottom:8px;align-items:stretch;}
+.fd-col{display:flex;flex-direction:column;gap:8px;min-width:0;}
+.fd-p{background:var(--s1);border:1px solid var(--line);border-radius:6px;min-width:0;display:flex;flex-direction:column;overflow:hidden;}
+.fd-p>header{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:5px 10px;border-bottom:1px solid var(--line);background:var(--s2);min-height:28px;}
+.fd-p>header b{font:600 12px var(--sans);color:var(--tx);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.fd-p>header b::before{content:"";display:inline-block;width:6px;height:6px;border-radius:1px;background:var(--amber,#FF9F0A);margin-right:7px;vertical-align:1px;}
+.fd-p>header span{font:400 11px var(--sans);color:var(--tx3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;}
+.fd-b{padding:10px;flex:1;min-width:0;}
+.fd-b.f{padding:0;}
+.fd-sc{overflow:auto;max-height:470px;}
+.fd-t{width:100%;border-collapse:collapse;font:400 12px var(--sans);margin:0;}
+.fd-t th{position:sticky;top:0;z-index:1;background:var(--s1);text-align:right;font:500 10.5px var(--sans);color:var(--tx3);padding:5px 8px;border:0;border-bottom:1px solid var(--line);white-space:nowrap;}
+.fd-t td{text-align:right;padding:4px 8px;border:0;border-bottom:1px solid var(--line);white-space:nowrap;color:var(--tx2);vertical-align:middle;}
+.fd-t th:first-child,.fd-t td:first-child{padding-left:10px;} .fd-t th:last-child,.fd-t td:last-child{padding-right:10px;}
+.fd-t tr:last-child td{border-bottom:0;} .fd-t tbody tr:hover td{background:rgba(127,127,127,.06);}
+.fd-t .l{text-align:left;} .fd-t td.b{color:var(--tx);font-weight:600;} .fd-t td.w{white-space:normal;min-width:130px;}
+.fd .s{display:inline-flex;align-items:baseline;gap:6px;max-width:100%;min-width:0;} .fd .s b{color:var(--tx);font-weight:600;}
+.fd .s small{display:none;font:400 10.5px var(--sans);color:var(--tx3);max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.fd .s2{display:block;text-align:left;} .fd .s2 b{display:block;color:var(--tx);font-weight:600;} .fd .s2 small{display:block;font:400 10.5px var(--sans);color:var(--tx3);white-space:nowrap;}
+.fd .s.w small{max-width:250px;}
+.fd .dot{display:inline-block;width:7px;height:7px;border-radius:2px;margin-right:7px;}
+.fd-oc{display:block;} .fd-oc>div{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:2px 9px;align-items:center;padding:7px 10px;border-bottom:1px solid var(--line);}
+.fd-oc>div:last-child{border-bottom:0;} .fd-oc b{font:600 13px var(--sans);color:var(--tx);} .fd-oc .v{font:600 13px var(--sans);color:var(--tx);text-align:right;}
+.fd-oc small{grid-column:2 / 4;font:400 11px var(--sans);color:var(--tx3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.fd .wide{display:none;}
+.fd-t tr.dim td{opacity:.55;}
+.fd-s{display:inline-flex;align-items:center;gap:5px;padding:1px 7px;border-radius:10px;font:500 10.5px var(--sans);border:1px solid var(--line2);color:var(--tx2);white-space:nowrap;}
+.fd-s i{width:6px;height:6px;border-radius:50%;background:var(--tx4,#52525B);} .fd-s.g i{background:var(--green,#30D158);} .fd-s.a i{background:var(--amber,#FF9F0A);}
+.fd-a{display:inline-block;min-width:40px;text-align:center;padding:1px 6px;border-radius:4px;font:600 10.5px var(--sans);background:var(--s3);color:var(--tx2);}
+.fd-a.b{background:rgba(48,209,88,.14);color:var(--green,#30D158);} .fd-a.s{background:rgba(255,69,58,.14);color:var(--red,#FF453A);} .fd-a.w{background:rgba(255,159,10,.14);color:var(--amber,#FF9F0A);}
+.fd-ks{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));border:1px solid var(--line);border-radius:6px;background:var(--s1);overflow:hidden;margin-bottom:8px;}
+.fd-ks.in{border:0;border-radius:0;margin:0;background:none;}
+.fd-k{padding:7px 10px;box-shadow:0 0 0 .5px var(--line);min-width:0;}
+.fd-k small{display:block;font:500 10.5px var(--sans);color:var(--tx3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.fd-k b{display:block;font:600 15.5px/1.3 var(--sans);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.fd-k em{display:block;font:400 10.5px var(--sans);font-style:normal;color:var(--tx3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.fd-big{font:650 19px/1.2 var(--sans);letter-spacing:-.01em;}
+.fd-n{font:400 11.5px/1.5 var(--sans);color:var(--tx3);} .fd-n b{color:var(--tx2);font-weight:600;}
+.fd-n+.fd-n{margin-top:6px;}
+.fd-e{padding:14px 12px;font:400 12.5px/1.55 var(--sans);color:var(--tx2);} .fd-e b{color:var(--tx);}
+.fd-leg{display:flex;gap:4px 12px;flex-wrap:wrap;font:400 11px var(--sans);color:var(--tx3);margin-bottom:6px;} .fd-leg i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:5px;}
+.fd-leg b{font-weight:600;color:var(--tx2);}
+.fd-ch{position:relative;width:100%;} .fd-ch svg{position:absolute;left:0;top:0;width:calc(100% - 50px);height:100%;overflow:visible;}
+.fd-ch .yl{position:absolute;right:0;width:46px;text-align:right;font:400 10px var(--sans);color:var(--tx3);transform:translateY(-50%);white-space:nowrap;}
+.fd-ch .hl{position:absolute;left:4px;font:500 10px var(--sans);transform:translateY(-110%);white-space:nowrap;padding:0 3px;border-radius:3px;background:var(--s1);}
+.fd-xl{display:flex;justify-content:space-between;margin:3px 50px 0 0;font:400 10px var(--sans);color:var(--tx3);}
+.fd-bar{display:inline-block;width:54px;height:5px;border-radius:3px;background:var(--s3);vertical-align:middle;overflow:hidden;margin-left:6px;} .fd-bar i{display:block;height:100%;border-radius:3px;background:var(--amber,#FF9F0A);}
+.fd-vb{display:flex;align-items:flex-end;gap:3px;height:120px;padding-top:14px;}
+.fd-vb div{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%;}
+.fd-vb i{display:block;width:100%;border-radius:2px 2px 0 0;background:var(--amber,#FF9F0A);min-height:1px;}
+.fd-vb span{font:500 9.5px var(--sans);color:var(--tx2);margin-bottom:2px;white-space:nowrap;}
+.fd-mix div{display:grid;grid-template-columns:minmax(0,1fr) 90px 34px;gap:8px;align-items:center;padding:3px 0;font:400 11.5px var(--sans);color:var(--tx2);}
+.fd-mix div>span:first-child{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;} .fd-mix u{display:block;height:5px;border-radius:3px;background:var(--s3);overflow:hidden;text-decoration:none;}
+.fd-mix u i{display:block;height:100%;background:var(--cyan,#5AC8FA);border-radius:3px;} .fd-mix div>span:last-child{text-align:right;color:var(--tx);font-weight:600;}
+.fd-rule{display:grid;grid-template-columns:54px minmax(0,1fr);gap:5px 10px;font:400 11.5px/1.5 var(--sans);color:var(--tx2);} .fd-rule span{color:var(--tx3);}
+.fd-list{margin:0;padding:0;list-style:none;} .fd-list li{position:relative;padding:3px 0 3px 12px;font:400 11.5px/1.5 var(--sans);color:var(--tx2);}
+.fd-list li::before{content:"";position:absolute;left:0;top:10px;width:4px;height:4px;border-radius:50%;background:var(--tx3);}
+.fd .x,.fd .xx{display:none;}
+@container (min-width:560px){.fd-tk{grid-template-columns:repeat(4,minmax(0,1fr));} .fd-ks{grid-template-columns:repeat(4,minmax(0,1fr));}}
+@container (min-width:720px){
+  .fd-g{grid-template-columns:repeat(12,minmax(0,1fr));}
+  .fd .wide{display:block;} .fd .narrow{display:none;} .fd .s small{display:inline;}
+  .fd .t4{grid-column:span 4;} .fd .t6{grid-column:span 6;} .fd .t12{grid-column:span 12;}
+  .fd .x{display:revert;}
+}
+@container (min-width:1100px){
+  .fd-tk{grid-template-columns:repeat(8,minmax(0,1fr));} .fd-ks{grid-template-columns:repeat(var(--n,8),minmax(0,1fr));} .fd-ks.in{grid-template-columns:repeat(var(--n,4),minmax(0,1fr));}
+  .fd .c2{grid-column:span 2;} .fd .c3{grid-column:span 3;} .fd .c4{grid-column:span 4;} .fd .c5{grid-column:span 5;} .fd .c6{grid-column:span 6;} .fd .c7{grid-column:span 7;}
+  .fd .c8{grid-column:span 8;} .fd .c9{grid-column:span 9;} .fd .c12{grid-column:span 12;}
+  .fd .xx{display:revert;}
+}
 </style>"""
+
+
+# ───────────── reading the files ─────────────
+def _stamp(p: Path) -> float:
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def _read_json(path: str, stamp: float):
+    return json.loads(Path(path).read_text())
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def _read_csv(path: str, stamp: float, keep: tuple = ()):
+    with open(path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    return [r for r in rows if not keep or r.get("sym") in keep]
+
+
+def signals():
+    p = ROOT / "signals.json"
+    try:
+        return _read_json(str(p), _stamp(p)) if p.exists() else None
+    except Exception:
+        return None
+
+
+def _charts():
+    p = ROOT / "charts.json"
+    try:
+        return _read_json(str(p), _stamp(p)) if p.exists() else {}
+    except Exception:
+        return {}
+
+
+def _names() -> dict:
+    try:
+        import watchlist_page
+        return {k: v[0] for k, v in (watchlist_page.equity_names() or {}).items()}
+    except Exception:
+        return {}
 
 
 # ───────────── formatting ─────────────
@@ -141,20 +200,22 @@ def _cls(x) -> str:
     return "fl" if not _ok(x) or abs(x) < 1e-9 else "up" if x > 0 else "dn"
 
 
-def _col(x, d=1) -> str:
+def _sg(x, d=1) -> str:
     return f'<span class="{_cls(x)}">{_pct(x, d)}</span>'
 
 
 def _qty(x) -> str:
-    """Contracts and shares the Indian way: lakh and crore."""
     if not _ok(x):
         return "—"
     a, s = abs(x), "-" if x < 0 else ""
     return f"{s}{a / 1e7:,.0f} Cr" if a >= 1e9 else f"{s}{a / 1e7:.2f} Cr" if a >= 1e7 else f"{s}{a / 1e5:.1f} L" if a >= 1e5 else f"{s}{a / 1e3:.0f} K" if a >= 1e3 else f"{s}{a:.0f}"
 
 
-def _rank(p) -> str:
-    return "not enough history" if not _ok(p) else f"higher than {p * 100:.0f}% of the last year"
+def _rs(x) -> str:
+    """Rupees the Indian way."""
+    if not _ok(x):
+        return "—"
+    return f"₹{x / 1e7:.2f} Cr" if abs(x) >= 1e7 else f"₹{x / 1e5:.2f} L" if abs(x) >= 1e5 else f"₹{x:,.0f}"
 
 
 def _day(iso, year=True) -> str:
@@ -165,28 +226,74 @@ def _day(iso, year=True) -> str:
         return "—"
 
 
-def _card(title, right, body, flush=False) -> str:
-    return (f'<div class="fo-card"><div class="fo-ct"><b>{_e(title)}</b><span>{right}</span></div>'
-            f'<div class="{"" if flush else "fo-cb"}">{body}</div></div>')
+def _dshort(iso) -> str:
+    try:
+        d = date.fromisoformat(str(iso)[:10])
+        return f"{d.day} {d.strftime('%b')} {d.strftime('%y')}"
+    except Exception:
+        return "—"
 
 
-def _tile(label, val, sub="") -> str:
-    return f'<div class="fo-tile"><small>{_e(label)}</small><b>{val}</b>{f"<em>{sub}</em>" if sub else ""}</div>'
+# ───────────── building blocks ─────────────
+def _html(body: str):
+    st.markdown(f'<div class="fd">{body}</div>', unsafe_allow_html=True)
 
 
-def _sec(title, sub="") -> str:
-    return f'<div class="fo-sec"><b>{_e(title)}</b><span>{_e(sub)}</span></div>'
+def _pan(title, meta, body, cls="", flush=False) -> str:
+    return f'<section class="fd-p {cls}"><header><b>{_e(title)}</b><span>{meta}</span></header><div class="fd-b{" f" if flush else ""}">{body}</div></section>'
 
 
-def _grid(cls, *cards) -> str:
-    return f'<div class="fo-g {cls}">{"".join(cards)}</div>'
+def _grid(*panels) -> str:
+    return f'<div class="fd-g">{"".join(panels)}</div>'
+
+
+def _k(label, val, sub="") -> str:
+    return f'<div class="fd-k"><small>{_e(label)}</small><b>{val}</b>{f"<em>{sub}</em>" if sub else ""}</div>'
+
+
+def _ks(cells, n=8, inner=False) -> str:
+    return f'<div class="fd-ks{" in" if inner else ""}" style="--n:{n}">{"".join(cells)}</div>'
+
+
+def _pill(status) -> str:
+    name, c = STATUS.get(status, STATUS["off"])
+    return f'<span class="fd-s {c}"><i></i>{name}</span>'
+
+
+def _act(word, kind="") -> str:
+    return f'<span class="fd-a {kind}">{_e(word)}</span>'
+
+
+def _bar(frac, colour="") -> str:
+    w = max(0.0, min(1.0, frac if _ok(frac) else 0.0)) * 100
+    style = f"width:{w:.0f}%" + (f";background:{colour}" if colour else "")
+    return f'<span class="fd-bar"><i style="{style}"></i></span>'
+
+
+def _sym(sym, names, sub="") -> str:
+    nm = sub or names.get(sym, "")
+    return f'<b>{_e(sym)}</b>' + (f'<small>{_e(nm)}</small>' if nm else "")
+
+
+def _t(head, rows, scroll=True, cls="") -> str:
+    """head = [(label, classes)], rows = [[cell, ...]] or [([cells], row class)]. Classes: l left · x hidden on phones · xx only on wide screens · b bold."""
+    th = "".join(f'<th class="{c}">{_e(h)}</th>' for h, c in head)
+    body = ""
+    for r in rows:
+        cells, rc = (r if isinstance(r, tuple) else (r, ""))
+        body += f'<tr class="{rc}">' + "".join(f'<td class="{head[i][1]}">{c}</td>' for i, c in enumerate(cells)) + "</tr>"
+    t = f'<table class="fd-t {cls}"><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table>'
+    return f'<div class="fd-sc">{t}</div>' if scroll else t
+
+
+def _empty(msg) -> str:
+    return f'<div class="fd-e">{msg}</div>'
 
 
 def _legend(items) -> str:
-    return '<div class="fo-leg">' + "".join(f'<span><i style="background:{c}"></i>{_e(n)}{f" <b>{v}</b>" if v else ""}</span>' for n, c, v in items) + '</div>'
+    return '<div class="fd-leg">' + "".join(f'<span><i style="background:{c}"></i>{_e(n)}{f" <b>{v}</b>" if v else ""}</span>' for n, c, v in items) + '</div>'
 
 
-# ───────────── charts (plain SVG, text kept as HTML so it stays sharp at any width) ─────────────
 def _nice(lo, hi, n=4):
     span = (hi - lo) or 1.0
     raw = span / n
@@ -199,835 +306,892 @@ def _nice(lo, hi, n=4):
     return out
 
 
-def _lines(dates, series, h=170, fmt=_px, zero=False, legend=True) -> str:
-    """Line chart. series = [(name, colour, values, last-value text or '')]."""
-    vals = [v for _, _, ys, *_ in series for v in ys if _ok(v)]
+def _line(dates, series, h=150, fmt=_px, zero=False, marks=()) -> str:
+    """Line chart. series = [(name, colour, values, last-value text)]. marks = [(value, label, colour)] drawn as dotted levels."""
+    vals = [v for _, _, ys, *_ in series for v in ys if _ok(v)] + [m[0] for m in marks if _ok(m[0])]
     if len(vals) < 3:
-        return '<div class="fo-empty">Not enough history to draw this yet.</div>'
+        return _empty("Not enough history to draw this yet.")
     lo, hi = min(vals), max(vals)
     if zero:
         lo, hi = min(lo, 0.0), max(hi, 0.0)
-    pad = (hi - lo) * 0.08 or abs(hi) * 0.05 or 1.0
+    pad = (hi - lo) * 0.07 or abs(hi) * 0.05 or 1.0
     lo, hi = lo - pad, hi + pad
     n = max(len(ys) for _, _, ys, *_ in series)
     X = lambda i: i / max(n - 1, 1) * 1000
     Y = lambda v: (hi - v) / (hi - lo) * h
     ticks = _nice(lo, hi)
-    grid = "".join(f'<line x1="0" x2="1000" y1="{Y(t):.1f}" y2="{Y(t):.1f}" stroke="{"var(--tx3)" if (zero and abs(t) < 1e-12) else "var(--line)"}" '
-                   f'stroke-width="1" vector-effect="non-scaling-stroke"/>' for t in ticks)
-    paths = ""
+    grid = "".join(f'<line x1="0" x2="1000" y1="{Y(t):.1f}" y2="{Y(t):.1f}" stroke="{"var(--tx3)" if (zero and abs(t) < 1e-12) else "var(--line)"}" stroke-width="1" '
+                   f'vector-effect="non-scaling-stroke"/>' for t in ticks)
+    paths, labels = "", ""
     for _, colr, ys, *_ in series:
         pts = " ".join(f"{X(i):.1f},{Y(v):.1f}" for i, v in enumerate(ys) if _ok(v))
-        paths += f'<polyline points="{pts}" fill="none" stroke="{colr}" stroke-width="1.6" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>'
+        paths += f'<polyline points="{pts}" fill="none" stroke="{colr}" stroke-width="1.5" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>'
+    for v, lab, colr in marks:
+        if _ok(v):
+            paths += f'<line x1="0" x2="1000" y1="{Y(v):.1f}" y2="{Y(v):.1f}" stroke="{colr}" stroke-width="1" stroke-dasharray="4 3" vector-effect="non-scaling-stroke"/>'
+            labels += f'<span class="hl" style="top:{Y(v) / h * 100:.1f}%;color:{colr}">{_e(lab)}</span>'
     yl = "".join(f'<span class="yl" style="top:{Y(t) / h * 100:.1f}%">{fmt(t)}</span>' for t in ticks)
     xl = ""
     if dates:
         idx = sorted({int(round(k * (len(dates) - 1) / 4)) for k in range(5)})
-        xl = '<div class="fo-xl">' + "".join(f"<span>{_day(dates[i], False)}</span>" for i in idx) + "</div>"
-    leg = _legend([(nm, colr, (rest[0] if rest else "")) for nm, colr, _, *rest in series]) if legend else ""
-    return (f'{leg}<div class="fo-ch" style="height:{h}px"><svg viewBox="0 0 1000 {h}" preserveAspectRatio="none">{grid}{paths}</svg>{yl}</div>{xl}')
+        xl = '<div class="fd-xl">' + "".join(f"<span>{_dshort(dates[i])}</span>" for i in idx) + "</div>"
+    leg = _legend([(nm, colr, (rest[0] if rest else "")) for nm, colr, _, *rest in series])
+    return f'{leg}<div class="fd-ch" style="height:{h}px"><svg viewBox="0 0 1000 {h}" preserveAspectRatio="none">{grid}{paths}</svg>{yl}{labels}</div>{xl}'
 
 
-def _bars(labels, series, h=170, mark=None, diverge=False, fmt=_qty, legend=True, mark_name="Price", xlabels=None) -> str:
-    """Bar chart across strikes. series = [(name, colour, values)]; mark = a price to draw as a vertical line."""
+def _strikes(labels, series, h=150, mark=None) -> str:
+    """Bars across strikes. series = [(name, colour, values)]; mark = the price, drawn as a dashed line."""
     n = len(labels)
     vals = [abs(v) for _, _, ys in series for v in ys if _ok(v)]
     if n < 3 or not vals or max(vals) <= 0:
-        return '<div class="fo-empty">Nothing stored for this expiry.</div>'
+        return _empty("No strikes stored for this expiry.")
     m, slot, k = max(vals), 10.0, len(series)
-    W = n * slot
-    zero_y, scale = (h / 2, (h / 2 - 4) / m) if diverge else (h - 1.0, (h - 8) / m)
-    bw = 8.0 / k
+    W, bw = n * slot, 8.0 / k
     rects = ""
     for j, (_, colr, ys) in enumerate(series):
         for i, v in enumerate(ys):
-            if _ok(v) and v != 0:
-                hh = abs(v) * scale
-                rects += f'<rect x="{i * slot + 1 + j * bw:.2f}" y="{(zero_y - hh) if v > 0 else zero_y:.1f}" width="{bw * 0.92:.2f}" height="{hh:.1f}" fill="{colr}" opacity=".85"/>'
-    extra = f'<line x1="0" x2="{W}" y1="{zero_y:.1f}" y2="{zero_y:.1f}" stroke="var(--line2)" stroke-width="1" vector-effect="non-scaling-stroke"/>'
+            if _ok(v) and v > 0:
+                hh = v / m * (h - 8)
+                rects += f'<rect x="{i * slot + 1 + j * bw:.2f}" y="{h - 1 - hh:.1f}" width="{bw * 0.92:.2f}" height="{hh:.1f}" fill="{colr}" opacity=".85"/>'
+    extra = ""
     if _ok(mark) and labels[0] < mark < labels[-1]:
-        pos = 0.0
         for i in range(n - 1):
             if labels[i] <= mark <= labels[i + 1]:
                 pos = (i + (mark - labels[i]) / ((labels[i + 1] - labels[i]) or 1)) * slot + slot / 2
+                extra = f'<line x1="{pos:.1f}" x2="{pos:.1f}" y1="0" y2="{h}" stroke="var(--tx)" stroke-width="1.2" stroke-dasharray="4 3" vector-effect="non-scaling-stroke"/>'
                 break
-        extra += f'<line x1="{pos:.1f}" x2="{pos:.1f}" y1="0" y2="{h}" stroke="var(--tx)" stroke-width="1.2" stroke-dasharray="4 3" vector-effect="non-scaling-stroke"/>'
-    yl = f'<span class="yl" style="top:6%">{fmt(m)}</span><span class="yl" style="top:{zero_y / h * 100:.0f}%">0</span>'
-    if diverge:
-        yl += f'<span class="yl" style="top:94%">{fmt(-m)}</span>'
     idx = sorted({int(round(q * (n - 1) / 5)) for q in range(6)})
-    xl = '<div class="fo-xl">' + "".join(f"<span>{_e(x)}</span>" for x in (xlabels or [_px(labels[i]) for i in idx])) + "</div>"
-    items = [(nm, colr, "") for nm, colr, _ in series] + ([(f"{mark_name} {_px(mark)}", "var(--tx)", "")] if _ok(mark) else [])
-    return (f'{_legend(items) if legend else ""}<div class="fo-ch" style="height:{h}px"><svg viewBox="0 0 {W:.0f} {h}" preserveAspectRatio="none">{extra}{rects}</svg>{yl}</div>{xl}')
+    xl = '<div class="fd-xl">' + "".join(f"<span>{_px(labels[i])}</span>" for i in idx) + "</div>"
+    items = [(nm, colr, "") for nm, colr, _ in series] + ([(f"Price {_px(mark)}", "var(--tx)", "")] if _ok(mark) else [])
+    return (f'{_legend(items)}<div class="fd-ch" style="height:{h}px"><svg viewBox="0 0 {W:.0f} {h}" preserveAspectRatio="none">{extra}{rects}</svg>'
+            f'<span class="yl" style="top:6%">{_qty(m)}</span><span class="yl" style="top:98%">0</span></div>{xl}')
 
 
-def _level_bar(lv: dict) -> str:
-    fut, mv = lv.get("fut"), lv.get("move10")
-    marks = [(lv.get("put_wall"), GREEN, "Put wall"), (lv.get("max_pain"), AMBER, "Max pain"), (fut, "var(--tx)", "Price"), (lv.get("call_wall"), RED, "Call wall")]
-    pts = [m[0] for m in marks if _ok(m[0]) and m[0] > 0]
-    if not _ok(fut) or len(pts) < 2:
+def _vbars(labels, values, fmt=lambda v: f"{v * 100:.1f}", colour=None) -> str:
+    vals = [v for v in values if _ok(v)]
+    if not vals:
         return ""
-    lo, hi = min(pts + ([fut - mv] if _ok(mv) else [])), max(pts + ([fut + mv] if _ok(mv) else []))
-    pad = (hi - lo) * 0.06 or fut * 0.01
+    m = max(abs(v) for v in vals) or 1.0
+    cols = "".join(f'<div><span>{fmt(v)}</span><i style="height:{max(abs(v) / m * 100, 1):.0f}%;background:{colour(i, v) if colour else AMBER}"></i></div>' for i, v in enumerate(values))
+    return f'<div class="fd-vb">{cols}</div><div class="fd-xl" style="margin-right:0">' + "".join(f"<span>{_e(x)}</span>" for x in labels) + "</div>"
+
+
+def _candles(d, s, marks=(), h=260) -> str:
+    """Candlestick chart as plain SVG (used when Plotly is not available). Hover a candle for its numbers."""
+    n = len(d)
+    vals = [v for k in ("h", "l") for v in s[k] if _ok(v)] + [m[0] for m in marks if _ok(m[0])]
+    if n < 5 or not vals:
+        return _empty("No price history stored for this stock yet.")
+    lo, hi = min(vals), max(vals)
+    pad = (hi - lo) * 0.05 or 1.0
     lo, hi = lo - pad, hi + pad
-    pos = lambda v: max(0.0, min(100.0, (v - lo) / (hi - lo) * 100))
-    band = f'<div class="bd" style="left:{pos(fut - mv):.1f}%;width:{pos(fut + mv) - pos(fut - mv):.1f}%"></div>' if _ok(mv) else ""
-    ticks = "".join(f'<i style="left:{pos(v):.1f}%;background:{c}" title="{_e(n)} {_px(v)}"></i>' for v, c, n in marks if _ok(v) and v > 0)
-    items = [(f"{n} {_px(v)}", c, "") for v, c, n in marks if _ok(v) and v > 0]
-    if _ok(mv):
-        items.append((f"Priced 10-session range ±{_px(mv)}", "rgba(161,161,170,.35)", ""))
-    return f'<div class="fo-bar"><div class="tr"></div>{band}{ticks}</div>{_legend(items)}'
-
-
-# ───────────── shared blocks ─────────────
-def _conf(M) -> str:
-    n = (M or {}).get("conf_n", 0)
-    name = (M or {}).get("conf", "Untested")
-    dots = "".join(f'<i class="{"on" if i < n else ""}"></i>' for i in range(3))
-    return f'<span class="fo-conf" title="How well the model\'s forecasts matched what happened on days it had not seen">Confidence {dots} {_e(name)}</span>'
-
-
-def _verdict(x: dict) -> str:
-    M = x.get("model") or {}
-    q, n = M.get("pct"), M.get("conf_n", 0)
-    if not _ok(q) or n == 0:
-        q = 0.5                                      # a model without a record does not move the needle
-    elif n == 1:
-        q = max(0.22, min(0.78, q))                  # a thin record may lean, not reach the strong calls
-    pos = q * 100
-    return (f'<div class="fo-vd"><b class="{TONE[x["tone"]]}">{_e(x["verdict"])}</b><span>next {E.MAIN_H} sessions</span>{_conf(M)}</div>'
-            f'<div class="fo-meter"><i style="left:{pos:.1f}%"></i></div>'
-            '<div class="fo-scale"><span>Correction risk</span><span>No edge</span><span>Rally setup</span></div>')
-
-
-def _model_tiles(x: dict, cls="") -> str:
-    M, lv = x.get("model") or {}, x["levels"]
-    fc = M.get("forecast")
-    st_ = (M.get("by") or {}).get(x["level"])
-    pu = st_["hit"] if st_ else None
-    t = [_tile("Model forecast", _col(fc, 1) if _ok(fc) else "—", f'normal {_pct(M.get("drift"))} · {E.MAIN_H} sessions' if _ok(M.get("drift")) else "needs two years of data"),
-         _tile("Ended higher after this verdict", f'{pu * 100:.0f}%' if _ok(pu) else "—", f'normal {M["base_up"] * 100:.0f}%' if _ok(M.get("base_up")) else ""),
-         _tile("Forecast rank", f'{M["pct"] * 100:.0f} of 100' if _ok(M.get("pct")) else "—", "against its own history"),
-         _tile("Future", _px(lv.get("fut")), f'{_col(lv.get("r1"), 2)} today · {_col(lv.get("r5"))} 5 sessions'),
-         _tile("Priced 10-session range", f'{_px(lv["fut"] - lv["move10"])} – {_px(lv["fut"] + lv["move10"])}' if _ok(lv.get("move10")) else "—",
-               f'implied volatility {_pct(lv.get("iv"), 1, False)}'),
-         _tile("Put wall · max pain · call wall", f'{_px(lv.get("put_wall"))} · {_px(lv.get("max_pain"))} · {_px(lv.get("call_wall"))}',
-               f'expiry {_day(lv.get("m_exp"), False)} · {lv.get("dte")} days' if lv.get("dte") is not None else "")]
-    return f'<div class="fo-tiles {cls}">{"".join(t)}</div>'
-
-
-def _drivers(drv: list, limit=None, unit="%") -> str:
-    drv = [d for d in drv if d.get("x") is not None][: (limit or 99)]
-    if not drv:
-        return '<div class="fo-empty">The model has no inputs for today yet.</div>'
-    m = max(abs(d["contrib"]) for d in drv) or 1.0
-    rows = []
-    for d in drv:
-        w = abs(d["contrib"]) / m * 50
-        colr = GREEN if d["contrib"] > 0 else RED
-        left = 50 if d["contrib"] > 0 else 50 - w
-        rows.append(f'<div class="r"><span title="{_e(d["text"])}">{_e(d["label"])}<small>{_e(d["text"])}</small></span>'
-                    f'<div class="t"><i style="left:{left:.1f}%;width:{w:.1f}%;background:{colr}"></i></div>'
-                    f'<b class="{_cls(d["contrib"])}">{d["contrib"] * 100:+.2f}{unit}</b></div>')
-    return f'<div class="fo-drv">{"".join(rows)}</div>'
-
-
-def _analogs(A: dict | None, who: str) -> str:
-    if not A or not A.get("h", {}).get(E.MAIN_H):
-        return '<div class="fo-empty">Not enough history yet to find past days that look like today.</div>'
-    a = A["h"][E.MAIN_H]
-    f = [v for v in A.get("f", []) if _ok(v)]
-    lo, hi = min(f + [0.0]), max(f + [0.0])
-    pad = (hi - lo) * 0.05 or 0.01
-    lo, hi = lo - pad, hi + pad
-    pos = lambda v: (v - lo) / (hi - lo) * 100
-    dots = "".join(f'<i style="left:{pos(v):.1f}%;background:{GREEN if v > 0 else RED}" title="{_pct(v)}"></i>' for v in f)
-    strip = (f'<div class="fo-strip"><div class="ax"></div><div class="z" style="left:{pos(0):.1f}%"></div>{dots}'
-             f'<div class="m" style="left:{pos(a["median"]):.1f}%" title="Median {_pct(a["median"])}"></div></div>'
-             f'<div class="fo-xl" style="margin-right:0"><span>{_pct(lo)}</span><span>each bar is one past day · amber line is the median</span><span>{_pct(hi)}</span></div>')
-    tiles = ('<div class="fo-tiles four">' + _tile("Median move", _col(a["median"]), f'normal {_pct(a["base"])}')
-             + _tile("Ended higher", f'{a["up"] * 100:.0f}%', f'normal {a["base_up"] * 100:.0f}%') + _tile("Worst", _col(a["worst"]), f'{E.MAIN_H} sessions later')
-             + _tile("Best", _col(a["best"]), f'{E.MAIN_H} sessions later') + '</div>')
-    rows = "".join(f'<tr><td>{_day(r["date"])}</td><td>{_col(r.get("f5"))}</td><td class="b">{_col(r.get("f10"))}</td><td>{_col(r.get("f20"))}</td></tr>' for r in A["rows"])
-    table = (f'<div class="fo-tw" style="max-height:230px;margin-top:10px"><table class="fo-t"><thead><tr><th>Closest past days</th><th>5 sessions</th>'
-             f'<th>{E.MAIN_H} sessions</th><th>20 sessions</th></tr></thead><tbody>{rows}</tbody></table></div>')
-    return (f'<div class="fo-tx" style="margin-top:0">The {A["n"]} past days when {who} looked most like today on every input, at least {E.MAIN_H} sessions apart, '
-            f'and what the price did next.</div>{strip}{tiles}{table}')
-
-
-def _note(note: list) -> str:
-    return '<div class="fo-note2">' + "".join(f'<div><small>{_e(n["h"])}</small>{_e(n["t"])}</div>' for n in note) + '</div>'
-
-
-def _hist_charts(hist: dict, with_oi=True, four=True) -> str:
-    d = hist.get("date") or []
-    last = lambda k, f: (f(next((v for v in reversed(hist.get(k) or []) if _ok(v)), None)))
-    parts = [_lines(d, [("Future price", "var(--tx)", hist.get("px") or [], last("px", _px))], h=130),
-             _lines(d, [("Put-call ratio", BLUE, hist.get("pcr") or [], last("pcr", lambda v: _num(v, 2)))], h=130, fmt=lambda v: f"{v:.2f}"),
-             _lines(d, [("Implied volatility", AMBER, hist.get("iv") or [], last("iv", lambda v: _pct(v, 1, False)))], h=130, fmt=lambda v: f"{v * 100:.0f}%")]
-    if with_oi:
-        parts.append(_lines(d, [("Futures open interest", "#A78BFA", hist.get("oi") or [], last("oi", _qty))], h=130, fmt=_qty))
-    return f'<div class="fo-mini {"four" if four else ""}">' + "".join(f"<div>{p}</div>" for p in parts) + "</div>"
-
-
-def _chain_cards(c: dict | None, F) -> str:
-    if not c:
-        return _grid("", _card("Option chain", "", '<div class="fo-empty">Strike-by-strike data for this expiry is not stored yet. It arrives with the next run of the F&O data workflow.</div>', True))
-    K = c["strike"]
-    keep = [i for i, k in enumerate(K) if abs(k / F - 1) <= 0.07] if _ok(F) else list(range(len(K)))
-    if len(keep) < 8:
-        keep = list(range(len(K)))
-    sub = lambda key: [c[key][i] for i in keep]
-    ks = [K[i] for i in keep]
-    oi = _bars(ks, [("Call open interest", RED, sub("ce_oi")), ("Put open interest", GREEN, sub("pe_oi"))], mark=F)
-    chg = _bars(ks, [("Calls added today", RED, sub("ce_chg")), ("Puts added today", GREEN, sub("pe_chg"))], mark=F, diverge=True)
-    tiles = ('<div class="fo-tiles two">' + _tile("Max pain", _px(c.get("max_pain")), f'expiry {_day(c["exp"], False)} · {c["dte"]} days')
-             + _tile("Put wall · call wall", f'{_px(c.get("put_wall"))} · {_px(c.get("call_wall"))}', "most open interest")
-             + _tile("Fresh writing today", f'{_px(c.get("put_add"))} · {_px(c.get("call_add"))}', "puts · calls, biggest additions")
-             + _tile("Put-call ratio", _num(c.get("pcr"), 2), "this expiry, stored strikes") + '</div>')
-    right = [_card("Open interest by strike", f'{_day(c["exp"], False)} expiry', oi + tiles), _card("Positions added or closed today", "change in open interest", chg)]
-    third = ""
-    if c.get("gex") and any(abs(v) > 0 for v in c["gex"]):
-        gex = _bars(ks, [("Estimated dealer gamma", BLUE, sub("gex"))], mark=F, diverge=True)
-        sign = "positive" if c["net_gex"] > 0 else "negative"
-        txt = ("Positive gamma: dealers trade against moves, which tends to hold price in a range." if c["net_gex"] > 0
-               else "Negative gamma: dealers trade with moves, which tends to stretch them.")
-        flip = f' It changes sign near <b style="color:var(--tx)">{_px(c["flip"])}</b>.' if _ok(c.get("flip")) else ""
-        iv = [v for v in sub("iv")]
-        smile = _lines([], [("Implied volatility by strike", AMBER, iv, "")], h=110, fmt=lambda v: f"{v * 100:.1f}%")
-        xl = '<div class="fo-xl">' + "".join(f"<span>{_px(ks[i])}</span>" for i in sorted({int(round(q * (len(ks) - 1) / 5)) for q in range(6)})) + "</div>"
-        third = _card("Dealer gamma and the volatility smile", f"net gamma {sign}", gex + f'<div class="fo-tx">{txt}{flip}</div><div style="height:12px"></div>' + smile + xl
-                      + '<div class="fo-note">Gamma is an estimate: it assumes dealers have sold the puts and bought the calls that customers hold. The true split is not published.</div>')
-    return _grid("three" if third else "two", *right, third)
-
-
-def _idea(idea: dict) -> str:
-    if not idea or not idea.get("name"):
-        return f'<div class="fo-tx" style="margin-top:0">{_e((idea or {}).get("why") or "No structure today.")}</div>'
-    out = [f'<div><b style="font:650 16px var(--sans)">{_e(idea["name"])}</b><span class="fo-tag">Rule-based · not backtested</span></div>',
-           f'<div class="fo-tx">{_e(idea["why"])}</div>']
-    if idea.get("legs"):
-        rows = "".join(f'<div><b class="{"dn" if l["act"] == "Sell" else "up"}">{l["act"]} {_px(l["strike"])} {"call" if l["typ"] == "CE" else "put"}</b>'
-                       f'<span>{("at " + _num(l["px"], 2)) if _ok(l.get("px")) else "price not stored"}</span></div>' for l in idea["legs"])
-        out.append(f'<div class="fo-legs">{rows}</div>')
-    if _ok(idea.get("max_gain")):
-        be = " and ".join(_px(b) for b in idea["breakeven"])
-        lot = f'per lot of {idea["lot"]:,.0f}' if _ok(idea.get("lot")) else "per unit"
-        out.append('<div class="fo-tiles">' + _tile("Most you can make", f'<span class="up">₹{_num(idea["max_gain"])}</span>', lot)
-                   + _tile("Most you can lose", f'<span class="dn">₹{_num(idea["max_loss"])}</span>', lot)
-                   + _tile("Breakeven", be, f'{"receive" if idea["net"] > 0 else "pay"} {_num(abs(idea["net"]), 2)} a unit') + '</div>')
-    if idea.get("note"):
-        out.append(f'<div class="fo-note">{_e(idea["note"])}</div>')
-    if idea.get("legs"):
-        out.append('<div class="fo-note">Premiums are the last stored closing prices, not live quotes. Check the live chain, margin and costs before placing anything.</div>')
-    return "".join(out)
-
-
-def _evidence(signals: list, relative: bool) -> str:
-    order = {"proven": 0, "leaning": 1, "unproven": 2, "thin": 3}
-    sig = sorted(signals, key=lambda s: (not s.get("on"), order[s["grade"]], -(abs(s["stats"][E.MAIN_H]["t"]) if s["stats"].get(E.MAIN_H) else 0)))
-    cell = lambda st_: f'<td class="xw">{_col(st_["edge"], 2)}</td>' if st_ else '<td class="xw">—</td>'
-    rows = []
-    for s in sig:
-        m = s["stats"].get(E.MAIN_H)
-        lab, cl = GRADE[s["grade"]]
-        hit = f'{m["hit"] * 100:.0f}% <span class="mu">vs {m["base_hit"] * 100:.0f}%</span>' if m else "—"
-        main = f'<td class="b">{_col(m["edge"], 2)}</td>' if m else "<td>—</td>"
-        today = '<b class="up">On</b>' if s.get("on") else '<span class="mu">Off</span>'
-        rows.append(f'<tr class="{"on" if s.get("on") else ""}"><td class="w">{_e(s["label"])}<small>{_e(s["note"])}</small></td>{"" if relative else f"<td>{today}</td>"}'
-                    f'{cell(s["stats"].get(5))}{main}{cell(s["stats"].get(20))}<td class="xw">{hit}</td>'
-                    f'<td class="xw">{m["neff"] if m else "—"}</td><td><span class="fo-pill {cl}">{lab}</span></td></tr>')
-    vs = "against other F&O stocks" if relative else "against a normal day"
-    head = (f'<tr><th>Reading</th>{"" if relative else "<th>Today</th>"}<th class="xw">5 sessions</th><th>{E.MAIN_H} sessions</th><th class="xw">20 sessions</th>'
-            f'<th class="xw">{"Beat the rest" if relative else "Ended higher"}</th><th class="xw">Episodes</th><th>Status</th></tr>')
-    return (f'<div class="fo-tw" style="max-height:440px"><table class="fo-t"><thead>{head}</thead><tbody>{"".join(rows)}</tbody></table></div>'
-            f'<div class="fo-note" style="padding:0 14px 12px">The extra move after each reading, {vs}, acting at the next day\'s close. Proven: a large edge against its noise, '
-            'at least 15 separate episodes, and the same direction in both halves of the history. Too few: it has not happened often enough to judge.</div>')
-
-
-# ───────────── overview ─────────────
-def _overview(res: dict) -> str:
-    idx = list(res["indexes"].values())
-    cards = []
-    for x in idx:
-        M = x.get("model") or {}
-        body = _verdict(x) + _model_tiles(x) + '<div style="height:14px"></div>' + _legend([("What is moving the forecast (share of the move, in %)", "transparent", "")]) \
-            + _drivers(M.get("drivers") or [], limit=6)
-        cards.append(_card(x["name"], f'{x["days"]:,} sessions of history', body))
-    notes = [_card(f'Desk note · {x["name"]}', "written from the numbers by fixed rules", _note(x["note"])) for x in idx]
-    return _grid("two", *cards) + _sec("Desk note", "What the data says, in order") + _grid("two", *notes) + _internals(res)
-
-
-def _internals(res: dict) -> str:
-    m = res.get("market") or {}
-    t = []
-    if _ok(m.get("fii_ls")):
-        t.append(_tile("FII long share, index futures", _pct(m["fii_ls"], 0, False), _rank(m.get("fii_ls_pct"))))
-    if _ok(m.get("fii_ls_d5")):
-        t.append(_tile("FII change, 5 sessions", f'<span class="{_cls(m["fii_ls_d5"])}">{m["fii_ls_d5"] * 100:+.1f} pts</span>', "of their long share"))
-    if _ok(m.get("cli_ls")):
-        t.append(_tile("Retail long share", _pct(m["cli_ls"], 0, False), _rank(m.get("cli_ls_pct"))))
-    if _ok(m.get("fii_opt")):
-        t.append(_tile("FII index options, net", f'<span class="{_cls(m["fii_opt"])}">{_qty(m["fii_opt"])}</span>', "contracts · calls less puts"))
-    if _ok(m.get("br_above")):
-        t.append(_tile("F&O stocks in uptrends", _pct(m["br_above"], 0, False), "above their 50-day average"))
-    if _ok(m.get("br_flow")):
-        t.append(_tile("Build-up balance", f'<span class="{_cls(m["br_flow"])}">{m["br_flow"] * 100:+.0f} pts</span>', "long less short build-up"))
-    st_ = res.get("stocks") or []
-    top = " · ".join(_e(s["sym"]) for s in st_[:6])
-    bot = " · ".join(_e(s["sym"]) for s in st_[-6:][::-1])
-    body = (f'<div class="fo-tiles six" style="margin-top:0">{"".join(t)}</div>' if t else '<div class="fo-empty">Participant positions are not stored yet.</div>')
-    if st_:
-        body += (f'<div class="fo-tiles" style="grid-template-columns:repeat(auto-fit,minmax(260px,1fr))">'
-                 + _tile("Top of the stock model", f'<span class="up" style="font-size:13.5px">{top}</span>', "ranked highest for the next 10 sessions")
-                 + _tile("Bottom of the stock model", f'<span class="dn" style="font-size:13.5px">{bot}</span>', "ranked lowest for the next 10 sessions") + '</div>')
-    return _sec("Market internals", "Who is positioned how, and where the stock model points") + _grid("", _card("Positioning and breadth", "end of day", body))
-
-
-# ───────────── index deep dive ─────────────
-def _record_table(M: dict, level: int) -> str:
-    by = M.get("by") or {}
-    if not by:
-        return ('<div class="fo-empty">No record yet. The model is only graded on sessions after the first two years of history, so it is never scored on data it learnt from.</div>')
-    rows = ""
-    for L in (2, 1, 0, -1, -2):
-        s = by.get(L)
-        name = E.VERDICTS[L][0]
-        cl = "g" if L > 0 else "r" if L < 0 else "n"
-        if s:
-            rows += (f'<tr class="{"now" if L == level else ""}"><td><span class="fo-pill {cl}">{name}</span></td><td class="xw">{s["n"]:,}</td><td class="xw">{s["neff"]}</td>'
-                     f'<td class="b">{_col(s["mean"])}</td><td>{s["hit"] * 100:.0f}%</td><td class="xw">{_col(s["edge"])}</td></tr>')
-        else:
-            rows += f'<tr><td><span class="fo-pill {cl}">{name}</span></td><td class="xw">—</td><td class="xw">—</td><td>—</td><td>—</td><td class="xw">—</td></tr>'
-    head = f'<tr><th>Verdict given</th><th class="xw">Sessions</th><th class="xw">Episodes</th><th>Next {E.MAIN_H} sessions</th><th>Ended higher</th><th class="xw">Against normal</th></tr>'
-    ic = M.get("ic")
-    foot = (f'On {M["oos_days"]:,} sessions the model had not seen, its forecasts and the outcomes had a rank correlation of <b style="color:var(--tx2)">{ic:+.2f}</b> '
-            f'(0 is chance, above 0.10 is useful). A healthy record steps down from the top row to the bottom row.') if _ok(ic) else ""
-    return f'<div class="fo-tw"><table class="fo-t"><thead>{head}</thead><tbody>{rows}</tbody></table></div><div class="fo-note" style="padding:0 14px 12px">{foot}</div>'
-
-
-def _strategy(M: dict) -> str:
-    c, s = M.get("curve"), M.get("stats") or {}
-    if not c or not s.get("model"):
-        return '<div class="fo-empty">The test strategy needs about two and a half years of stored history.</div>'
-    a, b = s["model"], s["hold"]
-    chart = _lines(c["date"], [("Follow the model", AMBER, c["model"], _pct(a.get("total"), 0)), ("Buy and hold the future", GREY, c["hold"], _pct(b.get("total"), 0))],
-                   h=190, fmt=lambda v: f"{v * 100:+.0f}%", zero=True)
-    row = lambda n, k, f: f'<tr><td class="w" style="min-width:110px">{n}</td><td class="b">{f(a.get(k))}</td><td>{f(b.get(k))}</td></tr>'
-    table = ('<table class="fo-t" style="margin-top:10px"><thead><tr><th>Since ' + _day(s.get("from")) + '</th><th>Model</th><th>Buy and hold</th></tr></thead><tbody>'
-             + row("Return a year", "cagr", _pct) + row("Worst fall from a peak", "dd", _pct) + row("Return for the risk taken (Sharpe)", "sharpe", lambda v: _num(v, 2))
-             + f'<tr><td>Time in the market</td><td class="b">{s["in_market"] * 100:.0f}%</td><td>100%</td></tr>'
-             + f'<tr><td>Times it switched</td><td class="b">{s["switches"]}</td><td>0</td></tr></tbody></table>')
-    return (chart + table + '<div class="fo-note">The rule: hold the index future, step out when the forecast falls into the bottom 40% of what the model has said before. '
-            'Decided after the close, acted on at the next close, 0.05% charged per switch. Only sessions the model had not seen. Taxes and margin interest are not included.</div>')
-
-
-def _index_view(x: dict, exp_pick: str) -> str:
-    M, lv = x.get("model") or {}, x["levels"]
-    c = x["counts"]
-    head = _card(x["name"], f'{x["days"]:,} sessions of history', _verdict(x) + _model_tiles(x, "six"))
-    rec = _card("The model's record, verdict by verdict", "sessions it had not seen", _record_table(M, (M.get("level") if M else 0)), True)
-    strat = _card("Would following it have paid?", "test strategy against buy and hold", _strategy(M))
-    drv = _card("What is moving the forecast", "each input's share of the forecast, in %", _drivers(M.get("drivers") or []))
-    ana = _card("Days like today", "nearest past days across every input", _analogs(M.get("analogs"), x["name"]))
-    ch = (x.get("chain") or {}).get("w" if exp_pick == "Weekly" else "m")
-    hist = _card("Six months", "end of day", _hist_charts(x.get("hist") or {}))
-    lvl = _card("Levels into expiry", f'expiry {_day(lv.get("m_exp"), False)}', _level_bar(lv) + _levels(lv))
-    idea = _card("Option structure that fits this view", "defined risk only", _idea(x.get("idea")))
-    ev = _card("Every reading and its record", f'{c.get("proven", 0)} proven · {c.get("leaning", 0)} leaning of {sum(c.values())}', _evidence(x["signals"], False), True)
-    left = f'<div class="fo-stack">{rec}{drv}{lvl}</div>'
-    right = f'<div class="fo-stack">{strat}{ana}{idea}</div>'
-    return (_grid("", head) + _sec("The model", "Tested only on sessions that came after the data it learnt from") + _grid("two", left, right)
-            + '<!--chain-->' + _sec("Option chain", f'{exp_pick} expiry · where the open interest sits and what was added today') + _chain_cards(ch, lv.get("fut"))
-            + _sec("History") + _grid("", hist) + _sec("Tested readings", "Simple rules, each with its own backtest") + _grid("", ev))
-
-
-def _levels(lv: dict) -> str:
-    fut = lv.get("fut")
-    t = [_tile("Put-call ratio", _num(lv.get("pcr"), 2), _rank(lv.get("pcr_pct"))), _tile("Implied volatility", _pct(lv.get("iv"), 1, False), _rank(lv.get("iv_pct"))),
-         _tile("Futures open interest", _col(lv.get("oi5")), "change over 5 sessions")]
-    if _ok(lv.get("move5")) and _ok(fut):
-        t.append(_tile("Priced move, 5 sessions", f'±{_px(lv["move5"])}', f'{_px(fut - lv["move5"])} to {_px(fut + lv["move5"])}'))
-    if _ok(lv.get("move_exp")) and _ok(fut):
-        t.append(_tile("Priced move to expiry", f'±{_px(lv["move_exp"])}', f'{_px(fut - lv["move_exp"])} to {_px(fut + lv["move_exp"])}'))
-    if _ok(lv.get("roll")):
-        t.append(_tile("Rolled to next month", _pct(lv["roll"], 0, False), "share of futures open interest"))
-    if _ok(lv.get("cal")):
-        t.append(_tile("Next-month premium", _pct(lv["cal"], 2), "next future against this one"))
-    if _ok(lv.get("skew")):
-        t.append(_tile("Put skew", f'{lv["skew"] * 100:+.1f} pts', "put volatility less call volatility"))
-    if lv.get("w_exp") and _ok(lv.get("w_max_pain")):
-        t.append(_tile(f'Weekly max pain · {_day(lv["w_exp"], False)}', _px(lv["w_max_pain"]), f'walls {_px(lv.get("w_put_wall"))} · {_px(lv.get("w_call_wall"))}'))
-    return f'<div class="fo-tiles">{"".join(t)}</div>'
-
-
-# ───────────── stocks ─────────────
-FILTERS = ["All", "Top fifth", "Bottom fifth", "Long build-up", "Short build-up", "Short covering", "Long unwinding", "Options expensive", "Options cheap",
-           "Open interest up", "Open interest down", "My watchlist"]
-
-
-def _mine() -> set:
-    try:
-        raw = list(st.session_state.get("watchlist", [])) + list(st.session_state.get("admin_watchlist", []))
-        return {str(s).upper().replace(".NS", "").replace(".BO", "").strip() for s in raw}
-    except Exception:
-        return set()
-
-
-def _pick(stocks: list, flt: str) -> list:
-    if flt == "Top fifth":
-        return [s for s in stocks if s["level"] == 2]
-    if flt == "Bottom fifth":
-        return [s for s in stocks if s["level"] == -2][::-1]
-    if flt in ("Long build-up", "Short build-up", "Short covering", "Long unwinding"):
-        return [s for s in stocks if s["buildup"] == flt]
-    if flt == "Options expensive":
-        return sorted([s for s in stocks if "iv_hi" in s["on"]], key=lambda s: -(s["levels"].get("iv_pct") or 0))
-    if flt == "Options cheap":
-        return sorted([s for s in stocks if "iv_lo" in s["on"]], key=lambda s: (s["levels"].get("iv_pct") or 0))
-    if flt == "Open interest up":
-        return sorted([s for s in stocks if _ok(s["levels"].get("oi5"))], key=lambda s: -s["levels"]["oi5"])[:40]
-    if flt == "Open interest down":
-        return sorted([s for s in stocks if _ok(s["levels"].get("oi5"))], key=lambda s: s["levels"]["oi5"])[:40]
-    if flt == "My watchlist":
-        mine = _mine()
-        return [s for s in stocks if s["sym"] in mine]
-    return stocks
-
-
-def _fifth(s) -> str:
-    cl = "g" if s["level"] > 0 else "r" if s["level"] < 0 else "n"
-    return f'<span class="fo-pill {cl}">{_e(s["verdict"])}</span>'
-
-
-def _stock_table(rows: list) -> str:
-    if not rows:
-        return '<div class="fo-empty">No stock matches this filter today.</div>'
-    out = []
-    for s in rows:
-        lv, bu = s["levels"], s["buildup"]
-        bcl = "up" if bu in ("Long build-up", "Short covering") else "dn" if bu else "mu"
-        ivp = lv.get("iv_pct")
-        out.append(f'<tr><td>{_e(s["sym"])}</td><td class="xw mu">{s.get("rank", "")}</td><td class="l">{_fifth(s)}</td><td class="xw">{_col(s.get("score"), 2)}</td>'
-                   f'<td>{_px(lv.get("fut"))}</td><td>{_col(lv.get("r1"))}</td><td class="xw">{_col(lv.get("r5"))}</td><td class="xw">{_col(lv.get("oi5"))}</td>'
-                   f'<td class="l {bcl}">{_e(bu) if bu else "—"}</td><td class="xw">{_num(lv.get("pcr"), 2)}</td>'
-                   f'<td class="xw">{_pct(lv.get("iv"), 0, False)}</td><td class="xw">{f"{ivp * 100:.0f}" if _ok(ivp) else "—"}</td>'
-                   f'<td class="xw">{_pct(lv.get("roll"), 0, False)}</td><td class="xw">{_px(lv.get("max_pain"))}</td></tr>')
-    head = ('<tr><th>Stock</th><th class="xw">Rank</th><th class="l">Model</th><th class="xw">Forecast against the rest</th><th>Future</th><th>Today</th>'
-            '<th class="xw">5 sessions</th><th class="xw">Open interest, 5 sessions</th><th class="l">Build-up</th><th class="xw">Put-call</th>'
-            '<th class="xw">Volatility</th><th class="xw">Vol rank</th><th class="xw">Rolled</th><th class="xw">Max pain</th></tr>')
-    return f'<div class="fo-tw"><table class="fo-t"><thead>{head}</thead><tbody>{"".join(out)}</tbody></table></div>'
-
-
-def _quadrant(stocks: list) -> str:
-    pts = [(s, s["levels"].get("r5"), s["levels"].get("oi5")) for s in stocks]
-    pts = [(s, x, y) for s, x, y in pts if _ok(x) and _ok(y)]
-    if len(pts) < 10:
-        return '<div class="fo-empty">Needs a week of stored data.</div>'
-    mx = max(0.04, sorted(abs(x) for _, x, _ in pts)[int(len(pts) * 0.97)])
-    my = max(0.05, sorted(abs(y) for _, _, y in pts)[int(len(pts) * 0.97)])
-    px_ = lambda x: 50 + max(-1, min(1, x / mx)) * 46
-    py_ = lambda y: 50 - max(-1, min(1, y / my)) * 44
-    far = {id(s) for s, _, _ in sorted(pts, key=lambda p: -((p[1] / mx) ** 2 + (p[2] / my) ** 2))[:14]}
-    dots = ""
-    for s, x, y in pts:
-        colr = "#22C55E" if s["level"] > 0 else "#EF4444" if s["level"] < 0 else "#71717A"
-        dots += f'<i style="left:{px_(x):.1f}%;top:{py_(y):.1f}%;background:{colr}" title="{_e(s["sym"])} · price {_pct(x)} · open interest {_pct(y)} · {_e(s["verdict"])}"></i>'
-        if id(s) in far:
-            dots += f'<em style="left:{px_(x):.1f}%;top:{py_(y):.1f}%">{_e(s["sym"])}</em>'
-    q = ('<span class="q" style="right:0;top:0;color:#22C55E">Long build-up</span><span class="q" style="left:0;top:0;color:#EF4444">Short build-up</span>'
-         '<span class="q" style="right:0;bottom:0">Short covering</span><span class="q" style="left:0;bottom:0">Long unwinding</span>')
-    n = {k: sum(1 for s in stocks if s["buildup"] == k) for k in ("Long build-up", "Short build-up", "Short covering", "Long unwinding")}
-    tiles = '<div class="fo-tiles four">' + "".join(_tile(k, str(v), "stocks today") for k, v in n.items()) + '</div>'
-    return (f'<div class="fo-quad"><div class="h" style="top:50%"></div><div class="v" style="left:50%"></div>{q}{dots}</div>'
-            f'<div class="fo-xl" style="margin-right:0"><span>price fell {_pct(-mx, 0)}</span><span>left to right: price over 5 sessions · bottom to top: open interest over 5 sessions</span>'
-            f'<span>price rose {_pct(mx, 0)}</span></div>{_legend([("Model: upper two fifths", "#22C55E", ""), ("Middle", "#71717A", ""), ("Lower two fifths", "#EF4444", "")])}{tiles}')
-
-
-def _stock_model(res: dict) -> str:
-    SM = res.get("stock_model")
-    if not SM:
-        return '<div class="fo-empty">The stock model needs about two years of stored history before it can be fitted and tested.</div>'
-    head = (f'<div class="fo-vd"><b style="font-size:19px">One model, every F&O stock</b>{_conf(SM)}</div>'
-            f'<div class="fo-tx">Each day it ranks all stocks on thirteen positioning inputs and forecasts which will beat or lag the rest over {E.MAIN_H} sessions. '
-            'It is graded only on sessions it had not seen.</div>')
-    if not _ok(SM.get("ic")):
-        return head + '<div class="fo-note">No record yet: the first two years of history are used for learning only.</div>'
-    q = SM.get("quint") or []
-    bars = _bars([1, 2, 3, 4, 5], [("Average result of each fifth, against the average stock", BLUE, q)], h=120, diverge=True, fmt=lambda v: f"{v * 100:+.2f}%",
-                 xlabels=["Bottom fifth", "Lower", "Middle", "Upper", "Top fifth"])
-    spread = (q[4] - q[0]) if (len(q) == 5 and _ok(q[0]) and _ok(q[4])) else None
-    s = SM.get("stats") or {}
-    tiles = ('<div class="fo-tiles">' + _tile("Top fifth less bottom fifth", _col(spread, 2), f"per {E.MAIN_H} sessions")
-             + _tile("Rank correlation", f'{SM["ic"]:+.3f}', "0 is chance · 0.03 is useful")
-             + _tile("Unseen sessions tested", f'{SM["oos_days"]:,}', f'since {_day(s.get("from"))}' if s.get("from") else "") + '</div>')
-    curve = ""
-    if SM.get("curve"):
-        c = SM["curve"]
-        curve = ('<div style="height:14px"></div>' + _lines(c["date"], [("Top fifth less bottom fifth", AMBER, c["ls"], _pct((s.get("ls") or {}).get("total"), 0)),
-                                                                       ("Top fifth less the average stock", BLUE, c["top"], _pct((s.get("top") or {}).get("total"), 0))],
-                                                            h=170, fmt=lambda v: f"{v * 100:+.0f}%", zero=True)
-                 + '<div class="fo-note">Rebalanced daily at the next close, before costs. A real portfolio would trade less often and pay costs, so read the shape, not the level.</div>')
-    return head + '<div style="height:12px"></div>' + bars + tiles + curve
-
-
-def _stock_detail(d: dict) -> str:
-    lv = d["levels"]
-    head = (f'<div class="fo-vd"><b class="{TONE[d["tone"]]}">{_e(d["verdict"])}</b><span>rank {d.get("rank", "—")} · forecast {_pct(d.get("score"), 2)} against the average F&O stock, '
-            f'{E.MAIN_H} sessions</span></div><div class="fo-tx">{_e(d["line"])}</div>')
-    t = ('<div class="fo-tiles six">' + _tile("Future", _px(lv.get("fut")), f'{_col(lv.get("r1"), 2)} today') + _tile("5 sessions", _col(lv.get("r5")), f'20 sessions {_pct(lv.get("r20"))}')
-         + _tile("Open interest, 5 sessions", _col(lv.get("oi5")), _e(d["buildup"] or "no build-up pattern")) + _tile("Put-call ratio", _num(lv.get("pcr"), 2), _rank(lv.get("pcr_pct")))
-         + _tile("Implied volatility", _pct(lv.get("iv"), 1, False), _rank(lv.get("iv_pct")))
-         + _tile("Put wall · max pain · call wall", f'{_px(lv.get("put_wall"))} · {_px(lv.get("max_pain"))} · {_px(lv.get("call_wall"))}', f'expiry {_day(lv.get("m_exp"), False)}') + '</div>')
-    out = _grid("", _card(d["sym"], "single-stock view", head + t))
-    bu = (d.get("hist") or {}).get("bu") or []
-    strip = ""
-    if bu:
-        strip = ('<div class="fo-note" style="margin-top:14px">Build-up pattern, last ' + str(len(bu)) + ' sessions (oldest left)</div><div class="fo-bu">'
-                 + "".join(f'<i style="background:{BU_COL.get(v, BU_COL[0])}" title="{BU_NAME.get(v, "")}"></i>' for v in bu) + '</div>'
-                 + _legend([(BU_NAME[k], BU_COL[k], "") for k in (1, 2, 3, 4)]))
-    out += _grid("two", _card("Why the model ranks it here", "each input's share, in % against the rest", _drivers(d.get("drivers") or []) + strip),
-                 _card("Days like today, this stock", "its own history", _analogs(d.get("analogs"), d["sym"])))
-    if d.get("hist"):
-        out += _grid("", _card("Six months", "end of day", _hist_charts(d["hist"])))
-    c = d.get("chain")
-    if c:
-        out += _chain_cards(c, lv.get("fut"))
-    on = [s for s in d.get("signals", []) if s.get("on")]
-    if on:
-        out += _grid("", _card("Tested readings on today", "against other F&O stocks", _evidence(on, True), True))
-    return out
-
-
-# ───────────── participants ─────────────
-def _participants(res: dict) -> str:
-    P, H = res.get("participants"), res.get("part_hist") or {}
-    if not P or not P.get("rows"):
-        return _grid("", _card("Who holds what", "", '<div class="fo-empty">Participant positions are not stored yet. They arrive with the next run of the F&O data workflow.</div>', True))
-    d2 = lambda v: f'<span class="{_cls(v)}">{_qty(v)}</span>'
-    rows = ""
-    for r in P["rows"]:
-        rows += (f'<tr><td>{_e(r["who"])}</td><td class="b">{r["ls"] * 100:.0f}%</td><td>{d2(r["idx_fut"])}</td><td class="xw">{d2(r["d_idx_fut"])}</td>'
-                 f'<td>{d2(r["idx_call"])}</td><td>{d2(r["idx_put"])}</td><td class="xw">{d2(r["stk_fut"])}</td><td class="xw">{d2(r["d_stk_fut"])}</td></tr>')
-    head = ('<tr><th>Group</th><th>Long share, index futures</th><th>Index futures, net</th><th class="xw">5-session change</th><th>Index calls, net</th>'
-            '<th>Index puts, net</th><th class="xw">Stock futures, net</th><th class="xw">5-session change</th></tr>')
-    table = (f'<div class="fo-tw"><table class="fo-t"><thead>{head}</thead><tbody>{rows}</tbody></table></div><div class="fo-note" style="padding:0 14px 12px">Net is contracts held long '
-             'less contracts held short. Green is net long, red is net short. Net long puts is a bearish position; net short puts is a bullish one.</div>')
-    out = _grid("", _card("Who holds what", f'NSE participant data · {_day(P["date"])}', table, True))
-    d = H.get("date") or []
-    if len(d) > 5:
-        c1 = _lines(d, [("FIIs", AMBER, H.get("fii_ls") or [], ""), ("Retail clients", BLUE, H.get("cli_ls") or [], ""), ("Pro desks", "#A78BFA", H.get("pro_ls") or [], "")],
-                    h=190, fmt=lambda v: f"{v * 100:.0f}%")
-        c2 = _lines(d, [("FII index futures, net contracts", AMBER, H.get("fii_net") or [], "")], h=190, fmt=_qty, zero=True)
-        c3 = _lines(d, [("FII index options, net (calls less puts)", BLUE, H.get("fii_opt") or [], "")], h=190, fmt=_qty, zero=True)
-        out += _grid("three", _card("Long share of index futures", "six months", c1), _card("FII index futures", "six months", c2), _card("FII index options", "six months", c3))
-    return out
-
-
-# ───────────── method ─────────────
-def _method(res: dict) -> str:
-    notes = "".join(f"<div>· {_e(n)}</div>" for n in res.get("notes", []))
-    P = [("What it reads", "The daily NSE files saved in your repository: futures prices and open interest, option open interest by strike, closing premiums, and the "
-                           "positions NSE publishes for FIIs, retail clients, pro desks and DIIs. End of day only."),
-         ("The model", "A ridge regression, the plainest forecasting model there is: the next 10 sessions' return explained by about twenty measured inputs, with a penalty "
-                       "that stops it learning noise. One model per index, one shared model for all stocks. For stocks it forecasts the return against the average F&O stock."),
-         ("How it is tested", "Walk-forward. Every quarter the model is re-learnt using only data from before that day, then used for the next quarter. All records, tables and "
-                              "curves on this page come from those unseen sessions. Trades are assumed at the next day's close, never the same close."),
-         ("When it gets a say", "The verdict is taken from the model only if its forecasts lined up with outcomes on unseen sessions. If they did not, the page says so and "
-                                "shows 'No proven edge' while still showing the positioning."),
-         ("Days like today", "The past days closest to today across all inputs, weighted by how much each input matters to the model, kept at least 10 sessions apart."),
-         ("Tested readings", "Simple yes-or-no rules (long build-up, put-call ratio very high, and so on), each with its own backtest. With about thirty under test, roughly "
-                             "one useless rule in a hundred can pass as proven by luck."),
-         ("Dealer gamma", "An estimate from open interest and option prices, assuming dealers sold the puts and bought the calls customers hold. The real split is not published."),
-         ("What is not in it", "Costs beyond the 0.05% per switch in the index test, taxes, margin, intraday moves, news and results dates. A verdict is odds, not a promise. "
-                               "This is analysis of public data, not investment advice.")]
-    body = '<div class="fo-note2">' + "".join(f"<div><small>{_e(a)}</small>{_e(b)}</div>" for a, b in P) + f'</div><div class="fo-note">{notes}</div>'
-    cards = [_card("How this desk works", "", body)]
-    wt = []
-    for x in res["indexes"].values():
-        M = x.get("model")
-        if M and M.get("betas"):
-            wt.append((x["name"], M["betas"]))
-    SM = res.get("stock_model")
-    if SM and SM.get("betas"):
-        wt.append(("F&O stocks", SM["betas"]))
-    if wt:
-        keys = []
-        for _, bs in wt:
-            keys += [b["key"] for b in bs if b["key"] not in keys]
-        look = [{b["key"]: b for b in bs} for _, bs in wt]
-        rows = ""
-        for k in keys:
-            lab = next(l[k]["label"] for l in look if k in l)
-            rows += f"<tr><td>{_e(lab)}</td>" + "".join(f'<td>{_col(l[k]["beta"], 2) if k in l else "—"}</td>' for l in look) + "</tr>"
-        table = ('<div class="fo-tw"><table class="fo-t"><thead><tr><th>Input</th>' + "".join(f"<th>{_e(n)}</th>" for n, _ in wt) + f'</tr></thead><tbody>{rows}</tbody></table></div>'
-                 '<div class="fo-note" style="padding:0 14px 12px">The effect on the 10-session forecast when an input is one notch (one standard deviation) above normal. '
-                 'Green: a high reading has been followed by gains. Red: by losses.</div>')
-        cards.append(_card("The model's weights today", "learnt from the full history", table, True))
-    return _grid("two" if len(cards) > 1 else "", *cards)
-
-
-# ───────────── signals ─────────────
-TIER = {"on": ("Approved", "g"), "trial": ("On trial", "a"), "off": ("Switched off", "n")}
-
-
-def _tier_of(S_, trusted) -> str:
-    return "off" if (not S_ or not trusted) else S_.get("tier", "off")
-
-
-def _rec_row(name, S_, trusted) -> str:
-    st_ = (S_ or {}).get("stats") or {}
-    lab, cl = TIER[_tier_of(S_, trusted)]
-    if not st_.get("n"):
-        return f'<tr><td>{_e(name)}</td><td class="l"><span class="fo-pill n">No record yet</span></td>' + "<td>—</td>" * 4 + '<td class="xw">—</td>' * 4 + "</tr>"
-    return (f'<tr><td>{_e(name)}</td><td class="l"><span class="fo-pill {cl}">{lab}</span></td><td>{st_["n"]}</td><td>{st_["win"] * 100:.0f}%</td>'
-            f'<td class="b">{_col(st_["exp"], 2)}</td><td>{st_["pf"]:.2f}</td><td class="xw">{_col(st_.get("edge"), 2)}</td><td class="xw">{_col(st_["avg_win"])} / {_col(st_["avg_loss"])}</td>'
-            f'<td class="xw">{_col(st_["worst"])}</td><td class="xw">{st_["losing_run"]} in a row</td></tr>')
-
-
-def _sig_status(res: dict) -> str:
-    rows = ""
-    for x in res["indexes"].values():
-        M = x.get("model") or {}
-        T, tr = M.get("trade") or {}, M.get("conf_n", 0) >= 1
-        rows += _rec_row(f'{x["name"]} · buy', T.get("long"), tr) + _rec_row(f'{x["name"]} · short', T.get("short"), tr)
-    ST = res.get("stock_trade")
-    rows += _rec_row("Stocks · buy (ten-stock portfolio)", ST, bool(ST and ST.get("trusted")))
-    head = ('<tr><th>Signal</th><th class="l">Status</th><th>Past trades</th><th>Won</th><th>Per trade, after costs</th><th>Money won ÷ lost</th>'
-            '<th class="xw">Against just holding</th><th class="xw">Average win / loss</th><th class="xw">Worst trade</th><th class="xw">Longest losing run</th></tr>')
-    return (f'<div class="fo-tw"><table class="fo-t"><thead>{head}</thead><tbody>{rows}</tbody></table></div><div class="fo-note" style="padding:0 14px 12px">'
-            '<b style="color:var(--tx2)">Approved</b>: on sessions the model had never seen, this signal made money after costs, won at least 1.2 times what it lost, and beat simply '
-            'holding by more than luck explains. <b style="color:var(--tx2)">On trial</b>: it made money and beat holding, but not by enough to rule out luck; paper trade it or use '
-            'very small size. <b style="color:var(--tx2)">Switched off</b>: it failed, or the model behind it has no record. Switched-off signals are never shown as a trade.</div>')
-
-
-def _plan_tiles(c: dict, lot=None, cap=None, risk=None) -> str:
-    t = []
-    if _ok(c.get("entry")):
-        t.append(_tile("Entry" if c.get("since") else "Entry reference", _px(c["entry"]), f'since {_day(c["since"], False)}' if c.get("since") else "last close · act at the next close"))
-    if _ok(c.get("stop")):
-        t.append(_tile("Stop (closing basis)", f'<span class="dn">{_px(c["stop"])}</span>', "exit if a session closes beyond this"))
-    if _ok(c.get("target")):
-        t.append(_tile("Target", f'<span class="up">{_px(c["target"])}</span>', "book the trade here"))
-    if _ok(c.get("pnl")):
-        t.append(_tile("Result so far", _col(c["pnl"], 2), f'{c.get("bars", 0)} sessions held'))
-    if c.get("left") is not None and c.get("since"):
-        t.append(_tile("Time limit", f'{c["left"]} sessions left', "after that the signal must still be on to stay in"))
-    if _ok(c.get("entry")) and _ok(c.get("stop")) and cap and risk and not c.get("since"):
-        per = abs(c["entry"] - c["stop"])
-        q = (cap * risk / 100) / per if per > 0 else 0
-        if _ok(lot) and lot > 0:
-            t.append(_tile("Size for your risk", f'{int(q // lot)} lot{"" if int(q // lot) == 1 else "s"}', f'lot {lot:,.0f} · one lot risks ₹{per * lot:,.0f}'))
-        else:
-            t.append(_tile("Size for your risk", f'{int(q):,} shares', f'risks ₹{cap * risk / 100:,.0f}'))
-    return f'<div class="fo-tiles">{"".join(t)}</div>' if t else ""
-
-
-def _index_signal(x: dict, cap, risk) -> str:
-    c, M = x.get("call") or {}, x.get("model") or {}
-    tier = c.get("tier")
-    tag = f'<span class="fo-pill {TIER[tier][1]}" style="margin-left:auto">{TIER[tier][0]}</span>' if tier else ""
-    head = f'<div class="fo-vd"><b class="{TONE.get(c.get("tone", "flat"), "fl")}">{_e(c.get("word", "No signal"))}</b><span>{_e(x["name"])} future</span>{tag}</div>'
-    body = head + f'<div class="fo-tx">{_e(c.get("why", ""))}</div>' + _plan_tiles(c, x["levels"].get("lot"), cap, risk)
-    if tier == "trial":
-        body += '<div class="fo-note"><b class="am">On trial.</b> This signal has not yet beaten luck in testing. Do not put meaningful money on it.</div>'
-    T = M.get("trade") or {}
-    S_ = T.get(c.get("side") or "long")
-    if S_ and S_["stats"].get("n"):
-        cv = S_["curve"]
-        nm = "Buy signals only" if S_["side"] == 1 else "Short signals only"
-        body += ('<div style="height:14px"></div>' + _lines(cv["date"], [(nm, AMBER, cv["sys"], _pct(cv["sys"][-1], 0)), ("Always in the position", GREY, cv["hold"], _pct(cv["hold"][-1], 0))],
-                                                            h=150, fmt=lambda v: f"{v * 100:+.0f}%", zero=True))
-        rows = "".join(f'<tr><td>{_day(t["in"])}</td><td class="xw">{_px(t["in_px"])}</td><td>{_day(t["out"], False)}</td><td class="xw">{_px(t["out_px"])}</td>'
-                       f'<td class="b">{_col(t["ret"], 2)}</td><td class="l xw">{_e(t["why"])}</td></tr>' for t in S_["trades"][:8])
-        body += (f'<div class="fo-tw" style="max-height:250px;margin-top:10px"><table class="fo-t"><thead><tr><th>Entered</th><th class="xw">At</th><th>Exited</th><th class="xw">At</th>'
-                 f'<th>Result after costs</th><th class="l xw">Why it ended</th></tr></thead><tbody>{rows}</tbody></table></div>')
-    return _card(f'{x["name"]} signal', "end of day · act at the next close", body)
-
-
-def _stock_signals(res: dict, cap, risk) -> str:
-    ST = res.get("stock_trade")
-    if not ST:
-        return _grid("", _card("Stock signals", "", '<div class="fo-empty">Stock signals need about two and a half years of stored history before they can be replayed and judged.</div>', True))
-    tier = _tier_of(ST, ST.get("trusted"))
-    lab, cl = TIER[tier]
-    st_, pf_, bn = ST["stats"], ST.get("port") or {}, ST.get("bench") or {}
-    rec = ('<div class="fo-tiles six" style="margin-top:0">' + _tile("Status", f'<span class="fo-pill {cl}">{lab}</span>', f'tested since {_day(ST.get("from"))}')
-           + _tile("Past trades", f'{st_.get("n", 0):,}', f'{st_.get("win", 0) * 100:.0f}% won · held {st_.get("bars") or 0:.0f} sessions')
-           + _tile("Per trade, after costs", _col(st_.get("exp"), 2), f'money won ÷ lost {st_.get("pf", 0):.2f}')
-           + _tile("Portfolio, a year", _col(pf_.get("cagr")), f'average F&O stock {_pct(bn.get("cagr"))}')
-           + _tile("Worst fall from a peak", _col(pf_.get("dd")), f'average F&O stock {_pct(bn.get("dd"))}')
-           + _tile("Money at work", f'{ST.get("invested", 0) * 100:.0f}%', f'of {ST["slots"]} equal slots, on average') + '</div>')
-    cv = ST["curve"]
-    chart = _lines(cv["date"], [("Signal portfolio", AMBER, cv["sys"], _pct(cv["sys"][-1], 0)), ("Average F&O stock", GREY, cv["bench"], _pct(cv["bench"][-1], 0))],
-                   h=170, fmt=lambda v: f"{v * 100:+.0f}%", zero=True)
-    out = _grid("", _card("Stock buy signals: the record", "ten-stock test portfolio on unseen sessions, after costs", rec + '<div style="height:14px"></div>' + chart))
-    if tier == "off":
-        why = ("the stock model has not shown skill on unseen sessions" if not ST.get("trusted") else "the replay did not make enough money after costs, or did not beat holding the average stock")
-        out += _grid("", _card("Buy · Hold · Sell", "switched off", f'<div class="fo-empty"><b>No stock buy signals.</b> They are switched off because {why}. '
-                                                                 'The stay-away list below is still shown, as a caution list.</div>', True))
-    else:
-        warn = '<div class="fo-note" style="padding:0 14px 10px"><b class="am">On trial.</b> These signals have not yet beaten luck in testing. Paper trade them or use very small size.</div>' if tier == "trial" else ""
-
-        def size(b):
-            per = abs(b["entry"] - b["stop"])
-            if not (cap and risk and per > 0 and b["entry"] > 0):
-                return "—"
-            return f'{int(min((cap * risk / 100) / per, cap / E.SLOTS / b["entry"])):,}'          # the smaller of: your risk limit, a tenth of your capital
-        buy = "".join(f'<tr><td>{_e(b["sym"])}</td><td>{_px(b["entry"])}</td><td class="dn">{_px(b["stop"])}</td><td class="up">{_px(b["target"])}</td>'
-                      f'<td class="xw">{(b["rank"] or 0) * 100:.0f}</td><td class="xw">{_pct(-E.SIG_STOP * b["swing"])} / {_pct(E.SIG_TARGET * b["swing"])}</td><td>{size(b)}</td></tr>' for b in ST["buy"])
-        buy = (f'<div class="fo-tw"><table class="fo-t"><thead><tr><th>Buy at the next close</th><th>Reference</th><th>Stop</th><th>Target</th><th class="xw">Model rank</th>'
-               f'<th class="xw">Risk / reward</th><th>Shares for your risk</th></tr></thead><tbody>{buy}</tbody></table></div>' if ST["buy"]
-               else '<div class="fo-empty">No new buy today' + ("." if ST.get("market_ok") else ": the market verdict is negative, so no new stock is bought.") + '</div>')
-        hold = [h for h in ST["hold"] if not h["sell"]]
-        sell = [h for h in ST["hold"] if h["sell"]]
-        hrow = lambda h: (f'<tr><td>{_e(h["sym"])}</td><td class="xw">{_day(h["since"], False)}</td><td class="xw">{_px(h["entry"])}</td><td>{_px(h["price"])}</td><td class="b">{_col(h["pnl"])}</td>'
-                          f'<td class="dn">{_px(h["stop"])}</td><td class="up">{_px(h["target"])}</td><td class="xw">{(h["rank"] or 0) * 100:.0f}</td><td class="xw">{h["left"]}</td></tr>')
-        hh = ('<tr><th>Hold</th><th class="xw">Bought</th><th class="xw">At</th><th>Now</th><th>Result</th><th>Stop</th><th>Target</th><th class="xw">Model rank</th>'
-              '<th class="xw">Sessions left</th></tr>')
-        holdt = (f'<div class="fo-tw"><table class="fo-t"><thead>{hh}</thead><tbody>{"".join(hrow(h) for h in hold)}</tbody></table></div>' if hold
-                 else '<div class="fo-empty">No open positions.</div>')
-        srows = "".join(f'<tr><td>{_e(h["sym"])}</td><td>Sell at the next close</td><td class="b">{_col(h["pnl"])}</td><td class="l">{_e(h["sell"])}</td></tr>' for h in sell)
-        srows += "".join(f'<tr><td>{_e(t["sym"])}</td><td>Sold at today\'s close</td><td class="b">{_col(t["ret"])}</td><td class="l">{_e(t["why"])}</td></tr>' for t in ST["sold"])
-        sellt = (f'<div class="fo-tw"><table class="fo-t"><thead><tr><th>Sell</th><th>When</th><th>Result</th><th class="l">Why</th></tr></thead><tbody>{srows}</tbody></table></div>'
-                 if srows else '<div class="fo-empty">Nothing to sell today.</div>')
-        n_buy, n_sell = len(ST["buy"]), len(sell) + len(ST["sold"])
-        out += _grid("two", f'<div class="fo-stack">{_card("Buy", str(n_buy) + " new today", buy + warn, True)}{_card("Sell", str(n_sell) + " today", sellt, True)}</div>',
-                     _card("Hold", f'{len(hold)} of {ST["slots"]} slots in use', holdt, True))
-    av = "".join(f'<tr><td>{_e(a["sym"])}</td><td>{_px(a["price"])}</td><td>{(a["rank"] or 0) * 100:.0f}</td><td class="l">Bottom fifth of the model and below its 50-day average</td></tr>' for a in ST["avoid"])
-    q = (res.get("stock_model") or {}).get("quint") or []
-    note = (f'On unseen sessions the bottom fifth moved {_pct(q[0], 2)} against the average F&O stock per {E.MAIN_H} sessions.' if (q and _ok(q[0])) else "")
-    avt = (f'<div class="fo-tw" style="max-height:320px"><table class="fo-t"><thead><tr><th>Stay away</th><th>Price</th><th>Model rank</th><th class="l">Why</th></tr></thead><tbody>{av}</tbody></table></div>'
-           if av else '<div class="fo-empty">No stock is in the bottom fifth and in a downtrend today.</div>')
-    out += _grid("", _card("Stay away", "do not buy · if you hold one, tighten your stop", avt + f'<div class="fo-note" style="padding:0 14px 12px">{note} '
-                           'This is a caution list, not a short-selling signal.</div>', True))
-    return out
-
-
-def _sig_rules() -> str:
-    R = [("Index: when to buy", f"The model's verdict is Stay invested or Rally setup, and no trade is open. You act at the next session's close."),
-         ("Index: where the stop and target go", f"Stop: {E.SIG_STOP:.0f} normal 10-session swing below your entry. Target: {E.SIG_TARGET:.0f} swings above. The swing is measured from the last 60 sessions. "
-                                                "Both are checked on the closing price, so a spike during the day does not count."),
-         ("Index: when to sell", f"The first of: a close below the stop; a close above the target; the verdict turns to Reduce risk or Correction risk; or {E.SIG_HOLD} sessions have passed "
-                                 "and the verdict is no longer positive. Short signals are the mirror image."),
-         ("Stocks: what gets bought", f"Top fifth of the stock model, above its 50-day average, and the NIFTY verdict is not negative. At most {E.SLOTS} stocks, a tenth of the money in each, "
-                                      "best rank first."),
-         ("Stocks: when to sell", f"The first of: a close below the stop; a close above the target; model rank falls below 40 of 100; or {E.SIG_HOLD} sessions have passed and it has left the top fifth."),
-         ("Costs in the test", f"{E.IDX_COST * 100:.2f}% a side on the index future and {E.STK_COST * 100:.2f}% a side on stocks, for brokerage, taxes and slippage."),
-         ("How much to trade", "Decide what you can lose on one trade (1% of capital is a common ceiling). Size = that amount ÷ (entry − stop), and for stocks never more than a tenth of your "
-                              "capital in one name. The tables do this sum for the numbers you enter; the numbers stay in your browser session."),
-         ("What this cannot promise", "The test covers a few years and a few dozen index trades. Losing runs happen even to systems that work; the table shows the longest one in testing. "
-                                      "Prices are futures closes; your fills will differ. This is analysis of public data, not investment advice.")]
-    return '<div class="fo-note2">' + "".join(f"<div><small>{_e(a)}</small>{_e(b)}</div>" for a, b in R) + "</div>"
-
-
-def _signals_tab(res: dict):
-    idx = list(res["indexes"].values())
-    _html(_grid("", _card("Which signals are switched on", "each kind of signal replayed trade by trade on sessions the model had never seen", _sig_status(res), True)))
-    c1, c2, _ = st.columns([1, 1, 2])
+    W, slot = 1000.0, 1000.0 / n
+    Y = lambda v: (hi - v) / (hi - lo) * h
+    ticks = _nice(lo, hi)
+    out = "".join(f'<line x1="0" x2="{W}" y1="{Y(t):.1f}" y2="{Y(t):.1f}" stroke="var(--line)" stroke-width="1" vector-effect="non-scaling-stroke"/>' for t in ticks)
+    for i in range(n):
+        o, hh, ll, c = s["o"][i], s["h"][i], s["l"][i], s["c"][i]
+        if not all(_ok(v) for v in (o, hh, ll, c)):
+            continue
+        colr = GREEN if c >= o else RED
+        x = i * slot + slot / 2
+        top, bot = Y(max(o, c)), Y(min(o, c))
+        tip = f"{_day(d[i])} · open {_px(o)} · high {_px(hh)} · low {_px(ll)} · close {_px(c)}"
+        out += (f'<g><title>{tip}</title><line x1="{x:.1f}" x2="{x:.1f}" y1="{Y(hh):.1f}" y2="{Y(ll):.1f}" stroke="{colr}" stroke-width="1" vector-effect="non-scaling-stroke"/>'
+                f'<rect x="{x - slot * 0.32:.1f}" y="{top:.1f}" width="{slot * 0.64:.1f}" height="{max(bot - top, 0.8):.1f}" fill="{colr}"/></g>')
+    pts = " ".join(f"{i * slot + slot / 2:.1f},{Y(v):.1f}" for i, v in enumerate(s.get("m") or []) if _ok(v))
+    if pts:
+        out += f'<polyline points="{pts}" fill="none" stroke="{AMBER}" stroke-width="1.3" vector-effect="non-scaling-stroke"/>'
+    labels = ""
+    for v, lab, colr in marks:
+        if _ok(v):
+            out += f'<line x1="0" x2="{W}" y1="{Y(v):.1f}" y2="{Y(v):.1f}" stroke="{colr}" stroke-width="1" stroke-dasharray="4 3" vector-effect="non-scaling-stroke"/>'
+            labels += f'<span class="hl" style="top:{Y(v) / h * 100:.1f}%;color:{colr}">{_e(lab)} {_px(v)}</span>'
+    yl = "".join(f'<span class="yl" style="top:{Y(t) / h * 100:.1f}%">{_px(t)}</span>' for t in ticks)
+    idx = sorted({int(round(k * (n - 1) / 5)) for k in range(6)})
+    xl = '<div class="fd-xl">' + "".join(f"<span>{_dshort(d[i])}</span>" for i in idx) + "</div>"
+    return f'<div class="fd-ch" style="height:{h}px"><svg viewBox="0 0 {W:.0f} {h}" preserveAspectRatio="none">{out}</svg>{yl}{labels}</div>{xl}'
+
+
+# ───────────── sizing (typed on the page, kept in the browser session only) ─────────────
+def _sizing() -> dict:
+    ss = st.session_state
+    c1, c2, c3 = st.columns(3)
     with c1:
-        cap = st.number_input("Your trading capital (₹)", min_value=0, value=int(st.session_state.get("fo_cap", 100000)), step=10000, key="fo_cap")
+        cap_l = st.number_input("Money for the Leaders book (₹)", min_value=0, max_value=1_000_000_000, value=int(ss.get("_fd_cap_l", 200000)), step=10000, key="fd_cap_l")
     with c2:
-        risk = st.number_input("Most you will lose on one trade (%)", min_value=0.1, max_value=5.0, value=float(st.session_state.get("fo_risk", 1.0)), step=0.1, key="fo_risk")
-    _html(_sec("Index", "One instruction per index, with the plan") + _grid("two", *[_index_signal(x, cap, risk) for x in idx])
-          + _sec("Stocks", "What to buy, what to hold, what to sell, what to stay away from") + _stock_signals(res, cap, risk)
-          + _sec("The rules", "Exactly what the signals do, so you can check them yourself") + _grid("", _card("How every signal is made", "fixed rules, no judgement calls", _sig_rules())))
+        cap_s = st.number_input("Money for swing and index trades (₹)", min_value=0, max_value=1_000_000_000, value=int(ss.get("_fd_cap_s", 100000)), step=10000, key="fd_cap_s")
+    with c3:
+        risk = st.number_input("Risk on one swing trade (% of that money)", min_value=0.1, max_value=5.0, value=float(ss.get("_fd_risk", 1.0)), step=0.1, key="fd_risk")
+    ss["_fd_cap_l"], ss["_fd_cap_s"], ss["_fd_risk"] = cap_l, cap_s, risk
+    return {"cap_l": float(cap_l or 0), "cap_s": float(cap_s or 0), "risk": float(risk or 1.0) / 100}
 
 
+def _saved_sizing() -> dict:
+    ss = st.session_state
+    return {"cap_l": float(ss.get("_fd_cap_l", 200000)), "cap_s": float(ss.get("_fd_cap_s", 100000)), "risk": float(ss.get("_fd_risk", 1.0)) / 100}
 
-# ───────────── page ─────────────
-def _html(body: str):
-    st.markdown(f'<div class="fo">{body}</div>', unsafe_allow_html=True)
+
+def _slot_qty(price, sz, slots=20) -> str:
+    if not _ok(price) or price <= 0 or sz["cap_l"] <= 0:
+        return "—"
+    q = int(sz["cap_l"] / slots // price)
+    return f"{q:,}" if q > 0 else "0"
 
 
-def render_fno(supabase=None, on_open=None):
-    st.markdown(CSS, unsafe_allow_html=True)
+def _risk_qty(price, stop, sz):
+    """Shares so that the gap between entry and stop costs the chosen share of capital; never more than a quarter of capital in one trade."""
+    if not (_ok(price) and _ok(stop)) or price <= stop or sz["cap_s"] <= 0:
+        return None
+    q = int(sz["cap_s"] * sz["risk"] // (price - stop))
+    return max(min(q, int(sz["cap_s"] * 0.25 // price)), 0)
+
+
+# ───────────── orders ─────────────
+def order_rows(S: dict, sz: dict) -> list:
+    """Everything to do at the next open, across the books."""
+    out = []
+    ld, sw = S["leaders"], S["swing"]
+    for r in ld.get("sell") or []:
+        out.append({"book": "Leaders", "act": "Sell", "k": "s", "sym": r["sym"], "ref": r["price"], "stop": None, "qty": "all", "note": r.get("why") or "", "status": ld["status"], "pnl": r.get("pnl")})
+    for r in ld.get("buy") or []:
+        out.append({"book": "Leaders", "act": "Buy", "k": "b", "sym": r["sym"], "ref": r["price"], "stop": None, "qty": _slot_qty(r["price"], sz, ld.get("slots", 20)),
+                    "note": "one twentieth of the book", "status": ld["status"], "pnl": None})
+    if sw["status"] != "off":
+        for r in sw.get("open") or []:
+            if r.get("sell"):
+                out.append({"book": "Swing", "act": "Sell", "k": "s", "sym": r["sym"], "ref": r["price"], "stop": None, "qty": "all", "note": r["sell"], "status": sw["status"], "pnl": r.get("pnl")})
+        for r in sw.get("new") or []:
+            q = _risk_qty(r["price"], r["stop"], sz)
+            out.append({"book": "Swing", "act": "Buy", "k": "b", "sym": r["sym"], "ref": r["price"], "stop": r["stop"], "qty": (f"{q:,}" if q is not None else "—"),
+                        "note": f'stop {_pct(-(r.get("risk") or 0), 1)} below entry', "status": sw["status"], "pnl": None})
+    for x in S.get("index") or []:
+        if x["status"] == "off":
+            continue
+        if x["action"] == "buy":
+            out.append({"book": "Index", "act": "Buy", "k": "b", "sym": x["name"], "ref": x["last"], "stop": None, "qty": "futures or call spread", "note": "dip in an uptrend", "status": x["status"], "pnl": None})
+        elif x["action"] == "sell":
+            out.append({"book": "Index", "act": "Sell", "k": "s", "sym": x["name"], "ref": x["last"], "stop": None, "qty": "all", "note": x.get("why") or "", "status": x["status"],
+                        "pnl": (x.get("pos") or {}).get("pnl")})
+    return out
+
+
+def _orders_table(rows, names) -> str:
+    head = [("Book", "l"), ("Action", "l"), ("Symbol", "l"), ("Last close", ""), ("Stop", ""), ("Quantity", ""), ("Open P&L", "x"), ("Why", "l xx"), ("Status", "l x")]
+    body = [[_e(r["book"]), _act(r["act"], r["k"]), f'<span class="s">{_sym(r["sym"], names)}</span>', _px(r["ref"]), _px(r["stop"]) if _ok(r["stop"]) else '<span class="mu">none</span>',
+             _e(r["qty"]), _sg(r["pnl"]) if _ok(r["pnl"]) else "", _e(r["note"]), _pill(r["status"])] for r in rows]
+    return _t(head, body)
+
+
+def _order_cards(rows) -> str:
+    """The same orders as stacked rows, for phones."""
+    out = ""
+    for r in rows:
+        bits = [r["book"]] + ([f'stop {_px(r["stop"])}'] if _ok(r["stop"]) else []) + ([f'qty {r["qty"]}'] if r["qty"] not in ("", "—") else []) + ([_pct(r["pnl"], 1)] if _ok(r["pnl"]) else []) \
+            + ([r["note"]] if r["k"] == "s" and r["note"] else []) + ([STATUS[r["status"]][0].lower()] if r["status"] != "on" else [])
+        out += f'<div>{_act(r["act"], r["k"])}<b>{_e(r["sym"])}</b><span class="v">{_px(r["ref"])}</span><small>{_e(" · ".join(bits))}</small></div>'
+    return f'<div class="fd-oc">{out}</div>'
+
+
+def _watch_rows(S, names) -> list:
+    """What could turn into an order in the next few sessions."""
+    rows = []
+    for x in S.get("index") or []:
+        if x["status"] == "off":
+            continue
+        if x["action"] == "none" and x.get("above200") and _ok(x.get("trigger")) and _ok(x.get("last")):
+            rows.append(["Index", f'<b style="color:var(--tx)">{_e(x["name"])}</b>', "Buy trigger", _px(x["trigger"]), _sg(x["trigger"] / x["last"] - 1, 1), "a close at or below this level buys the dip"])
+        elif x["action"] == "hold" and _ok(x.get("ma5")):
+            rows.append(["Index", f'<b style="color:var(--tx)">{_e(x["name"])}</b>', "Exit level", _px(x["ma5"]), _sg(x["ma5"] / x["last"] - 1, 1), "a close above the 5-day average sells"])
+    for r in (S["swing"].get("open") or [])[:6]:
+        if not r.get("sell") and _ok(r.get("stop")) and _ok(r.get("price")):
+            rows.append(["Swing", f'<span class="s">{_sym(r["sym"], names)}</span>', "Stop", _px(r["stop"]), _sg(r["stop"] / r["price"] - 1, 1), f'{r.get("left", 0)} sessions left'])
+    for h in S["leaders"]["holdings"]:
+        if h["flag"] == "risk":
+            rows.append(["Leaders", f'<span class="s">{_sym(h["sym"], names)}</span>', "Likely to go", _px(h["price"]), "", f'strength {_num((h.get("rank") or 0) * 100, 0)}: sold at the next check unless it recovers'])
+    for r in (S["leaders"].get("candidates") or [])[:3]:
+        rows.append(["Leaders", f'<span class="s">{_sym(r["sym"], names)}</span>', "Next in line", _px(r["price"]), "", f'strength {_num((r.get("rank") or 0) * 100, 0)}: bought when a slot opens'])
+    return rows
+
+
+def _next_check(S) -> str:
+    return "checked today" if S["leaders"].get("check_today") else "next check after the first session of next week"
+
+
+# ───────────── desk ─────────────
+def _ticker(S) -> str:
+    m = S["market"]
+    try:
+        age = (date.today() - date.fromisoformat(S["asof"])).days
+    except Exception:
+        age = 0
+    cell = lambda lab, val: f"<div><small>{lab}</small><b>{val}</b></div>"
+    first = cell(f'Prices to <span class="am">· {age} days old</span>' if age > 4 else "Prices to", _day(S["asof"]))
+    return ('<div class="fd-tk">' + first + cell("NIFTY 500", f'{_px(m.get("n500"))} {_sg(m.get("n500_d1"), 2)}')
+            + cell("Long-term trend", '<span class="up">Above 200-day</span>' if m.get("above200") else '<span class="dn">Below 200-day</span>')
+            + cell("Stocks above 50-day · 200-day", f'{_pct(m.get("b50"), 0, False)} · {_pct(m.get("b200"), 0, False)}')
+            + cell("52-week highs · lows", f'<span class="up">{m.get("highs", 0)}</span> · <span class="dn">{m.get("lows", 0)}</span>')
+            + cell("India VIX", _num(m.get("vix"), 1)) + cell("Universe", f'{m.get("universe", 0)} most traded') + cell("F&O data to", _day(S.get("fno_date"), False)) + '</div>')
+
+
+def _books(S) -> str:
+    ld, sw = S["leaders"], S["swing"]
+    w = {x["key"]: x for x in ld["record"]["windows"]}
+    a = w["all"]
+    two = lambda top, sub: f'<span class="s2"><b>{top}</b><small>{sub}</small></span>'
+    num = lambda top, sub: f'<span class="s2" style="text-align:right"><b>{top}</b><small>{sub}</small></span>'
+    rows = [[two("Leaders", "trend · 20 strongest stocks"), _pill(ld["status"]), num(f'<span class="{_cls(a["book"].get("cagr"))}">{_pct(a["book"].get("cagr"))}</span> a year', f'NIFTY 500 {_pct(a["index"].get("cagr"))}'),
+             num(f'{len(ld["holdings"])} held', _next_check(S).replace("after the first session of next week", "next week"))]]
+    s = sw["record"]["all"]
+    rows.append([two("Swing", "leader pullback · a few days"), _pill(sw["status"]), num(f'<span class="{_cls(s.get("exp"))}">{_pct(s.get("exp"), 2)}</span> a trade', f'{_pct(s.get("win"), 0, False)} of {s.get("n", 0)} won'),
+                 num(f'{len(sw["open"])} open', f'{len(sw["new"])} new today')])
+    for x in S.get("index") or []:
+        r = x["record"]["all"]
+        state = {"buy": "Buy at open", "sell": "Sell at open", "hold": "In a trade", "none": "No signal"}[x["action"]]
+        rows.append([two(_e(x["name"]), "dip in an uptrend"), _pill(x["status"]), num(f'<span class="{_cls(r.get("exp"))}">{_pct(r.get("exp"), 2)}</span> a trade', f'{_pct(r.get("win"), 0, False)} of {r.get("n", 0)} won'),
+                     num(state, f'5 sessions {_pct(x.get("r5"), 1)}')])
+    foot = _ks([_k("Leaders from peak", _sg(ld["record"].get("dd_now"), 1), "model book"), _k("Stay-away list", f'{len(S.get("avoid") or [])} stocks', "weakest tenth, below 200-day")], 2, True)
+    return _t([("Book", "l"), ("Status", "l"), ("Record", ""), ("Now", "x")], rows, scroll=False) + f'<div style="border-top:1px solid var(--line)">{foot}</div>'
+
+
+def _lead_mini(S, names, limit=10) -> str:
+    rows = []
+    for h in S["leaders"]["holdings"][:limit]:
+        flag = _act("Sell", "s") if h["flag"] == "sell" else _act("Watch", "w") if h["flag"] == "risk" else _act("Hold")
+        rows.append([f'<span class="s">{_sym(h["sym"], names)}</span>', _px(h["price"]), _sg(h["d1"], 1), _sg(h["pnl"], 0), _pct(h.get("w"), 0, False), flag])
+    return _t([("Symbol", "l"), ("Close", ""), ("Day", "x"), ("P&L", ""), ("Weight", "x"), ("", "")], rows, scroll=False)
+
+
+def _lead_curve(S, h=150) -> str:
+    c = S["leaders"]["record"]["curve"]
+    mult = lambda v: f"{1 + v:,.1f}×"
+    return _line(c["date"], [("Leaders book", AMBER, c["book"], mult(c["book"][-1])), ("NIFTY 500", "var(--tx2)", c["index"], mult(c["index"][-1])),
+                             ("Average liquid stock", BLUE, c["avg"], mult(c["avg"][-1]))], h=h, fmt=mult)
+
+
+def _swing_mini(S, names) -> str:
+    sw = S["swing"]
+    rows = []
+    for r in sw["new"][:6]:
+        rows.append([f'<span class="s"><b>{_e(r["sym"])}</b></span>', _act("Buy", "b"), _px(r["stop"]), '<span class="mu">new</span>'])
+    for r in sw["open"][:8]:
+        rows.append([f'<span class="s"><b>{_e(r["sym"])}</b></span>', _act("Sell", "s") if r.get("sell") else _act("Hold"), _px(r["stop"]), _sg(r["pnl"], 1)])
+    if not rows:
+        return _empty("No swing signal and no open swing trade. Signals come in clusters, on sharp market sell-offs.")
+    return _t([("Symbol", "l"), ("", "l"), ("Stop", ""), ("P&L", "")], rows, scroll=False)
+
+
+def _index_card(x) -> str:
+    word, col = {"buy": ("Buy at the next open", "up"), "sell": ("Sell at the next open", "dn"), "hold": ("In a dip trade: hold", "am"), "none": ("No signal", "fl")}[x["action"]]
+    p = x.get("pos") or {}
+    sub = (f'since {_day(p.get("since"), False)} · {_sg(p.get("pnl"), 2)} · {p.get("left", 0)} sessions left' if p else
+           (f'buys on a close at or below <b>{_px(x.get("trigger"))}</b>' if x.get("above200") else "below its 200-day average: the setup is off"))
+    f = x.get("fno") or {}
+    cells = [_k("Last close", _px(x["last"]), f'5 sessions {_pct(x.get("r5"))}'), _k("200-day average", _px(x.get("ma200")), "above" if x.get("above200") else "below"),
+             _k("Put-call ratio", _num(f.get("pcr"), 2), f'max pain {_px(f.get("max_pain"))}'), _k("Put wall · call wall", f'{_px(f.get("put_wall"))} · {_px(f.get("call_wall"))}', f'expiry {_day(f.get("exp"), False)}')]
+    return f'<div style="padding:9px 10px 8px"><div class="fd-big {col}">{word}</div><div class="fd-n" style="margin-top:2px">{sub}</div></div>' + _ks(cells, 2, True)
+
+
+def _fii_card(S) -> str:
+    P = S.get("participants")
+    if not P or not P.get("rows"):
+        return _empty("Participant positions are not stored yet.")
+    rows = []
+    for r in P["rows"]:
+        rows.append([f'<b style="color:var(--tx)">{_e(r["who"])}</b>', _pct(r.get("long_share"), 0, False) + _bar(r.get("long_share")), f'<span class="{_cls(r.get("d5"))}">{_qty(r.get("d5"))}</span>'])
+    return _t([("Index futures", "l"), ("Long share", ""), ("Net, 5 sessions", "")], rows, scroll=False)
+
+
+def _foot_card(S, names) -> str:
+    F, B = S.get("footprints") or {}, (S.get("buildups") or {}).get("lists") or {}
+    rows = []
+    for lab, lst, colr in (("Long build-up", B.get("Long build-up"), GREEN), ("Short build-up", B.get("Short build-up"), RED), ("Delivery accumulation", F.get("accumulation"), GREEN),
+                           ("Delivery distribution", F.get("distribution"), RED)):
+        syms = ", ".join(_e(r["sym"]) for r in (lst or [])[:4]) or '<span class="mu">none</span>'
+        rows.append([f'<i class="dot" style="background:{colr}"></i><span style="color:var(--tx)">{_e(lab)}</span>', syms])
+    return _t([("Footprint", "l"), ("Stocks", "l w")], rows, scroll=False)
+
+
+def _desk(S, C, sz, names):
+    rows = order_rows(S, sz)
+    blot = (f'<div class="wide">{_orders_table(rows, names)}</div><div class="narrow">{_order_cards(rows)}</div>') if rows else _empty(f'<b>No orders for the next open.</b> Leaders: {_next_check(S)}. Swing and index signals appear on the day they trigger.')
+    watch = _watch_rows(S, names)
+    if watch:
+        blot += ('<div style="border-top:1px solid var(--line)"><div style="padding:6px 10px 2px;font:500 10.5px var(--sans);color:var(--tx3)">On watch for the next sessions</div>'
+                 + _t([("Book", "l"), ("", "l"), ("What", "l x"), ("Level", ""), ("Away", ""), ("", "l xx")], watch[:8], scroll=False) + '</div>')
+    n_sw = sum(r["book"] == "Swing" and r["k"] == "b" for r in rows)
+    if n_sw > 4:
+        blot += (f'<div style="padding:7px 10px;border-top:1px solid var(--line)"><div class="fd-n"><b>{n_sw} swing buys on one day are one bet.</b> They come from the same sell-off and move together. '
+                 'They are listed strongest first; the tested portfolio never held more than ten at a tenth of capital each.</div></div>')
+    top = _grid(_pan("Orders for the next open", f'{len(rows)} to place · signals from {_day(S["asof"], False)} close' if rows else f'signals from {_day(S["asof"], False)} close', blot, "c8 t12", True),
+                _pan("Books", "record on real prices, after costs", _books(S), "c4 t12", True))
+    ld = S["leaders"]
+    mid = _grid(_pan("Leaders: holdings", f'top {min(10, len(ld["holdings"]))} of {len(ld["holdings"])} by profit', _lead_mini(S, names), "c5 t6", True),
+                _pan("Leaders against NIFTY 500", f'growth of 1 since {ld["record"]["start"][:4]}', _lead_curve(S), "c4 t6"),
+                _pan("Swing: signals and open trades", _pill(S["swing"]["status"]), _swing_mini(S, names), "c3 t12", True))
+    idx = "".join(_pan(x["name"] + " · dip in an uptrend", _pill(x["status"]), _index_card(x), "c3 t6", True) for x in S.get("index") or [])
+    P = S.get("participants") or {}
+    bot = _grid(idx, _pan("Who holds index futures", f'{_day(P.get("date"), False)}', _fii_card(S), "c3 t6", True),
+                _pan("Footprints today", "context, not signals", _foot_card(S, names), "c3 t6", True))
+    _html(top + mid + bot)
+
+
+# ───────────── leaders ─────────────
+def _lead_kpis(S) -> str:
+    ld = S["leaders"]
+    R = ld["record"]
+    w = {x["key"]: x for x in R["windows"]}
+    a, l3, t = w["all"], w["last3"], R["trades"]
+    rng = a.get("range") or [None, None]
+    cells = [_k("Status", _pill(ld["status"]), "beat both benchmarks" if ld["status"] == "on" else "one period is weak"),
+             _k(f'A year, since {R["start"][:4]}', f'<span class="{_cls(a["book"].get("cagr"))}">{_pct(a["book"].get("cagr"))}</span>', f'NIFTY 500 {_pct(a["index"].get("cagr"))}'),
+             _k("Other check days", f'{_pct(rng[0], 0)} to {_pct(rng[1], 0)}', "same rule, other check day"),
+             _k("Last 3 years", f'<span class="{_cls(l3["book"].get("cagr"))}">{_pct(l3["book"].get("cagr"))}</span>', f'NIFTY 500 {_pct(l3["index"].get("cagr"))}'),
+             _k("Worst fall", f'<span class="dn">{_pct(a["book"].get("dd"), 0)}</span>', f'NIFTY 500 {_pct(a["index"].get("dd"), 0)}'),
+             _k("From its peak now", _sg(R.get("dd_now"), 1), "model book"),
+             _k("Trades won", _pct(t.get("win"), 0, False), f'avg {_pct(t.get("avg_win"), 0)} · lost {_pct(t.get("avg_loss"), 0)}'),
+             _k("Trades a year", _num(t.get("per_year"), 0), f'{t.get("big", 0)} gained 50% or more')]
+    return _ks(cells, 8)
+
+
+def _lead_holdings(S, names, sz) -> str:
+    ld = S["leaders"]
+    rows = []
+    for h in ld["holdings"]:
+        flag = _act("Sell", "s") if h["flag"] == "sell" else _act("Watch", "w") if h["flag"] == "risk" else _act("Hold")
+        f = h.get("fno") or {}
+        rows.append([f'<span class="s">{_sym(h["sym"], names)}</span>', flag, _dshort(h["since"]), _px(h["entry"]), _px(h["price"]), _sg(h["d1"], 1), _sg(h["pnl"], 0),
+                     _pct(h.get("w"), 0, False), _num((h.get("rank") or 0) * 100, 0) + _bar(h.get("rank")), str(h.get("bars") if h.get("bars") is not None else "—"),
+                     _slot_qty(h["price"], sz, ld.get("slots", 20)), (f'lot {_num(f.get("lot"))}' if f else '<span class="mu">cash only</span>')])
+    head = [("Symbol", "l"), ("", "l"), ("Since", "x"), ("Entry", "x"), ("Close", ""), ("Day", "x"), ("P&L", ""), ("Weight", "xx"), ("Strength", "x"), ("Sessions", "xx"), ("Qty for your slot", "xx"), ("F&O", "l xx")]
+    return _t(head, rows, scroll=False)
+
+
+def _lead_changes(S, names, sz) -> str:
+    ld = S["leaders"]
+    out = ""
+    if ld.get("buy") or ld.get("sell"):
+        cards = ""
+        for r in ld["sell"]:
+            cards += f'<div>{_act("Sell", "s")}<b>{_e(r["sym"])}</b><span class="v">{_px(r["price"])}</span><small>{_e(r.get("why") or "")} · {_pct(r.get("pnl"), 0)} since {_dshort(r.get("since"))}</small></div>'
+        for r in ld["buy"]:
+            q = _slot_qty(r["price"], sz, ld.get("slots", 20))
+            cards += f'<div>{_act("Buy", "b")}<b>{_e(r["sym"])}</b><span class="v">{_px(r["price"])}</span><small>strength {_num((r.get("rank") or 0) * 100, 0)} of 100 · {q} shares for your slot</small></div>'
+        out += f'<div class="fd-oc">{cards}</div>'
+    else:
+        out += _empty('<b>No change this session.</b> ' + ("It was checked today." if ld.get("check_today") else "Next check: after the first session of next week; orders go in at the following open."))
+    for nt in (ld.get("notes") or [])[-3:]:
+        out += (f'<div style="padding:8px 10px;border-top:1px solid var(--line)"><div class="fd-n"><b class="am">{_e(nt.get("sym", ""))}, {_day(nt.get("date"))}:</b> {_e(nt.get("text", ""))} '
+                f'Result in the model book {_pct(nt.get("ret"), 0)}.</div></div>')
+    lc = ld.get("last_change")
+    if lc:
+        b = ", ".join(f'{_e(x["sym"])} at {_px(x["px"])}' for x in lc.get("bought") or []) or "nothing"
+        s_ = ", ".join(f'{_e(x["sym"])} at {_px(x["px"])} ({_pct(x.get("ret"), 0)})' for x in lc.get("sold") or []) or "nothing"
+        out += f'<div style="padding:8px 10px;border-top:1px solid var(--line)"><div class="fd-n"><b>Last change, {_day(lc["date"])} open.</b> Bought {b}. Sold {s_}.</div></div>'
+    return out
+
+
+def _years_table(R) -> str:
+    rows = []
+    for y in reversed(R["years"]):
+        diff = (y["book"] - y["index"]) if (_ok(y.get("book")) and _ok(y.get("index"))) else None
+        rows.append([f'<b style="color:var(--tx)">{y["y"]}</b>' + (' <span class="mu">part</span>' if y.get("part") else ""), _sg(y.get("book"), 0), f'{_pct(y.get("lo"), 0)} to {_pct(y.get("hi"), 0)}',
+                     _sg(y.get("index"), 0), _sg(y.get("avg"), 0), _sg(diff, 0)])
+    return _t([("Year", "l"), ("Book", ""), ("Other check days", "x"), ("NIFTY 500", ""), ("Avg stock", "x"), ("Against index", "")], rows)
+
+
+def _trade_list(trs, names, why=False) -> str:
+    rows = [[f'<span class="s">{_sym(t["sym"], names)}</span>', _dshort(t["in"]), _dshort(t["out"]), _sg(t["ret"], 0 if abs(t["ret"]) >= 0.1 else 1), str(t.get("bars") if t.get("bars") is not None else "—")]
+            + ([_e(t.get("why") or "")] if why else []) for t in trs]
+    return _t([("Symbol", "l"), ("In", ""), ("Out", "x"), ("Result", ""), ("Sessions", "x")] + ([("Why it left", "l xx")] if why else []), rows)
+
+
+def _sector_mix(S, names) -> str:
+    try:
+        import sector_map
+        counts = {}
+        for h in S["leaders"]["holdings"]:
+            g = sector_map.classify(h["sym"], names.get(h["sym"], ""))
+            g = (g[0] if isinstance(g, (tuple, list)) else g) or "Other"
+            try:
+                g = sector_map.family(g) or g
+            except Exception:
+                pass
+            counts[g] = counts.get(g, 0.0) + (h.get("w") or 0)
+    except Exception:
+        return ""
+    if not counts:
+        return ""
+    top = sorted(counts.items(), key=lambda kv: -kv[1])[:8]
+    m = max(v for _, v in top) or 1
+    return '<div class="fd-mix">' + "".join(f'<div><span>{_e(k)}</span><u><i style="width:{v / m * 100:.0f}%"></i></u><span>{v * 100:.0f}%</span></div>' for k, v in top) + '</div>'
+
+
+def _rule(key, S) -> str:
+    r = S["leaders"] if key == "leaders" else S["swing"] if key == "swing" else (S["index"][0] if S.get("index") else {})
+    return (f'<div class="fd-rule"><span>Enter</span><div>{_e(r.get("rule", ""))}</div><span>Exit</span><div>{_e(r.get("exit", ""))}</div><span>Size</span><div>{_e(r.get("size", ""))}</div>'
+            f'<span>Fill</span><div>Signals are known after the close. Orders go in at the next session\'s open.</div></div>')
+
+
+def _leaders(S, C, sz, names, on_open=None):
+    ld = S["leaders"]
+    R = ld["record"]
+    n_sell, n_risk = sum(h["flag"] == "sell" for h in ld["holdings"]), sum(h["flag"] == "risk" for h in ld["holdings"])
+    meta = f'{len(ld["holdings"])} of {ld.get("slots", 20)} slots' + (f' · {n_sell} to sell' if n_sell else "") + (f' · {n_risk} on watch' if n_risk else "")
+    dd = R.get("dd_curve") or {}
+    sm = _sector_mix(S, names)
+    cand = [[f'<span class="s">{_sym(r["sym"], names)}</span>', _px(r["price"]), _sg(r["d1"], 1), _num((r.get("rank") or 0) * 100, 0) + _bar(r.get("rank"))] for r in ld.get("candidates") or []]
+    nxt = _pan("Next in line", "bought when a slot opens", _t([("Symbol", "l"), ("Close", ""), ("Day", ""), ("Strength", "")], cand, scroll=False) if cand else _empty("No candidates."), "", True)
+    left = _pan("This week's changes", _next_check(S), _lead_changes(S, names, sz), "", True) + f'<div class="wide">{nxt}</div>'
+    body = (_lead_kpis(S)
+            + _grid(f'<div class="fd-col c4 t12">{left}</div>', _pan("Holdings", meta, _lead_holdings(S, names, sz), "c8 t12", True), f'<div class="narrow">{nxt}</div>')
+            + _grid(_pan("Growth of 1", f'since {_day(R["start"])} · after costs', _lead_curve(S, 190), "c7 t12"),
+                    _pan("Fall from the peak", "how deep it has gone", _line(dd.get("date") or [], [("Leaders book", RED, dd.get("dd") or [], _pct(R.get("dd_now"), 0))], h=190,
+                                                                             fmt=lambda v: f"{v * 100:.0f}%", zero=True), "c5 t12"))
+            + _grid(_pan("Year by year", "book · range on other check days · benchmarks", _years_table(R), "c5 t12", True),
+                    _pan("Biggest winners", f'{R["trades"].get("big", 0)} trades gained 50% or more', _trade_list(R["winners"], names), "c4 t6", True),
+                    _pan("Sector mix", "share of the book", sm or _empty("Sector map not available."), "c3 t6"))
+            + _grid(_pan("Latest exits", "closed trades", _trade_list(R.get("recent") or [], names, True), "c7 t12", True),
+                    _pan("The rule", "fixed, no judgement", _rule("leaders", S) + '<div class="fd-n" style="margin-top:8px"><b>Starting today?</b> Buy the holdings in equal amounts, skip any marked Watch, '
+                         'then follow the weekly changes. <b>Why no stop:</b> a 4 ATR trail, a 20 to 25% stop and a 200-day exit were all tested; each lowered the return without reducing the worst fall.</div>', "c5 t12")))
+    _html(body)
+    _chart_picker(S, C, [h["sym"] for h in ld["holdings"]] + [r["sym"] for r in ld.get("buy") or []], "fd_chart_l",
+                  lambda s: [(next((h["entry"] for h in ld["holdings"] if h["sym"] == s), None), "Entry", "var(--tx2)")], on_open)
+
+
+# ───────────── swing ─────────────
+def _period_table(rec, extra=None) -> str:
+    rows = []
+    for k in ("all", "early", "late", "last3"):
+        r = rec.get(k) or {}
+        e = (r.get(extra) or {}) if extra else {}
+        rows.append([f'<b style="color:var(--tx)">{_e(r.get("label", k))}</b>', str(r.get("n", 0)), _pct(r.get("win"), 0, False), _sg(r.get("exp"), 2), _pct(r.get("avg_win"), 1), _pct(r.get("avg_loss"), 1),
+                     _num(r.get("pf"), 2), _num(r.get("t"), 1)] + ([_sg(e.get("edge"), 2), _num(e.get("t"), 1)] if extra else []))
+    head = [("Period", "l"), ("Trades", ""), ("Won", ""), ("Per trade", ""), ("Avg win", "x"), ("Avg loss", "x"), ("Won ÷ lost", "x"), ("t", "xx")]
+    if extra:
+        head += [("Stock pick" if extra == "pick" else "Over holding", ""), ("t", "xx")]
+    return _t(head, rows, scroll=False)
+
+
+def _swing(S, C, sz, names, on_open=None):
+    sw = S["swing"]
+    a = sw["record"]["all"]
+    pick = (a.get("pick") or {})
+    l3 = sw["record"].get("last3") or {}
+    cells = [_k("Status", _pill(sw["status"]), "positive before and after 2022"), _k("Trades tested", str(a.get("n", 0)), f'about {_num(a.get("n", 0) / 11.4, 0)} a year, in clusters'),
+             _k("Won", _pct(a.get("win"), 0, False), f'last 3 years {_pct(l3.get("win"), 0, False)}'), _k("Per trade, after costs", _sg(a.get("exp"), 2), f'last 3 years {_pct(l3.get("exp"), 2)}'),
+             _k("Avg win · avg loss", f'{_pct(a.get("avg_win"), 1)} · {_pct(a.get("avg_loss"), 1)}', f'held {_num(a.get("bars"), 1)} sessions'),
+             _k("Worst losing run", f'{a.get("losing_run", 0)} in a row', f'worst trade {_pct(a.get("worst"), 0)}'),
+             _k("From stock picking", _sg(pick.get("edge"), 2), "the rest is the market's bounce"), _k("10% a trade, 10 at once", _pct((sw.get("curve_stats") or {}).get("cagr")) + " a year", f'worst fall {_pct((sw.get("curve_stats") or {}).get("dd"), 0)}')]
+    new = []
+    for r in sw["new"]:
+        q = _risk_qty(r["price"], r["stop"], sz)
+        f = r.get("fno") or {}
+        lots = ""
+        if f and _ok(f.get("lot")) and f["lot"] > 0:
+            lots = f'lot {_num(f["lot"])} · risk {_rs(f["lot"] * (r["price"] - r["stop"]))}'
+        new.append([f'<span class="s">{_sym(r["sym"], names)}</span>', _px(r["price"]), _sg(r.get("r5"), 1), _px(r["stop"]), _pct(r.get("risk"), 1, False), f"{q:,}" if q is not None else "—",
+                    _rs(q * r["price"]) if q else "—", _num((r.get("rank") or 0) * 100, 0), lots or '<span class="mu">cash only</span>'])
+    opn = []
+    for r in sw["open"]:
+        opn.append([f'<span class="s">{_sym(r["sym"], names)}</span>', _act("Sell", "s") if r.get("sell") else _act("Hold"), _dshort(r["since"]), _px(r["entry"]), _px(r["price"]), _sg(r["pnl"], 1), _px(r["stop"]),
+                    _e(r.get("sell") or f'{r.get("left", 0)} sessions left')])
+    done = "".join(f'<div class="fd-n"><b>{_e(d["sym"])}</b> closed today at {_px(d["p1"])}: {_pct(d["ret"], 1)} · {_e(d["why"])}</div>' for d in sw.get("done") or [])
+    yrs = sw["record"].get("years") or []
+    ybars = _vbars([str(y["y"])[2:] for y in yrs], [y["exp"] for y in yrs], fmt=lambda v: f"{v * 100:+.1f}", colour=lambda i, v: GREEN if v >= 0 else RED)
+    cv = sw.get("curve") or {}
+    body = (_ks(cells, 8)
+            + _grid(_pan("New signals: buy at the next open", f'{len(new)} · stop 3 ATR below entry', _t([("Symbol", "l"), ("Close", ""), ("5 sessions", ""), ("Stop", ""), ("Stop gap", "x"), ("Quantity", ""), ("Value", "x"),
+                                                                                                        ("Strength", "xx"), ("Futures", "l xx")], new) if new else
+                         _empty("<b>No new signal.</b> A strong stock has to fall 3 ATR in 5 sessions; that mostly happens on market-wide sell-offs, so signals arrive in clusters."), "c7 t12", True),
+                    _pan("Open trades", f'{len(opn)} open', (_t([("Symbol", "l"), ("", "l"), ("Since", "x"), ("Entry", "x"), ("Close", ""), ("P&L", ""), ("Stop", ""), ("Plan", "l x")], opn) if opn else _empty("No open swing trade."))
+                         + (f'<div style="padding:8px 10px;border-top:1px solid var(--line)">{done}</div>' if done else ""), "c5 t12", True))
+            + _grid(_pan("Record by period", "every signal, one trade per stock", _period_table(sw["record"], "pick"), "c6 t12", True),
+                    _pan("Average trade by year", "% after costs", ybars, "c3 t6"), _pan("The rule", "fixed, no judgement", _rule("swing", S), "c3 t6"))
+            + _grid(_pan("Latest trades", "most recent first", _trade_list(sw.get("recent") or [], names, True), "c6 t12", True),
+                    _pan("If you took them with a money limit", "a tenth of capital a trade, at most ten at once", _line(cv.get("date") or [], [("Swing book", AMBER, cv.get("book") or [],
+                         _pct((cv.get("book") or [0])[-1], 0))], h=170, fmt=lambda v: f"{v * 100:.0f}%", zero=True), "c6 t12")))
+    _html(body)
+    stops = {r["sym"]: r["stop"] for r in sw["new"] + sw["open"]}
+    ents = {r["sym"]: r.get("entry") for r in sw["open"]}
+    _chart_picker(S, C, [r["sym"] for r in sw["new"]] + [r["sym"] for r in sw["open"]], "fd_chart_s", lambda s: [(ents.get(s), "Entry", "var(--tx2)"), (stops.get(s), "Stop", RED)], on_open)
+
+
+# ───────────── index ─────────────
+def _chain(sym: str):
+    p = FNO / "chain_latest.csv"
+    if not p.exists():
+        return None
+    try:
+        rows = _read_csv(str(p), _stamp(p), ("NIFTY", "BANKNIFTY"))
+        rows = [r for r in rows if r["sym"] == sym]
+        if not rows:
+            return None
+        exp = min(r["exp"] for r in rows)
+        f = lambda v: float(v) if v not in ("", None) else 0.0
+        rows = sorted([r for r in rows if r["exp"] == exp], key=lambda r: f(r["strike"]))
+        return {"exp": exp, "k": [f(r["strike"]) for r in rows], "ce": [f(r["ce_oi"]) for r in rows], "pe": [f(r["pe_oi"]) for r in rows]}
+    except Exception:
+        return None
+
+
+def _index_col(x, I, sz) -> str:
+    word, col = {"buy": ("Buy at the next open", "up"), "sell": ("Sell at the next open", "dn"), "hold": ("In a dip trade: hold", "am"), "none": ("No signal today", "fl")}[x["action"]]
+    p, f, a = x.get("pos") or {}, x.get("fno") or {}, x["record"]["all"]
+    oh = a.get("over_hold") or {}
+    if p:
+        sub = f'Bought {_day(p.get("since"), False)} at {_px(p.get("entry"))} · now {_sg(p.get("pnl"), 2)} · {_e(x.get("why") or (str(p.get("left", 0)) + " sessions left"))}'
+    elif x.get("above200"):
+        sub = f'Uptrend intact. A close at or below <b style="color:var(--tx)">{_px(x.get("trigger"))}</b> next session would trigger a buy.'
+    else:
+        sub = "Below its 200-day average: the setup only works in an uptrend, so it is switched off for now."
+    head = (f'<div style="padding:10px"><div style="display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap"><div class="fd-big {col}">{word}</div>{_pill(x["status"])}</div>'
+            f'<div class="fd-n" style="margin-top:3px">{sub}</div></div>'
+            + _ks([_k("Last close", _px(x["last"]), f'to {_day(x["asof"], False)}'), _k("5 sessions", _sg(x.get("r5"), 2), "needs −2.5% or worse"), _k("200-day average", _px(x.get("ma200")), "above" if x.get("above200") else "below"),
+                   _k("Trades tested", str(a.get("n", 0)), f'{_pct(a.get("win"), 0, False)} won'), _k("Per trade", _sg(a.get("exp"), 2), f'held {_num(a.get("bars"), 1)} sessions'),
+                   _k("More than just holding", _sg(oh.get("edge"), 2), f't {_num(oh.get("t"), 1)}'), _k("Worst trade", _pct(a.get("worst"), 1), f'best {_pct(a.get("best"), 1)}'),
+                   _k("Worst losing run", f'{a.get("losing_run", 0)} in a row', "no stop in the test")], 4, True))
+    out = _pan(x["name"] + " · dip in an uptrend", f'since 2012 · {a.get("n", 0)} trades', head, "", True)
+    ch = I.get(x["sym"]) or {}
+    if ch:
+        marks = [(x.get("trigger"), "Buy trigger", GREEN)] if (x.get("above200") and not p) else [(p.get("entry"), "Entry", "var(--tx2)")] if p else []
+        out += _pan("One year", "close · 5-day and 200-day averages", _line(ch["d"], [("Close", "var(--tx)", ch["c"], _px(ch["c"][-1])), ("5-day", BLUE, ch["m5"], ""), ("200-day", AMBER, ch["m200"], "")], h=190, marks=marks))
+    out += _pan("Record by period", "after 0.05% a side", _period_table(x["record"], "over_hold"), "", True)
+    lot = f.get("lot")
+    plan = x.get("plan") or {}
+    cells = [_k("Future", _px(f.get("fut")), f'lot {_num(lot)} · {_rs((lot or 0) * (f.get("fut") or 0))} a lot'), _k("Expiry", _day(f.get("exp"), False), f'{_num(f.get("dte"))} days'),
+             _k("Put-call ratio", _num(f.get("pcr"), 2), "open interest, all strikes"), _k("Implied volatility", _pct(f.get("iv"), 1, False), f'straddle {_pct(f.get("straddle"), 1, False)} of price'),
+             _k("Max pain", _px(f.get("max_pain")), "this expiry"), _k("Put wall", _px(f.get("put_wall")), "most put open interest"), _k("Call wall", _px(f.get("call_wall")), "most call open interest"),
+             _k("A 1% move, one lot", _rs((lot or 0) * (f.get("fut") or 0) * 0.01), "futures profit or loss")]
+    note = ""
+    if plan:
+        if plan.get("priced"):
+            note = (f'<b>Call spread for a dip trade:</b> buy the {_px(plan["buy"])} call, sell the {_px(plan["sell"])} call, {_day(plan["exp"], False)} expiry. Cost about {_px(plan["cost"])} points '
+                    f'({_rs(plan["cost"] * (lot or 0))} a lot), which is the most it can lose; best case {_px(plan["max_gain"])} points; breaks even at {_px(plan["breakeven"])}.')
+        else:
+            note = (f'<b>Call spread for a dip trade:</b> buy the {_px(plan["buy"])} call, sell the {_px(plan["sell"])} call, in an expiry at least 7 days away. '
+                    f'The stored chain expires in {plan.get("days", 0)} days, so price it at your broker; the cost is the most it can lose.')
+    out += _pan("Futures and options levels", f'F&O data to {_day(f.get("date"), False)}', _ks(cells, 4, True) + (f'<div style="padding:8px 10px;border-top:1px solid var(--line)"><div class="fd-n">{note}</div></div>' if note else ""), "", True)
+    c = _chain(x["sym"])
+    if c and _ok(f.get("spot")):
+        keep = [i for i, k in enumerate(c["k"]) if abs(k / f["spot"] - 1) <= 0.06]
+        if len(keep) >= 8:
+            out += _pan("Open interest by strike", f'{_day(c["exp"], False)} expiry', _strikes([c["k"][i] for i in keep], [("Calls", RED, [c["ce"][i] for i in keep]), ("Puts", GREEN, [c["pe"][i] for i in keep])], mark=f["spot"]))
+    rec = [[_dshort(t["in"]), _dshort(t["out"]), _px(t["p0"]), _px(t["p1"]), _sg(t["ret"], 2), str(t["bars"]), _e(t["why"])] for t in x.get("recent") or []]
+    out += _pan("Latest trades", "most recent first", _t([("In", "l"), ("Out", "l"), ("Entry", "x"), ("Exit", "x"), ("Result", ""), ("Sessions", "x"), ("Why it left", "l xx")], rec, scroll=False), "", True)
+    return f'<div class="fd-col c6 t12">{out}</div>'
+
+
+def _index(S, C, sz):
+    xs = S.get("index") or []
+    if not xs:
+        _html(_empty("Index history was not available on the last run."))
+        return
+    _html(_grid(*[_index_col(x, C.get("i") or {}, sz) for x in xs])
+          + '<div class="fd-n">The index trade has no stop in its test: its worst trade is shown above. A call spread caps the loss at its cost; with futures, size for a fall of that worst trade. '
+            'A "new 20-day high" rule was also tested on both indexes and made no more than simply holding, so it is not used.</div>')
+
+
+# ───────────── big players ─────────────
+def _mini_list(rows, names, cols) -> str:
+    if not rows:
+        return _empty("Nothing unusual today.")
+    return _t([("Symbol", "l")] + [(h, c) for h, _, c in cols], [[f'<span class="s">{_sym(r["sym"], names)}</span>'] + [fn(r) for _, fn, _ in cols] for r in rows], scroll=False)
+
+
+def _players(S, names):
+    P = S.get("participants") or {}
+    rows = []
+    for r in P.get("rows") or []:
+        rows.append([f'<b style="color:var(--tx)">{_e(r["who"])}</b>', _pct(r.get("long_share"), 0, False) + _bar(r.get("long_share")), f'{_pct(r.get("share_pct"), 0, False)}', _qty(r.get("net")),
+                     f'<span class="{_cls(r.get("d1"))}">{_qty(r.get("d1"))}</span>', f'<span class="{_cls(r.get("d5"))}">{_qty(r.get("d5"))}</span>', _qty(r.get("stk")),
+                     f'<span class="{_cls(r.get("stk_d5"))}">{_qty(r.get("stk_d5"))}</span>', _qty(r.get("opt")), f'<span class="{_cls(r.get("opt_d1"))}">{_qty(r.get("opt_d1"))}</span>'])
+    part = _t([("Who", "l"), ("Index futures long", ""), ("Higher than, 1 yr", "x"), ("Net contracts", ""), ("1 session", "x"), ("5 sessions", ""), ("Stock futures net", "xx"), ("5 sessions", "xx"),
+               ("Index options net", "xx"), ("1 session", "xx")], rows, scroll=False) if rows else _empty("Participant positions are not stored yet. They come with the F&O data workflow.")
+    fii = next((r for r in P.get("rows") or [] if r["who"] == "FIIs"), None)
+    if fii:
+        part += (f'<div style="padding:8px 10px;border-top:1px solid var(--line)"><div class="fd-n"><b>FIIs hold {_pct(fii.get("long_share"), 0, False)} of their index futures long</b>, more than on '
+                 f'{_pct(fii.get("share_pct"), 0, False)} of days in the past year. Net contracts are longs less shorts; a positive options number means more calls than puts held on balance.</div>'
+                 '<div class="fd-n">Tested on five years of this data: no participant reading gave a reliable buy or sell signal on its own, so these are context.</div></div>')
+    fh = P.get("fii") or {}
+    fchart = _line(fh.get("date") or [], [("FII long share of index futures", AMBER, fh.get("share") or [], _pct((fh.get("share") or [0])[-1], 0, False))], h=150, fmt=lambda v: f"{v * 100:.0f}%") if fh else _empty("No history yet.")
+    B = (S.get("buildups") or {}).get("lists") or {}
+    bcols = [("Price", lambda r: _sg(r.get("p5"), 1), ""), ("OI", lambda r: _sg(r.get("oi5"), 0), "")]
+    bu = "".join(_pan(k, "futures price and open interest · 5 sessions", _mini_list(B.get(k) or [], names, bcols), "c3 t6", True) for k in ("Long build-up", "Short covering", "Short build-up", "Long unwinding"))
+    F = S.get("footprints") or {}
+    fcols = lambda lab: [(lab, lambda r: f'{_num(r.get("x"), 1)}×', ""), ("Day", lambda r: _sg(r.get("d1"), 1), ""), ("10 sessions", lambda r: _sg(r.get("d10"), 0), "x"), ("Delivered", lambda r: _pct(r.get("dshare"), 0, False), "x")]
+    fp = (_pan("Delivery accumulation", "10 sessions of delivery against normal · price up", _mini_list(F.get("accumulation") or [], names, fcols("Delivery")), "c4 t6", True)
+          + _pan("Delivery distribution", "heavy delivery · price down", _mini_list(F.get("distribution") or [], names, fcols("Delivery")), "c4 t6", True)
+          + _pan("Delivery spike today", "against the last 20 sessions", _mini_list(F.get("delivery_spike") or [], names, fcols("Delivery")), "c4 t12", True)
+          + _pan("Big tickets", "average trade size against normal", _mini_list(F.get("big_tickets") or [], names, fcols("Trade size")), "c6 t6", True)
+          + _pan("Volume surge", "against the last 50 sessions", _mini_list(F.get("volume") or [], names, fcols("Volume")), "c6 t6", True))
+    deals = S.get("deals") or []
+    drows = [[_e(d.get("kind", "")), f'<span class="s">{_sym(d.get("sym", ""), names)}</span>', _act("Buy", "b") if str(d.get("side", "")).upper().startswith("B") else _act("Sell", "s"), _e(d.get("who", "")),
+              _qty(d.get("qty")), _px(d.get("price")), (f'₹{d["value_cr"]:,.1f} Cr' if _ok(d.get("value_cr")) else "—")] for d in sorted(deals, key=lambda d: -(d.get("value_cr") or 0))[:40]]
+    dl = _t([("Type", "l"), ("Symbol", "l"), ("Side", "l"), ("Who", "l w"), ("Shares", "x"), ("Price", "x"), ("Value", "")], drows) if drows else _empty(
+        "No bulk or block deal was read on the last run. NSE publishes only the latest day, so they are collected from now on (arka_data/signals/deals.csv).")
+    _html(_grid(_pan("Who holds what in futures and options", f'NSE participant data · {_day(P.get("date"))}', part, "c8 t12", True), _pan("FII positioning, 120 sessions", "share of their index futures that is long", fchart, "c4 t12"))
+          + _grid(bu) + _grid(fp) + _grid(_pan("Bulk and block deals", "largest first", dl, "c12 t12", True))
+          + '<div class="fd-n"><b>How to read this tab.</b> These are footprints of large money, shown as context. Each was also tested as a buy signal on eleven years of prices: '
+            'delivery accumulation, delivery spikes and heavy-volume days did not beat simply owning the average liquid stock, so none of them places an order on the desk. See Evidence.</div>')
+
+
+# ───────────── options map (the earlier positioning views) ─────────────
+def _options_map(on_open):
+    try:
+        import fno_legacy as L
+    except Exception:
+        _html(_pan("Options map", "", _empty("<b>fno_legacy.py is not installed.</b> Add it next to this file to get the option chain, dealer gamma, six-month history and the F&O stock table here."), "", True))
+        return
+    st.markdown(L.CSS + "<style>.fo-g{gap:8px;margin-bottom:8px;} .fo-card{border-radius:6px;} .fo-ct{background:var(--s2);padding:6px 10px;} .fo-ct b{font-size:12px;} .fo-cb{padding:10px;}"
+                ".fo-tiles{border-radius:6px;margin-top:10px;} .fo-tile{padding:7px 10px;} .fo-tile b{font-size:15px;} .fo-sec{margin:10px 0 8px;}</style>", unsafe_allow_html=True)
     try:
         with st.spinner("Reading the stored F&O history…"):
-            res = E.run_cached()
+            res = L.E.run_cached()
     except Exception as e:
-        _html(f'<div class="fo-card"><div class="fo-empty"><b>The F&O history could not be read.</b><br>{_e(type(e).__name__)}: {_e(str(e)[:200])}</div></div>')
+        _html(_empty(f"The F&O history could not be read ({_e(type(e).__name__)})."))
         return
     if not res.get("ok") or not res.get("indexes"):
-        msg = " ".join(res.get("notes") or []) or "No F&O history found yet."
-        _html('<div class="fo-card"><div class="fo-empty"><b>No F&O data to analyse yet.</b><br>' + _e(msg)
-              + '<br>In GitHub open Actions, choose "F&O data", press Run workflow, type 5 in the years box and wait for the green tick. '
-                'The page fills in on its own after that.</div></div>')
+        _html(_empty("No F&O history yet. Run the F&O data workflow once."))
         return
-
     idx = list(res["indexes"].values())
-    SM = res.get("stock_model") or {}
-    chips = (f'<span class="fo-chip">Data to <b>{_day(res["asof"])}</b></span><span class="fo-chip"><b>{res["days"]:,}</b> sessions of history</span>'
-             f'<span class="fo-chip"><b>{res.get("n_stocks", 0)}</b> F&O stocks</span>'
-             + "".join(f'<span class="fo-chip">{_e(x["name"])} model <b>{_e((x.get("model") or {}).get("conf", "untested").lower())}</b></span>' for x in idx)
-             + (f'<span class="fo-chip">Stock model <b>{_e(SM.get("conf", "untested").lower())}</b></span>' if SM else "")
-             + '<span class="fo-chip">End of day · updates after 8 pm</span>')
-    _html(f'<div class="fo-chips">{chips}</div>')
-
-    tabs = ["Signals", "Overview"] + [x["name"] for x in idx] + ["Stocks", "Participants", "Method"]
-    tab = st.pills("View", tabs, default="Signals", key="fo_tab", label_visibility="collapsed") or "Signals"
-
-    if tab == "Signals":
-        _signals_tab(res)
-    elif tab == "Overview":
-        _html(_overview(res))
-    elif tab in [x["name"] for x in idx]:
-        x = next(v for v in idx if v["name"] == tab)
-        has_w = bool((x.get("chain") or {}).get("w"))
-        exp_pick = "Monthly"
-        body = _index_view(x, "Monthly")
-        top, rest = body.split("<!--chain-->", 1)
-        _html(top)
-        if has_w:
-            exp_pick = st.pills("Expiry", ["Monthly", "Weekly"], default="Monthly", key=f"fo_exp_{x['sym']}", label_visibility="collapsed") or "Monthly"
-            if exp_pick == "Weekly":
-                rest = _index_view(x, "Weekly").split("<!--chain-->", 1)[1]
-        _html(rest)
-    elif tab == "Stocks":
+    pick = st.pills("Options map", [x["name"] for x in idx] + ["F&O stocks"], default=idx[0]["name"], key="fd_om", label_visibility="collapsed") or idx[0]["name"]
+    wrap = lambda body: st.markdown(f'<div class="fo">{body}</div>', unsafe_allow_html=True)
+    if pick == "F&O stocks":
         stocks = res.get("stocks", [])
-        _html(_grid("two", _card("The stock model and its record", "sessions it had not seen", _stock_model(res)),
-                    _card("Price and open interest map", f'{len(stocks)} stocks · last 5 sessions', _quadrant(stocks))))
-        flt = st.pills("Stocks", FILTERS, default="All", key="fo_flt", label_visibility="collapsed") or "All"
-        rows = _pick(stocks, flt)
-        _html(_grid("", _card("F&O stocks", f"{len(rows)} shown · ranked by the model", _stock_table(rows), True)))
+        flt = st.pills("Stocks", L.FILTERS, default="All", key="fd_om_flt", label_visibility="collapsed") or "All"
+        rows = L._pick(stocks, flt)
+        wrap(L._grid("two", L._card("Price and open interest map", f"{len(stocks)} stocks · last 5 sessions", L._quadrant(stocks)), L._card("F&O stocks", f"{len(rows)} shown", L._stock_table(rows), True)))
         c1, c2 = st.columns([3, 1])
         with c1:
-            sel = st.selectbox("Open one stock", sorted(s["sym"] for s in stocks), index=None, placeholder="Open one stock for the full picture", key="fo_sym",
-                               label_visibility="collapsed")
+            sel = st.selectbox("Open one stock", sorted(s["sym"] for s in stocks), index=None, placeholder="Open one stock for its option chain and history", key="fd_om_sym", label_visibility="collapsed")
         with c2:
-            if sel and on_open and st.button("Open in research", key="fo_open", use_container_width=True):
+            if sel and on_open and st.button("Open in research", key="fd_om_open", use_container_width=True):
                 try:
                     on_open(sel)
                 except Exception:
                     pass
         if sel:
-            d = E.stock_detail(res, sel)
+            d = L.E.stock_detail(res, sel)
             if d:
-                _html(_stock_detail(d))
-        _html(_sec("Tested readings for stocks", "Simple rules, each with its own backtest across all stocks")
-              + _grid("", _card("Every reading and its record · F&O stocks", "against other F&O stocks, day by day", _evidence(res.get("stock_signals", []), True), True)))
-    elif tab == "Participants":
-        _html(_participants(res) + _internals(res))
-    else:
-        _html(_method(res))
+                lv = d["levels"]
+                body = L._grid("", L._card(sel, f'expiry {L._day(lv.get("m_exp"), False)}', L._level_bar(lv) + L._levels(lv)))
+                if d.get("chain"):
+                    body += L._chain_cards(d["chain"], lv.get("fut"))
+                if d.get("hist"):
+                    body += L._grid("", L._card("Six months", "end of day", L._hist_charts(d["hist"])))
+                wrap(body)
+        return
+    x = next(v for v in idx if v["name"] == pick)
+    lv = x["levels"]
+    ch = x.get("chain") or {}
+    which = "m"
+    if ch.get("w"):
+        which = "w" if (st.pills("Expiry", ["Monthly", "Weekly"], default="Monthly", key=f"fd_om_exp_{x['sym']}", label_visibility="collapsed") or "Monthly") == "Weekly" else "m"
+    wrap(L._grid("", L._card("Levels into expiry", f'expiry {L._day(lv.get("m_exp"), False)}', L._level_bar(lv) + L._levels(lv))) + L._chain_cards(ch.get(which), lv.get("fut"))
+         + L._grid("", L._card("Six months", "end of day", L._hist_charts(x.get("hist") or {}))))
 
 
-# ───────────── compact rows for Home ─────────────
-def home_rows(wait: float = 2.0) -> list | None:
-    """What Home shows: one entry per index. Waits a moment for the engine; returns None if it is still reading the history."""
-    import time
-    res, t0 = E.run_soon(), time.time()
-    while res is None and time.time() - t0 < wait:
-        time.sleep(0.1)
-        res = E.run_soon()
-    if res is None:
+# ───────────── evidence ─────────────
+def _log_rows() -> list:
+    p = ROOT / "log.csv"
+    try:
+        return _read_csv(str(p), _stamp(p)) if p.exists() else []
+    except Exception:
+        return []
+
+
+def _evidence(S, names):
+    ld, sw = S["leaders"], S["swing"]
+    w = {x["key"]: x for x in ld["record"]["windows"]}
+    a = w["all"]
+    used = lambda st_: _act("In use", "b") if st_ == "on" else _act("On trial", "w") if st_ == "trial" else _act("Off")
+    rows = [[f'<span class="s w"><b>Hold the 20 strongest stocks</b><small>12-month strength · weekly check</small></span>', used(ld["status"]), str(ld["record"]["trades"].get("n", "—")),
+             _pct(ld["record"]["trades"].get("win"), 0, False), f'{_pct(a["book"].get("cagr"))} a year', f'{_pct((a["book"].get("cagr") or 0) - (a["avg"].get("cagr") or 0))} a year', "—"]]
+    s, pk = sw["record"]["all"], (sw["record"]["all"].get("pick") or {})
+    rows.append([f'<span class="s w"><b>Leader pullback</b><small>strong stock, sharp 5-session fall</small></span>', used(sw["status"]), str(s.get("n", "—")), _pct(s.get("win"), 0, False), f'{_pct(s.get("exp"), 2)} a trade',
+                 f'{_pct(pk.get("edge"), 2)} a trade', _num(pk.get("t"), 1)])
+    for x in S.get("index") or []:
+        r, oh = x["record"]["all"], (x["record"]["all"].get("over_hold") or {})
+        rows.append([f'<span class="s w"><b>{_e(x["name"])}: dip in an uptrend</b><small>fall of 2.5% above the 200-day</small></span>', used(x["status"]), str(r.get("n", "—")), _pct(r.get("win"), 0, False),
+                     f'{_pct(r.get("exp"), 2)} a trade', f'{_pct(oh.get("edge"), 2)} over holding', _num(oh.get("t"), 1)])
+    for r in (S.get("evidence") or {}).get("rejected") or []:
+        rows.append([f'<span class="s w"><b>{_e(r["name"])}</b><small>{_e(r["rule"].split(".")[0])}</small></span>', _act("Rejected", "s"), str(r.get("n", "—")), _pct(r.get("win"), 0, False), f'{_pct(r.get("exp"), 2)} a trade',
+                     f'{_pct(r.get("pick"), 2)} a trade', _num(r.get("pick_t"), 1)])
+    for x in S.get("index") or []:
+        h = x.get("high20") or {}
+        rows.append([f'<span class="s w"><b>{_e(x["name"])}: new 20-day high</b><small>hold 10 sessions</small></span>', _act("Rejected", "s"), str(h.get("n", "—")), "—", f'{_pct(h.get("exp"), 2)} a trade',
+                     f'{_pct(h.get("edge"), 2)} over holding', _num(h.get("t"), 1)])
+    tested = _t([("Idea", "l"), ("Verdict", "l"), ("Trades", "x"), ("Won", "x"), ("Result", ""), ("Edge", ""), ("t", "x")], rows, scroll=False)
+    D = (S.get("evidence") or {}).get("deciles") or {}
+    dec = ""
+    if D.get("all"):
+        dec = (_vbars(["weak", "", "", "", "", "", "", "", "", "strong"], D["all"], fmt=lambda v: f"{v * 100:.1f}") + f'<div class="fd-n" style="margin-top:8px">Average move over the next 21 sessions for ten groups of stocks sorted by '
+               f'12-month strength, {D.get("all_n", 0)} monthly snapshots. Last 3 years: weakest {_pct(D["last3"][0], 1)}, strongest {_pct(D["last3"][-1], 1)}. This is the effect the Leaders book harvests, and why the '
+               'weakest group is the stay-away list.</div>')
+    bad = [str(y["y"]) for y in ld["record"]["years"] if not y.get("part") and _ok(y.get("book")) and y["book"] < 0]
+    bad_years = (", ".join(bad[:-1]) + " and " + bad[-1]) if len(bad) > 1 else (bad[0] if bad else "no full year so far")
+    static = ['Stops on the Leaders book (4 ATR trail, 20% and 25% from entry, exit below the 200-day): lower return, same worst fall.',
+              'Selling everything when NIFTY 500 is below its 200-day: return fell from about 20% to 7 to 13% a year.',
+              'Selling a holding as soon as it leaves the 350 most traded: same return, a quarter more trades, many of them one-week round trips. Holdings are now kept while among the 500 most traded.',
+              'Breadth filters and a "recent breakouts are working" gauge on breakouts: no help in either half of the history.',
+              '10 holdings instead of 20: much more luck, and worse in the first half of the history. 30 holdings: a little steadier.',
+              'The earlier F&O factor model (19 inputs): no forecasting skill on five years of real data. It no longer places orders.']
+    limits = ['The price history leaves out companies that were later delisted, so old results look better than they were. The last three years are least affected.',
+              'These rules were chosen in November 2026 after testing about thirty ideas on this same history. Expect less going forward than the record shows.',
+              'Costs are 0.15% a side for stocks. Taxes, slippage on thin days and circuit limits are not in the numbers. Demergers and rights issues are not adjusted in the price files.',
+              f'The Leaders book has fallen {_pct(-(a["book"].get("dd") or 0), 0, False)} from a peak at its worst, and lost money in {bad_years}. Only use money you can leave alone through that.',
+              'NSE\'s own momentum indexes beat their parent indexes over 20 years, yet an index fund on one of them launched in late 2024 was still under water in mid-2026. Momentum has long bad stretches.',
+              'End-of-day data only: no intraday signals, and fills are assumed at the next open.']
+    log = _log_rows()
+    fnum = lambda v: _px(float(v)) if str(v).replace(".", "", 1).isdigit() else "—"
+    lrows = [[_dshort(r.get("date", "")), _e(str(r.get("book", "")).capitalize()), _act(r.get("action", "").capitalize(), "b" if r.get("action") == "BUY" else "s"), f'<b style="color:var(--tx)">{_e(r.get("sym", ""))}</b>',
+              fnum(r.get("price", "")), fnum(r.get("stop", "")), _e(r.get("note", ""))] for r in reversed(log[-40:])]
+    lg = _t([("Signal day", "l"), ("Book", "l"), ("", "l"), ("Symbol", "l"), ("Close", ""), ("Stop", "x"), ("Note", "l x")], lrows) if lrows else _empty(
+        f'<b>No order has been issued yet.</b> The live record starts on {_day(S.get("live_since"))}; every order is written to arka_data/signals/log.csv on the day it is issued and is never edited.')
+    health = _ks([_k("Prices to", _day(S["asof"]), f'built {_dshort(str(S.get("built", ""))[:10])}'), _k("History from", _day(S.get("first")), f'{S.get("top", 350)} most traded'),
+                  _k("Live books since", _day(S.get("live_since")), "forward only"), _k("Replay matches live", "No" if ld.get("drift") else "Yes", "history unchanged" if not ld.get("drift") else "history was revised")], 2, True)
+    li = lambda xs: '<ul class="fd-list">' + "".join(f"<li>{_e(x)}</li>" for x in xs) + "</ul>"
+    avoid = [[f'<span class="s">{_sym(r["sym"], names)}</span>', _px(r["price"]), _num((r.get("rank") or 0) * 100, 0), _sg(r.get("below200"), 0), ("F&O" if r.get("fno") else "")] for r in S.get("avoid") or []]
+    _html(_grid(_pan("What was tested, and what survived", "edge = beyond the average liquid stock, or beyond just holding the index", tested, "c8 t12", True), _pan("Strength today, return next month", "% over the next 21 sessions", dec or _empty("Not computed."), "c4 t12"))
+          + _grid(_pan("Also tested, not used", "November 2026", li(static), "c4 t6"), _pan("Limits you should know", "read before using real money", li(limits), "c4 t6"),
+                  _pan("Stay-away list", "weakest tenth by strength, below the 200-day", _t([("Symbol", "l"), ("Close", ""), ("Strength", ""), ("vs 200-day", ""), ("", "x")], avoid) if avoid else _empty("None."), "c4 t12", True))
+          + _grid(_pan("Live record: orders as they were issued", f'{len(log)} logged', lg, "c8 t12", True), _pan("Data health", "", health, "c4 t12", True)))
+
+
+# ───────────── charts on demand ─────────────
+def _chart_picker(S, C, syms, key, marks_for, on_open=None):
+    syms = [s for s in dict.fromkeys(syms) if s in (C.get("s") or {})]
+    if not syms:
+        return
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        sel = st.selectbox("Chart", syms, index=0, key=key, label_visibility="collapsed")
+    with c2:
+        if sel and on_open and st.button("Open in research", key=key + "_open", use_container_width=True):
+            try:
+                on_open(sel)
+            except Exception:
+                pass
+    if not sel:
+        return
+    marks = [m for m in marks_for(sel) if _ok(m[0])]
+    d, s = C["d"], C["s"][sel]
+    try:
+        import plotly.graph_objects as go
+        fig = go.Figure()
+        fig.add_trace(go.Candlestick(x=d, open=s["o"], high=s["h"], low=s["l"], close=s["c"], name=sel, increasing_line_color="#30D158", decreasing_line_color="#FF453A",
+                                     increasing_fillcolor="#30D158", decreasing_fillcolor="#FF453A", showlegend=False))
+        fig.add_trace(go.Scatter(x=d, y=s.get("m"), mode="lines", line=dict(color="#FF9F0A", width=1.3), name="50-day average", hoverinfo="skip"))
+        for v, lab, _c in marks:
+            fig.add_hline(y=v, line_dash="dot", line_width=1, line_color="#FF453A" if lab == "Stop" else "#A1A1AA", annotation_text=f"{lab} {_px(v)}", annotation_position="top left",
+                          annotation_font=dict(size=10, color="#A1A1AA"))
+        fig.update_layout(height=340, margin=dict(l=6, r=6, t=26, b=6), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(family="Inter, system-ui, sans-serif", size=11, color="#A1A1AA"),
+                          title=dict(text=f"{sel} · {len(d)} sessions · candles with the 50-day average", font=dict(size=12, color="#EDEDEF"), x=0.01, y=0.98), hovermode="x unified", showlegend=False,
+                          xaxis=dict(type="category", nticks=8, showgrid=False, rangeslider=dict(visible=False), tickfont=dict(size=10)), yaxis=dict(side="right", gridcolor="rgba(127,127,127,.15)", tickfont=dict(size=10)))
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=key + "_fig")
+    except Exception:
+        _html(_grid(_pan(f"{sel}", f"{len(d)} sessions · candles with the 50-day average", _candles(d, s, marks), "c12 t12")))
+
+
+# ───────────── page ─────────────
+def _setup_note() -> str:
+    return ('<b>The signal files are not in the repository yet.</b><br>1. Add <b>signal_engine.py</b> to the repository (next to app.py).<br>'
+            '2. Add <b>.github/workflows/signals.yml</b>.<br>3. In GitHub open Actions, choose "Signals", press Run workflow and wait for the green tick (about three minutes).<br>'
+            'The desk fills in on its own after that, and refreshes every weekday evening.')
+
+
+def render_fno(supabase=None, on_open=None):
+    st.markdown(CSS3, unsafe_allow_html=True)
+    S = signals()
+    if not S or S.get("v") != 3:
+        _html(_pan("Signal desk", "", _empty(_setup_note()), "", True))
+        tab = st.pills("View", ["Options map"], default="Options map", key="fd_tab0", label_visibility="collapsed")
+        if tab:
+            _options_map(on_open)
+        return
+    C = _charts()
+    names = _names()
+    _html(_ticker(S))
+    tab = st.pills("View", TABS, default="Desk", key="fd_tab", label_visibility="collapsed") or "Desk"
+    try:
+        if tab in ("Desk", "Leaders", "Swing", "Index"):
+            sz = _sizing()
+        if tab == "Desk":
+            _desk(S, C, sz, names)
+        elif tab == "Leaders":
+            _leaders(S, C, sz, names, on_open)
+        elif tab == "Swing":
+            _swing(S, C, sz, names, on_open)
+        elif tab == "Index":
+            _index(S, C, sz)
+        elif tab == "Big players":
+            _players(S, names)
+        elif tab == "Options map":
+            _options_map(on_open)
+        else:
+            _evidence(S, names)
+    except Exception as e:
+        _html(_pan("This view could not be drawn", "", _empty(f"{_e(type(e).__name__)}: {_e(str(e)[:200])}. The other tabs still work; running the Signals workflow again usually fixes a half-written file."), "", True))
+    _html('<div class="fd-n" style="margin-top:4px">End-of-day signals from fixed rules tested on past prices. They can and do lose money. Not investment advice.</div>')
+
+
+# ───────────── for other pages ─────────────
+def home_desk() -> dict | None:
+    """What Home shows about the desk. None when the signal files are not there yet."""
+    S = signals()
+    if not S or S.get("v") != 3:
         return None
+    ld, sw = S["leaders"], S["swing"]
+    w = {x["key"]: x for x in ld["record"]["windows"]}
+    orders = order_rows(S, _saved_sizing())
+    return {"asof": S["asof"], "orders": [{"book": o["book"], "act": o["act"], "sym": o["sym"], "ref": o["ref"], "stop": o["stop"]} for o in orders],
+            "leaders": {"status": ld["status"], "cagr": w["all"]["book"].get("cagr"), "index": w["all"]["index"].get("cagr"), "held": len(ld["holdings"]), "dd_now": ld["record"].get("dd_now"),
+                        "check_today": ld.get("check_today"), "top": [{"sym": h["sym"], "pnl": h["pnl"]} for h in ld["holdings"][:3]]},
+            "swing": {"status": sw["status"], "new": len(sw["new"]), "open": len(sw["open"]), "win": sw["record"]["all"].get("win"), "exp": sw["record"]["all"].get("exp")},
+            "index": [{"name": x["name"], "status": x["status"], "action": x["action"], "last": x["last"], "r5": x.get("r5"), "trigger": x.get("trigger"), "above200": x.get("above200"),
+                       "pcr": (x.get("fno") or {}).get("pcr"), "max_pain": (x.get("fno") or {}).get("max_pain"), "put_wall": (x.get("fno") or {}).get("put_wall"),
+                       "call_wall": (x.get("fno") or {}).get("call_wall"), "iv": (x.get("fno") or {}).get("iv")} for x in S.get("index") or []]}
+
+
+def home_rows(wait: float = 2.0) -> list | None:
+    """Rows in the shape the earlier Home card expects (one per index), filled from the new desk."""
+    D = home_desk()
+    if D is None:
+        return []
+    word = {"buy": "Buy the dip at the open", "sell": "Sell at the open", "hold": "In a dip trade", "none": "No signal"}
     out = []
-    for x in (res.get("indexes") or {}).values():
-        lv, M = x["levels"], x.get("model") or {}
-        top = next((d for d in (M.get("drivers") or []) if d.get("x") is not None), None)
-        out.append({"name": x["name"], "verdict": x["verdict"], "tone": x["tone"], "asof": res.get("asof"), "pcr": lv.get("pcr"), "iv": lv.get("iv"),
-                    "max_pain": lv.get("max_pain"), "put_wall": lv.get("put_wall"), "call_wall": lv.get("call_wall"), "move5": lv.get("move5"), "fut": lv.get("fut"),
-                    "proven": x["counts"].get("proven", 0), "reason": (top["label"] if top else ""), "forecast": M.get("forecast"), "conf": M.get("conf", "Untested"),
-                    "p_up": M.get("p_up"), "signal": (x.get("call") or {}).get("word", "")})
+    for x in D["index"]:
+        out.append({"name": x["name"], "verdict": word[x["action"]], "tone": "up" if x["action"] in ("buy", "hold") else "flat", "asof": D["asof"], "pcr": x["pcr"], "iv": x["iv"],
+                    "max_pain": x["max_pain"], "put_wall": x["put_wall"], "call_wall": x["call_wall"], "move5": None, "fut": x["last"], "proven": 0, "reason": "", "forecast": None,
+                    "conf": STATUS.get(x["status"], STATUS["off"])[0], "p_up": None, "signal": word[x["action"]]})
     return out
+
+
+def signal_for(sym: str) -> tuple:
+    """(what the desk says about this stock, short detail) for the Research page."""
+    S = signals()
+    if not S or S.get("v") != 3:
+        return "", ""
+    sym = str(sym).upper()
+    ld, sw = S["leaders"], S["swing"]
+    for r in ld.get("buy") or []:
+        if r["sym"] == sym:
+            return "Leaders book: buy at the next open", f'12-month strength {_num((r.get("rank") or 0) * 100, 0)} of 100'
+    for h in ld.get("holdings") or []:
+        if h["sym"] == sym:
+            word = "sell at the next open" if h["flag"] == "sell" else "held, on watch" if h["flag"] == "risk" else "held"
+            return f"Leaders book: {word}", f'since {_day(h["since"])} · {_pct(h["pnl"], 0)} · strength {_num((h.get("rank") or 0) * 100, 0)} of 100'
+    for r in sw.get("new") or []:
+        if r["sym"] == sym:
+            return "Swing: buy at the next open", f'stop about {_px(r["stop"])}'
+    for r in sw.get("open") or []:
+        if r["sym"] == sym:
+            return ("Swing: sell at the next open" if r.get("sell") else "Swing: open trade"), f'entry {_px(r["entry"])} · stop {_px(r["stop"])} · {_pct(r["pnl"], 1)}'
+    for r in S.get("avoid") or []:
+        if r["sym"] == sym:
+            return "On the stay-away list", "weakest tenth by 12-month strength and below its 200-day average"
+    for r in ld.get("candidates") or []:
+        if r["sym"] == sym:
+            return "Leaders book: next in line", f'12-month strength {_num((r.get("rank") or 0) * 100, 0)} of 100'
+    return "No signal on the desk", ""
