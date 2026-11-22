@@ -1,5 +1,7 @@
-"""Arka Trades — Research Terminal v16.
+"""Arka Trades — Research Terminal v16.1.
 
+v16.1: the FNO screen and the dashboard card say what the signal desk (fno_page.py v3) holds for the stock: in the Leaders book,
+       a swing signal, next in line, or on the stay-away list. Nothing else changed.
 v16: a research desk, not only a data viewer.
 * Search with suggestions, like the Home search: type a few letters of the symbol or of the company name (hdfc shows
   HDFCBANK, HDFCLIFE, HDFCAMC …). A "Same name" row offers the sister companies of the stock you are on.
@@ -2825,7 +2827,21 @@ def _fno_get(wait=False):
         return None, None
 
 
+def _desk_signal(sym):
+    """(signal, detail) from the signal desk (fno_page.py v3), or None with an earlier fno_page.py."""
+    try:
+        import fno_page as fp
+        f = getattr(fp, "signal_for", None)
+        out = f(sym) if f else None
+        return out if (out and out[0]) else None
+    except Exception:
+        return None
+
+
 def _fno_signal(res, sym):
+    desk = _desk_signal(sym)
+    if desk:
+        return desk[0], "on"
     ST = (res or {}).get("stock_trade") or {}
     tier = ST.get("tier", "off") if ST.get("trusted") else "off"
     for name, rows in (("Buy signal today", ST.get("buy")), ("Open signal: hold", [h for h in ST.get("hold") or [] if not h.get("sell")]),
@@ -2836,6 +2852,10 @@ def _fno_signal(res, sym):
 
 
 def _fno_pos(sym, B, T, key, nf):
+    desk = _desk_signal(sym)
+    if desk:
+        tail = "" if desk[0].startswith("No signal") else " The rule behind it and its record are on the F&O page."
+        st.markdown(f'<div class="rp-read"><b>{_esc(desk[0])}</b>{(" · " + _esc(desk[1])) if desk[1] else ""}.{tail}</div>', unsafe_allow_html=True)
     with st.spinner("Reading the stored F&O history…"):
         fe, res = _fno_get(wait=True)
     if fe is None or not res or not res.get("ok"):
@@ -2845,10 +2865,11 @@ def _fno_pos(sym, B, T, key, nf):
     if not d:
         _unavailable("F&O positioning", "a stock that trades in futures and options", T, f"{sym} is not in the F&O list on {res.get('asof')}.")
         return
-    name, tier = _fno_signal(res, sym)
-    tl = {"on": "approved", "trial": "on trial", "off": "switched off"}[tier]
-    st.markdown(f'<div class="rp-read"><b>{_esc(name)}</b> · stock signals are <b>{tl}</b>. Data to {_esc(res.get("asof"))}. '
-                'The full record and the rules are on the F&O page, Signals tab.</div>', unsafe_allow_html=True)
+    if not desk:
+        name, tier = _fno_signal(res, sym)
+        tl = {"on": "approved", "trial": "on trial", "off": "switched off"}[tier]
+        st.markdown(f'<div class="rp-read"><b>{_esc(name)}</b> · stock signals are <b>{tl}</b>. Data to {_esc(res.get("asof"))}. '
+                    'The full record and the rules are on the F&O page, Signals tab.</div>', unsafe_allow_html=True)
     try:
         import fno_page as fp
         st.markdown(fp.CSS + f'<div class="fo">{fp._stock_detail(d)}</div>', unsafe_allow_html=True)
@@ -2861,10 +2882,11 @@ def _fno_pos(sym, B, T, key, nf):
 
 def _fno_mini(sym, T):
     fe, res = _fno_get(wait=False)
-    if fe is None or not res or not res.get("ok"):
-        return
-    s = next((x for x in res.get("stocks", []) if x["sym"] == sym), None)
+    s = next((x for x in res.get("stocks", []) if x["sym"] == sym), None) if (fe is not None and res and res.get("ok")) else None
     if not s:
+        desk = _desk_signal(sym)                      # not an F&O stock (or the F&O history is still loading): the desk's signal alone
+        if desk and not desk[0].startswith("No signal"):
+            _mini("Signal desk", [("Signal", desk[0])] + ([("Detail", desk[1])] if desk[1] else []), T, "FNO")
         return
     lv = s["levels"]
     name, _ = _fno_signal(res, sym)
