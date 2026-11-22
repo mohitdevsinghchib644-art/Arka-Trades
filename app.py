@@ -1,5 +1,9 @@
 """
-Arka Trades — Market Terminal v10.4
+Arka Trades — Market Terminal v10.5
+
+v10.5: the F&O page is now the signal desk (fno_page.py v3, fed by signal_engine.py through the "Signals" workflow): new title,
+       the search codes SIG and SIGNALS also open it, and the app no longer starts the earlier F&O engine in the background
+       (it now loads only when the Options map tab or a stock's FNO screen is opened). Nothing else changed.
 
 v10.4: new page, F&O (fno_page.py + fno_engine.py): what futures and options positioning says for NIFTY 50, BANK NIFTY and
        every F&O stock, with each signal's tested record. It sits after Regime in the tabs, second in the phone menu, and
@@ -830,9 +834,10 @@ def _allowed(page: str) -> bool:
 
 
 def _warm_fno():
-    """Start the F&O engine in the background, so Home and the F&O page open without a wait. Costs nothing once it is ready."""
+    """Read the small signal files once, so Home and the F&O desk open without a wait. The earlier F&O engine is no longer started
+    here: it loads when the Options map tab or a stock's FNO screen is opened."""
     try:
-        importlib.import_module("fno_engine").run_soon()
+        importlib.import_module("fno_page").signals()
     except BaseException as e:
         if _is_streamlit_control(e):
             raise
@@ -847,10 +852,10 @@ NAV = [("Home", "home"), ("Brief", "brief"), ("Regime", "regime"), ("F&O", "fno"
 NAV_LABEL = {t: l for l, t in NAV}
 LEGACY_PAGES = {"profile": "account", "settings": "account", "contact": "account"}
 
-FUNCTION_CODES = {"HOME": "home", "MAIN": "home", "BRIEF": "brief", "AM": "brief", "FNO": "fno", "FO": "fno", "OI": "fno", "MF": "flow", "FLOW": "flow", "WL": "watchlist", "PORT": "portfolio",
+FUNCTION_CODES = {"HOME": "home", "MAIN": "home", "BRIEF": "brief", "AM": "brief", "FNO": "fno", "FO": "fno", "OI": "fno", "SIG": "fno", "SIGNALS": "fno", "MF": "flow", "FLOW": "flow", "WL": "watchlist", "PORT": "portfolio",
                   "NEWS": "news", "N": "news", "EQS": "smart_scan", "SCRN": "smart_scan", "RES": "research", "AI": "analysis",
                   "ACCT": "account", "SET": "account", "REG": "regime", "MKT": "regime", "BT": "backtest", "BACK": "backtest"}
-FUNCTION_MENU = ["BRIEF · Daily brief", "FNO · Futures and options", "MF · Money flow", "RES · Research", "PORT · Portfolio", "WL · Watchlist", "NEWS · News", "EQS · Screener",
+FUNCTION_MENU = ["BRIEF · Daily brief", "FNO · F&O and signals", "MF · Money flow", "RES · Research", "PORT · Portfolio", "WL · Watchlist", "NEWS · News", "EQS · Screener",
                  "AI · Arka AI", "REG · Market regime", "BT · Backtest lab", "HOME · Market monitor", "ACCT · Account"]
 TICKER_FUNCS = {"RES": "research", "AI": "analysis", "DES": "security", "GP": "security"}
 if not IS_ADMIN:                                          # members: admin pages disappear from every menu
@@ -862,7 +867,7 @@ if not IS_ADMIN:                                          # members: admin pages
 PAGE_META = {
     "home": ("Market monitor", "India first, global context and your book."),
     "brief": ("Daily brief", "What happened overnight and what can move Indian stocks today."),
-    "fno": ("Futures and options", "What positioning says for NIFTY, BANK NIFTY and every F&O stock, with each signal's tested record."),
+    "fno": ("F&O and signals", "Orders for the next open, the trend and swing books, the index setups and what large players hold. Fixed rules, tested on real prices."),
     "flow": ("Money flow", "Where money is moving across sectors, how strong it is, and whether following it has worked."),
     "watchlist": ("Watchlist", "Your stocks with full quotes and today's events."),
     "portfolio": ("Portfolio", "Holdings, live P&L, exposure, tax and risk."),
@@ -1174,7 +1179,7 @@ TABS_DESKTOP = [("Home", "home"), ("Brief", "brief"), ("Regime", "regime"), ("F&
                 ("Account", "account")]
 TABS_PHONE = [("Home", "home", ":material/home:"), ("Watchlist", "watchlist", ":material/bookmark:"),
               ("Portfolio", "portfolio", ":material/pie_chart:"), ("Research", "research", ":material/query_stats:")]
-MORE_PHONE = [("Daily brief", "brief", ":material/wb_sunny:"), ("Futures and options", "fno", ":material/candlestick_chart:"),
+MORE_PHONE = [("Daily brief", "brief", ":material/wb_sunny:"), ("F&O and signals", "fno", ":material/candlestick_chart:"),
               ("Market regime", "regime", ":material/monitor_heart:"), ("Backtest lab", "backtest", ":material/science:"),
               ("Money flow", "flow", ":material/swap_vert:"), ("News", "news", ":material/newspaper:"),
               ("Screener", "smart_scan", ":material/filter_alt:"), ("Arka AI", "analysis", ":material/auto_awesome:"),
