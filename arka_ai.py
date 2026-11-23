@@ -1,5 +1,9 @@
 """
-arka_ai.py — Arka AI v11 · YOUR playbook, YOUR zones, YOUR trade plan — now with evidence
+arka_ai.py — Arka AI v11.1 · YOUR playbook, YOUR zones, YOUR trade plan — now with evidence
+
+NEW IN v11.1
+  * A busy Gemini model (503 "high demand", 429) is tried once more and then the next models are tried, instead of failing at once.
+  * Saving to the playbook uses the Pinecone index's own size, so an index created by hand (e.g. 3072) no longer gives a dimension error.
 
 NEW IN v11 (speed + redesign; analysis logic and your saved playbook are unchanged)
   SPEED     * Analysis: price data, NIFTY context and the results date load in parallel; the weekly chart is built from the
@@ -193,12 +197,31 @@ def get_pinecone_index():
         if INDEX_NAME not in existing:
             pc.create_index(name=INDEX_NAME, dimension=768, metric="cosine",
                             spec=ServerlessSpec(cloud="aws", region="us-east-1"))
+        try:                                                       # v11.1: an index made by hand can have another size (e.g. 3072)
+            _INDEX_DIM["n"] = int(pc.describe_index(INDEX_NAME).dimension)
+        except Exception:
+            pass
         return pc.Index(INDEX_NAME)
     except Exception:
         return None
 
 
-_CONST_VEC = [0.001] * 768     # storage does not need real embeddings: items are read back by id, not by similarity
+_INDEX_DIM = {"n": 768}
+
+
+def _const_vec(idx=None) -> list:
+    """A placeholder vector of the index's own size. Storage does not need real embeddings: items are read back by id."""
+    n = _INDEX_DIM.get("n") or 768
+    if idx is not None and not _INDEX_DIM.get("checked"):
+        try:
+            n = int(idx.describe_index_stats().get("dimension") or n)
+        except Exception:
+            try:
+                n = int(getattr(idx.describe_index_stats(), "dimension", n) or n)
+            except Exception:
+                pass
+        _INDEX_DIM.update(n=n, checked=True)
+    return [0.001] * n
 
 
 def _invalidate():
@@ -303,7 +326,7 @@ def save_item(kind: str, name: str, payload: dict, activate: bool = True, source
         if len(compact) > 34000:
             st.error("This item is too large to store (over 34 KB). Trim it or split the document.")
             return False
-        emb = _CONST_VEC
+        emb = _const_vec(idx)
         meta = {"memory_kind": kind, "item_id": item_id, "name": name, "active": bool(activate), "saved_at": saved_at,
                 "source_name": source_name, "source_text": str(source_text or "")[:3000], "version": V9_VERSION}
         if kind == "setup":
@@ -480,6 +503,13 @@ def parse_json_loose(raw: str) -> dict:
     return out
 
 
+def _model_busy(exc) -> bool:
+    """v11.1: Google's side is overloaded or rate-limited for a moment (503 / 429). Worth one more try, then another model."""
+    t = str(exc).lower()
+    return any(k in t for k in ("503", "unavailable", "high demand", "overloaded", "429", "resource_exhausted", "resource exhausted",
+                                "deadline", "timed out", "timeout", "500 internal"))
+
+
 def _model_gone(exc) -> bool:
     t = str(exc).lower()
     return any(k in t for k in ("not found", "404", "is not supported", "deprecated", "no longer available", "unknown model", "not_found"))
@@ -500,45 +530,57 @@ def _generate(prompt: str, images=None, pdf: bytes | None = None, want_json: boo
     ok = st.session_state.get("aa_model_ok")
     models = ([ok] if ok else []) + [m for m in b["models"] if m != ok]
     last = None
+    busy = False
     for model in models[:4]:
-        try:
-            if b["kind"] == "new":
-                parts = [prompt]
-                if pdf:
-                    parts.append(genai_types.Part.from_bytes(data=pdf, mime_type="application/pdf"))
-                for png in images or []:
-                    parts.append(genai_types.Part.from_bytes(data=png, mime_type="image/png"))
-                kw = {"system_instruction": SYSTEM_PROMPT, "temperature": 0.0, "response_mime_type": "application/json" if want_json else None}
-                budget = _thinking_budget()
-                if budget is not None and not st.session_state.get("aa_no_thinking_cfg"):
-                    try:
-                        kw["thinking_config"] = genai_types.ThinkingConfig(thinking_budget=budget)
-                    except Exception:
-                        pass
-                try:
-                    resp = b["client"].models.generate_content(model=model, contents=parts, config=genai_types.GenerateContentConfig(**kw))
-                except Exception as exc:
-                    if "thinking_config" in kw and "think" in str(exc).lower():      # this model does not accept a budget: run without it
-                        st.session_state["aa_no_thinking_cfg"] = True
-                        kw.pop("thinking_config")
-                        resp = b["client"].models.generate_content(model=model, contents=parts, config=genai_types.GenerateContentConfig(**kw))
-                    else:
-                        raise
-            else:
-                m = genai.GenerativeModel(model_name=model, system_instruction=SYSTEM_PROMPT)
-                content = [prompt]
-                if pdf:
-                    content.append({"mime_type": "application/pdf", "data": pdf})
-                for png in images or []:
-                    content.append({"mime_type": "image/png", "data": png})
-                gc = {"temperature": 0.0, **({"response_mime_type": "application/json"} if want_json else {})}
-                resp = m.generate_content(content, generation_config=gc)
-            st.session_state["aa_model_ok"] = model
-            return (getattr(resp, "text", "") or "").strip()
-        except Exception as exc:
-            last = exc
-            if not _model_gone(exc):
-                break
+      for attempt in (0, 1):
+          try:
+              if b["kind"] == "new":
+                  parts = [prompt]
+                  if pdf:
+                      parts.append(genai_types.Part.from_bytes(data=pdf, mime_type="application/pdf"))
+                  for png in images or []:
+                      parts.append(genai_types.Part.from_bytes(data=png, mime_type="image/png"))
+                  kw = {"system_instruction": SYSTEM_PROMPT, "temperature": 0.0, "response_mime_type": "application/json" if want_json else None}
+                  budget = _thinking_budget()
+                  if budget is not None and not st.session_state.get("aa_no_thinking_cfg"):
+                      try:
+                          kw["thinking_config"] = genai_types.ThinkingConfig(thinking_budget=budget)
+                      except Exception:
+                          pass
+                  try:
+                      resp = b["client"].models.generate_content(model=model, contents=parts, config=genai_types.GenerateContentConfig(**kw))
+                  except Exception as exc:
+                      if "thinking_config" in kw and "think" in str(exc).lower():      # this model does not accept a budget: run without it
+                          st.session_state["aa_no_thinking_cfg"] = True
+                          kw.pop("thinking_config")
+                          resp = b["client"].models.generate_content(model=model, contents=parts, config=genai_types.GenerateContentConfig(**kw))
+                      else:
+                          raise
+              else:
+                  m = genai.GenerativeModel(model_name=model, system_instruction=SYSTEM_PROMPT)
+                  content = [prompt]
+                  if pdf:
+                      content.append({"mime_type": "application/pdf", "data": pdf})
+                  for png in images or []:
+                      content.append({"mime_type": "image/png", "data": png})
+                  gc = {"temperature": 0.0, **({"response_mime_type": "application/json"} if want_json else {})}
+                  resp = m.generate_content(content, generation_config=gc)
+              st.session_state["aa_model_ok"] = model
+              return (getattr(resp, "text", "") or "").strip()
+          except Exception as exc:
+              last = exc
+              if _model_busy(exc):
+                  busy = True
+                  if attempt == 0:
+                      time.sleep(2.5)                              # the same model once more ...
+                      continue
+                  break                                            # ... then the next model
+              if _model_gone(exc):
+                  break                                            # retired name: next model
+              raise RuntimeError(f"Gemini call failed: {last}")
+    if busy:
+        raise RuntimeError("Google's AI service is busy right now (tried " + ", ".join(str(m) for m in models[:4]) + "). Nothing is wrong with "
+                           "your key or the app: wait a minute and press the button again.")
     raise RuntimeError(f"Gemini call failed: {last}")
 
 
