@@ -1,7 +1,9 @@
 # Arka Trades · morning brief
 # Writes the Daily brief and sends it to Telegram at about 08:00 IST on weekdays.
-# GitHub can start scheduled jobs late and sometimes skips one, so there are three starts each morning:
-# 08:00, 08:20 and 08:45 IST. The first one that runs sends the brief; the others see it was sent and do nothing.
+# GitHub can start scheduled jobs late and sometimes skips one, so there are five starts each morning between
+# 07:37 and 08:57 IST, on odd minutes (the hour and half-hour marks are GitHub's busiest). The first one that runs
+# sends the brief; the others see it was sent and do nothing.
+# A scheduled run that GitHub starts after 11:00 IST does nothing: a morning brief in the evening is worse than none.
 # You can also start it by hand: Actions tab -> "Daily brief" -> "Run workflow".
 #
 # Secrets it reads (repository Settings -> Secrets and variables -> Actions). Names only; values never appear in logs:
@@ -14,9 +16,11 @@ name: Daily brief
 
 on:
   schedule:
-    - cron: "30 2 * * 1-5"        # 02:30 UTC = 08:00 IST, Monday to Friday
-    - cron: "50 2 * * 1-5"        # 08:20 IST, backup
-    - cron: "15 3 * * 1-5"        # 08:45 IST, second backup
+    - cron: "7 2 * * 1-5"         # 02:07 UTC = 07:37 IST, Monday to Friday
+    - cron: "23 2 * * 1-5"        # 07:53 IST
+    - cron: "41 2 * * 1-5"        # 08:11 IST
+    - cron: "3 3 * * 1-5"         # 08:33 IST
+    - cron: "27 3 * * 1-5"        # 08:57 IST
   workflow_dispatch:
 
 permissions:
@@ -56,4 +60,16 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           ONCE: ${{ github.event_name == 'schedule' && '--once' || '' }}      # a run started by hand always sends
-        run: python daily_brief.py --send $ONCE
+          EVENT: ${{ github.event_name }}
+        run: |
+          now=$(TZ=Asia/Kolkata date +%H%M)
+          if [ "$EVENT" = "schedule" ] && [ "$((10#$now))" -gt 1100 ]; then
+            echo "GitHub started this morning run late (now $now IST). Nothing sent."
+            exit 0
+          fi
+          if [ -z "$GEMINI_KEY" ] || [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "A required secret is missing. Add GEMINI_KEY, TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in"
+            echo "repository Settings -> Secrets and variables -> Actions -> New repository secret."
+            exit 1
+          fi
+          python daily_brief.py --send $ONCE
