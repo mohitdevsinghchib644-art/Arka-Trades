@@ -1,6 +1,7 @@
 // Arka Trades · new app (stage 3): Home, Watchlist, the full Portfolio, Signals, Markets, Daily brief, More. Plain JavaScript, no build step.
 import * as PFV from "./portfolio.js";
 import * as RG from "./regime.js";
+import * as HM from "./home.js";
 import { chartMove } from "./charts.js";
 const CLASSIC = "https://arka-trades-1.streamlit.app";       // the Streamlit app, for sections that have not moved yet
 const $ = (s) => document.querySelector(s);
@@ -32,7 +33,7 @@ const MORE = [["Stock research", "Financials, charts, filings and peers for any 
   ["Screener", "Describe a setup and scan the market."], ["Backtest", "Test a rule on past prices."], ["News", "Market wire and exchange filings."]];
 
 const S = { me: null, tab: "home", q: {}, at: {}, wl: { rows: [], list: "Main", loaded: false, err: "" }, sig: null, sigErr: "", sigTab: "Leaders", mkTab: "India", sort: "order",
-            pf: PFV.pfDefaults(), rg: RG.rgDefaults(), qv: 0, deals: null, brief: undefined,
+            pf: PFV.pfDefaults(), rg: RG.rgDefaults(), qv: 0, hm: HM.homeDefaults(), deals: null, brief: undefined,
             sheet: null, results: null, searching: false };
 
 // ── small helpers ──
@@ -106,13 +107,13 @@ const mine = () => S.wl.rows.filter((r) => r.list === S.wl.list).map((r) => r.sy
 const inList = (sym) => S.wl.rows.some((r) => r.sym === sym && r.list === S.wl.list);
 function pageSymbols() {
   const wl = mine();
-  if (S.tab === "home") return [...INDICES.map((x) => x[1]), ...SECTORS.map((x) => x[1]), ...wl.slice(0, 12)];
+  if (S.tab === "home") return [...HM.N50, ...S.pf.lots.map((l) => l.sym), ...wl.slice(0, 7)];
   if (S.tab === "watchlist") return wl;
   if (S.tab === "portfolio") return [...new Set(S.pf.lots.map((l) => l.sym)), ...wl.slice(0, 12)];
   if (S.tab === "markets") return [...MARKETS[S.mkTab].map((x) => x[1]), ...wl.slice(0, 12)];
   return wl.slice(0, 12);
 }
-const refresh = () => need(pageSymbols());
+const refresh = () => { need(pageSymbols()); if (S.tab === "home") HM.loadHome(); };
 
 // ── pieces ──
 const qOf = (s) => S.q[s];
@@ -135,37 +136,6 @@ function rail() {                                           // desktop: the watc
 }
 
 // ── pages ──
-function home() {
-  const t = ist(), hr = t.getHours(), hello = hr < 12 ? "Good morning" : hr < 17 ? "Good afternoon" : "Good evening";
-  const tiles = INDICES.map(([n, s]) => { const q = qOf(s);
-    return `<button class="tile" data-sym="${esc(s)}"><div class="n">${n}</div><div class="p">${q && q.ok ? num(q.price) : '<span class="' + (q ? "mu" : "sk") + '">—</span>'}</div>
-      <div class="c ${cls(q && q.pct)}">${q && q.ok ? sgn(q.chg) + " (" + pc(q.pct) + ")" : "&nbsp;"}</div>${spark(q && q.spark, q && q.prev, 120, 30, true)}</button>`; }).join("");
-  const secs = SECTORS.map(([n, s]) => ({ n, q: qOf(s) })).filter((x) => x.q && x.q.ok && x.q.pct != null).sort((a, b) => b.q.pct - a.q.pct);
-  const mx = Math.max(1, ...secs.map((x) => Math.abs(x.q.pct)));
-  const secHtml = secs.length ? secs.map((x) => { const w = (Math.abs(x.q.pct) / mx) * 50;
-    return `<div class="sec"><span>${x.n}</span><span class="t"><i style="${x.q.pct >= 0 ? "left:50%" : "right:50%"};width:${w.toFixed(1)}%;background:var(${x.q.pct >= 0 ? "--up" : "--dn"})"></i></span><b class="${cls(x.q.pct)}">${pc(x.q.pct)}</b></div>`; }).join("")
-    : '<div class="note">Loading sectors…</div>';
-  const upN = secs.filter((x) => x.q.pct > 0).length;
-  const wl = mine();
-  const wlHtml = !S.wl.loaded ? "" : `<div class="only-m"><h2>Watchlist <a href="#/watchlist">See all</a></h2><div class="card">${wl.length ? wl.slice(0, 5).map((s) => stockRow(s)).join("")
-    : '<div class="empty"><b>No stocks yet</b>Tap the search icon and add the stocks you follow.</div>'}</div></div>`;
-  return `<div><div class="hd"><div><h1>${hello}</h1><div class="sub">${t.toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long" })}</div></div></div>
-    <div class="tiles">${tiles}</div>
-    <div class="two-col"><div><h2>Market health <span>${S.sig ? "close of " + esc(S.sig.asof) : ""}</span></h2>${health()}</div>
-      <div><h2>Signal desk <a href="#/signals">Open</a></h2>${ordersCard(true)}</div></div>
-    ${wlHtml}
-    <h2>Sectors today <span>${secs.length ? upN + " of " + secs.length + " up" : ""}</span></h2><div class="card" style="padding:6px 0">${secHtml}</div>
-    <div class="note" style="padding:14px 2px">Prices from Yahoo Finance and can trail the exchange by a few minutes. Information, not investment advice.</div></div>`;
-}
-function health() {
-  const m = S.sig && S.sig.market;
-  if (!m) return `<div class="card"><div class="note">${S.sigErr ? esc(S.sigErr) : "Loading…"}</div></div>`;
-  const good = (m.above200 ? 1 : 0) + (m.b50 >= 0.5 ? 1 : 0) + (m.b200 >= 0.5 ? 1 : 0) + (m.highs > m.lows ? 1 : 0);
-  const word = good >= 3 ? ["Healthy", "up"] : good === 2 ? ["Mixed", "mu"] : ["Weak", "dn"];
-  return `<div class="card"><div class="verdict"><b class="${word[1]}">${word[0]}.</b> NIFTY 500 is ${m.above200 ? "above" : "below"} its 200-day average, and ${num(m.b200 * 100, 0)}% of stocks are above theirs.</div>
-    <div class="stats"><div><span>Above 50-day average</span><b>${num(m.b50 * 100, 0)}%</b></div><div><span>Above 200-day average</span><b>${num(m.b200 * 100, 0)}%</b></div>
-    <div><span>52-week highs · lows</span><b><span class="up">${m.highs}</span> · <span class="dn">${m.lows}</span></b></div><div><span>India VIX</span><b>${num(m.vix, 1)}</b></div></div></div>`;
-}
 function orders() {
   const d = S.sig; if (!d) return null;
   const o = [];
@@ -175,6 +145,14 @@ function orders() {
   for (const r of (d.swing && d.swing.open) || []) if (r.sell) o.push(["Sell", "r", r.sym, "Swing · " + r.sell]);
   for (const x of d.index || []) if (x.action && x.action !== "none") o.push([x.action === "buy" ? "Buy" : "Sell", x.action === "buy" ? "g" : "r", x.name, "Index · " + (x.why || x.setup) + (x.status === "trial" ? " · on trial" : "")]);
   return o;
+}
+function ordersOf(d) {                                     // everything to do at the next open, across the books (fno_page.order_rows)
+  const out = [], L = d.leaders || {}, W = d.swing || {};
+  for (const r of L.sell || []) out.push({ book: "Leaders", act: "Sell", sym: r.sym, ref: r.price, stop: null });
+  for (const r of L.buy || []) out.push({ book: "Leaders", act: "Buy", sym: r.sym, ref: r.price, stop: null });
+  if (W.status !== "off") { for (const r of W.open || []) if (r.sell) out.push({ book: "Swing", act: "Sell", sym: r.sym, ref: r.price, stop: null }); for (const r of W.new || []) out.push({ book: "Swing", act: "Buy", sym: r.sym, ref: r.price, stop: r.stop }); }
+  for (const x of d.index || []) { if (x.status === "off") continue; if (x.action === "buy") out.push({ book: "Index", act: "Buy", sym: x.name, ref: x.last, stop: null }); else if (x.action === "sell") out.push({ book: "Index", act: "Sell", sym: x.name, ref: x.last, stop: null }); }
+  return out;
 }
 function ordersCard(short) {
   const o = orders();
@@ -276,7 +254,7 @@ function more() {
     <div class="links">${MORE.map(([t, d]) => `<a class="link" href="${CLASSIC}" target="_blank" rel="noopener"><b>${t}</b><small>${d}</small></a>`).join("")}</div>
     <h2>Account</h2><div class="card pad"><div style="margin-bottom:12px">Signed in as <b>${esc(S.me.user)}</b> <span class="chip">${esc(S.me.role)}</span></div><button class="btn" data-act="logout">Sign out</button></div></div>`;
 }
-const PAGES = { home, watchlist, portfolio: PFV.page, regime: RG.page, signals, markets, brief, more };
+const PAGES = { home: HM.page, watchlist, portfolio: PFV.page, regime: RG.page, signals, markets, brief, more };
 
 // ── painting ──
 function renderShell() {
@@ -289,16 +267,16 @@ function renderShell() {
     <div id="msearch"></div><main id="main"></main>
     <nav class="nav"><a class="brand only-d" href="#/home"><img src="/icon-180.png" alt="">ARKA <i>TRADES</i></a>
       ${TABS.map(([k, n, d, mob]) => `<a href="#/${k}" data-tab="${k}"${mob ? "" : ' class="only-d"'}>${icon(d)}<span>${n}</span></a>`).join("")}
-      <div class="who">Signed in as <b>${esc(S.me.user)}</b><br>New app · stage 4</div></nav></div>`;
+      <div class="who">Signed in as <b>${esc(S.me.user)}</b><br>New app · stage 5</div></nav></div>`;
 }
 function paint() {
   const main = $("#main"); if (!main || !S.me) return;
   const phoneTab = TABS.some(([k, , , mob]) => k === S.tab && mob) ? S.tab : "more";      // Markets and the brief light up More on a phone
   document.querySelectorAll(".nav a[data-tab]").forEach((a) => { a.classList.toggle("on", a.dataset.tab === S.tab); a.classList.toggle("onm", a.dataset.tab === phoneTab); });
-  const withRail = !["watchlist", "more", "brief", "portfolio", "regime"].includes(S.tab);
+  const withRail = !["home", "watchlist", "more", "brief", "portfolio", "regime"].includes(S.tab);
   const ae = document.activeElement;                       // typing in a Portfolio box: leave the page alone so the cursor stays put
   if (ae && main.contains(ae) && ae.dataset.pf && ae.tagName === "INPUT" && !/range|checkbox/.test(ae.type)) { if (S.sheet && !typingInSheet()) paintSheet(); return; }
-  main.className = withRail ? "rail" : ["portfolio", "regime"].includes(S.tab) ? "wide" : "";
+  main.className = withRail ? "rail" : ["home", "portfolio", "regime"].includes(S.tab) ? "wide" : "";
   const y = window.scrollY;
   main.innerHTML = PAGES[S.tab]() + (withRail ? rail() : "");
   window.scrollTo(0, y);
@@ -497,6 +475,7 @@ document.addEventListener("click", async (e) => {
     if (act === "buyform") { S.sheet = { form: "buy", sym: a.dataset.s || "" }; paintSheet(); const i = $("#buy input[name=" + (a.dataset.s ? "qty" : "sym") + "]"); if (i) i.focus(); return; }
     if (act === "dellot") { if (!confirm("Delete this buy? This cannot be undone.")) return; try { await api("/api/portfolio?id=" + a.dataset.id, { method: "DELETE" }); toast("Buy deleted"); } catch (er) { toast(er.message); }
       await loadPortfolio(); return paintSheet(); }
+    if (act === "hmgo") return HM.go(a.dataset.v);
     if (act === "rgset") { S.rg[a.dataset.k] = a.dataset.v; if (a.dataset.k === "uni") RG.loadRegime(); return paint(); }
     if (act === "pfview") { S.pf.view = a.dataset.v; window.scrollTo(0, 0); return paint(); }
     if (act === "pfcsv") return PFV.csv(a.dataset.v);
@@ -515,7 +494,8 @@ document.addEventListener("click", async (e) => {
   if (S.results && !e.target.closest(".field")) { S.results = null; paintDrop(); }
 });
 window.addEventListener("hashchange", route);
+window.addEventListener("scroll", () => { if (S.tab === "home") HM.spy(); }, { passive: true });
 document.addEventListener("visibilitychange", () => { if (!document.hidden && S.me) refresh(); });
 setInterval(() => { if (S.me && !document.hidden && marketOpen()) refresh(); }, 30000);
 boot();
-export { S, api, paint, esc, num, sgn, pc, cls, rs, nice, todayStr, field, toast };
+export { S, api, paint, esc, num, sgn, pc, cls, rs, nice, todayStr, field, toast, need, ordersOf };
