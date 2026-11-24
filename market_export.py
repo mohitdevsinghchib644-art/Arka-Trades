@@ -1,5 +1,8 @@
 """
-Arka Trades — market_export.py (v1.1)
+Arka Trades — market_export.py (v1.2)
+
+v1.2: Money flow (python market_export.py flow): the rotation engine of money_flow.py with the classic page's default data options
+      (Arka groups, against NIFTY 500, 5 years, ₹0.5 Cr a day), every model setting the page offers, and the NSDL FPI fortnights.
 
 v1.1: meta.json also carries a one-line summary of each regime (state, score, date) for the Home page chip.
 
@@ -8,6 +11,7 @@ so the new app shows exactly the same readings without running Python itself. St
 after the market closes.
 
     python market_export.py regime            # Regime for Nifty 500, Nifty 200 and Nifty 100
+    python market_export.py flow              # Money flow: flow.json (page), flow_sectors.json (sector view), flow_fpi.json
     python market_export.py regime --out DIR
 
 Only public market data is used (NSE index lists, Yahoo Finance prices). Nothing here touches a broker account.
@@ -123,10 +127,176 @@ def run_regime(out: Path, panel=None) -> list:
     return written
 
 
+# ═════════════════════════ Money flow ═════════════════════════
+FLOW_N, FLOW_EVERY, FLOW_COST = [2, 3, 4, 5, 6, 8, 10], [10, 21, 42, 63], 0.30
+
+
+def _ser(x, d=2):
+    return [_num(v, d) for v in np.asarray(x, dtype=float)]
+
+
+def _thin(s: pd.Series, step=5):
+    """Every `step`-th point of a curve, always keeping the last one."""
+    keep = list(range(0, len(s), step))
+    if keep and keep[-1] != len(s) - 1:
+        keep.append(len(s) - 1)
+    return s.iloc[keep]
+
+
+def _metrics_json(m):
+    return {k: _num(v, 3) for k, v in (m or {}).items()}
+
+
+def _pf_json(pf, base=None, stab=None):
+    if not pf.get("ok"):
+        return {"ok": False, "why": pf.get("why", "")}
+    curves = pd.DataFrame({"model": (1 + pf["returns"]).cumprod() * 100, "bench": (1 + pf["bench_returns"]).cumprod() * 100,
+                           "ew": (1 + pf["ew_returns"]).cumprod() * 100})
+    if base is not None and base.get("ok"):
+        curves["base"] = (1 + base["returns"].reindex(curves.index).fillna(0)).cumprod() * 100
+    c = curves.iloc[[*range(0, len(curves), 5)] + ([len(curves) - 1] if (len(curves) - 1) % 5 else [])]
+    last = next((x for x in reversed(pf["log"]) if not x.get("pending")), None)
+    return {"ok": True, "held": pf["held"], "metrics": _metrics_json(pf["metrics"]), "bench_metrics": _metrics_json(pf["bench_metrics"]),
+            "ew_metrics": _metrics_json(pf["ew_metrics"]), "turnover": _num(pf["turnover_per_year"], 2), "reviews": pf["reviews"],
+            "sessions": len(pf["returns"]), "missing_bar_days": int(pf.get("missing_bar_days") or 0), "last_review": _day(last["date"]) if last else None,
+            "base_metrics": _metrics_json(base["metrics"]) if base is not None and base.get("ok") else None,
+            "curve": {"d": [_day(x) for x in c.index], **{k: _ser(c[k], 2) for k in c.columns}},
+            "log": [{"date": _day(x["date"]), "pending": bool(x.get("pending")), "regime": x.get("regime"), "slots": x["slots"], "in": x["in"], "out": x["out"],
+                     "holdings": x["holdings"]} for x in pf["log"][-12:][::-1]],
+            "stability": stab}
+
+
+def run_flow(out: Path, E=None, fpi_n: int = 48) -> list:
+    import money_flow as mf
+    from arka_flow import MODEL_VERSION, fpi, report, rotation as rot, state as rstate
+    from arka_flow.config import MIN_SECTOR_COVERAGE
+    from arka_flow.data import validation as val
+    out.mkdir(parents=True, exist_ok=True)
+    kind, bench, period, min_turn = "Arka groups", "NIFTY 500", "5y", 0.5
+    if E is None:
+        meta, source = mf._universe_cached()
+        E = mf._engine(tuple(meta["symbol"]), period, kind, bench, float(min_turn))
+    else:
+        source = E.get("_source", "test")
+    H, F, reg, q, tbl = E["H"], E["F"], E["reg"], E["q"], E["table"]
+    n_sec = len(H["sectors"])
+    d_n = 5 if n_sec >= 30 else 4 if n_sec >= 15 else 3
+    rg_row = reg.iloc[-1]
+    rg = rg_row["regime"]
+    # one snapshot for the model-independent columns (rank, score, components, rotation map, trend, returns vs benchmark)
+    base_snap = rot.snapshot(H, F, reg, None, d_n)
+    cols = ["sector", "score", "rank", "rank_20_ago", "rank_change_20", "rank_pct", *rot.WEIGHTS, "n_parts", "rs_ratio", "rs_mom", "quadrant", "quadrant_10_ago",
+            "trend_ok", "dist_trend", "rel_21", "rel_63", "rel_126", "pct50", "d50", "consistency_raw", "vol"]
+    sectors = []
+    for r in base_snap.to_dict("records"):
+        row = {k: (r[k] if isinstance(r[k], str) else _num(r[k], 4)) for k in cols}
+        r2 = dict(r, action="")
+        row["why"] = rot.explain(pd.Series(r2), n_sec, H["bench_name"], rg)
+        row["contrib"] = {k: _num(v, 4) for k, v in rot.contributions(pd.Series(r)).items()}
+        sectors.append(row)
+    # every model setting the page offers (cost stays at the page default)
+    models, ic = {}, {}
+    for every in FLOW_EVERY:
+        t = rot.score_test(H, F, h=every)
+        idx = F["score"].dropna(how="all").index
+        cut = idx[int(len(idx) * 0.6)] if len(idx) > 120 else None
+        halves = []
+        if cut is not None:
+            for kw in ({"end": cut}, {"start": cut}):
+                tt = rot.score_test(H, F, h=every, keys=["score"], **kw)
+                halves.append(_num(tt["ic"]["mean_ic"].iloc[0], 4) if len(tt["ic"]) else None)
+        ic[str(every)] = {"ic": [{k: (x[k] if k == "factor" else _num(x[k], 4)) for k in ("factor", "dates", "mean_ic", "t_stat", "pct_positive")} for x in t["ic"].to_dict("records")],
+                          "quintiles": [{k: (x[k] if k == "quintile" else _num(x[k], 4)) for k in ("quintile", "mean_excess", "beat_pct", "dates")} for x in t["quintiles"].to_dict("records")],
+                          "dates": t["dates"], "spread_mean": _num(t["spread_mean"], 4), "spread_beat": _num(t["spread_beat"], 2),
+                          "cut": _day(cut) if cut is not None else None, "half_ic": halves}
+        for n in FLOW_N:
+            base = rot.run_portfolio(H, F, reg, n=n, every=every, cost_pct=FLOW_COST, use_regime=False, score_key="momentum_only")
+            for use_reg in (True, False):
+                pf = rot.run_portfolio(H, F, reg, n=n, every=every, cost_pct=FLOW_COST, use_regime=use_reg)
+                stab = None
+                if cut is not None:
+                    stab = []
+                    for kw in ({"end": cut}, {"start": cut}):
+                        x = rot.run_portfolio(H, F, reg, n=n, every=every, cost_pct=FLOW_COST, use_regime=use_reg, **kw)
+                        stab.append(_metrics_json(x.get("metrics")))
+                snap = rot.snapshot(H, F, reg, pf, n)
+                j = _pf_json(pf, base, stab)
+                j["target"] = snap.loc[snap["target"], "sector"].tolist()
+                j["actions"] = {a: snap.loc[snap["action"] == a, "sector"].tolist() for a in ("Hold", "Rotate in", "Rotate out", "Watch: improving")}
+                models[f"{n}|{every}|{int(use_reg)}"] = j
+    tail = 20
+    rrg = {"d": [_day(x) for x in F["rs_ratio"].index[-tail:]], "s": {s: [_ser(F["rs_ratio"][s].iloc[-tail:], 3), _ser(F["rs_mom"][s].iloc[-tail:], 3)] for s in H["levels"].columns}}
+    c = E["close"]
+    mk = {n: ((c > c.ewm(span=n, adjust=False, min_periods=n).mean()) & c.notna()).sum(axis=1) / c.notna().sum(axis=1).replace(0, np.nan) * 100 for n in (20, 50, 200)}
+    mk = pd.DataFrame({f"p{n}": v for n, v in mk.items()}).tail(250)
+    tcols = ["sector", "state", "confidence", "n_bar", "pct20", "d20_stocks_10", "pct50", "d50_stocks_20", "pct200", "adv", "dec", "new_high20", "new_low20", "breakout20",
+             "coverage_status", "traded_value_cr", "rel_activity", "turnover_accel", "up_share5", "down_share5", "abs_5", "rel_20", "rel_60", "pctile_20", "members", "with_prices", "coverage"]
+    table = [{k: (r[k] if isinstance(r.get(k), str) else _num(r.get(k), 4)) for k in tcols if k in r} for r in tbl.to_dict("records")]
+    stale_by = val.stale_sessions(H["asof"], q["session"]["last_complete_session"])
+    page = {"v": 1, "built": datetime.now(qd.IST).isoformat(timespec="minutes"), "asof": str(H["asof"])[:10], "bench": H["bench_name"], "kind": kind, "period": period,
+            "min_turn": min_turn, "cost": FLOW_COST, "n_sectors": n_sec, "default": {"n": d_n, "every": 21, "regime": True}, "options": {"n": FLOW_N, "every": FLOW_EVERY},
+            "regime": {"label": rg, "bench_vs_sma": _num((rg_row["bench"] / rg_row["sma200"] - 1) * 100 if pd.notna(rg_row["sma200"]) else np.nan),
+                       "above": None if pd.isna(rg_row["above_sma200"]) else int(rg_row["above_sma200"]), "breadth200": _num(rg_row["breadth200"]),
+                       "vol20": _num(rg_row["vol20"]), "vol_pct": _num(rg_row["vol_pct"]), "drawdown": _num(rg_row["drawdown"]), "slots_share": rot.REGIME_SLOTS},
+            "weights": rot.WEIGHTS, "labels": rot.FACTOR_LABEL, "sectors": sectors, "models": models, "ic": ic, "rrg": rrg, "table": table,
+            "market": {"d": [_day(x) for x in mk.index], **{k: _ser(mk[k], 1) for k in mk.columns}}, "value_basis": H.get("value_basis", ""),
+            "quality": {"source": q["source"], "adjusted": q["adjusted"], "period": q["period"], "loaded_at": str(q["loaded_at"]), "universe": source,
+                        "requested": q["requested"], "loaded": q["loaded"], "used": q["used"], "last_complete": q["session"]["last_complete_session"],
+                        "holiday_calendar": q["session"]["holiday_calendar"], "illiquid": len(q["illiquid"]), "stale": len(q["stale"]),
+                        "small_groups": q["small_groups"], "index_missing": q["index_missing"], "dropped_sessions": q["dropped_sessions"], "stale_by": stale_by,
+                        "failures": [[k, str(v)] for k, v in list(q["failures"].items())[:200]], "n_failures": len(q["failures"]),
+                        "jumps": [{k: (v if isinstance(v, str) else _num(v, 2) if isinstance(v, (int, float, np.floating, np.integer)) else str(v)) for k, v in j.items()} for j in q["jumps"][:200]],
+                        "min_coverage": MIN_SECTOR_COVERAGE, "rot_version": rot.ROT_VERSION, "model_version": MODEL_VERSION},
+            "states_doc": rstate.__doc__ or "", "rules_doc": rot.__doc__ or ""}
+    # sector view: one year of history and the member table for every sector (loaded only when that view opens)
+    L, b, T = H["levels"], H["bench"], F["trend_sma"]
+    d252 = L.index[-252:]
+    det = {}
+    for s in L.columns:
+        lv = pd.DataFrame({"s": L[s], "b": b, "t": T[s]}).loc[d252]
+        s0, b0 = lv["s"].dropna().iloc[0] if lv["s"].notna().any() else np.nan, lv["b"].iloc[0]
+        mem = E["members"].get(s, [])
+        stk = report.stock_table(E["close"], E["high"], E["volume"], mem, b, L[s]) if mem else pd.DataFrame()
+        keep = ["symbol", "price", "ret_20", "ret_60", "rel_bench_60", "rel_sector_60", "above_50", "above_200", "from_52w_high", "rel_volume", "avg_value_cr", "setup"]
+        det[s] = {"lv": _ser(lv["s"] / s0 * 100), "bv": _ser(lv["b"] / b0 * 100), "tv": _ser(lv["t"] / s0 * 100), "rank": _ser(F["rank_pct"][s].reindex(d252), 1),
+                  "rr": _ser(F["rs_ratio"][s].iloc[-180:], 3), "rm": _ser(F["rs_mom"][s].iloc[-180:], 3),
+                  "p20": _ser(H["pct20"][s].iloc[-250:], 1) if s in H["pct20"] else [], "p50": _ser(H["pct50"][s].iloc[-250:], 1) if s in H["pct50"] else [],
+                  "p200": _ser(H["pct200"][s].iloc[-250:], 1) if s in H["pct200"] else [], "n_members": len(mem),
+                  "stocks": [{k: (r.get(k) if isinstance(r.get(k), (str, bool)) or r.get(k) is None else _num(r.get(k), 2)) for k in keep} for r in stk.to_dict("records")]}
+    sect = {"d252": [_day(x) for x in d252], "d180": [_day(x) for x in F["rs_ratio"].index[-180:]], "d250": [_day(x) for x in H["pct50"].index[-250:]], "s": det}
+    (out / "flow.json").write_text(json.dumps(page, separators=(",", ":"), allow_nan=False, default=str))
+    (out / "flow_sectors.json").write_text(json.dumps(sect, separators=(",", ":"), allow_nan=False, default=str))
+    written = ["flow.json", "flow_sectors.json"]
+    # NSDL fortnightly FPI flows by sector (context only, as on the classic page)
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        dates = [str(d)[:10] for d in fpi.nsdl_report_dates(fpi_n)]
+        fetch = getattr(mf._nsdl_fetch, "__wrapped__", mf._nsdl_fetch)
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            got = list(pool.map(fetch, dates))
+        net, auc = fpi.nsdl_panels(got)
+        if not net.empty:
+            fj = {"dates": [_day(x) for x in net.index], "tried": len(dates), "ok": sum(g is not None for g in got),
+                  "net": {s: _ser(net[s], 1) for s in net.columns}, "auc": {s: _ser(auc[s], 1) for s in auc.columns}}
+            (out / "flow_fpi.json").write_text(json.dumps(fj, separators=(",", ":"), allow_nan=False))
+            written.append("flow_fpi.json")
+    except Exception as exc:
+        print(f"FPI: skipped ({exc})", file=sys.stderr)
+    for f in written:
+        print(f"{f}: {(out / f).stat().st_size // 1024} KB")
+    meta = out / "meta.json"
+    m = json.loads(meta.read_text()) if meta.exists() else {}
+    m["flow"] = {"built": page["built"], "asof": page["asof"], "files": written,
+                 "top": [{"sector": x, "action": a} for a in ("Rotate in", "Hold") for x in models[f"{d_n}|21|1"]["actions"].get(a, [])][:8],
+                 "regime": rg}
+    meta.write_text(json.dumps(m, indent=1))
+    return written
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("what", choices=["regime"])
+    ap.add_argument("what", choices=["regime", "flow"])
     ap.add_argument("--out", default=str(OUT))
     a = ap.parse_args()
-    got = run_regime(Path(a.out))
+    got = run_regime(Path(a.out)) if a.what == "regime" else run_flow(Path(a.out))
     sys.exit(0 if got else 1)
