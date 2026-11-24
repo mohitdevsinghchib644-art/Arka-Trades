@@ -1,0 +1,215 @@
+// Arka Trades · API (stage 1). Runs on Cloudflare for every request to /api/*.
+// Secrets are read by NAME from the Cloudflare project settings and never sent to the browser:
+//   ADMIN_USER, ADMIN_PASS, MEMBER_USER, MEMBER_PASS, AUTH_SECRET   sign-in (same names and values as in Streamlit)
+//   SUPABASE_URL, SUPABASE_KEY                                      watchlist storage (same as in Streamlit)
+// Optional plain variable: GITHUB_REPO (default below) for the signal files written by the "Signals" workflow.
+// Only public market data leaves this worker (Yahoo Finance). Nothing here touches a broker account.
+
+const REPO = "mohitdevsinghchib644-art/Arka-Trades";
+const COOKIE = "arka_s";
+const DAYS = 30;
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
+const enc = new TextEncoder();
+
+const json = (data, status = 200, headers = {}) =>
+  new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...headers } });
+const fail = (status, message) => json({ error: message }, status);
+
+// ── sign-in: a signed cookie, nothing stored on the server ──
+const b64u = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const unb64u = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
+async function hmac(secret, text) {
+  const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return b64u(await crypto.subtle.sign("HMAC", key, enc.encode(text)));
+}
+function same(a, b) {                                   // comparison that does not stop at the first difference
+  a = String(a); b = String(b);
+  let diff = a.length ^ b.length;
+  for (let i = 0; i < Math.max(a.length, b.length); i++) diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
+  return diff === 0;
+}
+async function makeToken(env, role, user) {
+  const body = b64u(enc.encode(JSON.stringify({ r: role, u: user, x: Date.now() + DAYS * 864e5 })));
+  return body + "." + (await hmac(env.AUTH_SECRET, body));
+}
+async function readToken(env, request) {
+  const m = (request.headers.get("cookie") || "").match(new RegExp("(?:^|;\\s*)" + COOKIE + "=([^;]+)"));
+  if (!m || !env.AUTH_SECRET) return null;
+  const [body, sig] = m[1].split(".");
+  if (!body || !sig || !same(sig, await hmac(env.AUTH_SECRET, body))) return null;
+  try {
+    const p = JSON.parse(new TextDecoder().decode(unb64u(body)));
+    return p.x > Date.now() && (p.r === "admin" || p.r === "member") ? { role: p.r, user: p.u } : null;
+  } catch { return null; }
+}
+const cookie = (value, maxAge) => `${COOKIE}=${value}; Max-Age=${maxAge}; Path=/; HttpOnly; Secure; SameSite=Lax`;
+
+async function login(env, request) {
+  if (!env.AUTH_SECRET || String(env.AUTH_SECRET).length < 16) return fail(503, "Sign-in is not set up yet: add AUTH_SECRET in the Cloudflare project settings.");
+  if (!(env.ADMIN_PASS || env.MEMBER_PASS)) return fail(503, "Sign-in is not set up yet: add ADMIN_USER and ADMIN_PASS in the Cloudflare project settings.");
+  let b = {};
+  try { b = await request.json(); } catch { /* empty body */ }
+  const u = String(b.user || "").trim(), p = String(b.pass || "").trim();
+  let role = null;
+  if (env.ADMIN_USER && env.ADMIN_PASS && same(u, env.ADMIN_USER) && same(p, env.ADMIN_PASS)) role = "admin";
+  else if (env.MEMBER_USER && env.MEMBER_PASS && same(u.toLowerCase(), String(env.MEMBER_USER).toLowerCase()) && same(p.toLowerCase(), String(env.MEMBER_PASS).toLowerCase())) role = "member";
+  if (!role) return fail(401, "That user name or password is not right.");
+  return json({ role, user: u }, 200, { "set-cookie": cookie(await makeToken(env, role, u), DAYS * 86400) });
+}
+
+// ── market data (Yahoo Finance, public) ──
+const SYM_OK = /^[A-Z0-9^][A-Z0-9&._=\-^]{0,24}$/;
+const ySym = (s) => (/[\^=.]|-USD$/.test(s) ? s : s + ".NS");          // plain names are NSE stocks; indices and currencies pass through
+function thin(arr, n) {                                                 // at most n points, always keeping the last one
+  const a = arr.filter((v) => v != null);
+  if (a.length <= n) return a.map((v) => +v.toFixed(2));
+  const out = [];
+  for (let i = 0; i < n; i++) out.push(+a[Math.round((i * (a.length - 1)) / (n - 1))].toFixed(2));
+  return out;
+}
+async function yahoo(path, ctx, ttl) {
+  const url = "https://query1.finance.yahoo.com" + path;
+  const cache = typeof caches !== "undefined" && caches.default;
+  const key = new Request(url);
+  if (cache) { const hit = await cache.match(key); if (hit) return hit.json(); }
+  const r = await fetch(url, { headers: { "user-agent": UA, accept: "application/json" } });
+  if (!r.ok) throw new Error("Yahoo answered " + r.status);
+  const data = await r.json();
+  if (cache) {
+    const put = cache.put(key, new Response(JSON.stringify(data), { headers: { "content-type": "application/json", "cache-control": `max-age=${ttl}` } }));
+    ctx && ctx.waitUntil ? ctx.waitUntil(put) : await put;
+  }
+  return data;
+}
+export function quoteFrom(sym, data) {
+  const res = data && data.chart && data.chart.result && data.chart.result[0];
+  if (!res || !res.meta) return { sym, ok: false };
+  const m = res.meta, closes = ((res.indicators || {}).quote || [{}])[0].close || [];
+  const price = m.regularMarketPrice, prev = m.chartPreviousClose ?? m.previousClose;
+  if (price == null) return { sym, ok: false };
+  return { sym, ok: true, name: m.longName || m.shortName || "", price, prev, chg: prev ? price - prev : null, pct: prev ? (price / prev - 1) * 100 : null,
+           high: m.regularMarketDayHigh ?? null, low: m.regularMarketDayLow ?? null, vol: m.regularMarketVolume ?? null,
+           hi52: m.fiftyTwoWeekHigh ?? null, lo52: m.fiftyTwoWeekLow ?? null, t: m.regularMarketTime ?? null, cur: m.currency || "", spark: thin(closes, 36) };
+}
+async function quotes(url, ctx) {
+  const list = [...new Set((url.searchParams.get("s") || "").toUpperCase().split(",").map((s) => s.trim()).filter((s) => SYM_OK.test(s)))].slice(0, 40);
+  const out = await Promise.all(list.map(async (sym) => {
+    try { return quoteFrom(sym, await yahoo(`/v8/finance/chart/${encodeURIComponent(ySym(sym))}?range=1d&interval=5m&includePrePost=false`, ctx, 45)); }
+    catch { return { sym, ok: false }; }
+  }));
+  return json({ quotes: out, at: Date.now() });
+}
+const ret = (c, n) => (c.length > n && c[c.length - 1 - n] ? (c[c.length - 1] / c[c.length - 1 - n] - 1) * 100 : null);
+export function stockFrom(sym, day, hist) {
+  const q = quoteFrom(sym, day);
+  const res = hist && hist.chart && hist.chart.result && hist.chart.result[0];
+  const c = res ? (((res.indicators || {}).quote || [{}])[0].close || []).filter((v) => v != null) : [];
+  const avg = (n) => (c.length >= n ? c.slice(-n).reduce((a, b) => a + b, 0) / n : null);
+  const a50 = avg(50), a200 = avg(200);
+  return { ...q, r1w: ret(c, 5), r1m: ret(c, 21), r3m: ret(c, 63), r6m: ret(c, 126), r1y: ret(c, 252), a50, a200,
+           trend: a50 == null || !q.ok ? null : q.price > a50 && (a200 == null || q.price > a200) ? "up" : q.price < a50 && (a200 == null || q.price < a200) ? "down" : "side",
+           year: thin(c, 120) };
+}
+async function stock(url, ctx) {
+  const sym = (url.searchParams.get("s") || "").toUpperCase().trim();
+  if (!SYM_OK.test(sym)) return fail(400, "Unknown symbol.");
+  const y = encodeURIComponent(ySym(sym));
+  try {
+    const [day, hist] = await Promise.all([yahoo(`/v8/finance/chart/${y}?range=1d&interval=5m&includePrePost=false`, ctx, 45),
+                                           yahoo(`/v8/finance/chart/${y}?range=1y&interval=1d`, ctx, 900)]);
+    return json(stockFrom(sym, day, hist));
+  } catch (e) { return fail(502, "Prices are not available right now. " + e.message); }
+}
+async function search(url, ctx) {
+  const q = (url.searchParams.get("q") || "").trim().slice(0, 40);
+  if (q.length < 2) return json({ results: [] });
+  try {
+    const d = await yahoo(`/v1/finance/search?q=${encodeURIComponent(q)}&quotesCount=12&newsCount=0&listsCount=0`, ctx, 3600);
+    const results = (d.quotes || []).filter((x) => x.quoteType === "EQUITY" && /\.NS$/.test(x.symbol || ""))
+      .map((x) => ({ sym: x.symbol.replace(/\.NS$/, ""), name: x.longname || x.shortname || "" })).slice(0, 8);
+    return json({ results });
+  } catch { return json({ results: [], error: "Search is not available right now." }); }
+}
+
+// ── watchlist (Supabase, the same table the Streamlit app uses) ──
+const cleanSym = (s) => String(s || "").toUpperCase().replace(/\.NS$/, "").replace(/[^A-Z0-9&._-]/g, "").slice(0, 24);
+const cleanList = (s) => String(s || "Main").replace(/[^\w &.-]/g, "").trim().slice(0, 24) || "Main";
+async function sb(env, path, init = {}) {
+  if (!env.SUPABASE_URL || !env.SUPABASE_KEY) throw Object.assign(new Error("Storage is not connected: add SUPABASE_URL and SUPABASE_KEY in the Cloudflare project settings."), { status: 503 });
+  const r = await fetch(String(env.SUPABASE_URL).replace(/\/+$/, "") + "/rest/v1/" + path, {
+    ...init, headers: { apikey: env.SUPABASE_KEY, authorization: "Bearer " + env.SUPABASE_KEY, "content-type": "application/json", prefer: "return=minimal", ...(init.headers || {}) } });
+  const text = await r.text();
+  if (!r.ok) throw Object.assign(new Error(text.slice(0, 200) || "Storage error " + r.status), { status: r.status, body: text });
+  return text ? JSON.parse(text) : null;
+}
+async function watchlist(env, request, url) {
+  try {
+    if (request.method === "GET") {
+      let rows, lists = true;
+      try { rows = await sb(env, "watchlist?select=symbol,list_name,note,alert_above,alert_below&order=id"); }
+      catch (e) {                                       // table without the list columns: one plain list
+        if (e.status === 503) throw e;
+        rows = await sb(env, "watchlist?select=symbol&order=id"); lists = false;
+      }
+      const seen = new Set(), out = [];
+      for (const r of rows || []) {
+        const sym = cleanSym(r.symbol), list = cleanList(r.list_name);
+        if (sym && !seen.has(list + "|" + sym)) { seen.add(list + "|" + sym); out.push({ sym, list, note: r.note || "", above: r.alert_above ?? null, below: r.alert_below ?? null }); }
+      }
+      return json({ rows: out, lists });
+    }
+    const b = request.method === "POST" ? await request.json().catch(() => ({})) : {};
+    const sym = cleanSym(request.method === "POST" ? b.sym : url.searchParams.get("s"));
+    const list = cleanList(request.method === "POST" ? b.list : url.searchParams.get("list"));
+    if (!sym) return fail(400, "Which stock?");
+    if (request.method === "POST") {
+      try { await sb(env, "watchlist", { method: "POST", body: JSON.stringify({ symbol: sym, list_name: list }) }); }
+      catch (e) { if (e.status === 503) throw e; await sb(env, "watchlist", { method: "POST", body: JSON.stringify({ symbol: sym }) }); }
+      return json({ ok: true, sym, list });
+    }
+    if (request.method === "DELETE") {
+      try { await sb(env, `watchlist?symbol=eq.${encodeURIComponent(sym)}&list_name=eq.${encodeURIComponent(list)}`, { method: "DELETE" }); }
+      catch (e) { if (e.status === 503) throw e; await sb(env, `watchlist?symbol=eq.${encodeURIComponent(sym)}`, { method: "DELETE" }); }
+      return json({ ok: true });
+    }
+    return fail(405, "Not supported.");
+  } catch (e) { return fail(e.status === 503 ? 503 : 502, e.message); }
+}
+
+// ── signal desk files written by the "Signals" workflow (public files in the repo) ──
+async function signals(env, ctx) {
+  const url = `https://raw.githubusercontent.com/${env.GITHUB_REPO || REPO}/main/arka_data/signals/signals.json`;
+  const cache = typeof caches !== "undefined" && caches.default, key = new Request(url);
+  if (cache) { const hit = await cache.match(key); if (hit) return new Response(hit.body, { headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } }); }
+  const r = await fetch(url, { headers: { "user-agent": UA } });
+  if (!r.ok) return fail(502, "The signal file could not be read (" + r.status + ").");
+  const text = await r.text();
+  if (cache) { const put = cache.put(key, new Response(text, { headers: { "content-type": "application/json", "cache-control": "max-age=600" } })); ctx && ctx.waitUntil ? ctx.waitUntil(put) : await put; }
+  return new Response(text, { headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
+}
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url), p = url.pathname;
+    if (!p.startsWith("/api/")) return env.ASSETS ? env.ASSETS.fetch(request) : fail(404, "Not found.");
+    try {
+      if (p === "/api/health") {                        // which settings exist (true/false only, never a value)
+        const has = (n) => Boolean(env[n] && String(env[n]).trim());
+        return json({ sign_in: has("AUTH_SECRET") && (has("ADMIN_PASS") || has("MEMBER_PASS")), storage: has("SUPABASE_URL") && has("SUPABASE_KEY") });
+      }
+      if (p === "/api/login" && request.method === "POST") return login(env, request);
+      if (p === "/api/logout" && request.method === "POST") return json({ ok: true }, 200, { "set-cookie": cookie("", 0) });
+      const me = await readToken(env, request);
+      if (!me) return fail(401, "Please sign in.");
+      if (p === "/api/me") return json(me);
+      if (p === "/api/quotes") return quotes(url, ctx);
+      if (p === "/api/stock") return stock(url, ctx);
+      if (p === "/api/search") return search(url, ctx);
+      if (p === "/api/watchlist") return watchlist(env, request, url);
+      if (p === "/api/signals") return signals(env, ctx);
+      return fail(404, "Not found.");
+    } catch (e) {
+      return fail(500, "Something went wrong on the server.");
+    }
+  },
+};

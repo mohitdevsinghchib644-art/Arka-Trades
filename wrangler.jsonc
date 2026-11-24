@@ -1,0 +1,13 @@
+{
+  // Arka Trades · new app (stage 1). Cloudflare reads this file when the repo is connected: it serves the folder "web"
+  // as the site and runs worker/index.js for every address that starts with /api/.
+  "name": "arka-trades",
+  "main": "./worker/index.js",
+  "compatibility_date": "2026-11-01",
+  "assets": {
+    "directory": "./web",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  }
+}
