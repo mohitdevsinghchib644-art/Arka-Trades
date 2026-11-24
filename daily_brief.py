@@ -1,5 +1,11 @@
 """
-daily_brief.py — Arka Trades · Daily brief (morning edition), v1
+daily_brief.py — Arka Trades · Daily brief (morning edition), v1.1
+
+NEW IN v1.1
+  * When Google's servers are busy (503 "high demand"), the scheduled job no longer gives up after a few seconds: it
+    goes through every Gemini flash and flash-lite model, then waits and tries again, for up to 20 minutes.
+  * Optional free backup AI through OpenRouter (secret OPENROUTER_KEY). It is used only when Gemini is still busy after
+    the first two rounds. It receives exactly what Gemini receives: index prices and public headlines, nothing else.
 
 What it is
   A morning report written before the 09:15 IST open: what happened overnight and what can move Indian stocks today.
@@ -35,6 +41,7 @@ Privacy
   * Secrets are read by NAME from Streamlit secrets or environment variables and are never written to logs:
       GEMINI_KEY (already used by Arka AI) · TELEGRAM_BOT_TOKEN · TELEGRAM_CHAT_ID (scheduled job only)
       optional: SUPABASE_URL · SUPABASE_KEY (to share the brief) · BRIEF_GEMINI_MODEL · BRIEF_WEB_SEARCH=on
+                OPENROUTER_KEY (free backup AI) · BRIEF_OPENROUTER_MODEL
 
 Needs: requests, yfinance, pandas, google-genai (all already in the app's requirements). No feedparser needed here.
 """
@@ -81,7 +88,7 @@ def _cfg(name: str, default: str = "") -> str:
         return default
 
 
-_SECRET_NAMES = ("GEMINI_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "SUPABASE_KEY", "SUPABASE_URL")
+_SECRET_NAMES = ("GEMINI_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "SUPABASE_KEY", "SUPABASE_URL", "OPENROUTER_KEY")
 
 
 def _safe_err(e) -> str:
@@ -483,7 +490,10 @@ Return one JSON object and nothing else, with exactly this shape:
  "today": [""]}"""
 
 _MODEL_RX = re.compile(r"^gemini-(\d+(?:\.\d+)?)-flash$")
+_LITE_RX = re.compile(r"^gemini-(\d+(?:\.\d+)?)-flash-lite$")
 _FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-flash-latest"]
+_FALLBACK_LITE = ["gemini-2.5-flash-lite", "gemini-flash-lite-latest"]   # a separate pool: often free when flash is busy
+_BUSY = ("503", "429", "UNAVAILABLE", "overloaded", "RESOURCE_EXHAUSTED", "high demand", "500 INTERNAL", "502", "504")
 
 
 def build_prompt(rows: list, heads: list, previous: list, now: datetime) -> str:
@@ -535,14 +545,17 @@ def _thinking_variants(types) -> list:
 
 
 def _models(client) -> list:
+    """Newest stable flash models first, then the safe names, then the flash-lite models (they are busy less often)."""
     names = []
     try:
         names = [str(m.name).split("/")[-1] for m in client.models.list()]
     except Exception:
         pass
-    stable = sorted({n for n in names if _MODEL_RX.match(n)}, key=lambda n: float(_MODEL_RX.match(n).group(1)), reverse=True)
+    ver = lambda rx: (lambda n: float(rx.match(n).group(1)))
+    stable = sorted({n for n in names if _MODEL_RX.match(n)}, key=ver(_MODEL_RX), reverse=True)
+    lite = sorted({n for n in names if _LITE_RX.match(n)}, key=ver(_LITE_RX), reverse=True)
     out = []
-    for n in [_cfg("BRIEF_GEMINI_MODEL"), _cfg("ARKA_GEMINI_MODEL")] + stable[:2] + _FALLBACK_MODELS:
+    for n in [_cfg("BRIEF_GEMINI_MODEL"), _cfg("ARKA_GEMINI_MODEL")] + stable[:3] + _FALLBACK_MODELS + lite[:2] + _FALLBACK_LITE:
         if n and n not in out:
             out.append(n)
     return out
@@ -569,49 +582,114 @@ def _web_sources(resp) -> list:
     return out[:20]
 
 
-def ask_model(prompt: str, progress=None, backend=None, budget_s: float = 420.0) -> tuple:
-    """-> (data, model name, mode, web sources). Tries the newest flash model first, then falls back.
-    For each model it first asks for light "thinking" (a long think is what makes a request time out); if the model
-    refuses that setting it asks again without it. A busy server gets one retry; a timeout moves on to the next model."""
-    client, types = backend or _client()
-    want_search = _cfg("BRIEF_WEB_SEARCH").lower() in ("on", "1", "true", "yes")
+def _is_busy(msg: str) -> bool:
+    low = msg.lower()
+    return any(k.lower() in low for k in _BUSY)
+
+
+def _gemini_round(client, types, prompt, progress, want_search, deadline, errors):
+    """One pass over every Gemini model. -> (result or None, True when every failure was "busy")."""
     variants = _thinking_variants(types)
-    errors, t0 = [], time.time()
+    all_busy = True
     for model in _models(client):
         for use_search in ([True, False] if want_search else [False]):
             next_model = False
             for think in variants:
-                if next_model:
+                if next_model or time.time() > deadline:
                     break
-                for attempt in (1, 2):
-                    if time.time() - t0 > budget_s:
-                        raise BriefError("The AI took too long to answer. Try again in a few minutes. " + " | ".join(errors[-2:]))
-                    try:
-                        kw = {"system_instruction": SYSTEM, "temperature": 0.3}
-                        if think is not None:
-                            kw["thinking_config"] = think
-                        if use_search:
-                            kw["tools"] = [types.Tool(google_search=types.GoogleSearch())]
-                        else:
-                            kw["response_mime_type"] = "application/json"
-                        if progress:
-                            progress(f"Writing with {model}" + (" and web search" if use_search else ""))
-                        resp = client.models.generate_content(model=model, contents=prompt, config=types.GenerateContentConfig(**kw))
-                        data = _parse_json(getattr(resp, "text", "") or "")
-                        if not isinstance(data, dict) or not data.get("deep"):
-                            raise ValueError("the reply has no stories")
-                        return data, model, ("wire + web search" if use_search else "wire"), (_web_sources(resp) if use_search else [])
-                    except Exception as e:
-                        msg = _safe_err(e)
-                        errors.append(f"{model}: {msg[:160]}")
-                        low = msg.lower()
-                        if attempt == 1 and any(k in msg for k in ("503", "429", "UNAVAILABLE", "overloaded", "RESOURCE_EXHAUSTED")):
-                            time.sleep(8)
-                            continue                              # busy: the same request once more
-                        if think is not None and ("400" in msg or "invalid_argument" in low or "thinking" in low):
-                            break                                 # the model refused this setting: next variant
-                        next_model = True                         # timeout or anything else: next model
+                try:
+                    kw = {"system_instruction": SYSTEM, "temperature": 0.3}
+                    if think is not None:
+                        kw["thinking_config"] = think
+                    if use_search:
+                        kw["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+                    else:
+                        kw["response_mime_type"] = "application/json"
+                    if progress:
+                        progress(f"Writing with {model}" + (" and web search" if use_search else ""))
+                    resp = client.models.generate_content(model=model, contents=prompt, config=types.GenerateContentConfig(**kw))
+                    data = _parse_json(getattr(resp, "text", "") or "")
+                    if not isinstance(data, dict) or not data.get("deep"):
+                        raise ValueError("the reply has no stories")
+                    return (data, model, ("wire + web search" if use_search else "wire"), (_web_sources(resp) if use_search else [])), all_busy
+                except Exception as e:
+                    msg = _safe_err(e)
+                    errors.append(f"{model}: {msg[:160]}")
+                    low = msg.lower()
+                    if _is_busy(msg):
+                        next_model = True                     # busy is about the model, not the setting: next model
                         break
+                    all_busy = False
+                    if think is not None and ("400" in msg or "invalid_argument" in low or "thinking" in low):
+                        continue                              # the model refused this setting: next variant
+                    next_model = True                         # timeout or anything else: next model
+                    break
+        if time.time() > deadline:
+            break
+    return None, all_busy
+
+
+def ask_backup(prompt: str, progress=None, post=None):
+    """Free backup AI through OpenRouter (OpenAI-style API). -> (data, model, mode, []) or raises.
+    Only used when OPENROUTER_KEY is set. Receives the same prompt as Gemini: index prices and public headlines."""
+    key = _cfg("OPENROUTER_KEY")
+    if not key:
+        raise BriefError("no backup AI key")
+    post = post or requests.post
+    models = [m for m in (_cfg("BRIEF_OPENROUTER_MODEL"), "openrouter/free") if m]
+    last = ""
+    for model in dict.fromkeys(models):
+        if progress:
+            progress(f"Gemini is busy: writing with the backup AI ({model})")
+        try:
+            r = post("https://openrouter.ai/api/v1/chat/completions", timeout=240,
+                     headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json", "X-Title": "Arka Trades brief"},
+                     json={"model": model, "temperature": 0.3,
+                           "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}]})
+            if r.status_code != 200:
+                raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
+            j = r.json()
+            data = _parse_json(j["choices"][0]["message"]["content"] or "")
+            if not isinstance(data, dict) or not data.get("deep"):
+                raise ValueError("the reply has no stories")
+            return data, "backup: " + str(j.get("model") or model), "wire", []
+        except Exception as e:
+            last = f"{model}: {_safe_err(e)[:200]}"
+    raise BriefError("The backup AI did not answer either. " + last)
+
+
+def ask_model(prompt: str, progress=None, backend=None, budget_s: float = 420.0, backup=None) -> tuple:
+    """-> (data, model name, mode, web sources).
+    Goes through every Gemini model; when all of them are busy it waits and goes round again (30 s, 1, 2, 4 min ...)
+    until budget_s runs out. After the second busy round the free backup AI is tried once, if OPENROUTER_KEY is set."""
+    client, types = backend or _client()
+    want_search = _cfg("BRIEF_WEB_SEARCH").lower() in ("on", "1", "true", "yes")
+    errors, t0 = [], time.time()
+    deadline = t0 + budget_s
+    backup = backup or ask_backup
+    backup_tried, rnd, wait = False, 0, 30
+    while True:
+        rnd += 1
+        got, all_busy = _gemini_round(client, types, prompt, progress, want_search, deadline, errors)
+        if got:
+            return got
+        if rnd >= 2 and not backup_tried and _cfg("OPENROUTER_KEY"):
+            backup_tried = True
+            try:
+                return backup(prompt, progress)
+            except Exception as e:
+                errors.append(_safe_err(e)[:200] if not isinstance(e, BriefError) else str(e)[:200])
+        if not all_busy:
+            break                                             # a real error, not a busy server: waiting will not help
+        if time.time() + wait > deadline or rnd >= 9:
+            break
+        if progress:
+            progress(f"Google's AI is busy. Trying again in {wait // 60} min {wait % 60} s (round {rnd + 1})")
+        time.sleep(wait)
+        wait = min(wait * 2, 240)
+    if errors and all(_is_busy(e) for e in errors[-3:]):
+        raise BriefError(f"Google's AI stayed busy for {round((time.time() - t0) / 60)} min, so the brief could not be written. "
+                         + ("" if _cfg("OPENROUTER_KEY") else "Add the free OPENROUTER_KEY secret as a backup. ") + "Last reply: " + errors[-1][:140])
     raise BriefError("The AI did not return a usable brief. " + " | ".join(errors[-3:]))
 
 
@@ -710,7 +788,8 @@ def clean(data: dict, heads: list) -> tuple:
     return out, notes
 
 
-def write_brief(store=None, now: datetime | None = None, progress=None, prefer_home: bool = True, backend=None, fetch=None) -> dict:
+def write_brief(store=None, now: datetime | None = None, progress=None, prefer_home: bool = True, backend=None, fetch=None,
+                patience_s: float = 420.0) -> dict:
     """Collect, write, check and save today's brief. Raises BriefError with a readable reason on failure."""
     now = now or _now()
     say = progress or (lambda _m: None)
@@ -732,7 +811,7 @@ def write_brief(store=None, now: datetime | None = None, progress=None, prefer_h
             previous = [b for b in store.recent(6) if b.get("day") and b["day"] < now.strftime("%Y-%m-%d")]
         except Exception:
             previous = []
-    data, model, mode, web = ask_model(build_prompt(rows, heads, previous, now), say, backend)
+    data, model, mode, web = ask_model(build_prompt(rows, heads, previous, now), say, backend, budget_s=patience_s)
     say("Checking sources")
     sections, notes = clean(data, heads)
     if no_prices:
@@ -1282,7 +1361,8 @@ def main(argv=None) -> int:
         return 0
     try:
         if brief is None:
-            brief = write_brief(store, now, progress=lambda m: print("·", m), prefer_home=False)
+            brief = write_brief(store, now, progress=lambda m: print("·", m, flush=True), prefer_home=False,
+                                patience_s=float(_cfg("BRIEF_PATIENCE_S", "1200") or 1200))     # the scheduled job can wait 20 min
             print(f"Written with {brief['model']}: {len(brief['deep'])} stories, {len(brief['radar'])} radar, {len(brief['rapid'])} rapid fire, "
                   f"{brief['stats']['headlines']} headlines, {brief['stats']['feeds_ok']}/{brief['stats']['feeds']} feeds.")
         else:
