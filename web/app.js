@@ -3,6 +3,7 @@ import * as PFV from "./portfolio.js";
 import * as RG from "./regime.js";
 import * as HM from "./home.js";
 import * as MF from "./flow.js";
+import * as NW from "./news.js";
 import { chartMove } from "./charts.js";
 const CLASSIC = "https://arka-trades-1.streamlit.app";       // the Streamlit app, for sections that have not moved yet
 const $ = (s) => document.querySelector(s);
@@ -26,16 +27,17 @@ const NAMES = Object.fromEntries([...INDICES, ...SECTORS, ...Object.values(MARKE
 const TABS = [["home", "Home", '<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/>', true], ["watchlist", "Watchlist", '<path d="M6 3h12v18l-6-4.5L6 21z"/>', true],
   ["portfolio", "Portfolio", '<path d="M3 7h18v13H3z"/><path d="M8 7V4h8v3M3 12h18"/>', true], ["signals", "Signals", '<path d="M3 17l5-6 4 4 8-10"/><path d="M15 5h5v5"/>', true],
   ["flow", "Money flow", '<path d="M4 17c3-6 5 2 8-4s5-1 8-6"/><path d="M4 21h16"/>', false],
+  ["news", "News", '<path d="M4 5h13v14H6a2 2 0 0 1-2-2z"/><path d="M17 9h3v8a2 2 0 0 1-2 2"/><path d="M8 9h5M8 13h5"/>', false],
   ["regime", "Regime", '<path d="M3 20h18"/><path d="M6 16l4-5 3 3 5-7"/><circle cx="18" cy="7" r="1.6"/>', false],
   ["markets", "Markets", '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.2 3 14.8 0 18M12 3c-3 3.2-3 14.8 0 18"/>', false],
   ["brief", "Daily brief", '<path d="M5 3h11l3 3v15H5z"/><path d="M8 9h8M8 13h8M8 17h5"/>', false],
   ["more", "More", '<circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/>', true]];
 const MORE = [["Stock research", "Financials, charts, filings and peers for any stock."], ["Arka AI", "Chart reading with your own playbook."],
   
-  ["Screener", "Describe a setup and scan the market."], ["Backtest", "Test a rule on past prices."], ["News", "Market wire and exchange filings."]];
+  ["Screener", "Describe a setup and scan the market."], ["Backtest", "Test a rule on past prices."]];
 
 const S = { me: null, tab: "home", q: {}, at: {}, wl: { rows: [], list: "Main", loaded: false, err: "" }, sig: null, sigErr: "", sigTab: "Leaders", mkTab: "India", sort: "order",
-            pf: PFV.pfDefaults(), rg: RG.rgDefaults(), qv: 0, hm: HM.homeDefaults(), mf: MF.flowDefaults(), deals: null, brief: undefined,
+            pf: PFV.pfDefaults(), rg: RG.rgDefaults(), qv: 0, hm: HM.homeDefaults(), mf: MF.flowDefaults(), nw: NW.newsDefaults(), deals: null, brief: undefined,
             sheet: null, results: null, searching: false };
 
 // ── small helpers ──
@@ -112,6 +114,7 @@ function pageSymbols() {
   if (S.tab === "home") return [...HM.N50, ...S.pf.lots.map((l) => l.sym), ...wl.slice(0, 7)];
   if (S.tab === "watchlist") return wl;
   if (S.tab === "portfolio") return [...new Set(S.pf.lots.map((l) => l.sym)), ...wl.slice(0, 12)];
+  if (S.tab === "news") return [...new Set([...S.wl.rows.map((r) => r.sym), ...S.pf.lots.map((l) => l.sym)])].slice(0, 120);
   if (S.tab === "markets") return [...MARKETS[S.mkTab].map((x) => x[1]), ...wl.slice(0, 12)];
   return wl.slice(0, 12);
 }
@@ -250,13 +253,13 @@ function brief() {
 }
 function more() {
   return `<div><div class="hd"><div><h1>More</h1></div></div>
-    <div class="links only-m" style="margin-bottom:10px"><a class="link" href="#/flow"><b>Money flow</b><small>Sector rotation: where to be, and when.</small></a><a class="link" href="#/regime"><b>Market regime</b><small>Trend, breadth and volatility: how hard to push today.</small></a><a class="link" href="#/markets"><b>Markets</b><small>Indices, commodities, currencies and rates.</small></a>
+    <div class="links only-m" style="margin-bottom:10px"><a class="link" href="#/news"><b>News desk</b><small>Market wire, your stocks and exchange filings.</small></a><a class="link" href="#/flow"><b>Money flow</b><small>Sector rotation: where to be, and when.</small></a><a class="link" href="#/regime"><b>Market regime</b><small>Trend, breadth and volatility: how hard to push today.</small></a><a class="link" href="#/markets"><b>Markets</b><small>Indices, commodities, currencies and rates.</small></a>
       <a class="link" href="#/brief"><b>Daily brief</b><small>What happened overnight and what can move stocks today.</small></a></div>
     <h2 style="margin-top:8px">Still in the classic app <span>opens in a new tab</span></h2>
     <div class="links">${MORE.map(([t, d]) => `<a class="link" href="${CLASSIC}" target="_blank" rel="noopener"><b>${t}</b><small>${d}</small></a>`).join("")}</div>
     <h2>Account</h2><div class="card pad"><div style="margin-bottom:12px">Signed in as <b>${esc(S.me.user)}</b> <span class="chip">${esc(S.me.role)}</span></div><button class="btn" data-act="logout">Sign out</button></div></div>`;
 }
-const PAGES = { home: HM.page, watchlist, portfolio: PFV.page, regime: RG.page, flow: MF.page, signals, markets, brief, more };
+const PAGES = { home: HM.page, watchlist, portfolio: PFV.page, regime: RG.page, flow: MF.page, news: NW.page, signals, markets, brief, more };
 
 // ── painting ──
 function renderShell() {
@@ -269,19 +272,21 @@ function renderShell() {
     <div id="msearch"></div><main id="main"></main>
     <nav class="nav"><a class="brand only-d" href="#/home"><img src="/icon-180.png" alt="">ARKA <i>TRADES</i></a>
       ${TABS.map(([k, n, d, mob]) => `<a href="#/${k}" data-tab="${k}"${mob ? "" : ' class="only-d"'}>${icon(d)}<span>${n}</span></a>`).join("")}
-      <div class="who">Signed in as <b>${esc(S.me.user)}</b><br>New app · stage 5</div></nav></div>`;
+      <div class="who">Signed in as <b>${esc(S.me.user)}</b><br>New app · stage 7</div></nav></div>`;
 }
 function paint() {
   const main = $("#main"); if (!main || !S.me) return;
   const phoneTab = TABS.some(([k, , , mob]) => k === S.tab && mob) ? S.tab : "more";      // Markets and the brief light up More on a phone
   document.querySelectorAll(".nav a[data-tab]").forEach((a) => { a.classList.toggle("on", a.dataset.tab === S.tab); a.classList.toggle("onm", a.dataset.tab === phoneTab); });
-  const withRail = !["home", "watchlist", "more", "brief", "portfolio", "regime", "flow"].includes(S.tab);
+  const withRail = !["home", "watchlist", "more", "brief", "portfolio", "regime", "flow", "news"].includes(S.tab);
   const ae = document.activeElement;                       // typing in a Portfolio box: leave the page alone so the cursor stays put
   if (ae && main.contains(ae) && ae.dataset.pf && ae.tagName === "INPUT" && !/range|checkbox/.test(ae.type)) { if (S.sheet && !typingInSheet()) paintSheet(); return; }
-  main.className = withRail ? "rail" : ["home", "portfolio", "regime", "flow"].includes(S.tab) ? "wide" : "";
+  const keep = ae && main.contains(ae) && ae.dataset && ae.dataset.nw ? [ae.dataset.nw, ae.selectionStart, ae.selectionEnd] : null;
+  main.className = withRail ? "rail" : ["home", "portfolio", "regime", "flow", "news"].includes(S.tab) ? "wide" : "";
   const y = window.scrollY;
   main.innerHTML = PAGES[S.tab]() + (withRail ? rail() : "");
   window.scrollTo(0, y);
+  if (keep) { const el = main.querySelector(`[data-nw="${keep[0]}"]`); if (el) { el.focus(); try { el.setSelectionRange(keep[1], keep[2]); } catch { /* not a text box */ } } }
   if (S.sheet && !typingInSheet()) paintSheet();
 }
 const typingInSheet = () => { const a = document.activeElement; return !!(a && $("#sheet").contains(a) && /INPUT|SELECT|TEXTAREA/.test(a.tagName)); };
@@ -292,6 +297,7 @@ function route() {
   if (S.tab === "brief" && S.brief === undefined) loadBrief();
   if (S.tab === "regime") RG.loadRegime();
   if (S.tab === "flow") MF.loadFlow();
+  if (S.tab === "news") NW.loadNews();
   if (S.tab === "signals" && S.sigTab === "Big players") loadDeals();
 }
 
@@ -460,7 +466,9 @@ function pfInput(el, ev) {                                // a control on the Po
   if (k === "bench") PFV.loadHistory();
   paint();
 }
-document.addEventListener("input", (e) => { if (e.target.id === "q" || e.target.id === "mq") onSearch(e.target.value); else if (e.target.dataset.pf) pfInput(e.target, "input"); });
+let nwTimer = 0;
+document.addEventListener("input", (e) => { if (e.target.id === "q" || e.target.id === "mq") onSearch(e.target.value); else if (e.target.dataset.pf) pfInput(e.target, "input");
+  else if (e.target.dataset.nw) { S.nw[e.target.dataset.nw] = e.target.value; clearTimeout(nwTimer); nwTimer = setTimeout(paint, 180); } });
 document.addEventListener("change", (e) => { if (e.target.dataset.mf === "pick") { S.mf.pick = e.target.value; paint(); return; } if (e.target.dataset.act === "sort") { S.sort = e.target.value; paint(); } else if (e.target.dataset.pf) pfInput(e.target, "change"); });
 document.addEventListener("pointermove", chartMove, { passive: true });
 document.addEventListener("pointerdown", chartMove, { passive: true });
@@ -479,6 +487,11 @@ document.addEventListener("click", async (e) => {
     if (act === "dellot") { if (!confirm("Delete this buy? This cannot be undone.")) return; try { await api("/api/portfolio?id=" + a.dataset.id, { method: "DELETE" }); toast("Buy deleted"); } catch (er) { toast(er.message); }
       await loadPortfolio(); return paintSheet(); }
     if (act === "hmgo") return HM.go(a.dataset.v);
+    if (act === "nwrefresh") { S.nw.at = 0; NW.loadNews(true); return paint(); }
+    if (act === "nwdays") { S.nw.days = +a.dataset.v; S.nw.at = 0; NW.loadNews(true); return paint(); }
+    if (act === "nwsort") { S.nw.sort = a.dataset.v; return paint(); }
+    if (act === "nwmode") { S.nw.mode = a.dataset.v; return paint(); }
+    if (act === "nwpart") { S.nw.part = a.dataset.v; return paint(); }
     if (act === "mfview") { S.mf.view = a.dataset.v; window.scrollTo(0, 0); return paint(); }
     if (act === "mfsec") { e.preventDefault(); S.mf.pick = a.dataset.v; S.mf.view = "Sector"; window.scrollTo(0, 0); return paint(); }
     if (act.startsWith("mfset-")) { const k = act.slice(6); S.mf[k] = k === "regime" ? a.dataset.v === "1" : +a.dataset.v; return paint(); }
@@ -507,6 +520,6 @@ document.addEventListener("click", async (e) => {
 window.addEventListener("hashchange", route);
 window.addEventListener("scroll", () => { if (S.tab === "home") HM.spy(); }, { passive: true });
 document.addEventListener("visibilitychange", () => { if (!document.hidden && S.me) refresh(); });
-setInterval(() => { if (S.me && !document.hidden && marketOpen()) refresh(); }, 30000);
+setInterval(() => { if (S.me && !document.hidden && marketOpen()) refresh(); if (S.me && !document.hidden && S.tab === "news") { NW.loadNews(); paint(); } }, 30000);
 boot();
 export { S, api, paint, esc, num, sgn, pc, cls, rs, nice, todayStr, field, toast, need, ordersOf };
