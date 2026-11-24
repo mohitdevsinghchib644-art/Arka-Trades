@@ -1,4 +1,4 @@
-// Arka Trades · API (stage 4: adds the nightly market files, starting with the Regime page). Runs on Cloudflare for every request to /api/*.
+// Arka Trades · API (stage 5: adds the Home page data: index overview and the market mood index). Runs on Cloudflare for every request to /api/*.
 // Secrets are read by NAME from the Cloudflare project settings and never sent to the browser:
 //   ADMIN_USER, ADMIN_PASS, MEMBER_USER, MEMBER_PASS, AUTH_SECRET   sign-in (same names and values as in Streamlit)
 //   SUPABASE_URL, SUPABASE_KEY                                      watchlist storage (same as in Streamlit)
@@ -142,6 +142,65 @@ async function history(url, ctx) {
     catch { return { sym, ok: false }; }
   }));
   return json({ history: out, at: Date.now() }, 200, { "cache-control": "private, max-age=600" });
+}
+// Home page: for each index, currency or commodity, the numbers the classic Home shows (home_page._metrics): last price,
+// change, open, day range, yesterday's high and low, 1-week / 1-month / year-to-date change, 52-week range, a 1-month sparkline,
+// and for the symbols in full= the year of closes (NIFTY chart, 200-day average, VIX percentile). One year of daily candles each.
+export function overviewFrom(sym, data, full) {
+  const res = data && data.chart && data.chart.result && data.chart.result[0];
+  if (!res || !res.timestamp) return { sym, ok: false };
+  const off = (res.meta && res.meta.gmtoffset) || 19800, q = ((res.indicators || {}).quote || [{}])[0], byDay = new Map();
+  res.timestamp.forEach((t, i) => { const c = q.close && q.close[i]; if (c != null && c > 0) byDay.set(dayOf(t, off), { c, o: q.open && q.open[i], h: q.high && q.high[i], l: q.low && q.low[i] }); });
+  const d = [...byDay.keys()].sort(), r = d.map((x) => byDay.get(x)), n = d.length;
+  if (n < 2) return { sym, ok: false };
+  const pos = (v) => (v != null && isFinite(v) && v > 0 ? v : null), last = r[n - 1], prv = r[n - 2], price = last.c, prev = prv.c, day = d[n - 1];
+  const back = (days) => { const cut = new Date(Date.parse(day) - days * 864e5).toISOString().slice(0, 10); let v = null; for (let i = 0; i < n && d[i] <= cut; i++) v = r[i].c; return v; };
+  const y0 = (() => { let v = null; for (let i = 0; i < n && d[i] < day.slice(0, 4) + "-01-01"; i++) v = r[i].c; return v; })();
+  const yr = new Date(Date.parse(day) - 365 * 864e5).toISOString().slice(0, 10), tail = r.filter((_, i) => d[i] > yr).map((x) => x.c);
+  const chg = (ref) => (ref ? (price / ref - 1) * 100 : null), w1 = back(7), m1 = back(30);
+  const out = { sym, ok: true, d: day, price, prev, pts: price - prev, chg: chg(prev), open: pos(last.o), high: pos(last.h), low: pos(last.l), pdh: pos(prv.h), pdl: pos(prv.l),
+    w1: chg(w1), m1: chg(m1), ytd: chg(y0), hi52: Math.max(...tail), lo52: Math.min(...tail), spark: r.slice(-23).map((x) => +x.c.toFixed(4)) };
+  if (full) out.series = { d, c: r.map((x) => +x.c.toFixed(4)) };
+  return out;
+}
+const marketHours = () => { const t = new Date(Date.now() + 330 * 60000), m = t.getUTCHours() * 60 + t.getUTCMinutes(); return t.getUTCDay() >= 1 && t.getUTCDay() <= 5 && m >= 540 && m <= 945; };
+async function overview(url, ctx) {
+  const pick = (k) => [...new Set((url.searchParams.get(k) || "").toUpperCase().split(",").map((x) => x.trim()).filter((x) => SYM_OK.test(x)))];
+  const list = pick("s").slice(0, 15), full = new Set(pick("full")), ttl = marketHours() ? 60 : 900;
+  const cache = typeof caches !== "undefined" && caches.default;
+  const out = await Promise.all(list.map(async (sym) => {
+    const key = new Request(`https://cache.arka/ov/${encodeURIComponent(sym)}?f=${full.has(sym) ? 1 : 0}`);
+    if (cache) { const hit = await cache.match(key); if (hit) return hit.json(); }
+    let o;
+    try { o = overviewFrom(sym, await yahoo(`/v8/finance/chart/${encodeURIComponent(ySym(sym))}?range=1y&interval=1d&includePrePost=false`, ctx, ttl), full.has(sym)); }
+    catch { o = { sym, ok: false }; }
+    if (cache && o.ok) { const put = cache.put(key, new Response(JSON.stringify(o), { headers: { "cache-control": `max-age=${ttl}` } })); ctx && ctx.waitUntil ? ctx.waitUntil(put) : await put; }
+    return o;
+  }));
+  return json({ overview: out, at: Date.now() });
+}
+// Market mood index from Tickertape (public page), as the classic Home reads it; the last good reading is kept for a week.
+const MMI_ZONES = [[0, 30, "Extreme Fear"], [30, 50, "Fear"], [50, 70, "Greed"], [70, 100.0001, "Extreme Greed"]];
+export function mmiFrom(html) {
+  for (const m of String(html || "").matchAll(/(\d{1,3}\.\d{1,2})\s*(?:<[^>]+>\s*)*Updated/g)) {
+    const v = parseFloat(m[1]);
+    if (v >= 0 && v <= 100) return { score: Math.round(v * 100) / 100, zone: MMI_ZONES.find(([lo, hi]) => v >= lo && v < hi)[2] };
+  }
+  return null;
+}
+async function mmi(ctx) {
+  const cache = typeof caches !== "undefined" && caches.default, liveKey = new Request("https://cache.arka/mmi/live"), lastKey = new Request("https://cache.arka/mmi/last");
+  if (cache) { const hit = await cache.match(liveKey); if (hit) return json(await hit.json()); }
+  let got = null;
+  try { const r = await fetch("https://www.tickertape.in/market-mood-index", { headers: { "user-agent": UA, accept: "text/html" } }); if (r.ok) got = mmiFrom(await r.text()); } catch { /* unreachable */ }
+  if (got) {
+    const v = { status: "live", ...got, at: Date.now() };
+    if (cache) { const a = cache.put(liveKey, new Response(JSON.stringify(v), { headers: { "cache-control": "max-age=900" } })), b = cache.put(lastKey, new Response(JSON.stringify(v), { headers: { "cache-control": "max-age=604800" } }));
+      ctx && ctx.waitUntil ? ctx.waitUntil(Promise.all([a, b])) : await Promise.all([a, b]); }
+    return json(v);
+  }
+  if (cache) { const old = await cache.match(lastKey); if (old) return json({ ...(await old.json()), status: "stale" }); }
+  return json({ status: "unavailable" });
 }
 async function search(url, ctx) {
   const q = (url.searchParams.get("q") || "").trim().slice(0, 40);
@@ -358,6 +417,8 @@ export default {
       if (p === "/api/quotes") return quotes(url, ctx);
       if (p === "/api/stock") return stock(url, ctx);
       if (p === "/api/history") return history(url, ctx);
+      if (p === "/api/overview") return overview(url, ctx);
+      if (p === "/api/mmi") return mmi(ctx);
       if (p === "/api/search") return search(url, ctx);
       if (p === "/api/watchlist") return watchlist(env, request, url);
       if (p === "/api/signals") return signals(env, ctx);
