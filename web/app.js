@@ -1,5 +1,7 @@
 // Arka Trades · new app (stage 3): Home, Watchlist, the full Portfolio, Signals, Markets, Daily brief, More. Plain JavaScript, no build step.
 import * as PFV from "./portfolio.js";
+import * as RG from "./regime.js";
+import { chartMove } from "./charts.js";
 const CLASSIC = "https://arka-trades-1.streamlit.app";       // the Streamlit app, for sections that have not moved yet
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -21,15 +23,16 @@ const NAMES = Object.fromEntries([...INDICES, ...SECTORS, ...Object.values(MARKE
 // [key, name, icon, shown in the phone's bottom bar]. Markets and the brief sit under More on a phone.
 const TABS = [["home", "Home", '<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/>', true], ["watchlist", "Watchlist", '<path d="M6 3h12v18l-6-4.5L6 21z"/>', true],
   ["portfolio", "Portfolio", '<path d="M3 7h18v13H3z"/><path d="M8 7V4h8v3M3 12h18"/>', true], ["signals", "Signals", '<path d="M3 17l5-6 4 4 8-10"/><path d="M15 5h5v5"/>', true],
+  ["regime", "Regime", '<path d="M3 20h18"/><path d="M6 16l4-5 3 3 5-7"/><circle cx="18" cy="7" r="1.6"/>', false],
   ["markets", "Markets", '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.2 3 14.8 0 18M12 3c-3 3.2-3 14.8 0 18"/>', false],
   ["brief", "Daily brief", '<path d="M5 3h11l3 3v15H5z"/><path d="M8 9h8M8 13h8M8 17h5"/>', false],
   ["more", "More", '<circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/>', true]];
 const MORE = [["Stock research", "Financials, charts, filings and peers for any stock."], ["Arka AI", "Chart reading with your own playbook."],
-  ["Money flow", "Where money is moving across sectors."], ["Market regime", "Trend, breadth and volatility of the market."],
+  ["Money flow", "Where money is moving across sectors."],
   ["Screener", "Describe a setup and scan the market."], ["Backtest", "Test a rule on past prices."], ["News", "Market wire and exchange filings."]];
 
 const S = { me: null, tab: "home", q: {}, at: {}, wl: { rows: [], list: "Main", loaded: false, err: "" }, sig: null, sigErr: "", sigTab: "Leaders", mkTab: "India", sort: "order",
-            pf: PFV.pfDefaults(), qv: 0, deals: null, brief: undefined,
+            pf: PFV.pfDefaults(), rg: RG.rgDefaults(), qv: 0, deals: null, brief: undefined,
             sheet: null, results: null, searching: false };
 
 // ── small helpers ──
@@ -267,13 +270,13 @@ function brief() {
 }
 function more() {
   return `<div><div class="hd"><div><h1>More</h1></div></div>
-    <div class="links only-m" style="margin-bottom:10px"><a class="link" href="#/markets"><b>Markets</b><small>Indices, commodities, currencies and rates.</small></a>
+    <div class="links only-m" style="margin-bottom:10px"><a class="link" href="#/regime"><b>Market regime</b><small>Trend, breadth and volatility: how hard to push today.</small></a><a class="link" href="#/markets"><b>Markets</b><small>Indices, commodities, currencies and rates.</small></a>
       <a class="link" href="#/brief"><b>Daily brief</b><small>What happened overnight and what can move stocks today.</small></a></div>
     <h2 style="margin-top:8px">Still in the classic app <span>opens in a new tab</span></h2>
     <div class="links">${MORE.map(([t, d]) => `<a class="link" href="${CLASSIC}" target="_blank" rel="noopener"><b>${t}</b><small>${d}</small></a>`).join("")}</div>
     <h2>Account</h2><div class="card pad"><div style="margin-bottom:12px">Signed in as <b>${esc(S.me.user)}</b> <span class="chip">${esc(S.me.role)}</span></div><button class="btn" data-act="logout">Sign out</button></div></div>`;
 }
-const PAGES = { home, watchlist, portfolio: PFV.page, signals, markets, brief, more };
+const PAGES = { home, watchlist, portfolio: PFV.page, regime: RG.page, signals, markets, brief, more };
 
 // ── painting ──
 function renderShell() {
@@ -286,16 +289,16 @@ function renderShell() {
     <div id="msearch"></div><main id="main"></main>
     <nav class="nav"><a class="brand only-d" href="#/home"><img src="/icon-180.png" alt="">ARKA <i>TRADES</i></a>
       ${TABS.map(([k, n, d, mob]) => `<a href="#/${k}" data-tab="${k}"${mob ? "" : ' class="only-d"'}>${icon(d)}<span>${n}</span></a>`).join("")}
-      <div class="who">Signed in as <b>${esc(S.me.user)}</b><br>New app · stage 3</div></nav></div>`;
+      <div class="who">Signed in as <b>${esc(S.me.user)}</b><br>New app · stage 4</div></nav></div>`;
 }
 function paint() {
   const main = $("#main"); if (!main || !S.me) return;
   const phoneTab = TABS.some(([k, , , mob]) => k === S.tab && mob) ? S.tab : "more";      // Markets and the brief light up More on a phone
   document.querySelectorAll(".nav a[data-tab]").forEach((a) => { a.classList.toggle("on", a.dataset.tab === S.tab); a.classList.toggle("onm", a.dataset.tab === phoneTab); });
-  const withRail = !["watchlist", "more", "brief", "portfolio"].includes(S.tab);
+  const withRail = !["watchlist", "more", "brief", "portfolio", "regime"].includes(S.tab);
   const ae = document.activeElement;                       // typing in a Portfolio box: leave the page alone so the cursor stays put
   if (ae && main.contains(ae) && ae.dataset.pf && ae.tagName === "INPUT" && !/range|checkbox/.test(ae.type)) { if (S.sheet && !typingInSheet()) paintSheet(); return; }
-  main.className = withRail ? "rail" : S.tab === "portfolio" ? "wide" : "";
+  main.className = withRail ? "rail" : ["portfolio", "regime"].includes(S.tab) ? "wide" : "";
   const y = window.scrollY;
   main.innerHTML = PAGES[S.tab]() + (withRail ? rail() : "");
   window.scrollTo(0, y);
@@ -307,6 +310,7 @@ function route() {
   S.tab = PAGES[t] ? t : "home";
   window.scrollTo(0, 0); paint(); refresh();
   if (S.tab === "brief" && S.brief === undefined) loadBrief();
+  if (S.tab === "regime") RG.loadRegime();
   if (S.tab === "signals" && S.sigTab === "Big players") loadDeals();
 }
 
@@ -477,8 +481,8 @@ function pfInput(el, ev) {                                // a control on the Po
 }
 document.addEventListener("input", (e) => { if (e.target.id === "q" || e.target.id === "mq") onSearch(e.target.value); else if (e.target.dataset.pf) pfInput(e.target, "input"); });
 document.addEventListener("change", (e) => { if (e.target.dataset.act === "sort") { S.sort = e.target.value; paint(); } else if (e.target.dataset.pf) pfInput(e.target, "change"); });
-document.addEventListener("pointermove", PFV.chartMove, { passive: true });
-document.addEventListener("pointerdown", PFV.chartMove, { passive: true });
+document.addEventListener("pointermove", chartMove, { passive: true });
+document.addEventListener("pointerdown", chartMove, { passive: true });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") { if (S.sheet) closeSheet(); else endSearch(); } });
 document.addEventListener("click", async (e) => {
   const a = e.target.closest("[data-act]"), act = a && a.dataset.act;
@@ -493,6 +497,7 @@ document.addEventListener("click", async (e) => {
     if (act === "buyform") { S.sheet = { form: "buy", sym: a.dataset.s || "" }; paintSheet(); const i = $("#buy input[name=" + (a.dataset.s ? "qty" : "sym") + "]"); if (i) i.focus(); return; }
     if (act === "dellot") { if (!confirm("Delete this buy? This cannot be undone.")) return; try { await api("/api/portfolio?id=" + a.dataset.id, { method: "DELETE" }); toast("Buy deleted"); } catch (er) { toast(er.message); }
       await loadPortfolio(); return paintSheet(); }
+    if (act === "rgset") { S.rg[a.dataset.k] = a.dataset.v; if (a.dataset.k === "uni") RG.loadRegime(); return paint(); }
     if (act === "pfview") { S.pf.view = a.dataset.v; window.scrollTo(0, 0); return paint(); }
     if (act === "pfcsv") return PFV.csv(a.dataset.v);
     if (act === "pfrefresh") { S.at = {}; toast("Refreshing prices and history"); refresh(); return PFV.loadHistory(true); }
