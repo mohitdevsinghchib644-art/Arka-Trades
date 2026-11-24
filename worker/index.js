@@ -1,4 +1,4 @@
-// Arka Trades · API (stage 3: adds price history with splits and dividends, and portfolio books, for the full Portfolio). Runs on Cloudflare for every request to /api/*.
+// Arka Trades · API (stage 4: adds the nightly market files, starting with the Regime page). Runs on Cloudflare for every request to /api/*.
 // Secrets are read by NAME from the Cloudflare project settings and never sent to the browser:
 //   ADMIN_USER, ADMIN_PASS, MEMBER_USER, MEMBER_PASS, AUTH_SECRET   sign-in (same names and values as in Streamlit)
 //   SUPABASE_URL, SUPABASE_KEY                                      watchlist storage (same as in Streamlit)
@@ -321,6 +321,14 @@ async function deals(env, ctx) {
   out.sort((a, b) => stamp(b) - stamp(a) || b.cr - a.cr);
   return json({ deals: out.slice(0, 60) });
 }
+// results of the nightly "Market data" job (the Streamlit engines run in Python on GitHub); only known file names are served
+const MARKET_FILES = /^(regime_nifty(500|200|100)|meta)$/;
+async function market(env, ctx, url) {
+  const f = url.searchParams.get("f") || "";
+  if (!MARKET_FILES.test(f)) return fail(400, "Unknown market file.");
+  const text = await repoFile(env, ctx, `arka_data/market/${f}.json`, 900);
+  return text == null ? fail(404, "Not built yet: run the “Market data” job once in GitHub Actions.") : raw(text);
+}
 async function brief(env, ctx) {
   if (env.SUPABASE_URL && env.SUPABASE_KEY) {              // written here when the morning job has the Supabase secrets
     try {
@@ -355,6 +363,7 @@ export default {
       if (p === "/api/signals") return signals(env, ctx);
       if (p === "/api/deals") return deals(env, ctx);
       if (p === "/api/brief") return brief(env, ctx);
+      if (p === "/api/market") return market(env, ctx, url);
       if (p === "/api/portfolio" || p === "/api/portfolio/sell" || p === "/api/portfolio/plan" || p === "/api/portfolio/move") return portfolio(env, request, url, p.slice("/api/portfolio".length));
       return fail(404, "Not found.");
     } catch (e) {
