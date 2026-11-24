@@ -1,18 +1,23 @@
 """
-Arka Trades — Watchlist (v6)
+Arka Trades — Watchlist (v7)
 
-v6: rebuilt to be easy to read the first time and calm to look at.
-  * A details panel sits next to the list (under the stock on a phone). Click a stock and it shows the price, today's and
-    the 52-week range, the key numbers in plain words, what is happening today and the last 24 hours of news and filings.
-    It is part of the page, not a pop-up, so it can never get stuck over the screen (v5's news pop-up could).
-  * Remove like TradingView: point at a row and click ✕ (always shown faintly on touch screens). An "Undo" bar
-    brings the stock back, with its note and alerts.
-  * Fewer, clearer columns with plain names ("Today", "Day's range", "What's happening"); columns drop out as the
-    screen gets narrow. Views: Today, Returns, Technicals, Heatmap. Trend and RSI are written as words.
-  * Filters and sorting in plain words; a four-part summary instead of six cards.
-  * Needs auth.py with WL_PREFIX (clicks on rows and ✕ reach this page). With an older auth.py the page still works:
-    a picker in the panel chooses the stock and rows open the stock as before.
-  Data, lists, notes, alerts, storage and the public API are unchanged.
+v7: designed for the phone first, and fast.
+  * Tap (or click) a stock and a sheet opens over the page: price, today's and the 52-week range, the key numbers in
+    plain words, what is happening today, and the last 24 hours of news and filings with links. The sheet is plain
+    HTML, so it opens and closes instantly, without reloading the page. On a phone it slides up from the bottom.
+  * The stuck sheet of v5 is fixed. Cause: the sheet sat inside a row that shrinks slightly while it is pressed; that
+    moved the ✕ out from under the finger, so the tap never landed. Rows no longer do that, and nothing around the
+    sheet can move it.
+  * Remove like TradingView: on a computer point at a row and click ✕; on a phone open the stock and tap Remove.
+    An "Undo" bar brings the stock back with its note and alerts.
+  * A compact list: symbol and name, today's chart, price, change, volume and what is happening. On a phone each
+    stock is two clean lines (symbol, chart, price and change) with large tap targets and no hover-only controls.
+  * Views: Today, Returns, Technicals, Heatmap. Filters and sorting in plain words (two dropdowns on a phone).
+  * Notes, price alerts and "move to another list" are under the list, in "Notes and price alerts".
+  * Needs auth.py with WL_PREFIX for ✕, Remove, Research and Arka AI inside the sheet. Without it the sheet still
+    opens and "Open chart" works; remove stocks under "Manage list".
+  Data, lists, notes, alerts, storage and the public API are unchanged. (v6, a side panel that reloaded the page on
+  every click, was withdrawn.)
 
 (v5 notes follow)
 
@@ -1078,156 +1083,157 @@ def _manage(sb, rows, list_name, key, can_edit, supports):
         st.code(SQL_LISTS, language="sql")
 
 
-# ═════════════════════════ v6 look ═════════════════════════
+# ═════════════════════════ v7 look ═════════════════════════
 def _css():
-    """v6: one calm card list on the left, a details panel on the right (inline, never an overlay)."""
+    """v7: a compact list designed for the phone first. Tapping a stock opens a sheet (plain HTML, no reload)."""
     st.markdown(f"""<style>
-    .w6, .w6 *{{box-sizing:border-box}}
-    .w6{{font-family:{SANS};font-variant-numeric:tabular-nums;color:{TX};-webkit-font-smoothing:antialiased}}
-    /* title */
-    .w6-head{{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin:12px 2px 2px}}
-    .w6-head h2{{margin:0 !important;padding:0 !important;font:650 25px/1.2 {SANS} !important;letter-spacing:-.5px;color:#F5F5F7 !important}}
-    .w6-head .sub{{font-size:13px;color:#8A8A90;padding-bottom:3px;text-align:right}}
-    .w6-hint{{display:flex;gap:8px;align-items:center;font-size:12.5px;color:#7A7A81;margin:6px 2px 14px}}
-    .w6-hint i{{font-style:normal;display:inline-grid;place-items:center;width:18px;height:18px;border-radius:6px;background:#1A1A1D;color:#A3A3A8;font-size:11px}}
-    /* summary */
-    .w6-sum{{display:grid;grid-template-columns:1.25fr 1fr 1fr 1fr;gap:1px;background:#1F1F23;border:1px solid #232326;border-radius:14px;overflow:hidden;margin:4px 0 14px}}
-    .w6-sum>div{{background:#111113;padding:12px 16px;min-width:0}}
-    .w6-sum .l{{font-size:12px;color:#8A8A90}}
-    .w6-sum .v{{font:600 17px/1.25 {SANS};margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#F2F2F4}}
-    .w6-sum .s{{font-size:12px;color:#6E6E75;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
-    .w6-bb{{display:flex;height:4px;border-radius:4px;overflow:hidden;background:#232327;margin-top:9px}} .w6-bb i{{display:block;height:100%}}
-    @media (max-width:760px){{.w6-sum{{grid-template-columns:1fr 1fr}} .w6-sum>div{{padding:11px 13px}} .w6-sum .v{{font-size:15.5px}}}}
+    .w7,.w7 *,.w6,.w6 *{{box-sizing:border-box}}
+    .w7,.w6{{font-family:{SANS};font-variant-numeric:tabular-nums;color:{TX};-webkit-font-smoothing:antialiased}}
     .up{{color:{GREEN}}} .dn{{color:{RED}}} .fl{{color:#A3A3A8}} .na{{color:#4A4A50}}
-    /* the list */
-    .w6-list{{container-type:inline-size;border:1px solid #232326;border-radius:16px;background:#111113;overflow:hidden}}
-    .w6-hd,.w6-row{{display:grid;grid-template-columns:var(--cols);column-gap:16px;align-items:center;padding-left:16px;padding-right:46px}}
-    .w6-hd{{padding-top:11px;padding-bottom:11px;background:#141416;border-bottom:1px solid #232326;font-size:12px;font-weight:500;color:#7C7C83}}
-    .w6-hd>div{{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:default}}
-    .w6-row{{position:relative;padding-top:12px;padding-bottom:12px;border-bottom:1px solid #1B1B1F;cursor:pointer;transition:background .12s ease}}
-    .w6-row:last-child{{border-bottom:0}}
-    .w6-row:hover{{background:#16161A}}
-    .w6-row.sel{{background:rgba(255,159,10,.075);box-shadow:inset 3px 0 0 {AMBER}}}
-    .w6-hd>div,.w6-row>div{{min-width:0;text-align:right}}
-    .w6-hd>div:first-child,.w6-row>div:first-child,.w6-hd>.lft,.w6-row>.lft{{text-align:left}}
-    .w6-hd>.ctr,.w6-row>.ctr{{text-align:center}}
-    .w6-grp{{padding:9px 16px;background:#0E0E10;border-bottom:1px solid #1B1B1F;font-size:12.5px;font-weight:600;color:#A3A3A8}}
-    .w6-grp span{{font-weight:500;color:#6E6E75;margin-left:6px}}
-    .w6-sym b{{display:block;font-size:14.5px;font-weight:650;color:#F4F4F6;letter-spacing:-.1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
-    .w6-sym span{{display:block;font-size:12px;color:#7A7A81;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
-    .w6-sym em{{font-style:normal;color:{AMBER};font-size:11px;margin-left:5px}}
-    .w6-row.sel .w6-sym b{{color:{AMBER}}}
-    .w6-px{{font-size:14.5px;font-weight:650;color:#F4F4F6;white-space:nowrap}}
-    .w6-px .lv{{display:inline-block;width:6px;height:6px;border-radius:50%;background:{AMBER};margin-left:6px;vertical-align:middle;
-               box-shadow:0 0 0 3px rgba(255,159,10,.18)}}
-    .w6-chg{{display:inline-block;min-width:70px;text-align:center;padding:4px 9px;border-radius:8px;font-weight:650;font-size:13px;white-space:nowrap}}
-    .w6-chg.up{{background:rgba(48,209,88,.13)}} .w6-chg.dn{{background:rgba(255,69,58,.13)}} .w6-chg.fl{{background:#1C1C20}}
-    .w6-sub{{display:block;font-size:11.5px;color:#7A7A81;margin-top:4px;white-space:nowrap}}
-    .w6-ret{{font-weight:600;font-size:13.5px;white-space:nowrap}}
-    /* range bar */
-    .w6-rg{{display:block}}
-    .w6-rg .bar{{display:block;position:relative;height:5px;border-radius:5px;background:#26262B;margin:2px 0 6px}}
-    .w6-rg .bar i{{position:absolute;top:-4px;width:13px;height:13px;border-radius:50%;transform:translateX(-6.5px);border:2.5px solid #111113;background:#E6E6EA}}
-    .w6-rg .lh{{display:flex;justify-content:space-between;font-size:11px;color:#6E6E75;white-space:nowrap;gap:6px}}
-    /* chips */
+    .w7 .m{{display:none}}
+    /* title */
+    .w7-head{{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin:10px 2px 8px}}
+    .w7-head h2{{margin:0 !important;padding:0 !important;font:650 24px/1.2 {SANS} !important;letter-spacing:-.5px;color:#F5F5F7 !important}}
+    .w7-head span{{font-size:12.5px;color:#8A8A90;text-align:right}}
+    /* summary strip */
+    .w7-sum{{display:grid;grid-template-columns:1.2fr 1fr 1fr 1fr;border:1px solid #222225;border-radius:14px;background:#101012;margin:2px 0 12px;overflow:hidden}}
+    .w7-sum>div{{padding:11px 16px;min-width:0;border-left:1px solid #1D1D20}} .w7-sum>div:first-child{{border-left:0}}
+    .w7-sum .l{{font-size:11.5px;color:#7C7C83}}
+    .w7-sum .v{{font:600 15.5px/1.3 {SANS};margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#F2F2F4}}
+    .w7-sum .s{{font-size:11.5px;color:#6E6E75;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+    .w7-bb{{display:flex;height:3px;border-radius:3px;overflow:hidden;background:#232327;margin-top:8px}} .w7-bb i{{display:block;height:100%}}
+    .w7-hint{{font-size:12px;color:#6E6E75;margin:0 2px 8px}}
+    /* list */
+    .w7-list{{border:1px solid #222225;border-radius:16px;background:#101012;overflow:hidden}}
+    details.w7-d{{display:block;margin:0}}
+    details.w7-d>summary{{list-style:none;cursor:pointer;outline:none;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none}}
+    details.w7-d>summary::-webkit-details-marker{{display:none}} details.w7-d>summary::marker{{content:""}}
+    .w7-hd,.w7-row{{display:grid;grid-template-columns:var(--cols);column-gap:14px;align-items:center;padding:0 12px 0 16px}}
+    .w7-hd{{height:38px;background:#131315;border-bottom:1px solid #222225;font-size:11.5px;font-weight:500;color:#77777E}}
+    .w7-hd>span,.w7-row>span{{display:block;min-width:0;text-align:right;white-space:nowrap}}
+    .w7-hd>span.lft,.w7-row>span.lft{{text-align:left}} .w7-hd>span.ctr,.w7-row>span.ctr{{text-align:center}}
+    .w7-row{{min-height:54px;padding-top:8px;padding-bottom:8px;border-bottom:1px solid #19191C;transition:background .12s ease}}
+    details.w7-d:last-child>.w7-row{{border-bottom:0}}
+    @media (hover:hover){{.w7-row:hover{{background:#16161A}}}}
+    .w7-row:active{{background:#1A1A1E}}
+    .w7-grp{{padding:8px 16px;background:#0C0C0E;border-bottom:1px solid #19191C;font-size:12px;font-weight:600;color:#A3A3A8}}
+    .w7-grp span{{font-weight:500;color:#6E6E75;margin-left:6px}}
+    .w7-st b{{display:block;font-size:14.5px;font-weight:650;color:#F4F4F6;letter-spacing:-.1px;overflow:hidden;text-overflow:ellipsis}}
+    .w7-st small{{display:block;font-size:12px;color:#77777E;margin-top:2px;overflow:hidden;text-overflow:ellipsis}}
+    .w7-st em{{font-style:normal;color:{AMBER};font-size:11px;margin-left:5px}}
+    .w7-px{{font-size:14.5px;font-weight:650;color:#F4F4F6}}
+    .w7-lv{{display:inline-block;width:6px;height:6px;border-radius:50%;background:{AMBER};margin-left:6px;vertical-align:middle}}
+    .w7-n{{font-size:13.5px;font-weight:600}} .w7-mu{{font-size:13px;color:#A3A3A8}} .w7-mu small{{color:#6E6E75;font-size:11.5px;margin-left:4px}}
+    .w7-pb b{{display:block;font-size:15px;font-weight:650;color:#F4F4F6}} .w7-pb i{{display:block;font-style:normal;font-size:12.5px;font-weight:600;margin-top:2px}}
+    .w7-x{{width:28px;height:28px;border-radius:8px;display:grid !important;place-items:center;font-size:13px;color:#77777E;opacity:0;transition:opacity .12s,background .12s,color .12s}}
+    .w7-row:hover .w7-x{{opacity:1}} .w7-x:hover{{background:rgba(255,69,58,.16);color:#FF6961}}
+    .v-today{{--cols:minmax(150px,1.5fr) 104px 92px 78px 76px 118px minmax(140px,1.25fr) 28px}}
+    .v-ret{{--cols:minmax(150px,1.5fr) 92px repeat(5,minmax(64px,.6fr)) 104px 28px}}
+    .v-tech{{--cols:minmax(150px,1.5fr) 92px 76px minmax(124px,.9fr) minmax(116px,.85fr) 92px 70px 28px}}
+    @media (max-width:1100px){{ .w7 .wide{{display:none !important}}
+        .v-today{{--cols:minmax(140px,1.5fr) 96px 88px 74px 74px minmax(130px,1.2fr) 28px}}
+        .v-ret{{--cols:minmax(140px,1.5fr) 88px repeat(5,minmax(60px,.6fr)) 28px}}
+        .v-tech{{--cols:minmax(140px,1.5fr) 88px 74px minmax(120px,.9fr) minmax(112px,.85fr) 88px 28px}} }}
+    /* phone: two lines per stock, big tap targets, no hover-only controls */
+    @media (max-width:700px){{
+        .w7 .d{{display:none !important}} .w7 .m{{display:block}}
+        .w7-hd{{display:none}}
+        .w7-row{{column-gap:12px;padding:11px 14px;min-height:60px}}
+        .v-today{{--cols:minmax(0,1fr) 64px auto}} .v-ret,.v-tech{{--cols:minmax(0,1fr) auto}}
+        .w7-row>.w7-ev{{grid-column:1 / -1;margin-top:8px;text-align:left}} .w7-row>.w7-ev.none{{display:none}}
+        .w7-st b{{font-size:15.5px}} .w7-st small{{font-size:12.5px}}
+        .w7-x{{display:none !important}}
+        .w7-sp svg{{width:64px !important;height:26px !important}}
+        .w7-pb{{min-width:96px}}
+        .w7-sum{{grid-template-columns:1fr 1fr}} .w7-sum>div{{padding:10px 13px}} .w7-sum>div:nth-child(3){{border-left:0}}
+        .w7-sum>div:nth-child(n+3){{border-top:1px solid #1D1D20}} .w7-sum .v{{font-size:14.5px}}
+        .w7-head h2{{font-size:22px !important}}
+    }}
+    /* chips and words */
     .w6-chips{{display:flex;flex-wrap:wrap;gap:5px;justify-content:flex-start}}
     .w6-chip{{--c:#8A8A90;display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:999px;font-size:11.5px;font-weight:600;white-space:nowrap;
              color:var(--c);background:color-mix(in srgb,var(--c) 13%,transparent)}}
     .w6-chip.nw::before{{content:"";width:5px;height:5px;border-radius:50%;background:var(--c)}}
     .w6-more{{font-size:11.5px;font-weight:600;color:#8A8A90;padding:3px 7px;border-radius:999px;background:#1C1C20}}
-    /* trend / rsi words */
-    .w6-word{{display:inline-block;font-size:12.5px;font-weight:600;padding:3px 9px;border-radius:8px;white-space:nowrap;
-             color:var(--c);background:color-mix(in srgb,var(--c) 12%,transparent)}}
-    /* remove (TradingView style: appears on hover, always faintly visible on touch screens) */
-    .w6-x{{position:absolute;right:10px;top:50%;margin-top:-14px;width:28px;height:28px;border-radius:8px;display:grid;place-items:center;
-          font-size:14px;line-height:1;color:#8A8A90;opacity:0;transition:opacity .12s ease,background .12s ease,color .12s ease}}
-    .w6-row:hover .w6-x{{opacity:1}}
-    .w6-x:hover{{background:rgba(255,69,58,.16);color:#FF6961}}
-    @media (hover:none){{.w6-x{{opacity:.6}}}}
-    /* column layouts per view; columns drop out as the list gets narrow */
-    .v-today{{--cols:minmax(140px,1.5fr) 92px 96px minmax(132px,1.15fr) 112px minmax(130px,1.25fr)}}
-    .v-ret{{--cols:minmax(140px,1.5fr) 92px repeat(5,minmax(62px,.62fr)) 104px}}
-    .v-tech{{--cols:minmax(140px,1.5fr) 92px minmax(120px,1fr) minmax(108px,.9fr) 96px 86px 80px}}
-    @container (max-width:900px){{ .v-today{{--cols:minmax(130px,1.5fr) 88px 92px minmax(120px,1.1fr) 104px}} .v-today .h5{{display:none}}
-                                   .v-ret{{--cols:minmax(130px,1.5fr) 88px repeat(5,minmax(58px,.6fr))}} .v-ret .h7{{display:none}}
-                                   .v-tech{{--cols:minmax(130px,1.5fr) 88px minmax(116px,1fr) minmax(104px,.9fr) 92px}} .v-tech .h5,.v-tech .h6{{display:none}} }}
-    @container (max-width:640px){{ .v-today{{--cols:minmax(120px,1.4fr) 84px 90px}} .v-today .h3,.v-today .h4{{display:none}}
-                                   .v-ret{{--cols:minmax(120px,1.4fr) 84px repeat(3,minmax(56px,.6fr))}} .v-ret .h3,.v-ret .h6{{display:none}}
-                                   .v-tech{{--cols:minmax(120px,1.4fr) 84px minmax(110px,1fr)}} .v-tech .h3,.v-tech .h4{{display:none}} }}
-    /* undo bar */
-    .w6-undo{{display:flex;align-items:center;gap:10px;font-size:13px;color:#D6D6DA}}
-    .w6-undo b{{color:#fff}}
-    div[class*="st-key-w6_undo"]{{border:1px solid #2C2C31;background:#161619;border-radius:12px;padding:6px 8px 6px 14px;margin:0 0 10px}}
-    div[class*="st-key-w6_undo"] [data-testid="stHorizontalBlock"]{{align-items:center}}
-    /* heatmap */
-    .w6-heat{{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:6px}}
-    .w6-tile{{padding:11px 12px;min-height:70px;border-radius:12px;cursor:pointer;transition:filter .12s, box-shadow .12s}}
-    .w6-tile:hover{{filter:brightness(1.15)}} .w6-tile.sel{{box-shadow:0 0 0 2px {AMBER} inset}}
-    .w6-tile b{{display:block;font-size:13px;font-weight:650;color:#fff}} .w6-tile .p{{font-size:11.5px;color:#EDEDED;margin-top:3px;opacity:.85}}
-    .w6-tile .c{{font-size:15.5px;font-weight:700;color:#fff;margin-top:3px}}
-    .w6-gh{{font-size:12.5px;font-weight:600;color:#A3A3A8;margin:12px 2px 6px}}
-    /* phone cards */
-    .w6-cards{{display:flex;flex-direction:column;gap:8px}}
-    .w6-card{{position:relative;background:#111113;border:1px solid #1F1F23;border-radius:14px;padding:12px 44px 12px 14px;cursor:pointer}}
-    .w6-card.sel{{border-color:rgba(255,159,10,.55);background:rgba(255,159,10,.06)}}
-    .w6-card .t{{display:flex;justify-content:space-between;align-items:center;gap:10px}}
-    .w6-card .t .w6-sym{{min-width:0}} .w6-card .r{{text-align:right;flex:0 0 auto}}
-    .w6-card .r .w6-chg{{min-width:0;margin-top:4px;padding:2px 8px;font-size:12px}}
-    .w6-card .w6-chips{{margin-top:9px}}
-    .w6-card .w6-x{{opacity:.6;right:8px}}
-    .w6-mg{{font-size:12.5px;font-weight:600;color:#A3A3A8;margin:10px 2px 0}}
-    /* details panel */
-    div[class*="st-key-w6_panel"]{{border:1px solid #26262B;background:#111113;border-radius:18px;padding:18px 18px 8px}}
-    @media (min-width:900px){{div[class*="st-key-w6_panel"]{{position:sticky;top:12px}}}}
-    .w6-p-hd{{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}}
+    .w6-word{{display:inline-block;font-size:12px;font-weight:600;padding:3px 9px;border-radius:8px;white-space:nowrap;color:var(--c);background:color-mix(in srgb,var(--c) 12%,transparent)}}
+    .w6-ret{{font-weight:600;font-size:13.5px;white-space:nowrap}}
+    /* the sheet: opens over the page without a reload. Dark backdrop and ✕ are part of the row's <summary>, so tapping either closes it. */
+    details.w7-d[open]>summary::before{{content:"";position:fixed;inset:0;z-index:999990;background:rgba(0,0,0,.66);cursor:default;animation:w7fade .16s ease}}
+    details.w7-d[open]>summary::after{{content:"✕";position:fixed;z-index:999992;top:calc(6vh + 12px);left:calc(50% + min(300px,46vw) - 48px);
+        width:36px;height:36px;border-radius:50%;display:grid;place-items:center;font:500 15px {SANS};color:#E2E2E6;background:#26262B;cursor:pointer}}
+    .w7-sh{{position:fixed;z-index:999991;top:6vh;left:50%;transform:translateX(-50%);width:min(600px,92vw);max-height:88vh;overflow-y:auto;
+           background:#0F0F12;border:1px solid #27272C;border-radius:20px;box-shadow:0 30px 90px rgba(0,0,0,.65);padding:20px 20px 18px;text-align:left;
+           white-space:normal;cursor:default;overscroll-behavior:contain;animation:w7rise .2s cubic-bezier(.2,.8,.2,1)}}
+    @keyframes w7fade{{from{{opacity:0}}to{{opacity:1}}}}
+    @keyframes w7rise{{from{{opacity:0;margin-top:12px}}to{{opacity:1;margin-top:0}}}}
+    @media (max-width:700px){{
+        .w7-sh{{top:10vh;bottom:0;left:0;width:100%;max-height:none;transform:none;border-radius:22px 22px 0 0;border-width:1px 0 0;padding:26px 16px 28px}}
+        .w7-sh::before{{content:"";position:absolute;top:9px;left:50%;margin-left:-20px;width:40px;height:4px;border-radius:4px;background:#3A3A40}}
+        details.w7-d[open]>summary::after{{top:calc(10vh + 14px);left:auto;right:14px}}
+    }}
+    .w6-p-hd{{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding-right:44px}}
+    .w6-p-hd>div:first-child{{min-width:0}}
     .w6-p-hd b{{display:block;font-size:21px;font-weight:700;color:#fff;letter-spacing:-.3px}}
     .w6-p-hd small{{display:block;font-size:12.5px;color:#8A8A90;margin-top:3px;line-height:1.4}}
-    .w6-p-hd .q{{text-align:right;white-space:nowrap;flex:0 0 auto}} .w6-p-hd>div:first-child{{min-width:0}}
-    .w6-p-hd .q b{{font-size:21px}} .w6-p-hd .q span{{display:block;font-size:13px;font-weight:650;margin-top:3px}}
-    .w6-p-hd .q small{{font-size:11.5px}}
+    .w6-p-hd .q{{text-align:right;white-space:nowrap;flex:0 0 auto}}
+    .w6-p-hd .q b{{font-size:19px}} .w6-p-hd .q span{{display:block;font-size:13px;font-weight:650;margin-top:3px}} .w6-p-hd .q small{{font-size:11.5px}}
+    @media (max-width:700px){{.w6-p-hd{{display:block;padding-right:48px}} .w6-p-hd .q{{text-align:left;margin-top:10px}} .w6-p-hd .q b{{font-size:24px}}
+        .w6-p-hd .q span{{display:inline-block;margin:0 8px 0 0}} .w6-p-hd .q small{{display:inline-block}}}}
     .w6-note{{margin-top:10px;font-size:12.5px;color:{AMBER};background:rgba(255,159,10,.08);border-radius:10px;padding:8px 11px}}
-    .w6-sec{{display:flex;justify-content:space-between;align-items:baseline;font-size:12.5px;font-weight:650;color:#C9C9CE;margin:16px 0 9px}}
+    .w7-acts{{display:grid;grid-template-columns:repeat(auto-fit,minmax(104px,1fr));gap:8px;margin-top:14px}}
+    .w7-btn{{display:block;text-align:center;padding:11px 10px;border-radius:12px;font-size:13.5px;font-weight:650;cursor:pointer;background:#1C1C20;color:#E6E6EA;
+            border:1px solid #2A2A2F;transition:filter .12s,background .12s;user-select:none;-webkit-user-select:none}}
+    .w7-btn:hover{{filter:brightness(1.15)}} .w7-btn.pri{{background:{AMBER};border-color:{AMBER};color:#111}}
+    .w7-btn.rm{{color:#FF6961;background:rgba(255,69,58,.08);border-color:rgba(255,69,58,.25)}}
+    .w6-sec{{display:flex;justify-content:space-between;align-items:baseline;font-size:12.5px;font-weight:650;color:#C9C9CE;margin:18px 0 9px}}
     .w6-sec em{{font-style:normal;font-weight:500;color:#6E6E75;font-size:12px}}
-    .w6-rows2{{display:grid;grid-template-columns:1fr;gap:14px}}
-    .w6-rgl{{font-size:12px;color:#8A8A90;margin-bottom:6px;display:flex;justify-content:space-between}}
-    .w6-rgl b{{color:#D6D6DA;font-weight:600}}
+    .w6-rows2{{display:grid;grid-template-columns:1fr 1fr;gap:16px}} @media (max-width:700px){{.w6-rows2{{grid-template-columns:1fr;gap:14px}}}}
+    .w6-rgl{{font-size:12px;color:#8A8A90;margin-bottom:7px}}
     .w6-band{{position:relative;height:6px;border-radius:6px;background:linear-gradient(90deg,rgba(255,69,58,.45),#2A2A2F 50%,rgba(48,209,88,.45))}}
-    .w6-band i{{position:absolute;top:-5px;width:4px;height:16px;border-radius:2px;background:#fff;transform:translateX(-2px);box-shadow:0 0 0 2px #111113}}
+    .w6-band i{{position:absolute;top:-5px;width:4px;height:16px;border-radius:2px;background:#fff;transform:translateX(-2px);box-shadow:0 0 0 2px #0F0F12}}
     .w6-bl{{display:flex;justify-content:space-between;font-size:11.5px;color:#6E6E75;margin-top:6px}}
-    .w6-stats{{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:#1F1F23;border-radius:12px;overflow:hidden;margin-top:2px}}
+    .w6-stats{{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:#1F1F23;border-radius:12px;overflow:hidden}}
+    @media (max-width:700px){{.w6-stats{{grid-template-columns:1fr 1fr}}}}
     .w6-stats>div{{background:#141417;padding:10px 12px;min-width:0}}
     .w6-stats span{{display:block;font-size:11.5px;color:#7A7A81}}
-    .w6-stats b{{display:block;font-size:14px;font-weight:600;color:#ECECEF;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
-    .w6-stats b small{{font-size:11.5px;font-weight:500;color:#8A8A90;margin-left:4px}}
+    .w6-stats b{{display:block;font-size:13.5px;font-weight:600;color:#ECECEF;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+    .w6-stats b small{{font-size:11px;font-weight:500;color:#8A8A90;margin-left:4px}}
     .w6-sig{{display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-bottom:1px solid #1C1C20}} .w6-sig:last-child{{border-bottom:0}}
     .w6-sig .w6-chip{{flex:0 0 auto}} .w6-sig p{{margin:1px 0 0 !important;font-size:12.5px;line-height:1.5;color:#A3A3A8}}
     .w6-none{{font-size:12.5px;color:#6E6E75;padding:4px 0 2px}}
-    a.ns{{display:block;text-decoration:none !important;padding:11px 13px;margin:0 0 8px;border-radius:12px;background:#151518;border:1px solid #202025;
+    a.ns{{display:block;text-decoration:none !important;padding:12px 14px;margin:0 0 8px;border-radius:12px;background:#141417;border:1px solid #1F1F24;
          transition:border-color .15s, background .15s}}
-    a.ns:hover{{border-color:#36363C;background:#18181C}}
+    a.ns:hover{{border-color:#34343A;background:#17171B}}
     .ns-m{{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:11.5px;color:#7A7A81}}
     .ns-m .t{{color:#E8E8EC;font-weight:600}} .ns-m .dot{{opacity:.5}}
     .ns-k{{--c:#8A8A90;padding:1px 7px;border-radius:999px;font-weight:600;font-size:11px;color:var(--c);background:color-mix(in srgb,var(--c) 14%,transparent)}}
-    .ns-t{{font-size:13.5px;font-weight:600;line-height:1.45;color:#F2F2F5;margin-top:6px}}
+    .ns-t{{font-size:14px;font-weight:600;line-height:1.45;color:#F2F2F5;margin-top:6px}}
     .ns-d{{font-size:12.5px;line-height:1.55;color:#A3A3A8;margin-top:5px}}
     .ns-go{{font-size:12px;font-weight:600;color:{AMBER};margin-top:7px}}
-    .w6-empty{{padding:38px 20px;text-align:center;color:#8A8A90;border:1px dashed #2A2A2F;border-radius:16px;background:#111113;font:13.5px/1.8 {SANS}}}
-    .w6-empty b{{display:block;color:#E6E6EA;font-size:16px;margin-bottom:4px}}
-    .w6-empty code{{background:#1C1C20;border-radius:6px;padding:1px 6px;color:#E6E6EA}}
-    .w6-foot{{font-size:12px;color:#6E6E75;line-height:1.6}}
-    /* native controls */
-    div[class*="st-key-w3_addrow"]{{border:1px solid #232326;background:#111113;border-radius:16px;padding:12px 14px 0;margin:6px 0 4px}}
+    .w7-ft{{font-size:11.5px;color:#6E6E75;margin-top:14px}}
+    /* heatmap */
+    .w7-heat{{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:6px}}
+    .w7-tile{{display:block;padding:11px 12px;min-height:70px;border-radius:12px;transition:filter .12s}} .w7-tile:hover{{filter:brightness(1.15)}}
+    .w7-tile b{{display:block;font-size:13px;font-weight:650;color:#fff}} .w7-tile i{{display:block;font-style:normal;font-size:11.5px;color:#EDEDED;margin-top:3px;opacity:.85}}
+    .w7-tile u{{display:block;text-decoration:none;font-size:15.5px;font-weight:700;color:#fff;margin-top:3px}}
+    .w7-gh{{font-size:12.5px;font-weight:600;color:#A3A3A8;margin:12px 2px 6px}}
+    .w7-empty{{padding:36px 20px;text-align:center;color:#8A8A90;border:1px dashed #2A2A2F;border-radius:16px;background:#101012;font:13.5px/1.8 {SANS}}}
+    .w7-empty b{{display:block;color:#E6E6EA;font-size:16px;margin-bottom:4px}}
+    .w7-empty code{{background:#1C1C20;border-radius:6px;padding:1px 6px;color:#E6E6EA}}
+    .w7-foot{{font-size:12px;color:#6E6E75;line-height:1.6;margin-top:10px}}
+    .w6-undo{{display:flex;align-items:center;gap:10px;font-size:13px;color:#D6D6DA}} .w6-undo b{{color:#fff}}
+    div[class*="st-key-w6_undo"]{{border:1px solid #2C2C31;background:#161619;border-radius:12px;padding:6px 8px 6px 14px;margin:0 0 10px}}
+    div[class*="st-key-w6_undo"] [data-testid="stHorizontalBlock"]{{align-items:center}}
+    div[class*="st-key-w3_addrow"]{{border:1px solid #222225;background:#101012;border-radius:16px;padding:12px 14px 0;margin:4px 0 10px}}
     div[class*="st-key-w3_addrow"] [data-testid="stForm"]{{border:0 !important;padding:0 !important;background:transparent !important}}
     div[class*="st-key-w3_lists"]{{margin:2px 0 0}}
     div[class*="st-key-w3_lists"] button{{border-radius:999px !important;min-height:34px !important}}
     div[class*="st-key-w3_lists"] button p{{font:600 13px {SANS} !important}}
-    div[class*="st-key-w6_flt"]{{margin:0 0 10px}}
-    div[class*="st-key-w6_panel"] button p{{font-weight:600 !important}}
-    div[class*="st-key-w6_panel"] [data-testid="stExpander"] details{{border-radius:12px !important;border-color:#26262B !important;background:#141417 !important}}
+    div[class*="st-key-w6_flt"]{{margin:0 0 6px}}
     </style>""", unsafe_allow_html=True)
 
 
-# ═════════════════════════ words and small cells ═════════════════════════
+# ═════════════════════════ words, chips, sheet pieces ═════════════════════════
 _NICE = [("Open=High", "Opened at high"), ("Open=Low", "Opened at low"), ("PDH break", "Above yesterday's high"),
          ("PDL break", "Below yesterday's low"), ("NR7", "Quiet day"), ("Inside", "Inside day"), ("52W high", "52-week high"),
          ("52W low", "52-week low"), ("↑200 DMA", "Crossed above 200-day"), ("↓200 DMA", "Crossed below 200-day")]
@@ -1255,24 +1261,10 @@ def _cls(v) -> str:
     return "na" if v is None else "up" if v > 0 else "dn" if v < 0 else "fl"
 
 
-def _chg_pill(pct) -> str:
-    if pct is None:
-        return '<span class="na">—</span>'
-    return f'<span class="w6-chg {_cls(pct)}">{"▲" if pct > 0 else "▼" if pct < 0 else ""} {abs(pct):.2f}%</span>'
-
-
 def _retc(v, d=1) -> str:
     if v is None:
         return '<span class="na">—</span>'
     return f'<span class="w6-ret {_cls(v)}">{v:+.{d}f}%</span>'
-
-
-def _range_cell(lo, hi, v) -> str:
-    if lo is None or hi is None or v is None:
-        return '<span class="na">—</span>'
-    p = 50.0 if hi <= lo else max(0.0, min(100.0, (v - lo) / (hi - lo) * 100))
-    return (f'<span class="w6-rg" title="Where the price is between today\'s low and high"><span class="bar"><i style="left:{p:.0f}%"></i></span>'
-            f'<span class="lh"><span>{fmt_price(lo)}</span><span>{fmt_price(hi)}</span></span></span>')
 
 
 def trend_word(r):
@@ -1336,6 +1328,9 @@ def _signal_html(e) -> str:
     return f'<div class="w6-sig"><span class="w6-chip" style="--c:{c}">{_e(_nice(lab))}</span><p>{_e(tip)}</p></div>'
 
 
+WL_PREFIX = "wl:"
+
+
 def _act(kind: str, sym: str) -> str:
     """The click target for the app's tap bridge: 'wl:sel:TCS' selects a stock, 'wl:rm:TCS' removes it."""
     return f"{WL_PREFIX}{kind}:{sym}" if _clicks_ok() else sym
@@ -1350,146 +1345,6 @@ def _clicks_ok() -> bool:
         return False
 
 
-WL_PREFIX = "wl:"
-
-
-# ═════════════════════════ views ═════════════════════════
-VIEWS6 = ["Today", "Returns", "Technicals", "Heatmap"]
-
-
-def _cols6(view):
-    """(header, tooltip, cell(r, ctx) -> html, extra class)."""
-    stock = ("Stock", "", lambda r, x: _stock_cell(r, x), "lft")
-    price = ("Price", "Last traded price (₹)", lambda r, x: (f'<span class="w6-px">{fmt_price(r.get("last"))}'
-                                                              f'{"<span class=lv title=Live></span>" if r.get("live") else ""}</span>'
-                                                              if r["has_data"] else '<span class="na">no data</span>'), "")
-    if view == "Today":
-        return [stock, price,
-                ("Today", "Change from yesterday's close", lambda r, x: (_chg_pill(r.get("pct")) + (f'<span class="w6-sub">{_signed(r.get("chg"))}</span>' if r.get("chg") is not None else ""))
-                 if r["has_data"] else '<span class="na">—</span>', ""),
-                ("Day's range", "Today's low and high; the dot is where the price is now", lambda r, x: _range_cell(r.get("low"), r.get("high"), r.get("last")) if r["has_data"] else '<span class="na">—</span>', ""),
-                ("Chart today", "Today in 5-minute steps; the dashed line is yesterday's close", lambda r, x: _spark_intraday(x["intra"].get(r["symbol"]), r.get("prev")), "ctr"),
-                ("What's happening", "News, results, filings, your alerts and price signals. Click the stock to read them", lambda r, x: _chips(r["events"], 2), "lft")]
-    if view == "Returns":
-        return [stock, price,
-                ("1 week", "", lambda r, x: _retc(r.get("r1w")), ""), ("1 month", "", lambda r, x: _retc(r.get("r1m")), ""),
-                ("3 months", "", lambda r, x: _retc(r.get("r3m")), ""), ("This year", "Since 31 December", lambda r, x: _retc(r.get("ytd")), ""),
-                ("1 year", "", lambda r, x: _retc(r.get("r1y")), ""),
-                ("Last 3 months", "Daily closes", lambda r, x: _spark_daily(r.get("spark"), 96, 26), "ctr")]
-    return [stock, price,
-            ("Trend", "Price against its 20-day, 50-day and 200-day averages", lambda r, x: _word(trend_word(r)), ""),
-            ("RSI (14 days)", "Momentum from 0 to 100: above 70 is stretched, below 30 is washed out", lambda r, x: _word(rsi_word(r.get("rsi"))), ""),
-            ("From 52W high", "How far the price is below its highest price of the last year", lambda r, x: _retc(r.get("off_hi52")), ""),
-            ("Volume", "Today's volume against its 20-day average" , lambda r, x: (f'<span class="w6-ret" style="color:{YELLOW if r["vol_x"] >= 2 else GREEN if r["vol_x"] >= 1.2 else TX2}">{r["vol_x"]:.1f}×</span>'
-                                                                                 if r.get("vol_x") else '<span class="na">—</span>'), ""),
-            ("Delivery", "Share of traded volume taken for delivery (NSE, latest day)", lambda r, x: (f'{x["deliv"][r["symbol"]]["pct"]:.0f}%' if x["deliv"].get(r["symbol"]) else '<span class="na">—</span>'), "")]
-
-
-def _stock_cell(r, ctx):
-    nm = (ctx["names"].get(r["symbol"]) or ("", ""))[0] or r.get("name") or ("no price data" if not r["has_data"] else "")
-    note = (ctx["meta"].get(r["symbol"]) or {}).get("note")
-    return (f'<div class="w6-sym"><b>{_e(r["symbol"])}{"<em title=" + chr(34) + _e(note) + chr(34) + ">✎</em>" if note else ""}</b>'
-            f'<span>{_e(nm)}</span></div>')
-
-
-def _x(r, can_edit) -> str:
-    if not can_edit or not _clicks_ok():
-        return ""
-    return f'<span class="w6-x" data-ak-sym="{_e(_act("rm", r["symbol"]))}" title="Remove {_e(r["symbol"])} from this list">✕</span>'
-
-
-def render_list6(rows, view, ctx, group=False, selected=None, can_edit=False) -> str:
-    cols = _cols6(view)
-    vcls = {"Today": "v-today", "Returns": "v-ret", "Technicals": "v-tech"}[view]
-    head = "".join(f'<div class="h{i} {c}" title="{_e(tip)}">{_e(h)}</div>' for i, (h, tip, _, c) in enumerate(cols))
-    body, last_grp = [], None
-    for r in rows:
-        if group and r.get("group") != last_grp:
-            last_grp = r.get("group")
-            members = [x for x in rows if x.get("group") == last_grp and x.get("pct") is not None]
-            avg = sum(x["pct"] for x in members) / len(members) if members else None
-            body.append(f'<div class="w6-grp">{_e(last_grp)}<span>{len([x for x in rows if x.get("group") == last_grp])} stocks'
-                        + (f' · average <b class="{_cls(avg)}">{avg:+.2f}%</b>' if avg is not None else "") + "</span></div>")
-        cells = "".join(f'<div class="h{i} {c}">{fn(r, ctx)}</div>' for i, (_, _, fn, c) in enumerate(cols))
-        body.append(f'<div class="w6-row {vcls}{" sel" if r["symbol"] == selected else ""}" data-ak-sym="{_e(_act("sel", r["symbol"]))}"'
-                    f' title="Click for details and news">{cells}{_x(r, can_edit)}</div>')
-    return f'<div class="w6"><div class="w6-list"><div class="w6-hd {vcls}">{head}</div>{"".join(body)}</div></div>'
-
-
-def render_cards6(rows, view, ctx, group=False, selected=None, can_edit=False) -> list:
-    """Phone: one card per stock. Returned as a list of (symbol, html) so the page can put the details under a card."""
-    out, last_grp = [], None
-    for r in rows:
-        pre = ""
-        if group and r.get("group") != last_grp:
-            last_grp = r.get("group")
-            pre = f'<div class="w6-mg">{_e(last_grp)}</div>'
-        if r["has_data"]:
-            right = f'<div class="r"><span class="w6-px">{fmt_price(r.get("last"))}</span><br>{_chg_pill(r.get("pct"))}</div>'
-        else:
-            right = '<div class="r"><span class="na">no data</span></div>'
-        if view == "Returns":
-            sub = " · ".join(f"{lab} {_plain_pct(r.get(k))}" for lab, k in (("1W", "r1w"), ("1M", "r1m"), ("1Y", "r1y")))
-            extra = f'<span class="w6-sub">{_e(sub)}</span>'
-        elif view == "Technicals":
-            tw, rw = trend_word(r), rsi_word(r.get("rsi"))
-            extra = '<div class="w6-chips" style="margin-top:8px">' + (_word(tw) if tw else "") + (_word((f"RSI {rw[0]}", rw[1])) if rw else "") + "</div>"
-        else:
-            extra = _chips(r["events"], 3) if r["events"] else ""
-        out.append((r["symbol"], pre + f'<div class="w6-card{" sel" if r["symbol"] == selected else ""}" data-ak-sym="{_e(_act("sel", r["symbol"]))}">'
-                                       f'<div class="t">{_stock_cell(r, ctx)}{right}</div>{extra}{_x(r, can_edit)}</div>'))
-    return out
-
-
-def render_heat6(rows, field, group=False, selected=None) -> str:
-    def tile(r):
-        v = r.get(field)
-        if v is None:
-            bg, txt = "#161618", "no data"
-        else:
-            scale = {"pct": 4, "r1w": 8, "r1m": 15, "r3m": 25, "ytd": 40, "r1y": 60}.get(field, 10)
-            a = min(0.85, 0.16 + abs(v) / scale * 0.7)
-            bg = f"rgba({'34,160,70' if v >= 0 else '215,50,45'},{a:.3f})"
-            txt = f"{v:+.2f}%"
-        return (f'<div class="w6-tile{" sel" if r["symbol"] == selected else ""}" style="background:{bg}" data-ak-sym="{_e(_act("sel", r["symbol"]))}">'
-                f'<b>{_e(r["symbol"])}</b><div class="p">{fmt_price(r.get("last"))}</div><div class="c">{txt}</div></div>')
-    srt = sorted(rows, key=lambda r: r.get(field) if r.get(field) is not None else -1e9, reverse=True)
-    if not group:
-        return '<div class="w6"><div class="w6-heat">' + "".join(tile(r) for r in srt) + "</div></div>"
-    out = []
-    for g in dict.fromkeys(r.get("group") for r in sorted(rows, key=lambda r: r.get("group") or "")):
-        members = [r for r in srt if r.get("group") == g]
-        out.append(f'<div class="w6-gh">{_e(g)} · {len(members)}</div><div class="w6-heat">' + "".join(tile(r) for r in members) + "</div>")
-    return '<div class="w6">' + "".join(out) + "</div>"
-
-
-def render_summary6(rows, nifty_row) -> str:
-    ok = [r for r in rows if r["has_data"] and r.get("pct") is not None]
-    adv = sum(1 for r in ok if r["pct"] > 0)
-    dec = sum(1 for r in ok if r["pct"] < 0)
-    flat = len(ok) - adv - dec
-    tot = max(1, len(ok))
-    avg = sum(r["pct"] for r in ok) / len(ok) if ok else None
-    npct = nifty_row.get("pct") if nifty_row and nifty_row.get("has_data") else None
-    movers = sorted(ok, key=lambda r: r["pct"])
-    best, worst = (movers[-1], movers[0]) if movers else (None, None)
-    news = sum(1 for r in rows if r.get("stories"))
-    alerts = sum(1 for r in rows if r.get("alert_hit"))
-    pct = lambda v: f'<span class="{_cls(v)}">{v:+.2f}%</span>' if v is not None else '<span class="na">—</span>'
-    bb = (f'<div class="w6-bb"><i style="width:{adv / tot * 100:.1f}%;background:{GREEN}"></i><i style="width:{flat / tot * 100:.1f}%;background:#3A3A40"></i>'
-          f'<i style="width:{dec / tot * 100:.1f}%;background:{RED}"></i></div>')
-    cells = [
-        f'<div><div class="l">Today</div><div class="v"><span class="up">{adv} up</span> <span class="na">·</span> <span class="dn">{dec} down</span></div>{bb}</div>',
-        f'<div><div class="l">Your list on average</div><div class="v">{pct(avg)}</div><div class="s">NIFTY 50 {pct(npct) if npct is not None else "—"}</div></div>',
-        (f'<div><div class="l">Best · worst</div><div class="v"><span class="up">{_e(best["symbol"])}</span> <span class="na">·</span> '
-         f'<span class="dn">{_e(worst["symbol"])}</span></div><div class="s">{pct(best["pct"])} · {pct(worst["pct"])}</div></div>') if best else
-        '<div><div class="l">Best · worst</div><div class="v na">—</div></div>',
-        f'<div><div class="l">Needs a look</div><div class="v">{news} in the news</div><div class="s">{alerts} price alert{"s" if alerts != 1 else ""} hit</div></div>',
-    ]
-    return '<div class="w6"><div class="w6-sum">' + "".join(cells) + "</div></div>"
-
-
-# ═════════════════════════ details panel ═════════════════════════
 def _band(lo, hi, v, label) -> str:
     if lo is None or hi is None or v is None or hi <= lo:
         return ""
@@ -1546,50 +1401,6 @@ def panel_body_html(r, meta, deliv) -> str:
             + "</div>")
 
 
-def _panel(sb, r, names, meta, deliv, key, list_name, lists, can_edit, supports, on_open, pick_from=None):
-    """The details panel for one stock: inline, so it can never get stuck over the page."""
-    with st.container(key=f"w6_panel_{key}"):
-        if pick_from is not None:                           # old auth.py: rows cannot select, so offer a picker
-            cur = st.session_state.get(f"w6_sel_{key}")
-            idx = pick_from.index(cur) if cur in pick_from else 0
-            st.selectbox("Stock", pick_from, index=idx, key=f"w6_pickbox_{key}", label_visibility="collapsed",
-                         on_change=lambda: st.session_state.update({f"w6_sel_{key}": st.session_state.get(f"w6_pickbox_{key}")}))
-        st.markdown(panel_head_html(r, names, meta.get(r["symbol"])), unsafe_allow_html=True)
-        sym = r["symbol"]
-        b1, b2, b3 = st.columns([1.25, 1, 1], gap="small")
-        if b1.button("Open chart", key=f"w6_open_{key}", type="primary", use_container_width=True, disabled=on_open is None):
-            on_open(sym)
-        if b2.button("Research", key=f"w6_res_{key}", use_container_width=True):
-            ud.go_research(sym)
-        if b3.button("Arka AI", key=f"w6_ai_{key}", use_container_width=True):
-            ud.go_analysis(sym)
-        st.markdown(panel_body_html(r, meta.get(sym) or {}, deliv), unsafe_allow_html=True)
-        if can_edit and key != "desk" and supports:
-            m = meta.get(sym) or {}
-            with st.expander("Note and price alerts"):
-                note = st.text_input("Note", value=m.get("note") or "", key=f"w6_note_{key}_{sym}", placeholder="Why is this stock on your list?")
-                a1, a2 = st.columns(2)
-                above = a1.number_input("Tell me when price goes above ₹", min_value=0.0, value=float(_num(m.get("alert_above")) or 0.0), step=1.0, key=f"w6_ab_{key}_{sym}")
-                below = a2.number_input("Tell me when price goes below ₹", min_value=0.0, value=float(_num(m.get("alert_below")) or 0.0), step=1.0, key=f"w6_bl_{key}_{sym}")
-                st.caption("Leave 0 for no alert. When the price crosses it, the stock shows an amber alert chip and appears under the “Alert hit” filter.")
-                others = [x for x in lists if x != list_name]
-                dst = st.selectbox("Move to another list", ["Keep it here"] + others, key=f"w6_mv_{key}_{sym}") if others else "Keep it here"
-                if st.button("Save", key=f"w6_meta_go_{key}_{sym}", type="primary"):
-                    err = update_meta(sb, sym, list_name, {"note": note.strip() or None, "alert_above": above or None, "alert_below": below or None})
-                    if not err and dst != "Keep it here":
-                        err = move_to_list(sb, sym, list_name, dst)
-                    if err:
-                        st.error(err)
-                    else:
-                        st.toast(f"{sym} saved")
-                        st.rerun()
-        if can_edit:
-            if st.button(f"Remove {sym} from {list_name}", key=f"w6_rm_{key}", use_container_width=True):
-                _remove(sb, sym, key, list_name, meta)
-                st.rerun()
-
-
-# ═════════════════════════ remove and undo ═════════════════════════
 def _remove(sb, sym, key, list_name, meta) -> bool:
     m = dict(meta.get(sym) or {})
     err = ud.remove_symbol(sb, sym, ud.A_TABLE) if key == "desk" else remove_from_list(sb, [sym], list_name)
@@ -1598,8 +1409,6 @@ def _remove(sb, sym, key, list_name, meta) -> bool:
         return False
     st.session_state["w6_undo"] = {"sym": sym, "list": list_name, "key": key, "t": time.time(),
                                    "meta": {k: m.get(k) for k in ("note", "alert_above", "alert_below") if m.get(k) not in (None, "")}}
-    if st.session_state.get(f"w6_sel_{key}") == sym:
-        st.session_state.pop(f"w6_sel_{key}", None)
     return True
 
 
@@ -1616,7 +1425,6 @@ def _undo(sb):
     if err:
         st.error(err)
     else:
-        st.session_state[f"w6_sel_{u['key']}"] = u["sym"]
         st.toast(f"{u['sym']} is back in {u['list']}")
 
 
@@ -1638,8 +1446,165 @@ def _undo_bar(sb, key):
             st.rerun()
 
 
+FILTERS6 = [("All", "All"), ("Up today", "Gainers"), ("Down today", "Losers"), ("In the news", "News today"), ("Alert hit", "Alerts hit"),
+            ("Volume spike", "Volume spike"), ("52-week high", "52W high"), ("Opened at high", "Open = high"), ("Opened at low", "Open = low"),
+            ("Above yesterday's high", "Above PDH"), ("Below yesterday's low", "Below PDL"), ("No price data", "No data")]
+
+
+SORTS6 = {"Your order": "List order", "Biggest gainers": "% Chg ↓", "Biggest losers": "% Chg ↑", "Busiest (volume)": "Volume × ↓",
+          "Most events": "Events first", "Best 1 month": "1M ↓", "Best this year": "YTD ↓", "Best 1 year": "1Y ↓",
+          "Nearest 52-week high": "Near 52W high", "Highest RSI": "RSI ↓", "Lowest RSI": "RSI ↑", "Name A–Z": "Symbol A–Z"}
+
+
+VIEWS6 = ["Today", "Returns", "Technicals", "Heatmap"]
+
+
+def _btn(label, target, cls="") -> str:
+    return f'<span class="w7-btn {cls}" data-ak-sym="{_e(target)}">{_e(label)}</span>'
+
+
+def sheet_html(r, ctx, can_edit, list_name) -> str:
+    """Everything about one stock, shown over the page when its row is tapped. Plain HTML: opening and closing never reloads."""
+    sym = r["symbol"]
+    meta = ctx["meta"].get(sym) or {}
+    acts = [_btn("Open chart", sym, "pri")]
+    if _clicks_ok():
+        acts += [_btn("Research", _act("res", sym)), _btn("Arka AI", _act("ai", sym))]
+        if can_edit:
+            acts.append(_btn("Remove", _act("rm", sym), "rm"))
+    return ('<div class="w7-sh" role="dialog">' + panel_head_html(r, ctx["names"], meta)
+            + f'<div class="w7-acts">{"".join(acts)}</div>' + panel_body_html(r, meta, ctx["deliv"])
+            + '<div class="w7-ft">Tap ✕ or anywhere outside to close.</div></div>')
+
+
+def _st_cell(r, ctx, extra="") -> str:
+    nm = (ctx["names"].get(r["symbol"]) or ("", ""))[0] or r.get("name") or ("no price data" if not r["has_data"] else "")
+    note = (ctx["meta"].get(r["symbol"]) or {}).get("note")
+    return (f'<span class="w7-st lft"><b>{_e(r["symbol"])}{"<em>✎</em>" if note else ""}</b><small>{_e(nm)}</small>'
+            + (f'<small class="m">{extra}</small>' if extra else "") + "</span>")
+
+
+def _pb(r) -> str:
+    """Phone: price with the change under it."""
+    if not r["has_data"]:
+        return '<span class="w7-pb m"><i class="na">no data</i></span>'
+    p = r.get("pct")
+    chg = f'<i class="{_cls(p)}">{_signed(r.get("chg"))} ({p:+.2f}%)</i>' if p is not None else ""
+    return f'<span class="w7-pb m"><b>{fmt_price(r.get("last"))}</b>{chg}</span>'
+
+
+def _px(r) -> str:
+    if not r["has_data"]:
+        return '<span class="d na">no data</span>'
+    return f'<span class="d w7-px">{fmt_price(r.get("last"))}{"<span class=w7-lv title=Live></span>" if r.get("live") else ""}</span>'
+
+
+def _num_cell(v, d=2, cls="d") -> str:
+    return f'<span class="{cls} na">—</span>' if v is None else f'<span class="{cls} w7-n {_cls(v)}">{v:+.{d}f}%</span>'
+
+
+def _row_cells(r, view, ctx) -> str:
+    dash = '<span class="na">—</span>'
+    if view == "Today":
+        vx = r.get("vol_x")
+        vol = (f'{fmt_qty(r.get("volume"))}<small style="color:{YELLOW if vx and vx >= 2 else "#6E6E75"}">{f"{vx:.1f}×" if vx else ""}</small>'
+               if r["has_data"] else dash)
+        chg = f'<span class="d w7-n {_cls(r.get("chg"))}">{_signed(r.get("chg"))}</span>' if r.get("chg") is not None else f'<span class="d na">—</span>'
+        ev = _chips(r["events"], 2) if r["events"] else ""
+        spark = _spark_intraday(ctx["intra"].get(r["symbol"]), r.get("prev"), 100, 28) if r["has_data"] else ""
+        spark = spark.replace("<svg ", '<svg viewBox="0 0 100 28" preserveAspectRatio="none" ', 1)       # so the phone can draw it narrower
+        return (_st_cell(r, ctx) + f'<span class="ctr w7-sp">{spark}</span>' + _pb(r)
+                + _px(r) + chg + _num_cell(r.get("pct")) + f'<span class="d wide w7-mu">{vol}</span>'
+                + f'<span class="w7-ev lft{"" if ev else " none"}">{ev or dash}</span>')
+    if view == "Returns":
+        sub = " · ".join(f"{lab} {_plain_pct(r.get(k))}" for lab, k in (("1W", "r1w"), ("1M", "r1m"), ("1Y", "r1y"))) if r["has_data"] else ""
+        return (_st_cell(r, ctx, _e(sub)) + _pb(r) + _px(r) + "".join(_num_cell(r.get(k), 1) for k in ("r1w", "r1m", "r3m", "ytd", "r1y"))
+                + f'<span class="d wide ctr">{_spark_daily(r.get("spark"), 96, 26) if r["has_data"] else ""}</span>')
+    tw, rw = trend_word(r), rsi_word(r.get("rsi"))
+    words = " ".join(x for x in (_word(tw) if tw else "", _word((f"RSI {rw[0]}", rw[1])) if rw else "") if x)
+    vx = r.get("vol_x")
+    return (_st_cell(r, ctx) + _pb(r) + _px(r) + _num_cell(r.get("pct")) + f'<span class="d">{_word(tw) if tw else dash}</span>'
+            + f'<span class="d">{_word(rw) if rw else dash}</span>' + _num_cell(r.get("off_hi52"), 1)
+            + f'<span class="d wide w7-n" style="color:{YELLOW if vx and vx >= 2 else GREEN if vx and vx >= 1.2 else "#A3A3A8"}">{f"{vx:.1f}×" if vx else "—"}</span>'
+            + f'<span class="w7-ev lft m{"" if words else " none"}">{words}</span>')
+
+
+_HEADS = {
+    "Today": [("Stock", "lft", ""), ("Chart today", "ctr", "Today in 5-minute steps; the dashed line is yesterday's close"), ("Price", "", "Last traded price (₹)"),
+              ("Change", "", "Rupees up or down since yesterday's close"), ("Change %", "", ""), ("Volume", "wide", "Shares traded today, and how many times the usual day"),
+              ("What's happening", "lft", "News, results, your alerts and unusual price moves. Tap the stock to read them"), ("", "", "")],
+    "Returns": [("Stock", "lft", ""), ("Price", "", ""), ("1 week", "", ""), ("1 month", "", ""), ("3 months", "", ""), ("This year", "", "Since 31 December"),
+                ("1 year", "", ""), ("Last 3 months", "wide ctr", "Daily closes"), ("", "", "")],
+    "Technicals": [("Stock", "lft", ""), ("Price", "", ""), ("Change %", "", ""), ("Trend", "", "Price against its 20-day, 50-day and 200-day averages"),
+                   ("RSI (14 days)", "", "Momentum from 0 to 100: above 70 is stretched, below 30 is washed out"),
+                   ("From 52W high", "", "How far the price is below its highest price of the last year"), ("Volume", "wide", "Today against the usual day"), ("", "", "")],
+}
+
+
+def render_list7(rows, view, ctx, group=False, can_edit=False, list_name="") -> str:
+    vcls = {"Today": "v-today", "Returns": "v-ret", "Technicals": "v-tech"}[view]
+    head = "".join(f'<span class="{c}" title="{_e(tip)}">{_e(h)}</span>' for h, c, tip in _HEADS[view])
+    x_ok = can_edit and _clicks_ok()
+    body, last_grp = [], None
+    for r in rows:
+        if group and r.get("group") != last_grp:
+            last_grp = r.get("group")
+            members = [x for x in rows if x.get("group") == last_grp]
+            pcts = [x["pct"] for x in members if x.get("pct") is not None]
+            avg = sum(pcts) / len(pcts) if pcts else None
+            body.append(f'<div class="w7-grp">{_e(last_grp)}<span>{len(members)} stock{"s" if len(members) != 1 else ""}'
+                        + (f' · average <b class="{_cls(avg)}">{avg:+.2f}%</b>' if avg is not None else "") + "</span></div>")
+        x = (f'<span class="d w7-x" data-ak-sym="{_e(_act("rm", r["symbol"]))}" title="Remove {_e(r["symbol"])} from this list">✕</span>' if x_ok
+             else '<span class="d"></span>')
+        body.append(f'<details class="w7-d"><summary class="w7-row {vcls}">{_row_cells(r, view, ctx)}{x}</summary>'
+                    f'{sheet_html(r, ctx, can_edit, list_name)}</details>')
+    return f'<div class="w7"><div class="w7-list"><div class="w7-hd {vcls}">{head}</div>{"".join(body)}</div></div>'
+
+
+def render_heat7(rows, field, ctx, group=False, can_edit=False, list_name="") -> str:
+    def tile(r):
+        v = r.get(field)
+        if v is None:
+            bg, txt = "#161618", "no data"
+        else:
+            scale = {"pct": 4, "r1w": 8, "r1m": 15, "r3m": 25, "ytd": 40, "r1y": 60}.get(field, 10)
+            bg = f"rgba({'34,160,70' if v >= 0 else '215,50,45'},{min(0.85, 0.16 + abs(v) / scale * 0.7):.3f})"
+            txt = f"{v:+.2f}%"
+        return (f'<details class="w7-d"><summary class="w7-tile" style="background:{bg}"><b>{_e(r["symbol"])}</b><i>{fmt_price(r.get("last"))}</i>'
+                f'<u>{txt}</u></summary>{sheet_html(r, ctx, can_edit, list_name)}</details>')
+    srt = sorted(rows, key=lambda r: r.get(field) if r.get(field) is not None else -1e9, reverse=True)
+    if not group:
+        return '<div class="w7"><div class="w7-heat">' + "".join(tile(r) for r in srt) + "</div></div>"
+    out = []
+    for g in dict.fromkeys(r.get("group") for r in sorted(rows, key=lambda r: r.get("group") or "")):
+        members = [r for r in srt if r.get("group") == g]
+        out.append(f'<div class="w7-gh">{_e(g)} · {len(members)}</div><div class="w7-heat">' + "".join(tile(r) for r in members) + "</div>")
+    return '<div class="w7">' + "".join(out) + "</div>"
+
+
+def render_summary7(rows, nifty_row) -> str:
+    ok = [r for r in rows if r["has_data"] and r.get("pct") is not None]
+    adv, dec = sum(1 for r in ok if r["pct"] > 0), sum(1 for r in ok if r["pct"] < 0)
+    tot = max(1, len(ok))
+    avg = sum(r["pct"] for r in ok) / len(ok) if ok else None
+    npct = nifty_row.get("pct") if nifty_row and nifty_row.get("has_data") else None
+    movers = sorted(ok, key=lambda r: r["pct"])
+    news, alerts = sum(1 for r in rows if r.get("stories")), sum(1 for r in rows if r.get("alert_hit"))
+    pct = lambda v: f'<span class="{_cls(v)}">{v:+.2f}%</span>' if v is not None else '<span class="na">—</span>'
+    bb = (f'<div class="w7-bb"><i style="width:{adv / tot * 100:.1f}%;background:{GREEN}"></i><i style="width:{(len(ok) - adv - dec) / tot * 100:.1f}%;background:#3A3A40"></i>'
+          f'<i style="width:{dec / tot * 100:.1f}%;background:{RED}"></i></div>')
+    best = (f'<div><div class="l">Best today</div><div class="v">{_e(movers[-1]["symbol"])}</div><div class="s">{pct(movers[-1]["pct"])}</div></div>'
+            f'<div><div class="l">Worst today</div><div class="v">{_e(movers[0]["symbol"])}</div><div class="s">{pct(movers[0]["pct"])}</div></div>') if movers else \
+           '<div><div class="l">Best today</div><div class="v na">—</div></div><div><div class="l">Worst today</div><div class="v na">—</div></div>'
+    extra = " · ".join(x for x in (f"{news} in the news" if news else "", f"{alerts} alert{'s' if alerts != 1 else ''} hit" if alerts else "") if x)
+    return ('<div class="w7"><div class="w7-sum">'
+            f'<div><div class="l">Today</div><div class="v"><span class="up">{adv} up</span> <span class="na">·</span> <span class="dn">{dec} down</span></div>{bb}</div>'
+            f'<div><div class="l">Your list on average</div><div class="v">{pct(avg)}</div><div class="s">NIFTY 50 {pct(npct) if npct is not None else "—"}'
+            f'{" · " + extra if extra else ""}</div></div>{best}</div></div>')
+
+
 def _take_click(sb, key, list_name, can_edit, meta):
-    """A click on a row or a ✕ arrives from the tap bridge (auth.py) as 'wl:sel:SYM' / 'wl:rm:SYM'."""
+    """A tap on ✕ or on a sheet button arrives from the tap bridge (auth.py) as 'wl:rm:SYM', 'wl:res:SYM' or 'wl:ai:SYM'."""
     cmd = st.session_state.pop("_wl_cmd_in", None)
     if not isinstance(cmd, str) or not cmd.startswith(WL_PREFIX):
         return
@@ -1647,23 +1612,36 @@ def _take_click(sb, key, list_name, can_edit, meta):
     sym = ud.clean_symbol(sym)
     if not sym:
         return
-    if op == "sel":
-        k = f"w6_sel_{key}"
-        if _phone() and st.session_state.get(k) == sym:     # phone: tapping the open card again closes it
-            st.session_state[k] = None
-        else:
-            st.session_state[k] = sym
-    elif op == "rm" and can_edit:
+    if op == "rm" and can_edit:
         _remove(sb, sym, key, list_name, meta)
+    elif op == "res":
+        ud.go_research(sym)
+    elif op == "ai":
+        ud.go_analysis(sym)
 
 
-# ═════════════════════════ filter and sort, in plain words ═════════════════════════
-FILTERS6 = [("All", "All"), ("Up today", "Gainers"), ("Down today", "Losers"), ("In the news", "News today"), ("Alert hit", "Alerts hit"),
-            ("Volume spike", "Volume spike"), ("52-week high", "52W high"), ("Opened at high", "Open = high"), ("Opened at low", "Open = low"),
-            ("Above yesterday's high", "Above PDH"), ("Below yesterday's low", "Below PDL"), ("No price data", "No data")]
-SORTS6 = {"Your order": "List order", "Biggest gainers": "% Chg ↓", "Biggest losers": "% Chg ↑", "Busiest (volume)": "Volume × ↓",
-          "Most events": "Events first", "Best 1 month": "1M ↓", "Best this year": "YTD ↓", "Best 1 year": "1Y ↓",
-          "Nearest 52-week high": "Near 52W high", "Highest RSI": "RSI ↓", "Lowest RSI": "RSI ↑", "Name A–Z": "Symbol A–Z"}
+def _notes(sb, rows, meta, key, list_name, lists):
+    """Note, price alerts and moving a stock to another list (needs real input boxes, so it lives under the list)."""
+    with st.expander("Notes and price alerts"):
+        syms = [r["symbol"] for r in rows]
+        sym = st.selectbox("Stock", syms, key=f"w7_ns_{key}")
+        m = meta.get(sym) or {}
+        note = st.text_input("Note", value=m.get("note") or "", key=f"w7_note_{key}_{sym}", placeholder="Why is this stock on your list?")
+        a1, a2 = st.columns(2)
+        above = a1.number_input("Tell me when the price goes above ₹", min_value=0.0, value=float(_num(m.get("alert_above")) or 0.0), step=1.0, key=f"w7_ab_{key}_{sym}")
+        below = a2.number_input("Tell me when the price goes below ₹", min_value=0.0, value=float(_num(m.get("alert_below")) or 0.0), step=1.0, key=f"w7_bl_{key}_{sym}")
+        st.caption("Leave 0 for no alert. When the price crosses it, the stock shows an amber alert chip and appears under “Alert hit”.")
+        others = [x for x in lists if x != list_name]
+        dst = st.selectbox("Move to another list", ["Keep it here"] + others, key=f"w7_mv_{key}_{sym}") if others else "Keep it here"
+        if st.button("Save", key=f"w7_meta_go_{key}", type="primary"):
+            err = update_meta(sb, sym, list_name, {"note": note.strip() or None, "alert_above": above or None, "alert_below": below or None})
+            if not err and dst != "Keep it here":
+                err = move_to_list(sb, sym, list_name, dst)
+            if err:
+                st.error(err)
+            else:
+                st.toast(f"{sym} saved")
+                st.rerun()
 
 
 # ═════════════════════════ entry point ═════════════════════════
@@ -1682,7 +1660,7 @@ def render_watchlist(supabase, on_open=None, is_admin=False):
     can_edit = bool(is_admin) if current == DESK else True
 
     all_rows = load_rows(sb)
-    if ss.get("_wl_cmd_in"):                                   # a click on a row or on ✕
+    if ss.get("_wl_cmd_in"):                                   # ✕ on a row, or a button inside a sheet
         meta0 = {} if current == DESK else {r["symbol"]: r for r in all_rows if r["list_name"] == current}
         _take_click(sb, key, current, can_edit, meta0)
         all_rows = load_rows(sb)
@@ -1702,7 +1680,7 @@ def render_watchlist(supabase, on_open=None, is_admin=False):
         mine = [r for r in all_rows if r["list_name"] == current]
         symbols, meta = [r["symbol"] for r in mine], {r["symbol"]: r for r in mine}
         sub = f"{len(symbols)} stock{'s' if len(symbols) != 1 else ''} · " + ("saved to your account" if sb is not None else "this session only")
-    st.markdown(f'<div class="w6"><div class="w6-head"><h2>{_e(current)}</h2><div class="sub">{_e(sub)}</div></div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="w7"><div class="w7-head"><h2>{_e(current)}</h2><span>{_e(sub)}</span></div></div>', unsafe_allow_html=True)
     if can_edit:
         _add_box(sb, current, key, desk=current == DESK)
     _undo_bar(sb, key)
@@ -1727,15 +1705,15 @@ def _body(sb, symbols, meta, key, on_open, can_edit, group, rich, list_name, lis
         msg = ("<b>This list is empty</b>Type a stock in the box above and press Add, for example <code>TCS</code> or <code>Reliance</code>.<br>"
                "You can add several at once, separated by commas, or import a TradingView / CSV file."
                if can_edit else "<b>The Arka desk list is empty</b>")
-        st.markdown(f'<div class="w6"><div class="w6-empty">{msg}</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="w7"><div class="w7-empty">{msg}</div></div>', unsafe_allow_html=True)
         _manage(sb, [], list_name, key, can_edit, supports) if can_edit else None
         return
     phone = _phone()
     view = ss.get("w6_view", VIEWS6[0])
     with st.spinner(f"Loading {len(symbols)} stocks…"):
-        frames, intra = load_frames(tuple(symbols) + ("^NSEI",), view == "Today" and not phone)
+        frames, intra = load_frames(tuple(symbols) + ("^NSEI",), view == "Today")
         names = equity_names()
-        deliv = delivery() if view in ("Today", "Technicals") or not phone else {}
+        deliv = delivery()
         cals = calendars(symbols) if rich else {}
         news = news_by_symbol(symbols, names) if rich else {}
     nifty = frames.get("^NSEI")
@@ -1743,102 +1721,72 @@ def _body(sb, symbols, meta, key, on_open, can_edit, group, rich, list_name, lis
     if group:
         for r in rows:
             r["group"] = _group_of(r["symbol"], names)
-    st.markdown(render_summary6(rows, compute("^NSEI", nifty)), unsafe_allow_html=True)
+    st.markdown(render_summary7(rows, compute("^NSEI", nifty)), unsafe_allow_html=True)
 
-    # controls: search · view · sort · options
-    if phone:
-        view = _seg(st, "View", VIEWS6, "w6_view")
-        c_q, c_s, c_o = st.columns([1.35, 1.1, 0.85], gap="small")
-    else:
-        c_q, c_v, c_s, c_o = st.columns([2.1, 3.1, 1.6, 0.9], gap="small")
-        view = _seg(c_v, "View", VIEWS6, "w6_view")
-    query = c_q.text_input("Search", placeholder="Find a stock in this list", key=f"w6_q_{key}", label_visibility="collapsed")
-    if view == "Heatmap":
-        hf = c_s.selectbox("Colour by", ["1D", "1W", "1M", "3M", "YTD", "1Y"], key="w6_heat", label_visibility="collapsed",
-                           format_func=lambda x: {"1D": "Colour: today", "1W": "Colour: 1 week", "1M": "Colour: 1 month", "3M": "Colour: 3 months",
-                                                  "YTD": "Colour: this year", "1Y": "Colour: 1 year"}[x])
-        how = "Your order"
-    else:
-        how = c_s.selectbox("Sort", list(SORTS6), key=f"w6_s_{key}", label_visibility="collapsed", format_func=lambda x: "Sort: " + x)
-    with c_o:
-        with _popover("Options"):
-            st.toggle("Group by sector", key="w3_group")
-            st.toggle("News, filings and results", key="w3_rich", help="Looks up today's news, filings and results dates (a few seconds the first time)")
-            st.toggle("Live refresh every 60 seconds", key="w3_auto", disabled=not market_open(), help="Only while NSE is open")
     counts = {lab: len(filter_rows(rows, raw)) for lab, raw in FILTERS6}
     opts = [lab for lab, _ in FILTERS6 if lab == "All" or counts[lab]]
     if ss.get(f"w6_f_{key}") not in opts:
         ss[f"w6_f_{key}"] = "All"
     fmt = lambda f: f if f == "All" else f"{f} · {counts[f]}"
-    with st.container(key=f"w6_flt_{key}"):
-        flt = (st.pills("Show", opts, key=f"w6_f_{key}", format_func=fmt, label_visibility="collapsed") if hasattr(st, "pills")
-               else st.radio("Show", opts, key=f"w6_f_{key}", format_func=fmt, horizontal=True, label_visibility="collapsed")) or "All"
+    heat_fmt = lambda x: {"1D": "Colour: today", "1W": "Colour: 1 week", "1M": "Colour: 1 month", "3M": "Colour: 3 months",
+                          "YTD": "Colour: this year", "1Y": "Colour: 1 year"}[x]
+    if phone:                                               # phone: three controls, all thumb-sized
+        view = _seg(st, "View", VIEWS6, "w6_view")
+        c_f, c_s = st.columns(2, gap="small")
+        flt = c_f.selectbox("Show", opts, key=f"w6_f_{key}", label_visibility="collapsed", format_func=lambda f: "Show: " + fmt(f))
+        query = ""
+    else:
+        c_q, c_v, c_s = st.columns([2.2, 3.2, 1.7], gap="small")
+        query = c_q.text_input("Search", placeholder="Find a stock in this list", key=f"w6_q_{key}", label_visibility="collapsed")
+        view = _seg(c_v, "View", VIEWS6, "w6_view")
+        with st.container(key=f"w6_flt_{key}"):
+            flt = (st.pills("Show", opts, key=f"w6_f_{key}", format_func=fmt, label_visibility="collapsed") if hasattr(st, "pills")
+                   else st.radio("Show", opts, key=f"w6_f_{key}", format_func=fmt, horizontal=True, label_visibility="collapsed")) or "All"
+    if view == "Heatmap":
+        hf = c_s.selectbox("Colour by", ["1D", "1W", "1M", "3M", "YTD", "1Y"], key="w6_heat", label_visibility="collapsed", format_func=heat_fmt)
+        how = "Your order"
+    else:
+        how = c_s.selectbox("Sort", list(SORTS6), key=f"w6_s_{key}", label_visibility="collapsed", format_func=lambda x: "Sort: " + x)
     shown = filter_rows(rows, dict(FILTERS6).get(flt, "All"), query)
     if view != "Heatmap":
         shown = sort_rows(shown, SORTS6.get(how, "List order"), group)
 
-    # which stock the panel shows
-    sel_key = f"w6_sel_{key}"
-    syms_shown = [r["symbol"] for r in shown]
-    sel = ss.get(sel_key)
-    if sel not in syms_shown:
-        sel = None if phone else (syms_shown[0] if syms_shown else None)
-        if not phone:
-            ss[sel_key] = sel
-    row = next((r for r in rows if r["symbol"] == sel), None)
-    clicks = _clicks_ok()
-    hint = ("Tap a stock to see its details and news. Tap ✕ to remove it." if phone else
-            "Click a stock to see its details and news on the right. To remove one, point at its row and click ✕.") if clicks else \
-           "Pick a stock in the panel to see its details and news. Clicking a row opens the stock."
-    st.markdown(f'<div class="w6"><div class="w6-hint"><i>i</i>{_e(hint)}</div></div>', unsafe_allow_html=True)
     ctx = {"names": names, "meta": meta, "deliv": deliv, "intra": intra}
-    pick_from = None if clicks else syms_shown
-
+    hint = "Tap a stock for its details and news." if phone else \
+        ("Click a stock for its details and news." + (" To remove one, point at its row and click ✕." if can_edit and _clicks_ok() else ""))
+    st.markdown(f'<div class="w7"><div class="w7-hint">{_e(hint)}</div></div>', unsafe_allow_html=True)
     if not shown:
-        st.markdown('<div class="w6"><div class="w6-empty"><b>Nothing to show</b>No stock in this list matches the search or filter.</div></div>',
+        st.markdown('<div class="w7"><div class="w7-empty"><b>Nothing to show</b>No stock in this list matches the search or filter.</div></div>',
                     unsafe_allow_html=True)
-    elif phone:
-        if view == "Heatmap":
-            field = {"1D": "pct", "1W": "r1w", "1M": "r1m", "3M": "r3m", "YTD": "ytd", "1Y": "r1y"}[hf]
-            st.markdown(render_heat6(shown, field, group, sel), unsafe_allow_html=True)
-            if row is not None:
-                _panel(sb, row, names, meta, deliv, key, list_name, lists, can_edit, supports, on_open, pick_from)
-        else:
-            cards = render_cards6(shown, view, ctx, group, sel, can_edit)
-            cut = next((i + 1 for i, (s, _) in enumerate(cards) if s == sel), len(cards))
-            st.markdown('<div class="w6"><div class="w6-cards">' + "".join(h for _, h in cards[:cut]) + "</div></div>", unsafe_allow_html=True)
-            if row is not None:
-                _panel(sb, row, names, meta, deliv, key, list_name, lists, can_edit, supports, on_open, pick_from)
-            if cards[cut:]:
-                st.markdown('<div class="w6"><div class="w6-cards">' + "".join(h for _, h in cards[cut:]) + "</div></div>", unsafe_allow_html=True)
+    elif view == "Heatmap":
+        field = {"1D": "pct", "1W": "r1w", "1M": "r1m", "3M": "r3m", "YTD": "ytd", "1Y": "r1y"}[hf]
+        st.markdown(render_heat7(shown, field, ctx, group, can_edit, list_name), unsafe_allow_html=True)
     else:
-        left, right = st.columns([2.05, 1], gap="medium")
-        with left:
-            if view == "Heatmap":
-                field = {"1D": "pct", "1W": "r1w", "1M": "r1m", "3M": "r3m", "YTD": "ytd", "1Y": "r1y"}[hf]
-                st.markdown(render_heat6(shown, field, group, sel), unsafe_allow_html=True)
-            else:
-                st.markdown(render_list6(shown, view, ctx, group, sel, can_edit), unsafe_allow_html=True)
-        with right:
-            if row is not None:
-                _panel(sb, row, names, meta, deliv, key, list_name, lists, can_edit, supports, on_open, pick_from)
+        st.markdown(render_list7(shown, view, ctx, group, can_edit, list_name), unsafe_allow_html=True)
 
     asof = max((r["date"] for r in rows if r["has_data"]), default=None)
-    st.markdown('<div style="height:10px"></div>', unsafe_allow_html=True)
-    c1, c2, c3, c4 = st.columns([4, 0.9, 0.9, 1.2], gap="small")
-    c1.markdown(f'<div class="w6"><div class="w6-foot">Showing {len(shown)} of {len(rows)} stocks'
+    st.markdown(f'<div class="w7"><div class="w7-foot">Showing {len(shown)} of {len(rows)} stocks'
                 + (f" · prices as of {asof:%d %b %Y}" if asof is not None else "")
                 + " · prices from Yahoo Finance, delivery from NSE · an amber dot means the day is still trading.</div></div>", unsafe_allow_html=True)
-    if c2.button("Refresh", key=f"w6_ref_{key}", use_container_width=True):
+    cols = st.columns(2, gap="small") if phone else st.columns([1, 1, 1, 1.2, 3], gap="small")
+    if cols[0].button("Refresh", key=f"w6_ref_{key}", use_container_width=True):
         for fn in (_live, _intraday):
             fn.clear()
         st.rerun(scope="fragment")
-    out = pd.DataFrame([{"symbol": r["symbol"], "name": r.get("name"), "ltp": r.get("last"), "chg": r.get("chg"), "pct_chg": r.get("pct"),
-                         "open": r.get("open"), "high": r.get("high"), "low": r.get("low"), "prev_close": r.get("prev"), "volume": r.get("volume"),
-                         "vol_x_20d": r.get("vol_x"), "deliv_pct": r.get("deliv_pct"), "r1w": r.get("r1w"), "r1m": r.get("r1m"), "r3m": r.get("r3m"),
-                         "ytd": r.get("ytd"), "r1y": r.get("r1y"), "rsi": r.get("rsi"), "events": " | ".join(_nice(e[0]) for e in r["events"])} for r in shown])
-    c3.download_button("CSV", out.to_csv(index=False).encode(), f"arka_{key}_{_now():%Y%m%d}.csv", "text/csv", key=f"w6_csv_{key}", use_container_width=True)
-    c4.download_button("TradingView", "\n".join(f"NSE:{r['symbol']}" for r in shown), f"arka_{key}_tv.txt", "text/plain", key=f"w6_tv_{key}",
-                       use_container_width=True, help="A file you can import into a TradingView watchlist")
+    with cols[1]:
+        with _popover("Options"):
+            st.toggle("Group by sector", key="w3_group")
+            st.toggle("News, filings and results", key="w3_rich", help="Looks up today's news, filings and results dates (a few seconds the first time)")
+            st.toggle("Live refresh every 60 seconds", key="w3_auto", disabled=not market_open(), help="Only while NSE is open")
+    if not phone:
+        out = pd.DataFrame([{"symbol": r["symbol"], "name": r.get("name"), "ltp": r.get("last"), "chg": r.get("chg"), "pct_chg": r.get("pct"),
+                             "open": r.get("open"), "high": r.get("high"), "low": r.get("low"), "prev_close": r.get("prev"), "volume": r.get("volume"),
+                             "vol_x_20d": r.get("vol_x"), "deliv_pct": r.get("deliv_pct"), "r1w": r.get("r1w"), "r1m": r.get("r1m"), "r3m": r.get("r3m"),
+                             "ytd": r.get("ytd"), "r1y": r.get("r1y"), "rsi": r.get("rsi"), "events": " | ".join(_nice(e[0]) for e in r["events"])} for r in shown])
+        cols[2].download_button("CSV", out.to_csv(index=False).encode(), f"arka_{key}_{_now():%Y%m%d}.csv", "text/csv", key=f"w6_csv_{key}", use_container_width=True)
+        cols[3].download_button("TradingView", "\n".join(f"NSE:{r['symbol']}" for r in shown), f"arka_{key}_tv.txt", "text/plain", key=f"w6_tv_{key}",
+                                use_container_width=True, help="A file you can import into a TradingView watchlist")
     if can_edit:
+        if key != "desk" and supports:
+            _notes(sb, rows, meta, key, list_name, lists)
         _manage(sb, rows, list_name, key, can_edit, supports)
