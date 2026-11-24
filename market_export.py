@@ -1,6 +1,7 @@
 """
 Arka Trades — market_export.py (v1.2)
 
+v1.3: names.json, NSE's company names by symbol (news tagging and filings in the new app).
 v1.2: Money flow (python market_export.py flow): the rotation engine of money_flow.py with the classic page's default data options
       (Arka groups, against NIFTY 500, 5 years, ₹0.5 Cr a day), every model setting the page offers, and the NSDL FPI fortnights.
 
@@ -11,6 +12,7 @@ so the new app shows exactly the same readings without running Python itself. St
 after the market closes.
 
     python market_export.py regime            # Regime for Nifty 500, Nifty 200 and Nifty 100
+    python market_export.py names             # NSE company names by symbol (names.json)
     python market_export.py flow              # Money flow: flow.json (page), flow_sectors.json (sector view), flow_fpi.json
     python market_export.py regime --out DIR
 
@@ -293,10 +295,32 @@ def run_flow(out: Path, E=None, fpi_n: int = 48) -> list:
     return written
 
 
+def run_names(out: Path) -> list:
+    """{SYMBOL: company name} from NSE's equity list (EQUITY_L.csv), the list the classic app's search and news use."""
+    import io
+    import requests
+    out.mkdir(parents=True, exist_ok=True)
+    for u in ("https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv", "https://archives.nseindia.com/content/equities/EQUITY_L.csv"):
+        try:
+            r = requests.get(u, headers={"User-Agent": qd.UA, "Accept": "text/csv,*/*"}, timeout=20)
+            if r.status_code == 200 and "SYMBOL" in r.text[:300].upper():
+                df = pd.read_csv(io.StringIO(r.text), dtype=str)
+                df.columns = [str(c).strip().upper() for c in df.columns]
+                name_col = next(c for c in df.columns if "NAME" in c)
+                names = {str(a).strip().upper(): str(b).strip() for a, b in zip(df["SYMBOL"], df[name_col]) if str(a).strip() and str(b).strip()}
+                if len(names) > 500:
+                    (out / "names.json").write_text(json.dumps(names, separators=(",", ":")))
+                    print(f"names.json: {len(names)} companies")
+                    return ["names.json"]
+        except Exception as exc:
+            print(f"names: {u} failed ({exc})", file=sys.stderr)
+    return []
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("what", choices=["regime", "flow"])
+    ap.add_argument("what", choices=["regime", "flow", "names"])
     ap.add_argument("--out", default=str(OUT))
     a = ap.parse_args()
-    got = run_regime(Path(a.out)) if a.what == "regime" else run_flow(Path(a.out))
+    got = {"regime": run_regime, "flow": run_flow, "names": run_names}[a.what](Path(a.out))
     sys.exit(0 if got else 1)
