@@ -4,7 +4,7 @@
 # GitHub starts this repository's scheduled jobs many hours late (about ten hours in November 2026), so a job set for
 # 08:00 would arrive in the evening. This file works around that:
 #   * GitHub is asked to start the job every 3 hours, all day.
-#   * A run that starts between 02:15 and 08:00 IST on a weekday WAITS until 08:00 IST and then sends.
+#   * A run that starts between 02:45 and 08:00 IST on a weekday WAITS until 08:00 IST and then sends.
 #   * A run that starts between 08:00 and 10:30 IST sends at once.
 #   * A run that starts at any other time, or on Saturday or Sunday, stops in a few seconds without doing anything.
 #   * The first run that sends marks the brief as sent; any other run that day sees the mark and does nothing.
@@ -18,6 +18,7 @@
 #   TELEGRAM_CHAT_ID      required   the chat the bot should write to
 #   SUPABASE_URL          optional   with SUPABASE_KEY: the app shows the exact brief that was sent
 #   SUPABASE_KEY          optional
+#   OPENROUTER_KEY        optional   free backup AI, used only when Google's Gemini is busy (openrouter.ai -> Keys)
 name: Daily brief
 
 on:
@@ -35,7 +36,7 @@ concurrency:
 jobs:
   brief:
     runs-on: ubuntu-latest
-    timeout-minutes: 355            # a run may wait up to 5 h 45 min for 08:00 IST
+    timeout-minutes: 358            # GitHub's limit is 6 h: up to 5 h 15 min waiting for 08:00 + up to 20 min if the AI is busy
     steps:
       - name: Decide
         id: plan
@@ -58,13 +59,13 @@ jobs:
             go=yes; echo "Started by hand: sending now."
           elif [ "$dow" -gt 5 ]; then
             echo "Weekend in India. Nothing to do."
-          elif [ "$mins" -ge 135 ] && [ "$mins" -lt 480 ]; then
+          elif [ "$mins" -ge 165 ] && [ "$mins" -lt 480 ]; then
             go=yes; wait=$(( (480 - mins) * 60 - 10#$ss ))
             echo "Started at $hh:$mm IST. Waiting $(( wait / 60 )) minutes, until 08:00 IST."
           elif [ "$mins" -ge 480 ] && [ "$mins" -le 630 ]; then
             go=yes; echo "Started at $hh:$mm IST, inside the morning window: sending now."
           else
-            echo "Started at $hh:$mm IST, outside 02:15-10:30. Nothing to do."
+            echo "Started at $hh:$mm IST, outside 02:45-10:30. Nothing to do."
           fi
           echo "go=$go" >> "$GITHUB_OUTPUT"
           echo "wait=$wait" >> "$GITHUB_OUTPUT"
@@ -103,5 +104,6 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
           ONCE: ${{ github.event_name == 'schedule' && '--once' || '' }}      # a run started by hand always sends
         run: python daily_brief.py --send $ONCE
