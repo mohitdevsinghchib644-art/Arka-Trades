@@ -1,4 +1,4 @@
-// Arka Trades · API (stage 5: adds the Home page data: index overview and the market mood index). Runs on Cloudflare for every request to /api/*.
+// Arka Trades · API (stage 6: adds Money flow files; nightly market files are read from the market-data branch). Runs on Cloudflare for every request to /api/*.
 // Secrets are read by NAME from the Cloudflare project settings and never sent to the browser:
 //   ADMIN_USER, ADMIN_PASS, MEMBER_USER, MEMBER_PASS, AUTH_SECRET   sign-in (same names and values as in Streamlit)
 //   SUPABASE_URL, SUPABASE_KEY                                      watchlist storage (same as in Streamlit)
@@ -341,8 +341,8 @@ async function portfolio(env, request, url, sub) {
 }
 
 // ── files written into the repo by the workflows (public): signals, deals, the daily brief ──
-async function repoFile(env, ctx, path, ttl = 600) {      // -> text, or null when the file is not there
-  const url = `https://raw.githubusercontent.com/${env.GITHUB_REPO || REPO}/main/${path}`;
+async function repoFile(env, ctx, path, ttl = 600, branch = "main") {      // -> text, or null when the file is not there
+  const url = `https://raw.githubusercontent.com/${env.GITHUB_REPO || REPO}/${branch}/${path}`;
   const cache = typeof caches !== "undefined" && caches.default, key = new Request(url);
   if (cache) { const hit = await cache.match(key); if (hit) return hit.text(); }
   const r = await fetch(url, { headers: { "user-agent": UA } });
@@ -381,11 +381,12 @@ async function deals(env, ctx) {
   return json({ deals: out.slice(0, 60) });
 }
 // results of the nightly "Market data" job (the Streamlit engines run in Python on GitHub); only known file names are served
-const MARKET_FILES = /^(regime_nifty(500|200|100)|meta)$/;
+// They live on the "market-data" branch (replaced each night, so the main branch and Cloudflare builds stay small); older runs wrote to main.
+const MARKET_FILES = /^(regime_nifty(500|200|100)|meta|flow|flow_sectors|flow_fpi)$/;
 async function market(env, ctx, url) {
   const f = url.searchParams.get("f") || "";
   if (!MARKET_FILES.test(f)) return fail(400, "Unknown market file.");
-  const text = await repoFile(env, ctx, `arka_data/market/${f}.json`, 900);
+  const text = (await repoFile(env, ctx, `${f}.json`, 900, "market-data")) ?? (await repoFile(env, ctx, `arka_data/market/${f}.json`, 900));
   return text == null ? fail(404, "Not built yet: run the “Market data” job once in GitHub Actions.") : raw(text);
 }
 async function brief(env, ctx) {
