@@ -1,16 +1,8 @@
 """
-Arka Trades — Market Terminal v10.6
+Arka Trades — Market Terminal v10.4.1
 
-v10.6: the thirteen tabs are clubbed into five sections, the same on phone and desktop:
-         Home · Markets (Daily brief, Market regime, Money flow, News) · Signals (F&O and signals, Screener, Backtest) ·
-         Research (Stock research, Arka AI) · My book (Watchlist, Portfolio, Account).
-       Desktop: five tabs, and under them the pages of the open section. Phone: the five sections are the bottom bar (no
-       "More" menu any more) and the pages of the open section are a row of pills under the top bar, one tap away.
-       A section reopens on the page you last used in it. Search codes (MF, PORT, TCS RES ...) work as before.
-
-v10.5: the F&O page is now the signal desk (fno_page.py v3, fed by signal_engine.py through the "Signals" workflow): new title,
-       the search codes SIG and SIGNALS also open it, and the app no longer starts the earlier F&O engine in the background
-       (it now loads only when the Options map tab or a stock's FNO screen is opened). Nothing else changed.
+v10.4.1: the Daily brief is sent to Telegram at 08:00 IST by the app itself (brief_clock.py), because GitHub starts this
+       repository's scheduled jobs about ten hours late. The clock starts on any visit, before the sign-in screen.
 
 v10.4: new page, F&O (fno_page.py + fno_engine.py): what futures and options positioning says for NIFTY 50, BANK NIFTY and
        every F&O stock, with each signal's tested record. It sits after Regime in the tabs, second in the phone menu, and
@@ -95,7 +87,7 @@ except Exception:  # pragma: no cover
     create_client = None
 
 IST = timezone(timedelta(hours=5, minutes=30))
-APP_VERSION = "v10.6"
+APP_VERSION = "v10.4.1"
 
 
 def _secret(name: str, default=""):
@@ -122,6 +114,11 @@ def get_supabase():
 
 
 supabase = get_supabase()
+
+try:                                                         # v10.4.1: the 08:00 IST brief sender (one background thread per app process)
+    importlib.import_module("brief_clock").start(supabase)
+except Exception:
+    pass
 
 
 def _db_symbols(table: str) -> list:
@@ -402,29 +399,6 @@ div[class*="st-key-tabs"] button p{font:500 14px var(--sans) !important;white-sp
 div[class*="st-key-tabs"] button:hover{background:var(--s1) !important;color:var(--tx) !important;}
 div[class*="st-key-tabs"] button[kind="primary"],div[class*="st-key-tabs"] button[data-testid="stBaseButton-primary"]{background:var(--s2) !important;color:#fff !important;box-shadow:inset 0 1px 0 rgba(255,255,255,.05) !important;border:0 !important;}
 div[class*="st-key-tabs"] button[kind="primary"] p,div[class*="st-key-tabs"] button[data-testid="stBaseButton-primary"] p{color:#fff !important;}
-/* v10.6: pages of the open section. Desktop: quiet text tabs with an amber underline. Phone: pills that scroll sideways. */
-div[class*="st-key-subnav"],div[class*="st-key-subnav"] [data-testid="stVerticalBlock"],div[class*="st-key-subnav"] [data-testid="stHorizontalBlock"],
-div[class*="st-key-psub"],div[class*="st-key-psub"] [data-testid="stVerticalBlock"],div[class*="st-key-psub"] [data-testid="stHorizontalBlock"]{
-  display:flex !important;flex-direction:row !important;flex-wrap:nowrap !important;align-items:center !important;}
-div[class*="st-key-subnav"] [data-testid="stElementContainer"],div[class*="st-key-subnav"] .element-container,div[class*="st-key-subnav"] .stButton,
-div[class*="st-key-psub"] [data-testid="stElementContainer"],div[class*="st-key-psub"] .element-container,div[class*="st-key-psub"] .stButton{width:auto !important;flex:0 0 auto !important;}
-div[class*="st-key-subnav"]{gap:22px !important;overflow-x:auto;scrollbar-width:none;padding:0 4px !important;border-bottom:1px solid var(--line);margin-top:-6px;}
-div[class*="st-key-subnav"] [data-testid="stVerticalBlock"]{gap:22px !important;}
-div[class*="st-key-subnav"] button{background:transparent !important;border:0 !important;border-radius:0 !important;box-shadow:none !important;filter:none !important;
-  min-height:40px !important;padding:0 2px !important;color:var(--tx3) !important;width:auto !important;}
-div[class*="st-key-subnav"] button p{font:500 13.5px var(--sans) !important;white-space:nowrap !important;}
-div[class*="st-key-subnav"] button:hover{color:var(--tx) !important;}
-div[class*="st-key-subnav"] button[kind="primary"],div[class*="st-key-subnav"] button[data-testid="stBaseButton-primary"]{color:#fff !important;background:transparent !important;
-  box-shadow:inset 0 -2px 0 var(--amber) !important;}
-div[class*="st-key-subnav"] button[kind="primary"] p,div[class*="st-key-subnav"] button[data-testid="stBaseButton-primary"] p{color:#fff !important;font-weight:600 !important;}
-div[class*="st-key-psub"]{gap:8px !important;overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch;padding:2px 0 4px !important;margin:0 -14px;padding-left:14px !important;padding-right:14px !important;}
-div[class*="st-key-psub"]::-webkit-scrollbar,div[class*="st-key-subnav"]::-webkit-scrollbar{display:none;}
-div[class*="st-key-psub"] [data-testid="stVerticalBlock"]{gap:8px !important;}
-div[class*="st-key-psub"] button{background:#151517 !important;border:1px solid #26262B !important;border-radius:999px !important;box-shadow:none !important;filter:none !important;
-  min-height:38px !important;padding:0 16px !important;color:#B4B4BA !important;width:auto !important;}
-div[class*="st-key-psub"] button p{font:600 13.5px var(--sans) !important;white-space:nowrap !important;color:inherit !important;}
-div[class*="st-key-psub"] button[kind="primary"],div[class*="st-key-psub"] button[data-testid="stBaseButton-primary"]{background:#F2F2F4 !important;border-color:#F2F2F4 !important;color:#0A0A0A !important;}
-div[class*="st-key-psub"] button[kind="primary"] p,div[class*="st-key-psub"] button[data-testid="stBaseButton-primary"] p{color:#0A0A0A !important;}
 div[class*="st-key-search"] [data-baseweb="select"]>div{min-height:40px;background:var(--s1) !important;border-radius:10px !important;}
 div[class*="st-key-search"] [data-baseweb="select"] input,div[class*="st-key-search"] .stTextInput input{font:500 14px var(--sans) !important;}
 
@@ -864,10 +838,9 @@ def _allowed(page: str) -> bool:
 
 
 def _warm_fno():
-    """Read the small signal files once, so Home and the F&O desk open without a wait. The earlier F&O engine is no longer started
-    here: it loads when the Options map tab or a stock's FNO screen is opened."""
+    """Start the F&O engine in the background, so Home and the F&O page open without a wait. Costs nothing once it is ready."""
     try:
-        importlib.import_module("fno_page").signals()
+        importlib.import_module("fno_engine").run_soon()
     except BaseException as e:
         if _is_streamlit_control(e):
             raise
@@ -882,10 +855,10 @@ NAV = [("Home", "home"), ("Brief", "brief"), ("Regime", "regime"), ("F&O", "fno"
 NAV_LABEL = {t: l for l, t in NAV}
 LEGACY_PAGES = {"profile": "account", "settings": "account", "contact": "account"}
 
-FUNCTION_CODES = {"HOME": "home", "MAIN": "home", "BRIEF": "brief", "AM": "brief", "FNO": "fno", "FO": "fno", "OI": "fno", "SIG": "fno", "SIGNALS": "fno", "MF": "flow", "FLOW": "flow", "WL": "watchlist", "PORT": "portfolio",
+FUNCTION_CODES = {"HOME": "home", "MAIN": "home", "BRIEF": "brief", "AM": "brief", "FNO": "fno", "FO": "fno", "OI": "fno", "MF": "flow", "FLOW": "flow", "WL": "watchlist", "PORT": "portfolio",
                   "NEWS": "news", "N": "news", "EQS": "smart_scan", "SCRN": "smart_scan", "RES": "research", "AI": "analysis",
                   "ACCT": "account", "SET": "account", "REG": "regime", "MKT": "regime", "BT": "backtest", "BACK": "backtest"}
-FUNCTION_MENU = ["BRIEF · Daily brief", "FNO · F&O and signals", "MF · Money flow", "RES · Research", "PORT · Portfolio", "WL · Watchlist", "NEWS · News", "EQS · Screener",
+FUNCTION_MENU = ["BRIEF · Daily brief", "FNO · Futures and options", "MF · Money flow", "RES · Research", "PORT · Portfolio", "WL · Watchlist", "NEWS · News", "EQS · Screener",
                  "AI · Arka AI", "REG · Market regime", "BT · Backtest lab", "HOME · Market monitor", "ACCT · Account"]
 TICKER_FUNCS = {"RES": "research", "AI": "analysis", "DES": "security", "GP": "security"}
 if not IS_ADMIN:                                          # members: admin pages disappear from every menu
@@ -897,7 +870,7 @@ if not IS_ADMIN:                                          # members: admin pages
 PAGE_META = {
     "home": ("Market monitor", "India first, global context and your book."),
     "brief": ("Daily brief", "What happened overnight and what can move Indian stocks today."),
-    "fno": ("F&O and signals", "Orders for the next open, the trend and swing books, the index setups and what large players hold. Fixed rules, tested on real prices."),
+    "fno": ("Futures and options", "What positioning says for NIFTY, BANK NIFTY and every F&O stock, with each signal's tested record."),
     "flow": ("Money flow", "Where money is moving across sectors, how strong it is, and whether following it has worked."),
     "watchlist": ("Watchlist", "Your stocks with full quotes and today's events."),
     "portfolio": ("Portfolio", "Holdings, live P&L, exposure, tax and risk."),
@@ -1204,54 +1177,24 @@ def _render_search():
                           placeholder="Search a stock and press Enter")
 
 
-# v10.6: every page belongs to one of five sections. (key, name, phone icon, [(page name, page key), ...])
-GROUPS = [
-    ("home", "Home", ":material/home:", [("Overview", "home")]),
-    ("markets", "Markets", ":material/public:", [("Daily brief", "brief"), ("Market regime", "regime"), ("Money flow", "flow"), ("News", "news")]),
-    ("signals", "Signals", ":material/candlestick_chart:", [("F&O and signals", "fno"), ("Screener", "smart_scan"), ("Backtest", "backtest")]),
-    ("research", "Research", ":material/query_stats:", [("Stock research", "research"), ("Arka AI", "analysis")]),
-    ("book", "My book", ":material/bookmark:", [("Watchlist", "watchlist"), ("Portfolio", "portfolio"), ("Account", "account")]),
-]
-GROUPS = [(k, n, ic, [(l, t) for l, t in pages if _allowed(t)]) for k, n, ic, pages in GROUPS]
-GROUPS = [g for g in GROUPS if g[3]]
-PAGE_GROUP = {t: k for k, _, _, pages in GROUPS for _, t in pages}
-
-
-def _group_pages(gkey):
-    return next((pages for k, _, _, pages in GROUPS if k == gkey), [])
-
-
-def _group_cb(gkey):
-    """Open a section on the page last used in it (its first page the first time)."""
-    pages = [t for _, t in _group_pages(gkey)]
-    if not pages:
-        return
-    last = (st.session_state.get("_ak_grp_last") or {}).get(gkey)
-    _nav_cb(last if last in pages else pages[0])
-
-
-def _current_group():
-    """The section of the page on show; remembered so the section reopens here. The stock screen belongs to none."""
-    pg = st.session_state.page
-    g = PAGE_GROUP.get(pg)
-    if g:
-        st.session_state.setdefault("_ak_grp_last", {})[g] = pg
-    return g
-
-
-def _render_subnav(key):
-    """The pages of the open section (nothing for a section with one page)."""
-    pg = st.session_state.page
-    pages = _group_pages(PAGE_GROUP.get(pg))
-    if len(pages) < 2:
-        return
-    with _hbox(key):
-        for label, target in pages:
-            _btn(label, f"{key}_{target}", primary=(pg == target), on_click=_nav_cb, args=(target,))
+TABS_DESKTOP = [("Home", "home"), ("Brief", "brief"), ("Regime", "regime"), ("F&O", "fno"), ("Money flow", "flow"), ("Watchlist", "watchlist"), ("Portfolio", "portfolio"),
+                ("News", "news"), ("Screener", "smart_scan"), ("Backtest", "backtest"), ("Research", "research"), ("Arka AI", "analysis"),
+                ("Account", "account")]
+TABS_PHONE = [("Home", "home", ":material/home:"), ("Watchlist", "watchlist", ":material/bookmark:"),
+              ("Portfolio", "portfolio", ":material/pie_chart:"), ("Research", "research", ":material/query_stats:")]
+MORE_PHONE = [("Daily brief", "brief", ":material/wb_sunny:"), ("Futures and options", "fno", ":material/candlestick_chart:"),
+              ("Market regime", "regime", ":material/monitor_heart:"), ("Backtest lab", "backtest", ":material/science:"),
+              ("Money flow", "flow", ":material/swap_vert:"), ("News", "news", ":material/newspaper:"),
+              ("Screener", "smart_scan", ":material/filter_alt:"), ("Arka AI", "analysis", ":material/auto_awesome:"),
+              ("Account", "account", ":material/person:")]
+if not IS_ADMIN:
+    TABS_DESKTOP = [x for x in TABS_DESKTOP if _allowed(x[1])]
+    TABS_PHONE = [x for x in TABS_PHONE if _allowed(x[1])]
+    MORE_PHONE = [x for x in MORE_PHONE if _allowed(x[1])]
 
 
 def _render_desktop_top():
-    cur = _current_group()
+    pg = st.session_state.page
     with st.container(key="toprow"):
         a, b, c = st.columns([1.3, 2.2, 1.5], gap="medium")
         with a:
@@ -1261,26 +1204,34 @@ def _render_desktop_top():
         with c:
             st.markdown(f'<div class="ak-meta">{_status_html()}</div>', unsafe_allow_html=True)
     with _hbox("tabs"):
-        for gkey, name, _ic, _pages in GROUPS:
-            _btn(name, f"tab_{gkey}", primary=(cur == gkey), on_click=_group_cb, args=(gkey,))
-    _render_subnav("subnav")
+        for label, target in TABS_DESKTOP:
+            _btn(label, f"tab_{target}", primary=(pg == target), on_click=_nav_cb, args=(target,))
 
 
 def _render_phone_top():
     pg = st.session_state.page
-    _current_group()
     st.markdown(f'<div class="ak-hdr ak-phdr"><div class="ak-id">{_brand(22, 15)}</div>'
                 f'<div class="ak-meta">{_status_html(with_clock=False)}</div></div>', unsafe_allow_html=True)
     if pg in ("home", "watchlist", "research", "security", "news", "analysis"):
         _render_search()
-    _render_subnav("psub")
 
 
 def _render_phone_tabbar():
-    cur = PAGE_GROUP.get(st.session_state.page)
+    pg = st.session_state.page
+    more_pages = {t for _, t, _ in MORE_PHONE}
     with _hbox("tabbar"):
-        for gkey, name, ic, _pages in GROUPS:
-            _btn(name, f"tb_{gkey}", icon=ic, primary=(cur == gkey), on_click=_group_cb, args=(gkey,))
+        for label, target, ic in TABS_PHONE:
+            _btn(label, f"tb_{target}", icon=ic, primary=(pg == target), on_click=_nav_cb, args=(target,))
+        kw = {"use_container_width": True}
+        try:
+            pop = st.popover("More", icon=":material/menu:", **kw)
+        except TypeError:
+            pop = st.popover("More", **kw)
+        with pop:
+            for label, target, ic in MORE_PHONE:
+                _btn(label, f"tbm_{target}", icon=ic, primary=(pg == target), on_click=_nav_cb, args=(target,), full=True)
+    if pg in more_pages:
+        st.markdown('<style>div[class*="st-key-tabbar"] [data-testid="stPopover"] button{color:#fff !important;}</style>', unsafe_allow_html=True)
 
 
 def _render_shell_top():
