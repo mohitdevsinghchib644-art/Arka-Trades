@@ -1,5 +1,11 @@
 """
-home_page.py — Arka Trades · Market overview (the HOME page), v4.2
+home_page.py — Arka Trades · Market overview (the HOME page), v5
+
+v5: the page is no longer one long scroll. It is clubbed into six parts with a switch at the top:
+      Overview (status, your money, NIFTY 50, market health, the other benchmarks) · Signals · My book ·
+      Sectors (sectors, movers, rotation, heatmap) · World (global indices, commodities, currencies, rates) · Calendar.
+    One part shows at a time, on phone and desktop. Switching redraws only this page's content from data already
+    loaded, so it is quick. Every card is the same as in v4.2; only the grouping changed.
 
 v4.2: the F&O section is now the signal desk in brief (fno_page.py v3): orders for the next open, the Leaders book and the two
       index setups. With an earlier fno_page.py the v4.1 card is shown instead.
@@ -293,6 +299,13 @@ _CSS = """<style>
   .hm-g>.c7{grid-column:span 7;} .hm-g>.c8{grid-column:span 8;} .hm-g>.c12{grid-column:1/-1;}
 }
 .hm-stack{display:flex;flex-direction:column;gap:12px;min-width:0;} .hm-stack>.hm-p:last-child{flex:1;}
+div[class*="st-key-hm_secbar"]{margin:2px 0 6px;}
+div[class*="st-key-hm_secbar"] [data-testid="stButtonGroup"],div[class*="st-key-hm_secbar"] [role="radiogroup"]{flex-wrap:nowrap !important;overflow-x:auto;scrollbar-width:none;
+  -webkit-overflow-scrolling:touch;gap:8px;padding-bottom:2px;}
+div[class*="st-key-hm_secbar"] [data-testid="stButtonGroup"]::-webkit-scrollbar{display:none;}
+div[class*="st-key-hm_secbar"] [data-testid="stButtonGroup"] button{flex:0 0 auto !important;min-height:36px;border-radius:999px !important;padding:0 16px !important;}
+div[class*="st-key-hm_secbar"] [data-testid="stButtonGroup"] button p{font:600 13.5px var(--sans) !important;white-space:nowrap !important;}
+.hm-one>.hm-sec:first-child{margin-top:8px;}
 .hm-sec{display:flex;align-items:center;gap:10px;margin:28px 0 -2px;flex-wrap:wrap;}
 .hm-sec::before{content:"";width:3px;height:15px;border-radius:2px;background:var(--amber);}
 .hm-sec b{font:600 15.5px var(--sans);letter-spacing:-.2px;color:var(--tx);}
@@ -1799,69 +1812,88 @@ def _gather(supabase):
 
 
 def _body(supabase, compact=False):
+    section = _pick_section()
     M, groups, n50, wl, wl_label, base, quotes, mmi = _gather(supabase)
-    return _draw(M, groups, n50, wl, wl_label, base, quotes, mmi, compact)
+    return _draw(M, groups, n50, wl, wl_label, base, quotes, mmi, compact, section)
 
 
-def _draw(M, groups, n50, wl, wl_label, base, quotes, mmi, compact):
-    """The page, most important first:
-       1 status + one-line brief     2 your money on one line     3 NIFTY 50 and market health     4 other benchmarks
-       5 your holdings and watchlist 6 leadership (sectors, movers, rotation, heatmap)
-       7 world and macro             8 calendar"""
+SECTIONS = ["Overview", "Signals", "My book", "Sectors", "World", "Calendar"]
+
+
+def _pick_section() -> str:
+    """The switch at the top of the page. Lives inside the page's fragment, so a tap redraws only this page."""
+    ss = st.session_state
+    if ss.get("hm_section") not in SECTIONS:
+        ss["hm_section"] = SECTIONS[0]
+
+    def _keep():                                             # tapping the open part again would clear it
+        if ss.get("hm_section") not in SECTIONS:
+            ss["hm_section"] = SECTIONS[0]
+    with st.container(key="hm_secbar"):
+        for name in ("pills", "segmented_control"):
+            fn = getattr(st, name, None)
+            if fn is None:
+                continue
+            try:
+                v = fn("Section", SECTIONS, key="hm_section", label_visibility="collapsed", on_change=_keep)
+                return v if v in SECTIONS else SECTIONS[0]
+            except TypeError:
+                continue
+        return st.radio("Section", SECTIONS, key="hm_section", horizontal=True, label_visibility="collapsed")
+
+
+def _draw(M, groups, n50, wl, wl_label, base, quotes, mmi, compact, section="Overview"):
+    """One part of the page at a time (v5). Parts: Overview, Signals, My book, Sectors, World, Calendar."""
     n50 = [s for v in groups.values() for s in v]
     nq = {s: quotes.get(s) for s in n50}
     B = _breadth(nq)
     S = nse_session()
     holds, realised = _book_holdings(base, quotes)
-    up, n_sec = _sector_count(M)
-    sec_right = (f"{up} of {n_sec} up · ranked by today" if n_sec else "")
-    rot_right, rot_body = _rotation(M)
-    heat_right = f'{B["adv"]} up · {B["flat"]} flat · {B["dec"]} down'
-    top = _ticker(M) + _head(M, B, S) + _book_bar(holds)
     has_book = bool(holds or wl)
     empty_book = ('<div class="hm-p c12 m2"><div class="hm-empty" style="padding:14px"><b>Make this page yours.</b> Add your buys in Portfolio and the '
                   'stocks you are stalking in Watchlist: your profit for the day, stops and prices then sit at the top of this page.</div></div>')
-
-    if compact:
-        book = (_holdings(holds, realised, "", True) + _watch(wl, wl_label, quotes, "")) if has_book else empty_book
-        html_ = (top
-                 + _grid(_hero(M, S, "", True)) + _bench(M) + _grid(_health(M, mmi, B))
-                 + _fno(True)
-                 + _sec("Your book") + _grid(book)
-                 + _sec("Leadership", "today")
-                 + _grid(_card("Top movers", "NIFTY 50", _movers(nq), flush=True)
-                         + _card("Sectors", sec_right, _sector_tiles(M), flush=True)
-                         + _card("Sector rotation", rot_right, rot_body, flush=True)
-                         + _card("NIFTY 50 heatmap", heat_right, _imap(groups, nq), flush=True))
-                 + _sec("World and macro")
-                 + _grid(_card("Global markets", "Local currency", _qlist(WEI, M, skip=("INDIA",)), flush=True)
-                         + _card("Commodities, currencies and rates", "", _qlist(XASSET, M), flush=True))
-                 + _sec("Calendar")
-                 + _grid(_session_panel(S) + _holiday_panel()))
-        st.markdown(f'<div class="hm hm-compact">{html_}</div>', unsafe_allow_html=True)
-        return
-
-    book = (_holdings(holds, realised, "c7 m2", False) + _watch(wl, wl_label, quotes, "c5 m2")) if has_book else empty_book
-    wei = _table(WEI, M, ["Index", "Last", "1D", "1W", "1M", "YTD", "1M trend"], show_date=False)
-    xa = (_table(XASSET, M, ["Instrument", "Last", "1D", "1M", "YTD"], show_date=False)
-          + '<div class="hm-empty" style="border-top:1px solid var(--line)">Yields move in basis points (100 bp = 1%). '
-            'For rupee pairs a rise means a weaker rupee. Hover a name for its last trade date.</div>')
-    lead_right = ('<div class="hm-stack c5 m2">' + _card("Top movers", "NIFTY 50 · today", _movers(nq), flush=True)
-                  + _card("Sector rotation", rot_right, rot_body, flush=True) + '</div>')
-    html_ = (top
-             + _grid(_hero(M, S, "c7 m2") + _health(M, mmi, B, "c5 m2"))
-             + _bench(M)
-             + _fno()
-             + _sec("Your book", "Holdings and the stocks you are watching") + _grid(book)
-             + _sec("Leadership", "Sectors and stocks moving the market today")
-             + _grid(_card("Sectors", sec_right, _sector_matrix(M), "c7 m2", True) + lead_right
-                     + _card("NIFTY 50 heatmap", heat_right, _imap(groups, nq), "c12 m2", True))
-             + _sec("World and macro", "Global indices, commodities, currencies and rates")
-             + _grid(_card("Global indices", "Local currency", wei, "c7 m2", True)
-                     + _card("Commodities, currencies and rates", "", xa, "c5 m2", True))
-             + _sec("Calendar", "Session, expiries, holidays and world market hours")
-             + _grid(_session_panel(S, "c4") + _holiday_panel("c4") + _card("World markets", "Local time", _world_clock(), "c4 m2")))
-    st.markdown(f'<div class="hm">{html_}</div>', unsafe_allow_html=True)
+    if section == "Overview":
+        top = _ticker(M) + _head(M, B, S) + _book_bar(holds)
+        html_ = (top + _grid(_hero(M, S, "", True)) + _bench(M) + _grid(_health(M, mmi, B))) if compact else \
+                (top + _grid(_hero(M, S, "c7 m2") + _health(M, mmi, B, "c5 m2")) + _bench(M))
+    elif section == "Signals":
+        html_ = _fno(compact) if compact else _fno()
+    elif section == "My book":
+        if compact:
+            book = (_holdings(holds, realised, "", True) + _watch(wl, wl_label, quotes, "")) if has_book else empty_book
+        else:
+            book = (_holdings(holds, realised, "c7 m2", False) + _watch(wl, wl_label, quotes, "c5 m2")) if has_book else empty_book
+        html_ = _book_bar(holds) + _grid(book)
+    elif section == "Sectors":
+        up, n_sec = _sector_count(M)
+        sec_right = (f"{up} of {n_sec} up · ranked by today" if n_sec else "")
+        rot_right, rot_body = _rotation(M)
+        heat_right = f'{B["adv"]} up · {B["flat"]} flat · {B["dec"]} down'
+        if compact:
+            html_ = _grid(_card("Top movers", "NIFTY 50", _movers(nq), flush=True)
+                          + _card("Sectors", sec_right, _sector_tiles(M), flush=True)
+                          + _card("Sector rotation", rot_right, rot_body, flush=True)
+                          + _card("NIFTY 50 heatmap", heat_right, _imap(groups, nq), flush=True))
+        else:
+            lead_right = ('<div class="hm-stack c5 m2">' + _card("Top movers", "NIFTY 50 · today", _movers(nq), flush=True)
+                          + _card("Sector rotation", rot_right, rot_body, flush=True) + '</div>')
+            html_ = _grid(_card("Sectors", sec_right, _sector_matrix(M), "c7 m2", True) + lead_right
+                          + _card("NIFTY 50 heatmap", heat_right, _imap(groups, nq), "c12 m2", True))
+    elif section == "World":
+        if compact:
+            html_ = _grid(_card("Global markets", "Local currency", _qlist(WEI, M, skip=("INDIA",)), flush=True)
+                          + _card("Commodities, currencies and rates", "", _qlist(XASSET, M), flush=True))
+        else:
+            wei = _table(WEI, M, ["Index", "Last", "1D", "1W", "1M", "YTD", "1M trend"], show_date=False)
+            xa = (_table(XASSET, M, ["Instrument", "Last", "1D", "1M", "YTD"], show_date=False)
+                  + '<div class="hm-empty" style="border-top:1px solid var(--line)">Yields move in basis points (100 bp = 1%). '
+                    'For rupee pairs a rise means a weaker rupee. Hover a name for its last trade date.</div>')
+            html_ = _grid(_card("Global indices", "Local currency", wei, "c7 m2", True)
+                          + _card("Commodities, currencies and rates", "", xa, "c5 m2", True))
+    else:
+        html_ = _grid(_session_panel(S) + _holiday_panel()) if compact else \
+                _grid(_session_panel(S, "c4") + _holiday_panel("c4") + _card("World markets", "Local time", _world_clock(), "c4 m2"))
+    st.markdown(f'<div class="hm{" hm-compact" if compact else ""} hm-one">{html_}</div>', unsafe_allow_html=True)
 
 
 def _body_live(supabase, compact=False):
