@@ -1,5 +1,7 @@
 """
-Arka Trades — market_export.py (v1)
+Arka Trades — market_export.py (v1.1)
+
+v1.1: meta.json also carries a one-line summary of each regime (state, score, date) for the Home page chip.
 
 Runs the same Python engines the Streamlit app uses and saves their results as small JSON files in arka_data/market/,
 so the new app shows exactly the same readings without running Python itself. Started by .github/workflows/market-data.yml
@@ -97,7 +99,7 @@ def run_regime(out: Path, panel=None) -> list:
     """Download Nifty 500 once, cut Nifty 200 and Nifty 100 out of it, write one file per universe."""
     out.mkdir(parents=True, exist_ok=True)
     big = panel or qd.load_panel("Nifty 500", None, 10, None, True)
-    written = []
+    written, summary = [], {}
     for name in REGIME_UNIVERSES:
         if name == "Nifty 500":
             p = big
@@ -112,10 +114,11 @@ def run_regime(out: Path, panel=None) -> list:
         f = out / f"regime_{name.replace(' ', '').lower()}.json"
         f.write_text(json.dumps(data, separators=(",", ":"), allow_nan=False))
         written.append(f.name)
+        summary[name] = {"state": data["state"], "score": data["row"]["score"], "asof": data["asof"], "exposure": data["exposure"]}
         print(f"{name}: {data['state']} · score {data['row']['score']} · {data['n']} stocks · {f.stat().st_size // 1024} KB")
     meta = out / "meta.json"
     m = json.loads(meta.read_text()) if meta.exists() else {}
-    m["regime"] = {"built": datetime.now(qd.IST).isoformat(timespec="minutes"), "files": written}
+    m["regime"] = {"built": datetime.now(qd.IST).isoformat(timespec="minutes"), "files": written, "now": {**(m.get("regime") or {}).get("now", {}), **summary}}
     meta.write_text(json.dumps(m, indent=1))
     return written
 
