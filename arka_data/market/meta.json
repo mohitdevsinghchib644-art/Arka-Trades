@@ -1,0 +1,10 @@
+{
+ "regime": {
+  "built": "2026-11-24T23:38+05:30",
+  "files": [
+   "regime_nifty500.json",
+   "regime_nifty200.json",
+   "regime_nifty100.json"
+  ]
+ }
+}
