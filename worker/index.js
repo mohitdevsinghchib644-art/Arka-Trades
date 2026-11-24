@@ -1,4 +1,4 @@
-// Arka Trades · API (stage 2: adds portfolio, watchlist notes and alerts, big-player deals and the daily brief). Runs on Cloudflare for every request to /api/*.
+// Arka Trades · API (stage 3: adds price history with splits and dividends, and portfolio books, for the full Portfolio). Runs on Cloudflare for every request to /api/*.
 // Secrets are read by NAME from the Cloudflare project settings and never sent to the browser:
 //   ADMIN_USER, ADMIN_PASS, MEMBER_USER, MEMBER_PASS, AUTH_SECRET   sign-in (same names and values as in Streamlit)
 //   SUPABASE_URL, SUPABASE_KEY                                      watchlist storage (same as in Streamlit)
@@ -120,6 +120,29 @@ async function stock(url, ctx) {
     return json(stockFrom(sym, day, hist));
   } catch (e) { return fail(502, "Prices are not available right now. " + e.message); }
 }
+// Daily candles with split and dividend history: what the Portfolio maths needs (growth chart, XIRR, risk, trailing stops, dividends).
+const dayOf = (t, off) => new Date((t + off) * 1000).toISOString().slice(0, 10);
+export function historyFrom(sym, data) {
+  const res = data && data.chart && data.chart.result && data.chart.result[0];
+  if (!res || !res.timestamp) return { sym, ok: false };
+  const off = (res.meta && res.meta.gmtoffset) || 19800, q = ((res.indicators || {}).quote || [{}])[0], r2 = (v) => (v == null ? null : +v.toFixed(2));
+  const rows = new Map();                               // one row per day, the last one wins; days with no close are dropped
+  res.timestamp.forEach((t, i) => { const c = q.close && q.close[i]; if (c != null) rows.set(dayOf(t, off), [r2(c), r2(q.high && q.high[i]), r2(q.low && q.low[i]), (q.volume && q.volume[i]) || 0]); });
+  const d = [...rows.keys()].sort(), col = (k) => d.map((x) => rows.get(x)[k]);
+  const ev = res.events || {}, list = (o, f) => Object.values(o || {}).map(f).filter((x) => x[1] > 0).sort((a, b) => (a[0] < b[0] ? -1 : 1));
+  return { sym, ok: d.length > 0, d, c: col(0), h: col(1), l: col(2), v: col(3),
+           splits: list(ev.splits, (x) => [dayOf(x.date, off), x.denominator ? x.numerator / x.denominator : 0]),
+           divs: list(ev.dividends, (x) => [dayOf(x.date, off), +Number(x.amount).toFixed(4)]) };
+}
+async function history(url, ctx) {
+  const list = [...new Set((url.searchParams.get("s") || "").toUpperCase().split(",").map((s) => s.trim()).filter((s) => SYM_OK.test(s)))].slice(0, 6);     // few per call: a free Worker has little CPU time per request
+  const range = ["1y", "2y", "5y", "10y"].includes(url.searchParams.get("range")) ? url.searchParams.get("range") : "5y";
+  const out = await Promise.all(list.map(async (sym) => {
+    try { return historyFrom(sym, await yahoo(`/v8/finance/chart/${encodeURIComponent(ySym(sym))}?range=${range}&interval=1d&events=div%2Csplits`, ctx, 1800)); }
+    catch { return { sym, ok: false }; }
+  }));
+  return json({ history: out, at: Date.now() }, 200, { "cache-control": "private, max-age=600" });
+}
 async function search(url, ctx) {
   const q = (url.searchParams.get("q") || "").trim().slice(0, 40);
   if (q.length < 2) return json({ results: [] });
@@ -193,45 +216,64 @@ async function portfolio(env, request, url, sub) {
   try {
     const m = request.method, b = m === "POST" ? await request.json().catch(() => ({})) : {};
     if (sub === "" && m === "GET") {
-      const [lots, sells, plans] = await Promise.all([optional(env, "portfolio?select=id,symbol,name,quantity,buy_price,buy_date,note&order=buy_date.asc.nullsfirst,id.asc"),
-        optional(env, "portfolio_sells?select=id,symbol,quantity,sell_price,sell_date,note&order=sell_date.asc,id.asc"), optional(env, "portfolio_plan?select=symbol,stop_loss,target")]);
-      const plan = {};
-      for (const r of plans.rows) plan[cleanSym(r.symbol)] = { stop: r.stop_loss == null ? null : Number(r.stop_loss), target: r.target == null ? null : Number(r.target) };
-      return json({ table: lots.ok, can_sell: sells.ok, can_plan: plans.ok, plan,
-        lots: lots.rows.map((r) => ({ id: r.id, sym: cleanSym(r.symbol), name: r.name || "", qty: Number(r.quantity), price: Number(r.buy_price), date: r.buy_date || null, note: r.note || "" })).filter((r) => r.sym && r.qty > 0),
-        sells: sells.rows.map((r) => ({ id: r.id, sym: cleanSym(r.symbol), qty: Number(r.quantity), price: Number(r.sell_price), date: r.sell_date || null })).filter((r) => r.sym && r.qty > 0) });
+      const [lots, sells, plans, meta] = await Promise.all([optional(env, "portfolio?select=id,symbol,name,quantity,buy_price,buy_date,note&order=buy_date.asc.nullsfirst,id.asc"),
+        optional(env, "portfolio_sells?select=id,book,symbol,quantity,sell_price,sell_date,note&order=sell_date.asc,id.asc"), optional(env, "portfolio_plan?select=book,symbol,stop_loss,target"),
+        optional(env, "portfolio_lot_meta?select=lot_id,book")]);
+      const plan = {}, bookOf = {};                      // plans are kept per book, as "Book|SYMBOL"
+      for (const r of plans.rows) plan[(r.book || "Main") + "|" + cleanSym(r.symbol)] = { stop: r.stop_loss == null ? null : Number(r.stop_loss), target: r.target == null ? null : Number(r.target) };
+      for (const r of meta.rows) if (r.lot_id != null) bookOf[String(r.lot_id)] = r.book || "Main";
+      return json({ table: lots.ok, can_sell: sells.ok, can_plan: plans.ok, can_book: meta.ok, plan,
+        lots: lots.rows.map((r) => ({ id: r.id, book: bookOf[String(r.id)] || "Main", sym: cleanSym(r.symbol), name: r.name || "", qty: Number(r.quantity), price: Number(r.buy_price), date: r.buy_date || null, note: r.note || "" })).filter((r) => r.sym && r.qty > 0),
+        sells: sells.rows.map((r) => ({ id: r.id, book: r.book || "Main", sym: cleanSym(r.symbol), qty: Number(r.quantity), price: Number(r.sell_price), date: r.sell_date || null, note: r.note || "" })).filter((r) => r.sym && r.qty > 0) });
     }
     if (sub === "" && m === "POST") {
       const sym = cleanSym(b.sym), qty = Number(b.qty), price = Number(b.price), date = isDate(b.date) ? b.date : today();
       if (!sym || !(qty > 0) || !(price > 0)) return fail(400, "Give the stock, a quantity above zero and a buy price above zero.");
       if (date > today()) return fail(400, "The buy date cannot be in the future.");
-      await sb(env, "portfolio", { method: "POST", body: JSON.stringify({ symbol: sym, quantity: qty, buy_price: price, buy_date: date, note: String(b.note || "").slice(0, 200) || null }) });
-      return json({ ok: true });
+      const book = cleanList(b.book);
+      const made = await sb(env, "portfolio", { method: "POST", headers: { prefer: "return=representation" }, body: JSON.stringify({ symbol: sym, quantity: qty, buy_price: price, buy_date: date, note: String(b.note || "").slice(0, 200) || null }) });
+      let booked = true;                                 // a buy outside "Main" is tagged with its book, the way the classic app does it
+      if (book !== "Main") {
+        const id = made && made[0] && made[0].id;
+        try { if (id == null) throw new Error("no id"); await sb(env, "portfolio_lot_meta?on_conflict=lot_id", { method: "POST", headers: { prefer: "resolution=merge-duplicates,return=minimal" }, body: JSON.stringify({ lot_id: String(id), book }) }); }
+        catch { booked = false; }
+      }
+      return json({ ok: true, booked });
     }
     if (sub === "" && m === "DELETE") {
       const id = url.searchParams.get("id");
       if (!/^\d+$/.test(id || "")) return fail(400, "Which buy?");
       await sb(env, "portfolio?id=eq." + id, { method: "DELETE" });
+      try { await sb(env, "portfolio_lot_meta?lot_id=eq." + id, { method: "DELETE" }); } catch { /* no book tag to remove */ }
+      return json({ ok: true });
+    }
+    if (sub === "/sell" && m === "DELETE") {
+      const id = url.searchParams.get("id");
+      if (!/^\d+$/.test(id || "")) return fail(400, "Which sell?");
+      await sb(env, "portfolio_sells?id=eq." + id, { method: "DELETE" });
       return json({ ok: true });
     }
     if (sub === "/sell" && m === "POST") {
       const sym = cleanSym(b.sym), qty = Number(b.qty), price = Number(b.price), date = isDate(b.date) ? b.date : today();
       if (!sym || !(qty > 0) || !(price > 0)) return fail(400, "Give the stock, a quantity above zero and a sell price above zero.");
       if (date > today()) return fail(400, "The sell date cannot be in the future.");
-      const lots = (await sb(env, `portfolio?select=quantity&symbol=eq.${encodeURIComponent(sym)}`)) || [];
-      let sold = [];
-      try { sold = (await sb(env, `portfolio_sells?select=quantity&symbol=eq.${encodeURIComponent(sym)}`)) || []; }
+      // How many shares are open is checked in the browser, which knows about splits and books; here only the tables are checked.
+      const book = cleanList(b.book);
+      try { await sb(env, "portfolio_sells", { method: "POST", body: JSON.stringify({ book, symbol: sym, quantity: qty, sell_price: price, sell_date: date, note: String(b.note || "").slice(0, 200) }) }); }
       catch (e) { if (missingTable(e)) return fail(409, "Selling needs the extra portfolio tables. Open Portfolio in the classic app once and run the SQL it shows."); throw e; }
-      const open = lots.reduce((a, r) => a + Number(r.quantity), 0) - sold.reduce((a, r) => a + Number(r.quantity), 0);
-      if (qty > open + 1e-9) return fail(400, `You hold ${+open.toFixed(4)} of ${sym}; you cannot sell ${qty}.`);
-      await sb(env, "portfolio_sells", { method: "POST", body: JSON.stringify({ book: "Main", symbol: sym, quantity: qty, sell_price: price, sell_date: date }) });
+      return json({ ok: true });
+    }
+    if (sub === "/move" && m === "POST") {                // move one buy to another book
+      if (!/^\d+$/.test(String(b.id || ""))) return fail(400, "Which buy?");
+      try { await sb(env, "portfolio_lot_meta?on_conflict=lot_id", { method: "POST", headers: { prefer: "resolution=merge-duplicates,return=minimal" }, body: JSON.stringify({ lot_id: String(b.id), book: cleanList(b.book) }) }); }
+      catch (e) { if (missingTable(e)) return fail(409, "Books need the extra portfolio tables. Open Portfolio in the classic app once and run the SQL it shows."); throw e; }
       return json({ ok: true });
     }
     if (sub === "/plan" && m === "POST") {
       const sym = cleanSym(b.sym), pos = (v) => (v == null || v === "" || !(Number(v) > 0) ? null : Number(v));
       if (!sym) return fail(400, "Which stock?");
       try { await sb(env, "portfolio_plan?on_conflict=book,symbol", { method: "POST", headers: { prefer: "resolution=merge-duplicates,return=minimal" },
-              body: JSON.stringify({ book: "Main", symbol: sym, stop_loss: pos(b.stop), target: pos(b.target) }) }); }
+              body: JSON.stringify({ book: cleanList(b.book), symbol: sym, stop_loss: pos(b.stop), target: pos(b.target) }) }); }
       catch (e) { if (missingTable(e)) return fail(409, "Stops and targets need the extra portfolio tables. Open Portfolio in the classic app once and run the SQL it shows."); throw e; }
       return json({ ok: true });
     }
@@ -307,12 +349,13 @@ export default {
       if (p === "/api/me") return json(me);
       if (p === "/api/quotes") return quotes(url, ctx);
       if (p === "/api/stock") return stock(url, ctx);
+      if (p === "/api/history") return history(url, ctx);
       if (p === "/api/search") return search(url, ctx);
       if (p === "/api/watchlist") return watchlist(env, request, url);
       if (p === "/api/signals") return signals(env, ctx);
       if (p === "/api/deals") return deals(env, ctx);
       if (p === "/api/brief") return brief(env, ctx);
-      if (p === "/api/portfolio" || p === "/api/portfolio/sell" || p === "/api/portfolio/plan") return portfolio(env, request, url, p.slice("/api/portfolio".length));
+      if (p === "/api/portfolio" || p === "/api/portfolio/sell" || p === "/api/portfolio/plan" || p === "/api/portfolio/move") return portfolio(env, request, url, p.slice("/api/portfolio".length));
       return fail(404, "Not found.");
     } catch (e) {
       return fail(500, "Something went wrong on the server.");
