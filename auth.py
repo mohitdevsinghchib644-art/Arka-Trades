@@ -218,6 +218,9 @@ def logo_data_uri(px: int = 64) -> str:
 
 
 # ═════════════════════════ the browser bridge component ═════════════════════════
+WL_PREFIX = "wl:"          # clicks with this prefix go to the watchlist page (select a stock / remove it)
+
+
 _BRIDGE_HTML = r"""<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0;background:transparent">
 <script>
 (function () {
@@ -562,7 +565,10 @@ def bridge(key: bytes, nav: str | None = None, back: str | None = None, prefs: s
         if on and on != ss.get("_ak_open_seen"):
             ss["_ak_open_seen"] = on
             if isinstance(val.get("open"), str):
-                ss["_ak_open_in"] = val["open"]
+                if val["open"].startswith(WL_PREFIX):          # a watchlist row or ✕ (watchlist v6), not a stock to open
+                    ss["_wl_cmd_in"] = val["open"]
+                else:
+                    ss["_ak_open_in"] = val["open"]
     if not ss["_ak_ready"] and time.time() - ss["_ak_started"] > WAIT_S:
         ss["_ak_ready"] = True
 
