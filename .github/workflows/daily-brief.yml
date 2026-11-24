@@ -1,10 +1,16 @@
 # Arka Trades · morning brief
-# Writes the Daily brief and sends it to Telegram at about 08:00 IST on weekdays.
-# GitHub can start scheduled jobs late and sometimes skips one, so there are five starts each morning between
-# 07:37 and 08:57 IST, on odd minutes (the hour and half-hour marks are GitHub's busiest). The first one that runs
-# sends the brief; the others see it was sent and do nothing.
-# A scheduled run that GitHub starts after 11:00 IST does nothing: a morning brief in the evening is worse than none.
-# You can also start it by hand: Actions tab -> "Daily brief" -> "Run workflow".
+# Writes the Daily brief and sends it to Telegram at 08:00 IST on weekdays. It does not need the website to be awake.
+#
+# GitHub starts this repository's scheduled jobs many hours late (about ten hours in November 2026), so a job set for
+# 08:00 would arrive in the evening. This file works around that:
+#   * GitHub is asked to start the job every 3 hours, all day.
+#   * A run that starts between 02:15 and 08:00 IST on a weekday WAITS until 08:00 IST and then sends.
+#   * A run that starts between 08:00 and 10:30 IST sends at once.
+#   * A run that starts at any other time, or on Saturday or Sunday, stops in a few seconds without doing anything.
+#   * The first run that sends marks the brief as sent; any other run that day sees the mark and does nothing.
+# So whatever the delay is, one run is always in place before 08:00. Most runs in the Actions list will be short and
+# green with "Nothing to do": that is normal.
+# You can also start it by hand, and that always sends at once: Actions tab -> "Daily brief" -> "Run workflow".
 #
 # Secrets it reads (repository Settings -> Secrets and variables -> Actions). Names only; values never appear in logs:
 #   GEMINI_KEY            required   the same Gemini key the app uses
@@ -16,11 +22,7 @@ name: Daily brief
 
 on:
   schedule:
-    - cron: "7 2 * * 1-5"         # 02:07 UTC = 07:37 IST, Monday to Friday
-    - cron: "23 2 * * 1-5"        # 07:53 IST
-    - cron: "41 2 * * 1-5"        # 08:11 IST
-    - cron: "3 3 * * 1-5"         # 08:33 IST
-    - cron: "27 3 * * 1-5"        # 08:57 IST
+    - cron: "17 */3 * * *"        # every 3 hours; the job itself decides whether this start is useful
   workflow_dispatch:
 
 permissions:
@@ -33,16 +35,56 @@ concurrency:
 jobs:
   brief:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 355            # a run may wait up to 5 h 45 min for 08:00 IST
     steps:
+      - name: Decide
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          HAS_GEMINI: ${{ secrets.GEMINI_KEY != '' }}
+          HAS_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN != '' }}
+          HAS_CHAT: ${{ secrets.TELEGRAM_CHAT_ID != '' }}
+        run: |
+          if [ "$HAS_GEMINI" != "true" ] || [ "$HAS_TOKEN" != "true" ] || [ "$HAS_CHAT" != "true" ]; then
+            echo "A required secret is missing. Add GEMINI_KEY, TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in"
+            echo "repository Settings -> Secrets and variables -> Actions -> New repository secret."
+            exit 1
+          fi
+          export TZ=Asia/Kolkata
+          dow=$(date +%u); hh=$(date +%H); mm=$(date +%M); ss=$(date +%S)
+          mins=$(( 10#$hh * 60 + 10#$mm ))
+          go=no; wait=0
+          if [ "$EVENT" != "schedule" ]; then
+            go=yes; echo "Started by hand: sending now."
+          elif [ "$dow" -gt 5 ]; then
+            echo "Weekend in India. Nothing to do."
+          elif [ "$mins" -ge 135 ] && [ "$mins" -lt 480 ]; then
+            go=yes; wait=$(( (480 - mins) * 60 - 10#$ss ))
+            echo "Started at $hh:$mm IST. Waiting $(( wait / 60 )) minutes, until 08:00 IST."
+          elif [ "$mins" -ge 480 ] && [ "$mins" -le 630 ]; then
+            go=yes; echo "Started at $hh:$mm IST, inside the morning window: sending now."
+          else
+            echo "Started at $hh:$mm IST, outside 02:15-10:30. Nothing to do."
+          fi
+          echo "go=$go" >> "$GITHUB_OUTPUT"
+          echo "wait=$wait" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for 08:00 IST
+        if: steps.plan.outputs.go == 'yes' && steps.plan.outputs.wait != '0'
+        run: sleep ${{ steps.plan.outputs.wait }}
+
       - uses: actions/checkout@v4
+        if: steps.plan.outputs.go == 'yes'
 
       - uses: actions/setup-python@v5
+        if: steps.plan.outputs.go == 'yes'
         with:
           python-version: "3.11"
 
-      # Keeps the last few briefs between runs, so a continuing story is written as "what changed".
+      # Keeps the last few briefs between runs: a continuing story is written as "what changed", and a second run on
+      # the same day can see that the brief was already sent. Restored after the wait, so it is up to date.
       - uses: actions/cache@v4
+        if: steps.plan.outputs.go == 'yes'
         with:
           path: .brief_store
           key: brief-store-${{ github.run_id }}
@@ -50,9 +92,11 @@ jobs:
             brief-store-
 
       - name: Install
+        if: steps.plan.outputs.go == 'yes'
         run: pip install --quiet requests pandas yfinance google-genai supabase
 
       - name: Write and send
+        if: steps.plan.outputs.go == 'yes'
         env:
           GEMINI_KEY: ${{ secrets.GEMINI_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -60,16 +104,4 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           ONCE: ${{ github.event_name == 'schedule' && '--once' || '' }}      # a run started by hand always sends
-          EVENT: ${{ github.event_name }}
-        run: |
-          now=$(TZ=Asia/Kolkata date +%H%M)
-          if [ "$EVENT" = "schedule" ] && [ "$((10#$now))" -gt 1100 ]; then
-            echo "GitHub started this morning run late (now $now IST). Nothing sent."
-            exit 0
-          fi
-          if [ -z "$GEMINI_KEY" ] || [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
-            echo "A required secret is missing. Add GEMINI_KEY, TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in"
-            echo "repository Settings -> Secrets and variables -> Actions -> New repository secret."
-            exit 1
-          fi
-          python daily_brief.py --send $ONCE
+        run: python daily_brief.py --send $ONCE
