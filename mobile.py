@@ -1,5 +1,5 @@
 """
-mobile.py — Arka Trades phone layout (v3, for app.py v9.1)
+mobile.py — Arka Trades phone layout (v4, for app.py v10.6: five sections in the bottom bar, pages as pills on top)
 
 PHONE_CSS is injected when app.py decides the device is a phone (real screen width < 820 px, or forced in
 ACCOUNT → Display). MOBILE_CSS holds a small safety subset that applies on narrow screens even before the width
@@ -45,6 +45,9 @@ div[class*="st-key-tabbar"] button{width:100% !important;min-height:54px !import
   box-shadow:none !important;filter:none !important;color:#8E8E96 !important;border-radius:10px !important;}
 div[class*="st-key-tabbar"] button>div,div[class*="st-key-tabbar"] button>span{display:flex !important;flex-direction:column !important;align-items:center !important;gap:3px !important;}
 div[class*="st-key-tabbar"] button p{font:500 11px var(--sans) !important;letter-spacing:.1px;white-space:nowrap !important;margin:0 !important;color:inherit !important;}
+div[class*="st-key-tabbar"] button[kind="primary"]::before,div[class*="st-key-tabbar"] button[data-testid="stBaseButton-primary"]::before{content:"";position:absolute;top:0;left:50%;
+  width:22px;height:3px;margin-left:-11px;border-radius:0 0 3px 3px;background:var(--amber);}
+div[class*="st-key-tabbar"] button{position:relative !important;}
 div[class*="st-key-tabbar"] button [data-testid="stIconMaterial"]{font-size:22px !important;margin:0 !important;color:inherit !important;}
 div[class*="st-key-tabbar"] button[kind="primary"],div[class*="st-key-tabbar"] button[data-testid="stBaseButton-primary"]{color:#fff !important;background:transparent !important;box-shadow:none !important;border:0 !important;}
 div[class*="st-key-tabbar"] button[kind="primary"] p,div[class*="st-key-tabbar"] button[data-testid="stBaseButton-primary"] p{color:#fff !important;}
