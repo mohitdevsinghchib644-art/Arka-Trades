@@ -2,6 +2,7 @@
 import * as PFV from "./portfolio.js";
 import * as RG from "./regime.js";
 import * as HM from "./home.js";
+import * as MF from "./flow.js";
 import { chartMove } from "./charts.js";
 const CLASSIC = "https://arka-trades-1.streamlit.app";       // the Streamlit app, for sections that have not moved yet
 const $ = (s) => document.querySelector(s);
@@ -24,16 +25,17 @@ const NAMES = Object.fromEntries([...INDICES, ...SECTORS, ...Object.values(MARKE
 // [key, name, icon, shown in the phone's bottom bar]. Markets and the brief sit under More on a phone.
 const TABS = [["home", "Home", '<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/>', true], ["watchlist", "Watchlist", '<path d="M6 3h12v18l-6-4.5L6 21z"/>', true],
   ["portfolio", "Portfolio", '<path d="M3 7h18v13H3z"/><path d="M8 7V4h8v3M3 12h18"/>', true], ["signals", "Signals", '<path d="M3 17l5-6 4 4 8-10"/><path d="M15 5h5v5"/>', true],
+  ["flow", "Money flow", '<path d="M4 17c3-6 5 2 8-4s5-1 8-6"/><path d="M4 21h16"/>', false],
   ["regime", "Regime", '<path d="M3 20h18"/><path d="M6 16l4-5 3 3 5-7"/><circle cx="18" cy="7" r="1.6"/>', false],
   ["markets", "Markets", '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.2 3 14.8 0 18M12 3c-3 3.2-3 14.8 0 18"/>', false],
   ["brief", "Daily brief", '<path d="M5 3h11l3 3v15H5z"/><path d="M8 9h8M8 13h8M8 17h5"/>', false],
   ["more", "More", '<circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/>', true]];
 const MORE = [["Stock research", "Financials, charts, filings and peers for any stock."], ["Arka AI", "Chart reading with your own playbook."],
-  ["Money flow", "Where money is moving across sectors."],
+  
   ["Screener", "Describe a setup and scan the market."], ["Backtest", "Test a rule on past prices."], ["News", "Market wire and exchange filings."]];
 
 const S = { me: null, tab: "home", q: {}, at: {}, wl: { rows: [], list: "Main", loaded: false, err: "" }, sig: null, sigErr: "", sigTab: "Leaders", mkTab: "India", sort: "order",
-            pf: PFV.pfDefaults(), rg: RG.rgDefaults(), qv: 0, hm: HM.homeDefaults(), deals: null, brief: undefined,
+            pf: PFV.pfDefaults(), rg: RG.rgDefaults(), qv: 0, hm: HM.homeDefaults(), mf: MF.flowDefaults(), deals: null, brief: undefined,
             sheet: null, results: null, searching: false };
 
 // ── small helpers ──
@@ -248,13 +250,13 @@ function brief() {
 }
 function more() {
   return `<div><div class="hd"><div><h1>More</h1></div></div>
-    <div class="links only-m" style="margin-bottom:10px"><a class="link" href="#/regime"><b>Market regime</b><small>Trend, breadth and volatility: how hard to push today.</small></a><a class="link" href="#/markets"><b>Markets</b><small>Indices, commodities, currencies and rates.</small></a>
+    <div class="links only-m" style="margin-bottom:10px"><a class="link" href="#/flow"><b>Money flow</b><small>Sector rotation: where to be, and when.</small></a><a class="link" href="#/regime"><b>Market regime</b><small>Trend, breadth and volatility: how hard to push today.</small></a><a class="link" href="#/markets"><b>Markets</b><small>Indices, commodities, currencies and rates.</small></a>
       <a class="link" href="#/brief"><b>Daily brief</b><small>What happened overnight and what can move stocks today.</small></a></div>
     <h2 style="margin-top:8px">Still in the classic app <span>opens in a new tab</span></h2>
     <div class="links">${MORE.map(([t, d]) => `<a class="link" href="${CLASSIC}" target="_blank" rel="noopener"><b>${t}</b><small>${d}</small></a>`).join("")}</div>
     <h2>Account</h2><div class="card pad"><div style="margin-bottom:12px">Signed in as <b>${esc(S.me.user)}</b> <span class="chip">${esc(S.me.role)}</span></div><button class="btn" data-act="logout">Sign out</button></div></div>`;
 }
-const PAGES = { home: HM.page, watchlist, portfolio: PFV.page, regime: RG.page, signals, markets, brief, more };
+const PAGES = { home: HM.page, watchlist, portfolio: PFV.page, regime: RG.page, flow: MF.page, signals, markets, brief, more };
 
 // ── painting ──
 function renderShell() {
@@ -273,10 +275,10 @@ function paint() {
   const main = $("#main"); if (!main || !S.me) return;
   const phoneTab = TABS.some(([k, , , mob]) => k === S.tab && mob) ? S.tab : "more";      // Markets and the brief light up More on a phone
   document.querySelectorAll(".nav a[data-tab]").forEach((a) => { a.classList.toggle("on", a.dataset.tab === S.tab); a.classList.toggle("onm", a.dataset.tab === phoneTab); });
-  const withRail = !["home", "watchlist", "more", "brief", "portfolio", "regime"].includes(S.tab);
+  const withRail = !["home", "watchlist", "more", "brief", "portfolio", "regime", "flow"].includes(S.tab);
   const ae = document.activeElement;                       // typing in a Portfolio box: leave the page alone so the cursor stays put
   if (ae && main.contains(ae) && ae.dataset.pf && ae.tagName === "INPUT" && !/range|checkbox/.test(ae.type)) { if (S.sheet && !typingInSheet()) paintSheet(); return; }
-  main.className = withRail ? "rail" : ["home", "portfolio", "regime"].includes(S.tab) ? "wide" : "";
+  main.className = withRail ? "rail" : ["home", "portfolio", "regime", "flow"].includes(S.tab) ? "wide" : "";
   const y = window.scrollY;
   main.innerHTML = PAGES[S.tab]() + (withRail ? rail() : "");
   window.scrollTo(0, y);
@@ -289,6 +291,7 @@ function route() {
   window.scrollTo(0, 0); paint(); refresh();
   if (S.tab === "brief" && S.brief === undefined) loadBrief();
   if (S.tab === "regime") RG.loadRegime();
+  if (S.tab === "flow") MF.loadFlow();
   if (S.tab === "signals" && S.sigTab === "Big players") loadDeals();
 }
 
@@ -458,7 +461,7 @@ function pfInput(el, ev) {                                // a control on the Po
   paint();
 }
 document.addEventListener("input", (e) => { if (e.target.id === "q" || e.target.id === "mq") onSearch(e.target.value); else if (e.target.dataset.pf) pfInput(e.target, "input"); });
-document.addEventListener("change", (e) => { if (e.target.dataset.act === "sort") { S.sort = e.target.value; paint(); } else if (e.target.dataset.pf) pfInput(e.target, "change"); });
+document.addEventListener("change", (e) => { if (e.target.dataset.mf === "pick") { S.mf.pick = e.target.value; paint(); return; } if (e.target.dataset.act === "sort") { S.sort = e.target.value; paint(); } else if (e.target.dataset.pf) pfInput(e.target, "change"); });
 document.addEventListener("pointermove", chartMove, { passive: true });
 document.addEventListener("pointerdown", chartMove, { passive: true });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") { if (S.sheet) closeSheet(); else endSearch(); } });
@@ -476,6 +479,14 @@ document.addEventListener("click", async (e) => {
     if (act === "dellot") { if (!confirm("Delete this buy? This cannot be undone.")) return; try { await api("/api/portfolio?id=" + a.dataset.id, { method: "DELETE" }); toast("Buy deleted"); } catch (er) { toast(er.message); }
       await loadPortfolio(); return paintSheet(); }
     if (act === "hmgo") return HM.go(a.dataset.v);
+    if (act === "mfview") { S.mf.view = a.dataset.v; window.scrollTo(0, 0); return paint(); }
+    if (act === "mfsec") { e.preventDefault(); S.mf.pick = a.dataset.v; S.mf.view = "Sector"; window.scrollTo(0, 0); return paint(); }
+    if (act.startsWith("mfset-")) { const k = act.slice(6); S.mf[k] = k === "regime" ? a.dataset.v === "1" : +a.dataset.v; return paint(); }
+    if (act === "mfshow") { S.mf.show = a.dataset.v; return paint(); }
+    if (act === "mftail") { S.mf.tail = +a.dataset.v; return paint(); }
+    if (act === "mffpi") { S.mf.fpiN = +a.dataset.v; return paint(); }
+    if (act === "mfsort") { const id = a.dataset.id, k = a.dataset.v, cur = S.mf.sort[id]; S.mf.sort[id] = [k, cur && cur[0] === k ? -cur[1] : -1]; return paint(); }
+    if (act === "mfcsv") return MF.csv();
     if (act === "rgset") { S.rg[a.dataset.k] = a.dataset.v; if (a.dataset.k === "uni") RG.loadRegime(); return paint(); }
     if (act === "pfview") { S.pf.view = a.dataset.v; window.scrollTo(0, 0); return paint(); }
     if (act === "pfcsv") return PFV.csv(a.dataset.v);
