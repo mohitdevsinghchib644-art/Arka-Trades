@@ -1,4 +1,4 @@
-// Arka Trades · API (stage 1). Runs on Cloudflare for every request to /api/*.
+// Arka Trades · API (stage 2: adds portfolio, watchlist notes and alerts, big-player deals and the daily brief). Runs on Cloudflare for every request to /api/*.
 // Secrets are read by NAME from the Cloudflare project settings and never sent to the browser:
 //   ADMIN_USER, ADMIN_PASS, MEMBER_USER, MEMBER_PASS, AUTH_SECRET   sign-in (same names and values as in Streamlit)
 //   SUPABASE_URL, SUPABASE_KEY                                      watchlist storage (same as in Streamlit)
@@ -158,9 +158,10 @@ async function watchlist(env, request, url) {
       }
       return json({ rows: out, lists });
     }
-    const b = request.method === "POST" ? await request.json().catch(() => ({})) : {};
-    const sym = cleanSym(request.method === "POST" ? b.sym : url.searchParams.get("s"));
-    const list = cleanList(request.method === "POST" ? b.list : url.searchParams.get("list"));
+    const hasBody = request.method === "POST" || request.method === "PATCH";
+    const b = hasBody ? await request.json().catch(() => ({})) : {};
+    const sym = cleanSym(hasBody ? b.sym : url.searchParams.get("s"));
+    const list = cleanList(hasBody ? b.list : url.searchParams.get("list"));
     if (!sym) return fail(400, "Which stock?");
     if (request.method === "POST") {
       try { await sb(env, "watchlist", { method: "POST", body: JSON.stringify({ symbol: sym, list_name: list }) }); }
@@ -172,20 +173,122 @@ async function watchlist(env, request, url) {
       catch (e) { if (e.status === 503) throw e; await sb(env, `watchlist?symbol=eq.${encodeURIComponent(sym)}`, { method: "DELETE" }); }
       return json({ ok: true });
     }
+    if (request.method === "PATCH") {                   // note, price alerts, or move to another list
+      const pos = (v) => (v == null || v === "" || !(Number(v) > 0) ? null : Number(v));
+      const fields = { note: String(b.note || "").trim().slice(0, 200) || null, alert_above: pos(b.above), alert_below: pos(b.below) };
+      if (b.to && cleanList(b.to) !== list) fields.list_name = cleanList(b.to);
+      await sb(env, `watchlist?symbol=eq.${encodeURIComponent(sym)}&list_name=eq.${encodeURIComponent(list)}`, { method: "PATCH", body: JSON.stringify(fields) });
+      return json({ ok: true });
+    }
     return fail(405, "Not supported.");
   } catch (e) { return fail(e.status === 503 ? 503 : 502, e.message); }
 }
 
-// ── signal desk files written by the "Signals" workflow (public files in the repo) ──
-async function signals(env, ctx) {
-  const url = `https://raw.githubusercontent.com/${env.GITHUB_REPO || REPO}/main/arka_data/signals/signals.json`;
+// ── portfolio (the same Supabase tables the Streamlit app uses: portfolio, portfolio_sells, portfolio_plan) ──
+const missingTable = (e) => e.status === 404 || /PGRST205|does not exist|could not find the table|42P01/i.test(String(e.body || e.message || ""));
+const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ""));
+const today = () => new Date(Date.now() + 330 * 60000).toISOString().slice(0, 10);          // the date in India
+async function optional(env, path) { try { return { rows: (await sb(env, path)) || [], ok: true }; } catch (e) { if (missingTable(e)) return { rows: [], ok: false }; throw e; } }
+async function portfolio(env, request, url, sub) {
+  try {
+    const m = request.method, b = m === "POST" ? await request.json().catch(() => ({})) : {};
+    if (sub === "" && m === "GET") {
+      const [lots, sells, plans] = await Promise.all([optional(env, "portfolio?select=id,symbol,name,quantity,buy_price,buy_date,note&order=buy_date.asc.nullsfirst,id.asc"),
+        optional(env, "portfolio_sells?select=id,symbol,quantity,sell_price,sell_date,note&order=sell_date.asc,id.asc"), optional(env, "portfolio_plan?select=symbol,stop_loss,target")]);
+      const plan = {};
+      for (const r of plans.rows) plan[cleanSym(r.symbol)] = { stop: r.stop_loss == null ? null : Number(r.stop_loss), target: r.target == null ? null : Number(r.target) };
+      return json({ table: lots.ok, can_sell: sells.ok, can_plan: plans.ok, plan,
+        lots: lots.rows.map((r) => ({ id: r.id, sym: cleanSym(r.symbol), name: r.name || "", qty: Number(r.quantity), price: Number(r.buy_price), date: r.buy_date || null, note: r.note || "" })).filter((r) => r.sym && r.qty > 0),
+        sells: sells.rows.map((r) => ({ id: r.id, sym: cleanSym(r.symbol), qty: Number(r.quantity), price: Number(r.sell_price), date: r.sell_date || null })).filter((r) => r.sym && r.qty > 0) });
+    }
+    if (sub === "" && m === "POST") {
+      const sym = cleanSym(b.sym), qty = Number(b.qty), price = Number(b.price), date = isDate(b.date) ? b.date : today();
+      if (!sym || !(qty > 0) || !(price > 0)) return fail(400, "Give the stock, a quantity above zero and a buy price above zero.");
+      if (date > today()) return fail(400, "The buy date cannot be in the future.");
+      await sb(env, "portfolio", { method: "POST", body: JSON.stringify({ symbol: sym, quantity: qty, buy_price: price, buy_date: date, note: String(b.note || "").slice(0, 200) || null }) });
+      return json({ ok: true });
+    }
+    if (sub === "" && m === "DELETE") {
+      const id = url.searchParams.get("id");
+      if (!/^\d+$/.test(id || "")) return fail(400, "Which buy?");
+      await sb(env, "portfolio?id=eq." + id, { method: "DELETE" });
+      return json({ ok: true });
+    }
+    if (sub === "/sell" && m === "POST") {
+      const sym = cleanSym(b.sym), qty = Number(b.qty), price = Number(b.price), date = isDate(b.date) ? b.date : today();
+      if (!sym || !(qty > 0) || !(price > 0)) return fail(400, "Give the stock, a quantity above zero and a sell price above zero.");
+      if (date > today()) return fail(400, "The sell date cannot be in the future.");
+      const lots = (await sb(env, `portfolio?select=quantity&symbol=eq.${encodeURIComponent(sym)}`)) || [];
+      let sold = [];
+      try { sold = (await sb(env, `portfolio_sells?select=quantity&symbol=eq.${encodeURIComponent(sym)}`)) || []; }
+      catch (e) { if (missingTable(e)) return fail(409, "Selling needs the extra portfolio tables. Open Portfolio in the classic app once and run the SQL it shows."); throw e; }
+      const open = lots.reduce((a, r) => a + Number(r.quantity), 0) - sold.reduce((a, r) => a + Number(r.quantity), 0);
+      if (qty > open + 1e-9) return fail(400, `You hold ${+open.toFixed(4)} of ${sym}; you cannot sell ${qty}.`);
+      await sb(env, "portfolio_sells", { method: "POST", body: JSON.stringify({ book: "Main", symbol: sym, quantity: qty, sell_price: price, sell_date: date }) });
+      return json({ ok: true });
+    }
+    if (sub === "/plan" && m === "POST") {
+      const sym = cleanSym(b.sym), pos = (v) => (v == null || v === "" || !(Number(v) > 0) ? null : Number(v));
+      if (!sym) return fail(400, "Which stock?");
+      try { await sb(env, "portfolio_plan?on_conflict=book,symbol", { method: "POST", headers: { prefer: "resolution=merge-duplicates,return=minimal" },
+              body: JSON.stringify({ book: "Main", symbol: sym, stop_loss: pos(b.stop), target: pos(b.target) }) }); }
+      catch (e) { if (missingTable(e)) return fail(409, "Stops and targets need the extra portfolio tables. Open Portfolio in the classic app once and run the SQL it shows."); throw e; }
+      return json({ ok: true });
+    }
+    return fail(405, "Not supported.");
+  } catch (e) { return fail(e.status === 503 ? 503 : 502, e.message); }
+}
+
+// ── files written into the repo by the workflows (public): signals, deals, the daily brief ──
+async function repoFile(env, ctx, path, ttl = 600) {      // -> text, or null when the file is not there
+  const url = `https://raw.githubusercontent.com/${env.GITHUB_REPO || REPO}/main/${path}`;
   const cache = typeof caches !== "undefined" && caches.default, key = new Request(url);
-  if (cache) { const hit = await cache.match(key); if (hit) return new Response(hit.body, { headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } }); }
+  if (cache) { const hit = await cache.match(key); if (hit) return hit.text(); }
   const r = await fetch(url, { headers: { "user-agent": UA } });
-  if (!r.ok) return fail(502, "The signal file could not be read (" + r.status + ").");
+  if (!r.ok) return null;
   const text = await r.text();
-  if (cache) { const put = cache.put(key, new Response(text, { headers: { "content-type": "application/json", "cache-control": "max-age=600" } })); ctx && ctx.waitUntil ? ctx.waitUntil(put) : await put; }
-  return new Response(text, { headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
+  if (cache) { const put = cache.put(key, new Response(text, { headers: { "cache-control": `max-age=${ttl}` } })); ctx && ctx.waitUntil ? ctx.waitUntil(put) : await put; }
+  return text;
+}
+const raw = (text) => new Response(text, { headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
+async function signals(env, ctx) {
+  const text = await repoFile(env, ctx, "arka_data/signals/signals.json");
+  return text == null ? fail(502, "The signal file could not be read.") : raw(text);
+}
+export function parseCsv(text) {                           // small CSV reader (handles quoted names with commas)
+  const rows = [];
+  for (const line of String(text || "").split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const out = []; let cur = "", q = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (q) { if (c === '"' && line[i + 1] === '"') { cur += '"'; i++; } else if (c === '"') q = false; else cur += c; }
+      else if (c === '"') q = true; else if (c === ",") { out.push(cur); cur = ""; } else cur += c;
+    }
+    out.push(cur); rows.push(out);
+  }
+  return rows;
+}
+async function deals(env, ctx) {
+  const text = await repoFile(env, ctx, "arka_data/signals/deals.csv");
+  if (text == null) return json({ deals: [] });
+  const [head, ...rows] = parseCsv(text), ix = Object.fromEntries((head || []).map((h, i) => [h.trim(), i]));
+  const out = rows.map((r) => ({ kind: r[ix.kind], date: r[ix.date], sym: cleanSym(r[ix.sym]), who: (r[ix.who] || "").trim(), side: (r[ix.side] || "").toUpperCase(), qty: Number(r[ix.qty]), price: Number(r[ix.price]), cr: Number(r[ix.value_cr]) }))
+    .filter((d) => d.sym && d.cr > 0);
+  const stamp = (d) => { const t = Date.parse(d.date); return isNaN(t) ? 0 : t; };
+  out.sort((a, b) => stamp(b) - stamp(a) || b.cr - a.cr);
+  return json({ deals: out.slice(0, 60) });
+}
+async function brief(env, ctx) {
+  if (env.SUPABASE_URL && env.SUPABASE_KEY) {              // written here when the morning job has the Supabase secrets
+    try {
+      const r = await sb(env, "arka_briefs?select=day,payload&kind=eq.am&order=day.desc&limit=1");
+      if (r && r[0]) return json({ brief: typeof r[0].payload === "string" ? JSON.parse(r[0].payload) : r[0].payload });
+    } catch { /* no such table: try the repo file */ }
+  }
+  const text = await repoFile(env, ctx, "arka_data/brief/latest.json", 300);
+  if (text) { try { return json({ brief: JSON.parse(text) }); } catch { /* fall through */ } }
+  return json({ brief: null });
 }
 
 export default {
@@ -207,6 +310,9 @@ export default {
       if (p === "/api/search") return search(url, ctx);
       if (p === "/api/watchlist") return watchlist(env, request, url);
       if (p === "/api/signals") return signals(env, ctx);
+      if (p === "/api/deals") return deals(env, ctx);
+      if (p === "/api/brief") return brief(env, ctx);
+      if (p === "/api/portfolio" || p === "/api/portfolio/sell" || p === "/api/portfolio/plan") return portfolio(env, request, url, p.slice("/api/portfolio".length));
       return fail(404, "Not found.");
     } catch (e) {
       return fail(500, "Something went wrong on the server.");
