@@ -1,6 +1,7 @@
 // Arka Trades · the Portfolio page. Every number here comes from pf.js, which is a port of the Streamlit app's portfolio maths.
 import { S, api, paint, esc, num, sgn, pc, cls, rs, nice, todayStr, field, toast } from "./app.js";
 import * as M from "./pf.js";
+import { lineChart, resetCharts } from "./charts.js";
 
 export const VIEWS = ["Dashboard", "Swing desk", "Holdings", "Analysis", "Performance", "Risk", "Rebalance", "Income", "Tax", "Transactions"];
 const BENCH = { "NIFTY 50": "^NSEI", "NIFTY 500": "^CRSLDX", "Midcap 100": "NIFTY_MIDCAP_100.NS" };
@@ -32,36 +33,7 @@ function tbl(head, rows, right = [], cls2 = "") {
 }
 const col = (v) => `<span class="${cls(v)}">`;
 
-// ── charts (plain SVG, no library) ──
-const CH = new Map(); let chN = 0;
-function lineChart(dates, series, o = {}) {
-  const H = o.h || 220, W = 1000, n = dates.length, all = series.flatMap((s) => s.v.filter((x) => x != null && isFinite(x)));
-  if (n < 2 || !all.length) return '<div class="note">Not enough history for a chart yet.</div>';
-  let lo = Math.min(...all), hi = Math.max(...all); if (hi === lo) hi = lo + 1;
-  const pad = (hi - lo) * 0.07; lo -= pad; hi += pad;
-  const step = Math.max(1, Math.ceil(n / 600)), X = (i) => (i / (n - 1)) * W, Y = (v) => H - ((v - lo) / (hi - lo)) * H, id = "c" + ++chN, fmt = o.fmt || ((v) => sh(v));
-  const paths = series.map((s) => {
-    let d = "", pen = false;
-    for (let i = 0; i < n; i += step) { const j = i + step >= n ? n - 1 : i, v = s.v[j]; if (v == null || !isFinite(v)) { pen = false; continue; } d += (pen ? "L" : "M") + X(j).toFixed(1) + " " + Y(v).toFixed(1); pen = true; if (j === n - 1) break; }
-    return (s.fill ? `<path d="${d}L${W} ${H}L0 ${H}Z" fill="${s.c}" opacity=".09"/>` : "") + `<path d="${d}" fill="none" stroke="${s.c}" stroke-width="${s.w || 1.8}" ${s.dash ? 'stroke-dasharray="5 5"' : ""} vector-effect="non-scaling-stroke" stroke-linejoin="round"/>`;
-  }).join("");
-  const ticks = [0, 1, 2, 3].map((k) => lo + ((hi - lo) * (k + 0.5)) / 4);
-  CH.set(id, { dates, series, fmt });
-  return `<div class="ch" data-ch="${id}"><div class="rd">${readout(id, n - 1)}</div><div class="plot" style="height:${H}px"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${
-    ticks.map((t) => `<line x1="0" x2="${W}" y1="${Y(t).toFixed(1)}" y2="${Y(t).toFixed(1)}" stroke="rgba(255,255,255,.06)" vector-effect="non-scaling-stroke"/>`).join("")}${paths}</svg><i class="vx"></i>${
-    ticks.map((t) => `<em style="top:${((Y(t) / H) * 100).toFixed(1)}%">${fmt(t)}</em>`).join("")}</div><div class="xl"><span>${nice(dates[0])}</span><span>${nice(dates[n >> 1])}</span><span>${nice(dates[n - 1])}</span></div></div>`;
-}
-function readout(id, i) {
-  const c = CH.get(id); if (!c) return "";
-  return `<span class="dt">${nice(c.dates[i])}</span>` + c.series.map((s) => `<span><i style="background:${s.c}"></i>${s.n} <b>${s.v[i] == null ? "—" : c.fmt(s.v[i])}</b></span>`).join("");
-}
-export function chartMove(e) {                            // move the reading line under the finger or pointer
-  const plot = e.target.closest && e.target.closest(".ch .plot"); if (!plot) return;
-  const box = plot.parentNode, c = CH.get(box.dataset.ch); if (!c) return;
-  const r = plot.getBoundingClientRect(), f = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)), i = Math.round(f * (c.dates.length - 1));
-  plot.querySelector(".vx").style.cssText = `display:block;left:${(f * 100).toFixed(2)}%`;
-  box.querySelector(".rd").innerHTML = readout(box.dataset.ch, i);
-}
+// ── charts ──
 function gauge(score) {
   const L = 267, c = score >= 75 ? "#2FD067" : score >= 50 ? "#FF9F0A" : "#FF5247", lab = score >= 75 ? "Well diversified" : score >= 50 ? "Moderate" : "Concentrated";
   return `<div class="gauge"><svg viewBox="0 0 200 112"><path d="M15 100A85 85 0 0 1 185 100" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="14" stroke-linecap="round"/>
@@ -142,7 +114,7 @@ function growth(A, h = 230) {
   const tl = A.tl, n = tl.d.length - 1, s = [{ n: "Your holdings", c: "#FF9F0A", v: tl.value, fill: true, w: 2 }, { n: "Money put in", c: "#8E8E93", v: tl.net, dash: true }];
   if (tl.bench) s.push({ n: A.benchName + " with the same cash", c: CY, v: tl.bench });
   const diff = tl.bench ? tl.value[n] - tl.bench[n] : null;
-  return `<div class="card pad">${lineChart(tl.d, s, { h })}${diff == null ? "" : `<div class="mini">Against ${esc(A.benchName)} bought and sold on the same days: <b class="${cls(diff)}">${shs(diff)}</b></div>`}</div>`;
+  return `<div class="card pad">${lineChart(tl.d, s, { h, fmt: (v) => sh(v) })}${diff == null ? "" : `<div class="mini">Against ${esc(A.benchName)} bought and sold on the same days: <b class="${cls(diff)}">${shs(diff)}</b></div>`}</div>`;
 }
 function dashboard(A) {
   const T = A.T, x = A.xirr, holds = A.holds;
@@ -372,7 +344,7 @@ const VIEW = { Dashboard: dashboard, "Swing desk": swing, Holdings: holdingsView
 export const partial = { ps: ["pf-ps", psOut], st: ["pf-st", stOut], reb: ["pf-rb", rebOut], find: ["pf-hl", holdList] };
 
 export function page() {
-  const P = S.pf; CH.clear(); chN = 0;
+  const P = S.pf; resetCharts();
   const head = (subt, extra = "") => `<div class="hd"><div><h1>Portfolio</h1><div class="sub">${subt}</div></div><button class="btn pri" data-act="buyform">Add a buy</button></div>${extra}`;
   if (!P.loaded) return `<div>${head("Loading…")}<div class="card"><div class="note">Loading your portfolio…</div></div></div>`;
   if (P.err) return `<div>${head("")}<div class="card"><div class="empty"><b>Portfolio is not available</b>${esc(P.err)}</div></div></div>`;
