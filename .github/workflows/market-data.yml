@@ -1,14 +1,18 @@
 # Arka Trades · Market data
-# Every weekday evening this runs the same Python engines the Streamlit app uses and saves their results under
-# arka_data/market/ in the repository. The new app (Cloudflare) only reads those files, so both apps show the same readings.
+# Every weekday evening this runs the same Python engines the Streamlit app uses and publishes their results on the
+# "market-data" branch of this repository. The new app (Cloudflare) only reads those files, so both apps show the same readings.
 #
-# Today it writes the market regime for Nifty 500, Nifty 200 and Nifty 100 (market_export.py regime).
-# More sections will be added to this same job.
+#   Regime       market_export.py regime   regime_engine.py for Nifty 500, Nifty 200 and Nifty 100
+#   Money flow   market_export.py flow     money_flow.py + arka_flow: ranking, every model setting, its test, sectors, FPI fortnights
 #
-# Where the data comes from (free and public): NSE index member lists, Yahoo Finance daily prices.
+# The "market-data" branch holds only the latest files (it is replaced on every run), so the main branch stays small and
+# Cloudflare does not rebuild the site for data. If one step fails, the other's new files are still published and the
+# failed one keeps yesterday's file.
+#
+# Where the data comes from (free and public): NSE index member lists, Yahoo Finance daily prices, NSDL FPI reports.
 # No secrets needed.
 #
-# First time: Actions tab -> "Market data" -> "Run workflow". It takes about five minutes.
+# First time: Actions tab -> "Market data" -> "Run workflow". It takes about 10 minutes.
 # After that it runs by itself at about 6:15 pm and 9:15 pm IST, Monday to Friday.
 name: Market data
 
@@ -19,7 +23,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write                 # needed to save the result files in the repository
+  contents: write                 # needed to publish the result files
 
 concurrency:
   group: market-data
@@ -28,7 +32,10 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
+    env:
+      OUT: ${{ runner.temp }}/market
+      ARKA_CACHE_DIR: ${{ runner.temp }}/arka_quant
     steps:
       - uses: actions/checkout@v4
 
@@ -37,22 +44,30 @@ jobs:
           python-version: "3.11"
 
       - name: Install
-        run: pip install --quiet "yfinance==0.2.61" "pandas>=2,<4" "numpy>=1.26" requests
+        run: pip install --quiet "yfinance==0.2.61" "pandas>=2,<4" "numpy>=1.26" requests streamlit lxml html5lib beautifulsoup4
+
+      - name: Last published files
+        run: |
+          mkdir -p "$OUT"
+          if git fetch --quiet --depth 1 origin market-data; then git archive FETCH_HEAD | tar -x -C "$OUT"; fi
+          ls -la "$OUT"
 
       - name: Regime
-        env:
-          ARKA_CACHE_DIR: ${{ runner.temp }}/arka_quant
-        run: python market_export.py regime
+        continue-on-error: true
+        run: python market_export.py regime --out "$OUT"
 
-      - name: Save to the repository
+      - name: Money flow
+        continue-on-error: true
+        run: python market_export.py flow --out "$OUT"
+
+      - name: Publish on the market-data branch
         run: |
+          cd "$OUT"
+          rm -rf .git
+          git init --quiet -b market-data
           git config user.name "arka-data-bot"
           git config user.email "arka-data-bot@users.noreply.github.com"
-          git add arka_data/market || true
-          if git diff --cached --quiet; then
-            echo "Nothing new to save."
-            exit 0
-          fi
-          git commit -m "Market data $(date -u +%Y-%m-%d)"
-          git pull --rebase --autostash origin "$GITHUB_REF_NAME" || true
-          git push
+          git add -A
+          git commit --quiet -m "Market data $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push --quiet --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" market-data
+          echo "Published: $(ls | tr '\n' ' ')"
