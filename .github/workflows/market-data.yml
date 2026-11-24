@@ -1,0 +1,58 @@
+# Arka Trades · Market data
+# Every weekday evening this runs the same Python engines the Streamlit app uses and saves their results under
+# arka_data/market/ in the repository. The new app (Cloudflare) only reads those files, so both apps show the same readings.
+#
+# Today it writes the market regime for Nifty 500, Nifty 200 and Nifty 100 (market_export.py regime).
+# More sections will be added to this same job.
+#
+# Where the data comes from (free and public): NSE index member lists, Yahoo Finance daily prices.
+# No secrets needed.
+#
+# First time: Actions tab -> "Market data" -> "Run workflow". It takes about five minutes.
+# After that it runs by itself at about 6:15 pm and 9:15 pm IST, Monday to Friday.
+name: Market data
+
+on:
+  schedule:
+    - cron: "45 12 * * 1-5"       # 18:15 IST
+    - cron: "45 15 * * 1-5"       # 21:15 IST, in case Yahoo was late with the day's candle
+  workflow_dispatch:
+
+permissions:
+  contents: write                 # needed to save the result files in the repository
+
+concurrency:
+  group: market-data
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install --quiet "yfinance==0.2.61" "pandas>=2,<4" "numpy>=1.26" requests
+
+      - name: Regime
+        env:
+          ARKA_CACHE_DIR: ${{ runner.temp }}/arka_quant
+        run: python market_export.py regime
+
+      - name: Save to the repository
+        run: |
+          git config user.name "arka-data-bot"
+          git config user.email "arka-data-bot@users.noreply.github.com"
+          git add arka_data/market || true
+          if git diff --cached --quiet; then
+            echo "Nothing new to save."
+            exit 0
+          fi
+          git commit -m "Market data $(date -u +%Y-%m-%d)"
+          git pull --rebase --autostash origin "$GITHUB_REF_NAME" || true
+          git push
