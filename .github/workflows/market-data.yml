@@ -4,6 +4,7 @@
 #
 #   Regime       market_export.py regime   regime_engine.py for Nifty 500, Nifty 200 and Nifty 100
 #   Money flow   market_export.py flow     money_flow.py + arka_flow: ranking, every model setting, its test, sectors, FPI fortnights
+#   Names        market_export.py names    NSE company names by symbol, for news tagging
 #
 # The "market-data" branch holds only the latest files (it is replaced on every run), so the main branch stays small and
 # Cloudflare does not rebuild the site for data. If one step fails, the other's new files are still published and the
@@ -33,11 +34,13 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    env:
-      OUT: ${{ runner.temp }}/market
-      ARKA_CACHE_DIR: ${{ runner.temp }}/arka_quant
     steps:
       - uses: actions/checkout@v4
+
+      - name: Folders
+        run: |
+          echo "OUT=$RUNNER_TEMP/market" >> "$GITHUB_ENV"
+          echo "ARKA_CACHE_DIR=$RUNNER_TEMP/arka_quant" >> "$GITHUB_ENV"
 
       - uses: actions/setup-python@v5
         with:
@@ -55,6 +58,10 @@ jobs:
       - name: Regime
         continue-on-error: true
         run: python market_export.py regime --out "$OUT"
+
+      - name: Company names
+        continue-on-error: true
+        run: python market_export.py names --out "$OUT"
 
       - name: Money flow
         continue-on-error: true
