@@ -1,4 +1,5 @@
-// Arka Trades · new app (stage 2): Home, Watchlist, Portfolio, Signals, Markets, Daily brief, More. Plain JavaScript, no build step.
+// Arka Trades · new app (stage 3): Home, Watchlist, the full Portfolio, Signals, Markets, Daily brief, More. Plain JavaScript, no build step.
+import * as PFV from "./portfolio.js";
 const CLASSIC = "https://arka-trades-1.streamlit.app";       // the Streamlit app, for sections that have not moved yet
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -28,7 +29,7 @@ const MORE = [["Stock research", "Financials, charts, filings and peers for any 
   ["Screener", "Describe a setup and scan the market."], ["Backtest", "Test a rule on past prices."], ["News", "Market wire and exchange filings."]];
 
 const S = { me: null, tab: "home", q: {}, at: {}, wl: { rows: [], list: "Main", loaded: false, err: "" }, sig: null, sigErr: "", sigTab: "Leaders", mkTab: "India", sort: "order",
-            pf: { lots: [], sells: [], plan: {}, can_sell: true, can_plan: true, loaded: false, err: "" }, deals: null, brief: undefined,
+            pf: PFV.pfDefaults(), qv: 0, deals: null, brief: undefined,
             sheet: null, results: null, searching: false };
 
 // ── small helpers ──
@@ -76,6 +77,7 @@ async function need(symbols) {                             // fetch quotes that 
     try {
       const d = await api("/api/quotes?s=" + encodeURIComponent(want.slice(i, i + 40).join(",")));
       for (const q of d.quotes) S.q[q.sym] = q;
+      S.qv++;
     } catch (e) { want.slice(i, i + 40).forEach((s) => { if (!S.q[s]) S.q[s] = { sym: s, ok: false }; }); }
     paint();
   }
@@ -90,33 +92,12 @@ async function loadSignals() {
   paint();
 }
 async function loadPortfolio() {
-  try { const d = await api("/api/portfolio"); Object.assign(S.pf, d, { err: "" }); }
+  try { const d = await api("/api/portfolio"); Object.assign(S.pf, d, { err: "" }); S.pf.ver++; }
   catch (e) { if (e.message !== "signed out") S.pf.err = e.message; }
-  S.pf.loaded = true; paint(); refresh();
+  S.pf.loaded = true; paint(); refresh(); PFV.loadHistory();
 }
 async function loadDeals() { if (S.deals) return; try { S.deals = (await api("/api/deals")).deals; } catch { S.deals = []; } paint(); }
 async function loadBrief() { try { S.brief = (await api("/api/brief")).brief; } catch (e) { if (e.message !== "signed out") S.brief = null; } paint(); }
-// Holdings from buys and sells: sells use up the oldest buys first (FIFO), like the classic app.
-function holdings() {
-  const by = {};
-  for (const l of S.pf.lots) (by[l.sym] = by[l.sym] || { sym: l.sym, lots: [], realised: 0, sold: 0 }).lots.push({ ...l, open: l.qty });
-  for (const h of Object.values(by)) h.lots.sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")) || a.id - b.id);
-  for (const x of S.pf.sells) {
-    const h = by[x.sym]; if (!h) continue;
-    let rem = x.qty; h.sold += x.qty;
-    for (const l of h.lots) { if (rem <= 1e-9) break; const take = Math.min(l.open, rem); l.open -= take; rem -= take; h.realised += take * (x.price - l.price); }
-  }
-  const out = [];
-  for (const h of Object.values(by)) {
-    const open = h.lots.filter((l) => l.open > 1e-9), qty = open.reduce((a, l) => a + l.open, 0), invested = open.reduce((a, l) => a + l.open * l.price, 0);
-    const q = qOf(h.sym), ok = q && q.ok, plan = S.pf.plan[h.sym] || {};
-    const value = ok ? qty * q.price : null;
-    out.push({ ...h, open, qty, invested, avg: qty ? invested / qty : null, price: ok ? q.price : null, value, pnl: value == null ? null : value - invested,
-               pnlPct: value == null || !invested ? null : (value / invested - 1) * 100, day: ok && q.prev ? qty * (q.price - q.prev) : null, stop: plan.stop ?? null, target: plan.target ?? null,
-               flag: !ok || !qty ? "" : plan.stop && q.price <= plan.stop ? "stop" : plan.target && q.price >= plan.target ? "target" : plan.stop && q.price <= plan.stop * 1.02 ? "near" : "" });
-  }
-  return out;
-}
 const lists = () => [...new Set([...S.wl.rows.map((r) => r.list), ...(S.wl.extra || [])])];
 const mine = () => S.wl.rows.filter((r) => r.list === S.wl.list).map((r) => r.sym);
 const inList = (sym) => S.wl.rows.some((r) => r.sym === sym && r.list === S.wl.list);
@@ -265,27 +246,6 @@ function markets() {
     <div class="seg">${Object.keys(MARKETS).map((t) => `<button class="${t === S.mkTab ? "on" : ""}" data-act="mktab" data-v="${esc(t)}">${esc(t)}</button>`).join("")}</div>
     <div class="card">${rows}</div><div class="note" style="padding:14px 2px">Changes are from the previous close. For rupee pairs a rise means a weaker rupee.</div></div>`;
 }
-function portfolio() {
-  const P = S.pf, hs = holdings().filter((h) => h.qty > 1e-9).sort((a, b) => (b.value ?? b.invested) - (a.value ?? a.invested));
-  const all = holdings(), realised = all.reduce((a, h) => a + h.realised, 0);
-  const invested = hs.reduce((a, h) => a + h.invested, 0), priced = hs.filter((h) => h.value != null);
-  const value = priced.length === hs.length ? hs.reduce((a, h) => a + h.value, 0) : null, pnl = value == null ? null : value - invested;
-  const day = priced.length === hs.length ? hs.reduce((a, h) => a + (h.day || 0), 0) : null;
-  const head = `<div class="hd"><div><h1>Portfolio</h1><div class="sub">${hs.length} holding${hs.length === 1 ? "" : "s"}</div></div><button class="btn pri" data-act="buyform">Add a buy</button></div>`;
-  if (!P.loaded) return `<div>${head}<div class="card"><div class="note">Loading your portfolio…</div></div></div>`;
-  if (P.err) return `<div>${head}<div class="card"><div class="empty"><b>Portfolio is not available</b>${esc(P.err)}</div></div></div>`;
-  if (!hs.length) return `<div>${head}<div class="card"><div class="empty"><b>No holdings yet</b>Tap “Add a buy” and enter the stock, how many shares and the price you paid.</div></div>
-    ${realised ? `<div class="note" style="padding:14px 2px">Booked profit so far: <b class="${cls(realised)}">${srs(realised)}</b></div>` : ""}</div>`;
-  const flag = { stop: '<span class="chip r">Stop hit</span>', near: '<span class="chip a">Near stop</span>', target: '<span class="chip g">At target</span>' };
-  const rows = hs.map((h) => `<button class="row two" data-sym="${esc(h.sym)}"><span class="a"><b>${esc(h.sym)} ${flag[h.flag] || ""}</b><small>${num(h.qty, h.qty % 1 ? 2 : 0)} shares · average ${num(h.avg)}${h.stop ? " · stop " + num(h.stop) : ""}</small></span>
-    <span class="z"><b>${h.value == null ? '<span class="mu">—</span>' : rs(h.value)}</b><small class="${cls(h.pnl)}">${h.pnl == null ? "no price" : srs(h.pnl) + " (" + pc(h.pnlPct, 1) + ")"}</small></span></button>`).join("");
-  return `<div>${head}<div class="card"><div class="stats four"><div><span>Value now</span><b>${rs(value)}</b></div><div><span>Money put in</span><b>${rs(invested)}</b></div>
-      <div><span>Profit or loss${pnl != null && invested ? " · " + pc((pnl / invested) * 100, 1) : ""}</span><b class="${cls(pnl)}">${srs(pnl)}</b></div>
-      <div><span>Today</span><b class="${cls(day)}">${srs(day)}</b></div></div></div>
-    <h2>Holdings <span>largest first</span></h2><div class="card">${rows}</div>
-    <div class="note" style="padding:14px 2px">${realised ? `Booked profit from sells: <b class="${cls(realised)}">${srs(realised)}</b>. ` : ""}Sells use up your oldest buys first. Profit excludes brokerage and taxes, and is not adjusted for splits or bonus shares yet.
-      Tax, risk and the trade journal are still in the <a href="${CLASSIC}" target="_blank" rel="noopener" style="color:var(--amber)">classic app</a>.</div></div>`;
-}
 function brief() {
   const B = S.brief, head = (sub) => `<div class="hd"><div><h1>Daily brief</h1><div class="sub">${sub}</div></div></div>`;
   if (B === undefined) return `<div>${head("What happened overnight and what can move Indian stocks today")}<div class="card"><div class="note">Loading…</div></div></div>`;
@@ -313,7 +273,7 @@ function more() {
     <div class="links">${MORE.map(([t, d]) => `<a class="link" href="${CLASSIC}" target="_blank" rel="noopener"><b>${t}</b><small>${d}</small></a>`).join("")}</div>
     <h2>Account</h2><div class="card pad"><div style="margin-bottom:12px">Signed in as <b>${esc(S.me.user)}</b> <span class="chip">${esc(S.me.role)}</span></div><button class="btn" data-act="logout">Sign out</button></div></div>`;
 }
-const PAGES = { home, watchlist, portfolio, signals, markets, brief, more };
+const PAGES = { home, watchlist, portfolio: PFV.page, signals, markets, brief, more };
 
 // ── painting ──
 function renderShell() {
@@ -326,14 +286,16 @@ function renderShell() {
     <div id="msearch"></div><main id="main"></main>
     <nav class="nav"><a class="brand only-d" href="#/home"><img src="/icon-180.png" alt="">ARKA <i>TRADES</i></a>
       ${TABS.map(([k, n, d, mob]) => `<a href="#/${k}" data-tab="${k}"${mob ? "" : ' class="only-d"'}>${icon(d)}<span>${n}</span></a>`).join("")}
-      <div class="who">Signed in as <b>${esc(S.me.user)}</b><br>New app · stage 2</div></nav></div>`;
+      <div class="who">Signed in as <b>${esc(S.me.user)}</b><br>New app · stage 3</div></nav></div>`;
 }
 function paint() {
   const main = $("#main"); if (!main || !S.me) return;
   const phoneTab = TABS.some(([k, , , mob]) => k === S.tab && mob) ? S.tab : "more";      // Markets and the brief light up More on a phone
   document.querySelectorAll(".nav a[data-tab]").forEach((a) => { a.classList.toggle("on", a.dataset.tab === S.tab); a.classList.toggle("onm", a.dataset.tab === phoneTab); });
-  const withRail = !["watchlist", "more", "brief"].includes(S.tab);
-  main.className = withRail ? "rail" : "";
+  const withRail = !["watchlist", "more", "brief", "portfolio"].includes(S.tab);
+  const ae = document.activeElement;                       // typing in a Portfolio box: leave the page alone so the cursor stays put
+  if (ae && main.contains(ae) && ae.dataset.pf && ae.tagName === "INPUT" && !/range|checkbox/.test(ae.type)) { if (S.sheet && !typingInSheet()) paintSheet(); return; }
+  main.className = withRail ? "rail" : S.tab === "portfolio" ? "wide" : "";
   const y = window.scrollY;
   main.innerHTML = PAGES[S.tab]() + (withRail ? rail() : "");
   window.scrollTo(0, y);
@@ -351,6 +313,7 @@ function route() {
 // ── stock sheet ──
 async function openSheet(sym) {
   S.sheet = { sym, d: null, range: "day", err: "" }; paintSheet();
+  if (S.pf.lots.some((l) => l.sym === sym)) need(S.pf.lots.map((l) => l.sym));          // a holding: its weight needs every holding's price
   try { const d = await api("/api/stock?s=" + encodeURIComponent(sym)); if (S.sheet && S.sheet.sym === sym) { S.sheet.d = d; if (d.ok) S.q[sym] = { ...(S.q[sym] || {}), ...d }; } }
   catch (e) { if (S.sheet && S.sheet.sym === sym) S.sheet.err = e.message; }
   paintSheet();
@@ -363,18 +326,8 @@ function buyForm() {
     <form id="buy" class="form">${field("Stock (NSE ticker)", "sym", S.sheet.sym || "", 'placeholder="TCS" autocapitalize="characters" autocomplete="off" required')}
       <div class="g2">${field("Shares", "qty", "", 'inputmode="decimal" placeholder="10" required')}${field("Price paid (₹)", "price", "", 'inputmode="decimal" placeholder="3000" required')}</div>
       ${field("Buy date", "date", todayStr(), 'type="date" max="' + todayStr() + '"')}${field("Note (optional)", "note", "", 'placeholder="Why you bought it" maxlength="200"')}
+      ${S.pf.can_book ? `<label class="f"><span>Book (optional)</span><input name="book" list="buy-books" value="${esc(S.pf.book !== "All books" ? S.pf.book : "Main")}" maxlength="24"><datalist id="buy-books">${PFV.books().map((b) => `<option>${esc(b)}</option>`).join("")}</datalist></label>` : ""}
       <div class="err"></div><button class="btn pri full" type="submit">Save buy</button></form></section>`;
-}
-function positionBlock(sym) {                              // your holding inside the stock sheet: numbers, stop and target, sell, the buys
-  const h = holdings().find((x) => x.sym === sym && x.qty > 1e-9); if (!h) return "";
-  const lots = h.open.map((l) => `<div class="lot"><span>${nice(l.date)} · ${num(l.open, l.open % 1 ? 2 : 0)} at ${num(l.price)}</span>${h.sold ? "" : `<button data-act="dellot" data-id="${l.id}" title="Delete this buy">Delete</button>`}</div>`).join("");
-  return `<h2>Your position</h2><div class="stats" style="border-radius:14px;overflow:hidden"><div><span>Shares · average price</span><b>${num(h.qty, h.qty % 1 ? 2 : 0)} · ${num(h.avg)}</b></div>
-      <div><span>Profit or loss${h.pnl == null ? "" : " · " + pc(h.pnlPct, 1)}</span><b class="${cls(h.pnl)}">${h.pnl == null ? "—" : srs(h.pnl)}</b></div></div>
-    <form id="plan" class="form" data-s="${esc(sym)}"><div class="g2">${field("Stop-loss (₹)", "stop", h.stop ?? "", 'inputmode="decimal" placeholder="none"')}${field("Target (₹)", "target", h.target ?? "", 'inputmode="decimal" placeholder="none"')}</div>
-      <div class="err"></div><button class="btn full" type="submit">Save stop and target</button></form>
-    <form id="sell" class="form" data-s="${esc(sym)}"><div class="g2">${field("Sell shares", "qty", "", 'inputmode="decimal" placeholder="' + num(h.qty, 0) + '" required')}${field("Sell price (₹)", "price", h.price ?? "", 'inputmode="decimal" required')}</div>
-      ${field("Sell date", "date", todayStr(), 'type="date" max="' + todayStr() + '"')}<div class="err"></div><button class="btn red full" type="submit">Record sell</button></form>
-    <h2>Your buys</h2><div class="card">${lots}</div>`;
 }
 function watchBlock(sym) {                                 // note, price alerts and moving between lists, for a stock in the open list
   const w = S.wl.rows.find((r) => r.sym === sym && r.list === S.wl.list); if (!w) return "";
@@ -406,7 +359,7 @@ function paintSheet() {
     <div class="px">${q.price != null ? num(q.price) : '<span class="sk">0000.00</span>'}<small class="${cls(q.pct)}">${q.price != null ? sgn(q.chg) + " (" + pc(q.pct) + ")" : ""}</small></div>
     <div class="chart">${chart}</div>
     <div class="seg"><button class="${sh.range === "day" ? "on" : ""}" data-act="range" data-v="day">Today</button><button class="${sh.range === "year" ? "on" : ""}" data-act="range" data-v="year">1 year</button></div>
-    ${band(q.low, q.high, q.price, "Today's range")}${band(q.lo52, q.hi52, q.price, "52-week range")}${stats}${acts}${isStock ? positionBlock(sh.sym) + watchBlock(sh.sym) : ""}</section>`;
+    ${band(q.low, q.high, q.price, "Today's range")}${band(q.lo52, q.hi52, q.price, "52-week range")}${stats}${acts}${isStock ? PFV.positionBlock(sh.sym) + watchBlock(sh.sym) : ""}</section>`;
   if (sh.keep != null) { $(".sheet").scrollTop = sh.keep; sh.keep = null; }
 }
 
@@ -474,8 +427,8 @@ async function sendForm(form, path, body, method = "POST") {
   try { await api(path, { method, body: JSON.stringify(body) }); return true; } catch (er) { formErr(form, er.message); return false; }
 }
 document.addEventListener("submit", async (e) => {
-  const f = e.target, id = f.id;
-  if (["buy", "sell", "plan", "wmeta"].includes(id)) {
+  const f = e.target, id = f.getAttribute("id");       // not f.id: a field named "id" would hide it
+  if (["buy", "sell", "plan", "wmeta", "move"].includes(id)) {
     e.preventDefault();
     const v = Object.fromEntries(new FormData(f)), sym = (f.dataset.s || v.sym || "").toUpperCase().trim().replace(/\.NS$/, "");
     const keep = () => { if (S.sheet) S.sheet.keep = ($(".sheet") || {}).scrollTop || 0; };
@@ -485,11 +438,21 @@ document.addEventListener("submit", async (e) => {
       const b = f.querySelector("button[type=submit]"); b.disabled = true;
       try { const d = await api("/api/quotes?s=" + encodeURIComponent(sym)); if (!d.quotes[0] || !d.quotes[0].ok) return formErr(f, sym + " was not found on NSE. Check the ticker."); S.q[sym] = d.quotes[0]; }
       catch (er) { return formErr(f, er.message); }
-      if (await sendForm(f, "/api/portfolio", { sym, qty: Number(v.qty), price: Number(v.price), date: v.date, note: v.note })) { closeSheet(); toast("Buy saved: " + sym); await loadPortfolio(); }
+      const book = (v.book || "Main").replace(/[^\w &.-]/g, "").trim().slice(0, 24) || "Main";
+      const b2 = f.querySelector("button[type=submit]"); b2.disabled = true;
+      try { const r = await api("/api/portfolio", { method: "POST", body: JSON.stringify({ sym, qty: Number(v.qty), price: Number(v.price), date: v.date, note: v.note, book }) });
+        closeSheet(); toast(r.booked === false ? "Buy saved in Main: the book could not be saved" : "Buy saved: " + sym); await loadPortfolio(); }
+      catch (er) { formErr(f, er.message); }
     } else if (id === "sell") {
-      if (await sendForm(f, "/api/portfolio/sell", { sym, qty: Number(v.qty), price: Number(v.price), date: v.date })) { toast("Sell recorded: " + sym); keep(); await loadPortfolio(); document.activeElement && document.activeElement.blur(); paintSheet(); }
+      if (!(Number(v.qty) > 0) || !(Number(v.price) > 0)) return formErr(f, "Shares and price must be numbers above zero.");
+      const x = { sym, qty: Number(v.qty), price: Number(v.price), date: v.date || todayStr(), book: v.book || "Main" }, why = PFV.sellProblem(x);
+      if (why) return formErr(f, why);
+      if (await sendForm(f, "/api/portfolio/sell", x)) { toast("Sell recorded: " + sym); keep(); document.activeElement && document.activeElement.blur(); await loadPortfolio(); paintSheet(); }
     } else if (id === "plan") {
-      if (await sendForm(f, "/api/portfolio/plan", { sym, stop: v.stop, target: v.target })) { toast("Stop and target saved"); keep(); await loadPortfolio(); document.activeElement && document.activeElement.blur(); paintSheet(); }
+      if (Number(v.stop) > 0 && Number(v.target) > 0 && Number(v.target) <= Number(v.stop)) return formErr(f, "The target must be above the stop-loss.");
+      if (await sendForm(f, "/api/portfolio/plan", { sym, stop: v.stop, target: v.target, book: f.dataset.book || "Main" })) { toast("Stop and target saved"); keep(); document.activeElement && document.activeElement.blur(); await loadPortfolio(); paintSheet(); }
+    } else if (id === "move") {
+      if (await sendForm(f, "/api/portfolio/move", { id: v.lot, book: v.book })) { toast("Moved to " + v.book); keep(); document.activeElement && document.activeElement.blur(); await loadPortfolio(); paintSheet(); }
     } else {
       if (await sendForm(f, "/api/watchlist", { sym, list: S.wl.list, note: v.note, above: v.above, below: v.below, to: v.to || "" }, "PATCH")) {
         toast(v.to ? sym + " moved to " + v.to : "Saved"); keep(); await loadWatchlist(); document.activeElement && document.activeElement.blur(); paintSheet(); }
@@ -503,8 +466,19 @@ document.addEventListener("submit", async (e) => {
   try { S.me = await api("/api/login", { method: "POST", body: JSON.stringify({ user: fd.get("user"), pass: fd.get("pass") }) }); start(); }
   catch (er) { renderLogin(er.message); }
 });
-document.addEventListener("input", (e) => { if (e.target.id === "q" || e.target.id === "mq") onSearch(e.target.value); });
-document.addEventListener("change", (e) => { if (e.target.dataset.act === "sort") { S.sort = e.target.value; paint(); } });
+function pfInput(el, ev) {                                // a control on the Portfolio page changed
+  const P = S.pf, k = el.dataset.pf, [g, f] = k.split("."), text = el.tagName === "INPUT" && !/range|checkbox/.test(el.type);
+  if (text !== (ev === "input") && !(el.type === "range" && ev === "input")) return;       // text boxes react as you type, the rest when they change
+  if (f) P[g][f] = el.type === "checkbox" ? el.checked : el.value; else P[k] = el.value;
+  const part = PFV.partial[f ? g : k];
+  if (part) { const box = document.getElementById(part[0]); if (box) box.innerHTML = part[1](PFV.calc()); return; }
+  if (k === "bench") PFV.loadHistory();
+  paint();
+}
+document.addEventListener("input", (e) => { if (e.target.id === "q" || e.target.id === "mq") onSearch(e.target.value); else if (e.target.dataset.pf) pfInput(e.target, "input"); });
+document.addEventListener("change", (e) => { if (e.target.dataset.act === "sort") { S.sort = e.target.value; paint(); } else if (e.target.dataset.pf) pfInput(e.target, "change"); });
+document.addEventListener("pointermove", PFV.chartMove, { passive: true });
+document.addEventListener("pointerdown", PFV.chartMove, { passive: true });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") { if (S.sheet) closeSheet(); else endSearch(); } });
 document.addEventListener("click", async (e) => {
   const a = e.target.closest("[data-act]"), act = a && a.dataset.act;
@@ -519,6 +493,12 @@ document.addEventListener("click", async (e) => {
     if (act === "buyform") { S.sheet = { form: "buy", sym: a.dataset.s || "" }; paintSheet(); const i = $("#buy input[name=" + (a.dataset.s ? "qty" : "sym") + "]"); if (i) i.focus(); return; }
     if (act === "dellot") { if (!confirm("Delete this buy? This cannot be undone.")) return; try { await api("/api/portfolio?id=" + a.dataset.id, { method: "DELETE" }); toast("Buy deleted"); } catch (er) { toast(er.message); }
       await loadPortfolio(); return paintSheet(); }
+    if (act === "pfview") { S.pf.view = a.dataset.v; window.scrollTo(0, 0); return paint(); }
+    if (act === "pfcsv") return PFV.csv(a.dataset.v);
+    if (act === "pfrefresh") { S.at = {}; toast("Refreshing prices and history"); refresh(); return PFV.loadHistory(true); }
+    if (act === "delsell") { if (!confirm("Delete this sell? This cannot be undone.")) return; try { await api("/api/portfolio/sell?id=" + a.dataset.id, { method: "DELETE" }); toast("Sell deleted"); } catch (er) { toast(er.message); } return loadPortfolio(); }
+    if (act === "newbook") { const n = (prompt("Name for the new book (for example Trading or Long term)") || "").replace(/[^\w &.-]/g, "").trim().slice(0, 24); if (!n) return;
+      S.pf.extraBooks = [...new Set([...(S.pf.extraBooks || []), n])]; paint(); return toast("Book “" + n + "” is ready. Choose it when you add a buy."); }
     if (act === "newlist") { const n = (prompt("Name for the new list (for example Swing or Long term)") || "").replace(/[^\w &.-]/g, "").trim().slice(0, 24); if (!n) return;
       S.wl.extra = [...new Set([...(S.wl.extra || []), n])]; S.wl.list = n; paint(); return toast("List “" + n + "” is ready. It is saved when you add its first stock."); }
     if (act === "mktab") { S.mkTab = a.dataset.v; paint(); return refresh(); }
@@ -533,3 +513,4 @@ window.addEventListener("hashchange", route);
 document.addEventListener("visibilitychange", () => { if (!document.hidden && S.me) refresh(); });
 setInterval(() => { if (S.me && !document.hidden && marketOpen()) refresh(); }, 30000);
 boot();
+export { S, api, paint, esc, num, sgn, pc, cls, rs, nice, todayStr, field, toast };
