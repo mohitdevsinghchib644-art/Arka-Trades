@@ -1,4 +1,4 @@
-// Arka Trades · API (stage 6: adds Money flow files; nightly market files are read from the market-data branch). Runs on Cloudflare for every request to /api/*.
+// Arka Trades · API (stage 7: adds the news sources, one per request). Runs on Cloudflare for every request to /api/*.
 // Secrets are read by NAME from the Cloudflare project settings and never sent to the browser:
 //   ADMIN_USER, ADMIN_PASS, MEMBER_USER, MEMBER_PASS, AUTH_SECRET   sign-in (same names and values as in Streamlit)
 //   SUPABASE_URL, SUPABASE_KEY                                      watchlist storage (same as in Streamlit)
@@ -202,6 +202,96 @@ async function mmi(ctx) {
   if (cache) { const old = await cache.match(lastKey); if (old) return json({ ...(await old.json()), status: "stale" }); }
   return json({ status: "unavailable" });
 }
+// ── news: one source per request (the browser asks for them in parallel and does the tagging and scoring) ──
+// The sources of the classic news desk (news_feed.py v12.1). Only these addresses can be fetched.
+export const WIRE = [["Economic Times", "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms"], ["Economic Times", "https://economictimes.indiatimes.com/markets/stocks/news/rssfeeds/2146842.cms"],
+  ["Business Standard", "https://www.business-standard.com/rss/markets-106.rss"], ["Business Standard", "https://www.business-standard.com/rss/companies-101.rss"],
+  ["Mint", "https://www.livemint.com/rss/markets"], ["Mint", "https://www.livemint.com/rss/companies"], ["Moneycontrol", "https://www.moneycontrol.com/rss/marketreports.xml"],
+  ["Moneycontrol", "https://www.moneycontrol.com/rss/business.xml"], ["BusinessLine", "https://www.thehindubusinessline.com/markets/feeder/default.rss"], ["NDTV Profit", "https://feeds.feedburner.com/ndtvprofit-latest"]];
+export const NSE_FEEDS = [["Announcements", "https://nsearchives.nseindia.com/content/RSS/Online_announcements.xml"], ["Financial results", "https://nsearchives.nseindia.com/content/RSS/Financial_Results.xml"],
+  ["Board meetings", "https://nsearchives.nseindia.com/content/RSS/Board_Meetings.xml"], ["Corporate actions", "https://nsearchives.nseindia.com/content/RSS/Corporate_action.xml"],
+  ["Insider trading", "https://nsearchives.nseindia.com/content/RSS/Insider_Trading.xml"]];
+const BORING = /trading window|74\s?\(5\)|loss of share|duplicate share|newspaper (publication|advertisement)|compliance certificate|closure of trading|investor (meet|presentation) intimation|book closure|change in (address|registrar)|copy of newspaper|postal ballot|esop|esos|analysts?.{0,25}meet|investors?.{0,12}meet|certificate under sebi|record of proceedings/i;
+const ENT = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", rsquo: "’", lsquo: "‘", rdquo: "”", ldquo: "“", ndash: "–", mdash: "—", hellip: "…", rupee: "₹" };
+const unent = (s) => String(s || "").replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e) => (e[0] === "#" ? String.fromCodePoint(e[1] === "x" || e[1] === "X" ? parseInt(e.slice(2), 16) : +e.slice(1)) : ENT[e.toLowerCase()] ?? m));
+export function cleanHtml(s, n = 260) {                     // news_feed._clean_html
+  let t = String(s || "").replace(/<[^>]+>/g, " ");
+  t = unent(t.replace(/\s+/g, " ")).replace(/\s+/g, " ").trim();
+  return t.length > n ? t.slice(0, n) + "…" : t;
+}
+const MON = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+export function parseDate(raw) {                            // RFC 822 dates, ISO dates, and NSE's "22-Nov-2026 18:30:00" (Indian time)
+  if (!raw) return null;
+  const s = String(raw).trim(), m = s.match(/^(\d{1,2})-([A-Za-z]{3})-(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (m && MON[m[2].toLowerCase()] != null) return Date.UTC(+m[3], MON[m[2].toLowerCase()], +m[1], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0)) - 330 * 60000;
+  const t = Date.parse(s.replace(/\bIST\b/, "+0530"));
+  return isNaN(t) ? null : t;
+}
+const tagText = (xml, tag) => { const m = xml.match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)</${tag}>`, "i")); return m ? m[1].replace(/^\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*$/, "$1") : ""; };
+export function parseFeed(xml, max = 40) {                  // RSS 2.0 and Atom, the fields the classic desk reads
+  const out = [], items = String(xml || "").match(/<item[\s>][\s\S]*?<\/item>|<entry[\s>][\s\S]*?<\/entry>/gi) || [];
+  for (const it of items.slice(0, max)) {
+    let link = tagText(it, "link").trim();
+    if (!link) { const a = it.match(/<link[^>]*href="([^"]+)"/i); link = a ? a[1] : ""; }
+    const src = tagText(it, "source");
+    out.push({ title: unent(tagText(it, "title").replace(/<[^>]+>/g, "")).trim(), link: unent(link), summary: cleanHtml(unent(tagText(it, "description") || tagText(it, "summary") || tagText(it, "content"))),
+      dt: parseDate(tagText(it, "pubDate") || tagText(it, "published") || tagText(it, "updated") || tagText(it, "dc:date")), src: src ? unent(src).trim() : null });
+  }
+  return out;
+}
+export function nseRows(xml, label) {                       // one NSE filing feed (news_feed._nse_cached)
+  const out = [];
+  for (const it of (String(xml || "").match(/<item[\s>][\s\S]*?<\/item>/gi) || []).slice(0, 150)) {
+    const title = cleanHtml(unent(tagText(it, "title")), 300), desc = cleanHtml(unent(tagText(it, "description")), 300);
+    let name, head;
+    if (title.includes(" - ")) { const i = title.indexOf(" - "); name = title.slice(0, i).trim(); head = title.slice(i + 3).trim(); } else { name = title.trim(); head = desc; }
+    if (!name || BORING.test(`${head} ${desc}`)) continue;
+    const dt = parseDate(tagText(it, "pubDate") || tagText(it, "published")); if (dt == null) continue;
+    out.push({ title: `${name}: ${head || label}`.slice(0, 240), link: unent(tagText(it, "link").trim()) || "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+      summary: desc && desc !== head ? desc : label, dt, src: "NSE filing", company: name });
+  }
+  return out;
+}
+export function bseRows(data) {                             // BSE corporate announcements (news_feed._bse_cached)
+  const out = [];
+  for (const x of ((data || {}).Table || []).slice(0, 200)) {
+    const name = String(x.SLONGNAME || "").trim(), head = String(x.HEADLINE || x.NEWSSUB || "").trim();
+    if (!name || !head || BORING.test(head) || BORING.test(String(x.SUBCATNAME || ""))) continue;
+    const raw = String(x.DT_TM || x.NEWS_DT || ""), dt = Date.parse(/[zZ]|[+-]\d\d:?\d\d$/.test(raw) ? raw : raw + "+05:30"); if (isNaN(dt)) continue;
+    const att = String(x.ATTACHMENTNAME || "").trim(), title = name.toLowerCase().replace(/(^|[^a-z0-9])([a-z])/g, (m, a, b) => a + b.toUpperCase());
+    out.push({ title: `${title}: ${head}`.slice(0, 240), link: att ? `https://www.bseindia.com/xml-data/corpfiling/AttachLive/${att}` : "https://www.bseindia.com/corporates/ann.html",
+      summary: String(x.CATEGORYNAME || x.SUBCATNAME || ""), dt, src: "BSE filing", company: name });
+  }
+  return out;
+}
+const gnewsUrl = (q, days) => `https://news.google.com/rss/search?q=${encodeURIComponent(`${q} when:${Math.max(1, days | 0)}d`).replace(/%20/g, "+")}&hl=en-IN&gl=IN&ceid=IN:en`;
+async function feed(url, ctx) {
+  const id = url.searchParams.get("id") || "", days = Math.max(1, Math.min(30, +url.searchParams.get("days") || 1));
+  let target, kind = "rss", label = "", headers = { "user-agent": UA, accept: "application/rss+xml,application/xml,text/xml,*/*" };
+  const [k, v] = [id.split(":")[0], id.slice(id.indexOf(":") + 1)];
+  if (k === "wire" && WIRE[+v]) target = WIRE[+v][1];
+  else if (k === "nse" && NSE_FEEDS[+v]) { target = NSE_FEEDS[+v][1]; kind = "nse"; label = NSE_FEEDS[+v][0]; headers.referer = "https://www.nseindia.com/"; }
+  else if (k === "gnews") { const q = (url.searchParams.get("q") || "").slice(0, 300); if (!q) return fail(400, "Which query?"); target = gnewsUrl(q, days); }
+  else if (k === "bse") { const t = new Date(Date.now() + 330 * 60000), f = new Date(t.getTime() - Math.min(days, 7) * 864e5), ymd = (d) => d.toISOString().slice(0, 10).replace(/-/g, "");
+    target = `https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pageno=1&strCat=-1&strPrevDate=${ymd(f)}&strScrip=&strSearch=P&strToDate=${ymd(t)}&strType=C&subcategory=-1`;
+    kind = "bse"; headers = { "user-agent": UA, referer: "https://www.bseindia.com/", origin: "https://www.bseindia.com", accept: "application/json, text/plain, */*" }; }
+  else return fail(400, "Unknown source.");
+  const cache = typeof caches !== "undefined" && caches.default, key = new Request("https://cache.arka/feed/" + encodeURIComponent(target)), last = new Request("https://cache.arka/feedlast/" + encodeURIComponent(target));
+  if (cache) { const hit = await cache.match(key); if (hit) return json(await hit.json()); }
+  try {
+    const r = await fetch(target, { headers, signal: AbortSignal.timeout ? AbortSignal.timeout(7000) : undefined });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const rows = kind === "bse" ? bseRows(await r.json()) : kind === "nse" ? nseRows(await r.text(), label) : parseFeed(await r.text());
+    if (!rows.length) throw new Error(kind === "rss" ? "empty feed" : "no filings");
+    const v2 = { ok: true, rows, at: Date.now() };
+    if (cache) { const a = cache.put(key, new Response(JSON.stringify(v2), { headers: { "cache-control": "max-age=300" } })), b = cache.put(last, new Response(JSON.stringify(v2), { headers: { "cache-control": "max-age=21600" } }));
+      ctx && ctx.waitUntil ? ctx.waitUntil(Promise.all([a, b])) : await Promise.all([a, b]); }
+    return json(v2);
+  } catch (e) {                                            // a failed source: say so, and hand back its last good copy (up to 6 hours old)
+    const old = cache ? await cache.match(last) : null, prev = old ? await old.json() : null;
+    return json({ ok: false, err: String(e && e.name === "TimeoutError" ? "Timeout" : (e && e.message) || "failed").slice(0, 60), rows: prev ? prev.rows : [], at: prev ? prev.at : null });
+  }
+}
 async function search(url, ctx) {
   const q = (url.searchParams.get("q") || "").trim().slice(0, 40);
   if (q.length < 2) return json({ results: [] });
@@ -382,7 +472,7 @@ async function deals(env, ctx) {
 }
 // results of the nightly "Market data" job (the Streamlit engines run in Python on GitHub); only known file names are served
 // They live on the "market-data" branch (replaced each night, so the main branch and Cloudflare builds stay small); older runs wrote to main.
-const MARKET_FILES = /^(regime_nifty(500|200|100)|meta|flow|flow_sectors|flow_fpi)$/;
+const MARKET_FILES = /^(regime_nifty(500|200|100)|meta|flow|flow_sectors|flow_fpi|names)$/;
 async function market(env, ctx, url) {
   const f = url.searchParams.get("f") || "";
   if (!MARKET_FILES.test(f)) return fail(400, "Unknown market file.");
@@ -420,6 +510,7 @@ export default {
       if (p === "/api/history") return history(url, ctx);
       if (p === "/api/overview") return overview(url, ctx);
       if (p === "/api/mmi") return mmi(ctx);
+      if (p === "/api/feed") return feed(url, ctx);
       if (p === "/api/search") return search(url, ctx);
       if (p === "/api/watchlist") return watchlist(env, request, url);
       if (p === "/api/signals") return signals(env, ctx);
