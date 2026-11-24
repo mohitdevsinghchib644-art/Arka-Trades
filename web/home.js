@@ -317,7 +317,12 @@ function movers(k = 5) {
   const col = (items, title) => `<div><div class="hm-lg">${title}</div>${items.length ? items.map(([s, q]) => `<button class="hm-li" data-sym="${esc(s)}"><span class="a"><b>${esc(s)}</b><small>₹${num(q.price, 2)}</small></span><span class="z"><b class="${cl(q.pct)}">${pct(q.pct)}</b></span></button>`).join("") : empty("None today.")}</div>`;
   return `<div class="hm-mv">${col(ranked.slice(0, k).filter(([, q]) => q.pct > 0), "Top gainers")}${col(ranked.slice().reverse().slice(0, k).filter(([, q]) => q.pct < 0), "Top losers")}</div>`;
 }
-function rotation(M) {                                       // 1-month return against NIFTY 50, with the 1-week turn (the classic Home's reading)
+function rotation(M) {                                       // Money flow's ranking when the nightly file is there, else 1-month return against NIFTY 50
+  const fm = S.hm.meta && S.hm.meta.flow;
+  if (fm && fm.top && fm.top.length) {
+    const c = { "Rotate in": GREEN, Hold: "#8AD66B" };
+    return [`From Money flow · ${nice(fm.asof).replace(/ \d{4}$/, "")} close`, fm.top.slice(0, 6).map((x) => `<a class="hm-li" href="#/flow"><span class="a"><b>${esc(x.sector)}</b><small>Model portfolio · market ${esc(fm.regime || "")}</small></span><span class="z"><span class="hm-pill" style="--c:${c[x.action] || T2}">${esc(x.action)}</span></span></a>`).join("")];
+  }
   const n = M["NIFTY 50"], rows = SECT.map(([l]) => [l, M["SEC::" + l]]).filter(([, m]) => m && ok(m.m1));
   if (!n || !ok(n.m1) || rows.length < 6) return ["", empty("Sector rotation appears once the sector indices load.")];
   const rel = rows.map(([l, m]) => [l, m.m1 - n.m1, m]).sort((a, b) => b[1] - a[1]);
