@@ -4,6 +4,7 @@
 // every combination the classic page offers is computed each night.
 import { S, api, paint, esc, num, nice } from "./app.js";
 import { lineChart, resetCharts, legend } from "./charts.js";
+import { dataBehind } from "./home.js";
 
 const GREEN = "#30D158", RED = "#FF453A", AMBER = "#FF9F0A", CYAN = "#5AC8FA", YELLOW = "#FFD60A", PURPLE = "#BF5AF2", T2 = "#A3A3A3", T3 = "#6B6B6B";
 const QUAD_C = { Leading: GREEN, Weakening: YELLOW, Lagging: RED, Improving: CYAN, "": T3 };
@@ -69,7 +70,8 @@ function status(d, M) {
   const chips = [`As of <b>${esc(nice(d.asof))}</b> close`, `<b>${d.n_sectors}</b> sectors · ${esc(d.kind)}`, `vs <b>${esc(d.bench)}</b>`,
     `<i style="background:${REG_C[rg] || T3}"></i>Market <b>${esc(rg)}</b>`, `Model: top <b>${M.n}</b>, review every <b>${M.every}</b> sessions`, `<b>${q.used}</b> stocks used`];
   let out = `<div class="mf-status">${chips.map((c) => `<span class="mf-chip">${c}</span>`).join("")}</div>`;
-  if (q.stale_by) out += `<div class="card warn"><div class="note">Latest data is ${q.stale_by} session(s) behind the last completed session (${esc(q.last_complete)}). Check the “Market data” run in GitHub Actions.</div></div>`;
+  const lag = dataBehind(String(d.asof).slice(0, 10));      // checked now, against the NSE holiday list (the file's own check knows weekends only)
+  if (lag.n) out += `<div class="card warn"><div class="note">Latest data is ${lag.n} session(s) behind ${esc(nice(lag.due))}, the last session that should be published by now. Check the “Market data” run in GitHub Actions.</div></div>`;
   if (q.n_failures) out += `<div class="note">${q.n_failures} ticker(s) returned no data from Yahoo; affected sectors are marked in Method & data.</div>`;
   return out;
 }
@@ -247,7 +249,7 @@ function viewMethod(d) {
     + h("Sources") + `<div class="card pad mf-txt">${SOURCES.map(([t, u]) => `<a href="${u}" target="_blank" rel="noopener">${esc(t)}</a>`).join("<br>")}</div>`
     + `<details class="card mf-set"><summary>Full rules (arka_flow/rotation.py)</summary><pre class="mf-pre">${esc(d.rules_doc)}</pre></details>`
     + h("What was loaded") + `<div class="card pad mf-txt"><ul class="mf-why"><li>Source: <b>${esc(q.source)}</b> · prices ${esc(q.adjusted)} · history ${esc(q.period)} · loaded ${esc(String(q.loaded_at).slice(0, 16).replace("T", " "))}</li>
-      <li>Universe: <code>${esc(q.universe)}</code> · requested <b>${q.requested}</b>, received <b>${q.loaded}</b>, used <b>${q.used}</b></li><li>Last completed session <b>${esc(q.last_complete)}</b> · holiday calendar: ${esc(q.holiday_calendar)}</li>
+      <li>Universe: <code>${esc(q.universe)}</code> · requested <b>${q.requested}</b>, received <b>${q.loaded}</b>, used <b>${q.used}</b></li><li>Data up to <b>${esc(nice(d.asof))}</b> · checked against the NSE 2026 holiday list in the app</li>
       <li>Excluded as illiquid (median value under ₹${d.min_turn} Cr/day): <b>${q.illiquid}</b> · stale tickers: <b>${q.stale}</b></li><li>Groups with fewer than 3 priced members: ${esc(q.small_groups.join(", ") || "none")} · NSE index series missing: ${esc(q.index_missing.join(", ") || "none")}</li>
       <li>Model versions: rotation ${esc(q.rot_version)} · engine ${esc(q.model_version)} · built ${esc(String(d.built).slice(0, 16).replace("T", " "))} IST by the nightly “Market data” job</li></ul></div>`
     + tbl([["Sector"], ["Members", 1], ["With prices", 1], ["Coverage %", 1], ["Status"]], cov.map((r) => `<tr><td><b>${esc(r.sector)}</b></td><td class="r">${r.members ?? "n/a"}</td><td class="r">${r.with_prices ?? "n/a"}</td><td class="r">${ok(r.coverage) ? num(r.coverage * 100, 0) : "n/a"}</td><td>${esc(r.coverage_status || "")}</td></tr>`), "stick")
