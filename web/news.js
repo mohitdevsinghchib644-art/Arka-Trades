@@ -47,6 +47,27 @@ export async function loadNews(force) {
   }));
   W.busy = false; W.ver++; paint();
 }
+// One company's stories for the stock page (news_feed.get_security_news): the wire, exchange filings and a Google News search
+// for the company, 7 days, kept only when the story is about it. pts = 15-minute prices for the move since each story.
+export async function securityNews(sym, pts) {
+  const W = S.nw;
+  if (W.names === null) { W.names = {}; try { W.names = await api("/api/market?f=names"); } catch { /* optional */ } nameIdx = Object.fromEntries(Object.entries(W.names).map(([s, n]) => [coKey(n), s])); }
+  const jobs = [...WIRE.map(([nm, i]) => ({ id: "wire:" + i, kind: "wire", source: nm })), { id: "gnews:" + sym, q: N.companyQuery(sym, W.names[sym]), kind: "company", source: "Google News", sym },
+    ...NSE.map((_, i) => ({ id: "nse:" + i, kind: "filing", source: "NSE filing" })), { id: "bse:", kind: "filing", source: "BSE filing" }];
+  const results = await Promise.all(jobs.map(async (j) => {
+    try { const d = await api(`/api/feed?id=${encodeURIComponent(j.id)}&days=7` + (j.q ? "&q=" + encodeURIComponent(j.q) : ""));
+      return { ...j, rows: (d.rows || []).map((r) => ({ ...r, sym: r.company && nameIdx ? nameIdx[coKey(r.company)] || null : null })), ok: d.ok }; }
+    catch { return { ...j, rows: [], ok: false }; }
+  }));
+  return N.assemble(results, [sym], W.names || {}, 7, Date.now(), sym).filter((a) => a.symbols.includes(sym));
+}
+export function reaction(pts, dt) {                          // news_feed._reaction: last price vs the first 15-minute close at or after the story
+  if (!pts || !pts.length) return null;
+  const after = pts.filter((p) => p[0] >= dt).map((p) => p[1]);
+  return after.length && after[0] > 0 ? (pts[pts.length - 1][1] / after[0] - 1) * 100 : null;
+}
+export const reactPill = (sym, r) => (r == null ? "" : pill(`${sym} ${r >= 0 ? "+" : ""}${num(r, 2)}% since`, r >= 0 ? GREEN : RED));
+
 function build() {                                            // assemble once per new batch of results, then only refresh ages
   const W = S.nw, U = universe(), key = W.ver + "|" + W.days + "|" + U.join(",");
   const results = Object.entries(W.res).filter(([k]) => k.endsWith("|" + W.days)).map(([, v]) => v);
@@ -63,7 +84,7 @@ const clock = (dt) => { const t = new Date(dt + 330 * 60000), n = new Date(Date.
   return t.getUTCDate() === n.getUTCDate() && t.getUTCMonth() === n.getUTCMonth() ? hm : t.toLocaleDateString("en-IN", { day: "2-digit", month: "short", timeZone: "UTC" }) + ", " + hm; };
 const pill = (t, c, solid) => `<span class="nd-pill${solid ? " solid" : ""}" style="--c:${c}">${esc(t)}</span>`;
 const href = (u) => (/^https?:\/\//i.test(u || "") ? esc(u) : "#");
-function story(a, moves) {
+export function story(a, moves, react = null) {
   const p = [];
   if (a.is_breaking) p.push(pill("Breaking", RED, true)); else if (a.priority >= 70) p.push(pill("Important", AMBER));
   if (a.hot) p.push(pill(`Trending · ${a.source_count} outlets`, YELLOW)); if (a.is_new) p.push(pill("New", CYAN));
@@ -74,7 +95,7 @@ function story(a, moves) {
   const extra = [...a.sectors.slice(0, 2), ...a.macro.slice(0, 2)].map(tagLabel).map(esc).join(" · ");
   return `<article class="nd-s"><div class="nd-m"><span class="t">${clock(a.pub)}</span><span>·</span><span>${esc(ago)}</span><span>·</span><span>${src}</span>${p.join("")}</div>
     <a class="nd-h" href="${href(a.link)}" target="_blank" rel="noopener noreferrer">${esc(a.title)}</a>${a.summary ? `<div class="nd-x">${esc(a.summary)}</div>` : ""}
-    <div class="nd-f">${syms}<span><i class="nd-dot" style="--c:${TONE_COLOR[a.sentiment]}"></i>${TONE_WORD[a.sentiment]}</span>${a.amount_cr ? `<span class="${a.score >= 0 ? "up" : "dn"}" style="font-weight:600">₹${num(a.amount_cr, 0)} Cr</span>` : ""}${extra ? `<span>${extra}</span>` : ""}</div></article>`;
+    <div class="nd-f">${syms}${react || ""}<span><i class="nd-dot" style="--c:${TONE_COLOR[a.sentiment]}"></i>${TONE_WORD[a.sentiment]}</span>${a.amount_cr ? `<span class="${a.score >= 0 ? "up" : "dn"}" style="font-weight:600">₹${num(a.amount_cr, 0)} Cr</span>` : ""}${extra ? `<span>${extra}</span>` : ""}</div></article>`;
 }
 function side(items, U, health) {
   const pl = N.pulse(items, U), live = pl.filter((r) => r.stories > 0), quiet = pl.length - live.length;
