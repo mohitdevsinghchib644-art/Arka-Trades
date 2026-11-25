@@ -1,9 +1,10 @@
-// Arka Trades · new app (stage 3): Home, Watchlist, the full Portfolio, Signals, Markets, Daily brief, More. Plain JavaScript, no build step.
+// Arka Trades · new app (stage 8): Home, Watchlist, Portfolio, the stock page with Research, Signals, Money flow, News, Regime, Markets, Daily brief, More. Plain JavaScript, no build step.
 import * as PFV from "./portfolio.js";
 import * as RG from "./regime.js";
 import * as HM from "./home.js";
 import * as MF from "./flow.js";
 import * as NW from "./news.js";
+import * as SK from "./stock.js";
 import { chartMove } from "./charts.js";
 const CLASSIC = "https://arka-trades-1.streamlit.app";       // the Streamlit app, for sections that have not moved yet
 const $ = (s) => document.querySelector(s);
@@ -32,12 +33,12 @@ const TABS = [["home", "Home", '<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21
   ["markets", "Markets", '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.2 3 14.8 0 18M12 3c-3 3.2-3 14.8 0 18"/>', false],
   ["brief", "Daily brief", '<path d="M5 3h11l3 3v15H5z"/><path d="M8 9h8M8 13h8M8 17h5"/>', false],
   ["more", "More", '<circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/>', true]];
-const MORE = [["Stock research", "Financials, charts, filings and peers for any stock."], ["Arka AI", "Chart reading with your own playbook."],
+const MORE = [["Arka AI", "Chart reading with your own playbook."],
   
   ["Screener", "Describe a setup and scan the market."], ["Backtest", "Test a rule on past prices."]];
 
 const S = { me: null, tab: "home", q: {}, at: {}, wl: { rows: [], list: "Main", loaded: false, err: "" }, sig: null, sigErr: "", sigTab: "Leaders", mkTab: "India", sort: "order",
-            pf: PFV.pfDefaults(), rg: RG.rgDefaults(), qv: 0, hm: HM.homeDefaults(), mf: MF.flowDefaults(), nw: NW.newsDefaults(), deals: null, brief: undefined,
+            pf: PFV.pfDefaults(), rg: RG.rgDefaults(), qv: 0, hm: HM.homeDefaults(), mf: MF.flowDefaults(), nw: NW.newsDefaults(), sk: SK.stockDefaults(), deals: null, brief: undefined,
             sheet: null, results: null, searching: false };
 
 // ── small helpers ──
@@ -116,6 +117,7 @@ function pageSymbols() {
   if (S.tab === "portfolio") return [...new Set(S.pf.lots.map((l) => l.sym)), ...wl.slice(0, 12)];
   if (S.tab === "news") return [...new Set([...S.wl.rows.map((r) => r.sym), ...S.pf.lots.map((l) => l.sym)])].slice(0, 120);
   if (S.tab === "markets") return [...MARKETS[S.mkTab].map((x) => x[1]), ...wl.slice(0, 12)];
+  if (S.tab === "s") return [S.sk.sym, ...(S.sk.code === "RV" ? [] : [])].filter(Boolean);
   return wl.slice(0, 12);
 }
 const refresh = () => { need(pageSymbols()); if (S.tab === "home") HM.loadHome(); };
@@ -259,7 +261,7 @@ function more() {
     <div class="links">${MORE.map(([t, d]) => `<a class="link" href="${CLASSIC}" target="_blank" rel="noopener"><b>${t}</b><small>${d}</small></a>`).join("")}</div>
     <h2>Account</h2><div class="card pad"><div style="margin-bottom:12px">Signed in as <b>${esc(S.me.user)}</b> <span class="chip">${esc(S.me.role)}</span></div><button class="btn" data-act="logout">Sign out</button></div></div>`;
 }
-const PAGES = { home: HM.page, watchlist, portfolio: PFV.page, regime: RG.page, flow: MF.page, news: NW.page, signals, markets, brief, more };
+const PAGES = { home: HM.page, watchlist, portfolio: PFV.page, regime: RG.page, flow: MF.page, news: NW.page, s: SK.page, signals, markets, brief, more };
 
 // ── painting ──
 function renderShell() {
@@ -272,27 +274,29 @@ function renderShell() {
     <div id="msearch"></div><main id="main"></main>
     <nav class="nav"><a class="brand only-d" href="#/home"><img src="/icon-180.png" alt="">ARKA <i>TRADES</i></a>
       ${TABS.map(([k, n, d, mob]) => `<a href="#/${k}" data-tab="${k}"${mob ? "" : ' class="only-d"'}>${icon(d)}<span>${n}</span></a>`).join("")}
-      <div class="who">Signed in as <b>${esc(S.me.user)}</b><br>New app · stage 7</div></nav></div>`;
+      <div class="who">Signed in as <b>${esc(S.me.user)}</b><br>New app · stage 8</div></nav></div>`;
 }
 function paint() {
   const main = $("#main"); if (!main || !S.me) return;
   const phoneTab = TABS.some(([k, , , mob]) => k === S.tab && mob) ? S.tab : "more";      // Markets and the brief light up More on a phone
   document.querySelectorAll(".nav a[data-tab]").forEach((a) => { a.classList.toggle("on", a.dataset.tab === S.tab); a.classList.toggle("onm", a.dataset.tab === phoneTab); });
-  const withRail = !["home", "watchlist", "more", "brief", "portfolio", "regime", "flow", "news"].includes(S.tab);
+  const withRail = !["home", "watchlist", "more", "brief", "portfolio", "regime", "flow", "news", "s"].includes(S.tab);
   const ae = document.activeElement;                       // typing in a Portfolio box: leave the page alone so the cursor stays put
   if (ae && main.contains(ae) && ae.dataset.pf && ae.tagName === "INPUT" && !/range|checkbox/.test(ae.type)) { if (S.sheet && !typingInSheet()) paintSheet(); return; }
   const keep = ae && main.contains(ae) && ae.dataset && ae.dataset.nw ? [ae.dataset.nw, ae.selectionStart, ae.selectionEnd] : null;
-  main.className = withRail ? "rail" : ["home", "portfolio", "regime", "flow", "news"].includes(S.tab) ? "wide" : "";
+  main.className = withRail ? "rail" : ["home", "portfolio", "regime", "flow", "news", "s"].includes(S.tab) ? "wide" : "";
   const y = window.scrollY;
-  main.innerHTML = PAGES[S.tab]() + (withRail ? rail() : "");
+  if (S.tab === "s") SK.paintInto(main); else main.innerHTML = PAGES[S.tab]() + (withRail ? rail() : "");
   window.scrollTo(0, y);
   if (keep) { const el = main.querySelector(`[data-nw="${keep[0]}"]`); if (el) { el.focus(); try { el.setSelectionRange(keep[1], keep[2]); } catch { /* not a text box */ } } }
   if (S.sheet && !typingInSheet()) paintSheet();
 }
 const typingInSheet = () => { const a = document.activeElement; return !!(a && $("#sheet").contains(a) && /INPUT|SELECT|TEXTAREA/.test(a.tagName)); };
 function route() {
-  const t = (location.hash.replace(/^#\/?/, "") || "home").split("/")[0];
+  const parts = (location.hash.replace(/^#\/?/, "") || "home").split("/"), t = parts[0];
   S.tab = PAGES[t] ? t : "home";
+  if (S.tab === "s") { const sym = decodeURIComponent(parts[1] || "").toUpperCase().replace(/[^A-Z0-9&._-]/g, "");
+    if (!sym) { location.hash = "#/home"; return; } SK.open(sym, (parts[2] || "").toUpperCase()); }
   window.scrollTo(0, 0); paint(); refresh();
   if (S.tab === "brief" && S.brief === undefined) loadBrief();
   if (S.tab === "regime") RG.loadRegime();
@@ -344,7 +348,7 @@ function paintSheet() {
     : sh.err ? `<div class="note">${esc(sh.err)}</div>` : '<div class="note">Loading numbers…</div>';
   const has = inList(sh.sym);
   const acts = isStock ? `<div class="acts"><button class="btn ${has ? "red" : "pri"}" data-act="${has ? "remove" : "add"}" data-s="${esc(sh.sym)}">${has ? "Remove" : "Add to watchlist"}</button>
-      <button class="btn" data-act="buyform" data-s="${esc(sh.sym)}">Add a buy</button></div>` : "";
+      <button class="btn" data-act="buyform" data-s="${esc(sh.sym)}">Add a buy</button></div><a class="btn full stockpage" href="#/s/${encodeURIComponent(sh.sym)}" data-act="close">Open the stock page · chart and full research</a>` : "";
   $("#sheet").innerHTML = `<div class="scrim" data-act="close"></div><section class="sheet" role="dialog" aria-label="${esc(title)}"><div class="grab"></div>
     <div class="hd"><div><h1>${esc(title)}</h1><small>${esc(name)}</small></div><button class="ib" data-act="close" aria-label="Close">${icon('<path d="M6 6l12 12M18 6 6 18"/>')}</button></div>
     <div class="px">${q.price != null ? num(q.price) : '<span class="sk">0000.00</span>'}<small class="${cls(q.pct)}">${q.price != null ? sgn(q.chg) + " (" + pc(q.pct) + ")" : ""}</small></div>
@@ -419,6 +423,7 @@ async function sendForm(form, path, body, method = "POST") {
 }
 document.addEventListener("submit", async (e) => {
   const f = e.target, id = f.getAttribute("id");       // not f.id: a field named "id" would hide it
+  if (id === "thesis") { e.preventDefault(); return SK.saveNote(f); }
   if (["buy", "sell", "plan", "wmeta", "move"].includes(id)) {
     e.preventDefault();
     const v = Object.fromEntries(new FormData(f)), sym = (f.dataset.s || v.sym || "").toUpperCase().trim().replace(/\.NS$/, "");
@@ -467,19 +472,22 @@ function pfInput(el, ev) {                                // a control on the Po
   paint();
 }
 let nwTimer = 0;
-document.addEventListener("input", (e) => { if (e.target.id === "q" || e.target.id === "mq") onSearch(e.target.value); else if (e.target.dataset.pf) pfInput(e.target, "input");
+document.addEventListener("input", (e) => { if (e.target.id === "q" || e.target.id === "mq") onSearch(e.target.value); else if (e.target.dataset.pf) pfInput(e.target, "input"); else if (e.target.dataset.rs) SK.input(e.target, "input");
   else if (e.target.dataset.nw) { S.nw[e.target.dataset.nw] = e.target.value; clearTimeout(nwTimer); nwTimer = setTimeout(paint, 180); } });
-document.addEventListener("change", (e) => { if (e.target.dataset.mf === "pick") { S.mf.pick = e.target.value; paint(); return; } if (e.target.dataset.act === "sort") { S.sort = e.target.value; paint(); } else if (e.target.dataset.pf) pfInput(e.target, "change"); });
+document.addEventListener("change", (e) => { if (e.target.dataset.rs) return SK.input(e.target, "change"); if (e.target.dataset.mf === "pick") { S.mf.pick = e.target.value; paint(); return; } if (e.target.dataset.act === "sort") { S.sort = e.target.value; paint(); } else if (e.target.dataset.pf) pfInput(e.target, "change"); });
 document.addEventListener("pointermove", chartMove, { passive: true });
 document.addEventListener("pointerdown", chartMove, { passive: true });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") { if (S.sheet) closeSheet(); else endSearch(); } });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { if (S.sheet) closeSheet(); else endSearch(); }
+  if (e.key === "Enter" && e.target.dataset && e.target.dataset.rs) { e.preventDefault(); SK.input(e.target, e.target.dataset.rs === "cmd" ? "enter" : "change"); } });
 document.addEventListener("click", async (e) => {
   const a = e.target.closest("[data-act]"), act = a && a.dataset.act;
   if (act) {
     if (act === "remove") { e.preventDefault(); e.stopPropagation(); await removeStock(a.dataset.s); if (S.sheet) paintSheet(); return; }
     if (act === "add") { await addStock(a.dataset.s); if (S.sheet) paintSheet(); return; }
     if (act === "undo") { const u = S.undo; $("#toast").innerHTML = ""; if (u) u(); return; }
-    if (act === "close") return closeSheet();
+    if (act === "close") { if (a.tagName === "A") { closeSheet(); return; } return closeSheet(); }
+    if (SK.act(act, a)) return;
+    if (act === "sksheet") return openSheet(a.dataset.s);
     if (act === "range") { S.sheet.range = a.dataset.v; return paintSheet(); }
     if (act === "list") { S.wl.list = a.dataset.v; paint(); return refresh(); }
     if (act === "sigtab") { S.sigTab = a.dataset.v; if (S.sigTab === "Big players") loadDeals(); return paint(); }
@@ -514,7 +522,11 @@ document.addEventListener("click", async (e) => {
     if (act === "logout") { try { await api("/api/logout", { method: "POST" }); } catch { /* ignore */ } S.me = null; return renderLogin(); }
   }
   const s = e.target.closest("[data-sym]");
-  if (s) { if (s.dataset.fromsearch) endSearch(); return openSheet(s.dataset.sym); }
+  if (s) {                                                 // a search result, or a stock on the stock page, opens the full stock page; elsewhere the quick sheet
+    if (s.dataset.fromsearch) { endSearch(); if (!/[\^=.]|-USD$/.test(s.dataset.sym)) { location.hash = "#/s/" + encodeURIComponent(s.dataset.sym); return; } }
+    if (S.tab === "s" && !$("#sheet").contains(s) && !/[\^=.]|-USD$/.test(s.dataset.sym)) { location.hash = "#/s/" + encodeURIComponent(s.dataset.sym); return; }
+    return openSheet(s.dataset.sym);
+  }
   if (S.results && !e.target.closest(".field")) { S.results = null; paintDrop(); }
 });
 window.addEventListener("hashchange", route);
