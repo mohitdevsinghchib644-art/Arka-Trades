@@ -5,6 +5,7 @@
 #   Regime       market_export.py regime   regime_engine.py for Nifty 500, Nifty 200 and Nifty 100
 #   Money flow   market_export.py flow     money_flow.py + arka_flow: ranking, every model setting, its test, sectors, FPI fortnights
 #   Names        market_export.py names    NSE company names by symbol, for news tagging
+#   Deliveries   market_export.py delivery NSE delivered vs traded quantity per stock, last 260 sessions (only new days are fetched)
 #
 # The "market-data" branch holds only the latest files (it is replaced on every run), so the main branch stays small and
 # Cloudflare does not rebuild the site for data. If one step fails, the other's new files are still published and the
@@ -62,6 +63,10 @@ jobs:
       - name: Company names
         continue-on-error: true
         run: python market_export.py names --out "$OUT"
+
+      - name: Deliveries
+        continue-on-error: true
+        run: python market_export.py delivery --out "$OUT"
 
       - name: Money flow
         continue-on-error: true
