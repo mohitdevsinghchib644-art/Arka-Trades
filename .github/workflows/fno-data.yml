@@ -44,6 +44,11 @@ jobs:
           YEARS: ${{ github.event.inputs.years || '0' }}
         run: python fno_data.py --years "$YEARS" --minutes 140
 
+      # What the new app's "Options map" tab shows: the F&O engine's levels, option chains and stock table, as small files.
+      - name: Options map
+        if: always()
+        run: python fno_export.py || echo "Options map was not written this time."
+
       - name: Save to the repository
         if: always()
         run: |
