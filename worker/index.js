@@ -127,14 +127,18 @@ async function stock(url, ctx) {
 }
 // Daily candles with split and dividend history: what the Portfolio maths needs (growth chart, XIRR, risk, trailing stops, dividends).
 const dayOf = (t, off) => new Date((t + off) * 1000).toISOString().slice(0, 10);
-export function historyFrom(sym, data) {
+export function historyFrom(sym, data, full = false) {
   const res = data && data.chart && data.chart.result && data.chart.result[0];
   if (!res || !res.timestamp) return { sym, ok: false };
   const off = (res.meta && res.meta.gmtoffset) || 19800, q = ((res.indicators || {}).quote || [{}])[0], r2 = (v) => (v == null ? null : +v.toFixed(2));
   const rows = new Map();                               // one row per day, the last one wins; days with no close are dropped
-  res.timestamp.forEach((t, i) => { const c = q.close && q.close[i]; if (c != null) rows.set(dayOf(t, off), [r2(c), r2(q.high && q.high[i]), r2(q.low && q.low[i]), (q.volume && q.volume[i]) || 0, r2(q.open && q.open[i])]); });
+  const adj = (((res.indicators || {}).adjclose || [])[0] || {}).adjclose || null, raw = (v) => (v == null ? null : +v);
+  res.timestamp.forEach((t, i) => { const c = q.close && q.close[i]; if (c != null) rows.set(dayOf(t, off), [r2(c), r2(q.high && q.high[i]), r2(q.low && q.low[i]), (q.volume && q.volume[i]) || 0, r2(q.open && q.open[i]),
+    full ? [raw(q.open && q.open[i]), raw(q.high && q.high[i]), raw(q.low && q.low[i]), raw(c), adj ? raw(adj[i]) : null] : null]); });
   const d = [...rows.keys()].sort(), col = (k) => d.map((x) => rows.get(x)[k]);
   const ev = res.events || {}, list = (o, f) => Object.values(o || {}).map(f).filter((x) => x[1] > 0).sort((a, b) => (a[0] < b[0] ? -1 : 1));
+  if (full) { const f = d.map((x) => rows.get(x)[5]);                // full precision, and Yahoo's adjusted close (the Backtest lab adjusts like yfinance auto_adjust)
+    return { sym, ok: d.length > 0, d, o: f.map((x) => x[0]), h: f.map((x) => x[1]), l: f.map((x) => x[2]), c: f.map((x) => x[3]), a: f.map((x) => x[4]), v: col(3), full: true }; }
   return { sym, ok: d.length > 0, d, c: col(0), h: col(1), l: col(2), v: col(3), o: col(4),
            splits: list(ev.splits, (x) => [dayOf(x.date, off), x.denominator ? x.numerator / x.denominator : 0]),
            divs: list(ev.dividends, (x) => [dayOf(x.date, off), +Number(x.amount).toFixed(4)]) };
@@ -167,11 +171,13 @@ async function gift(ctx) {                                 // GIFT Nifty futures
 async function history(url, ctx) {
   const list = [...new Set((url.searchParams.get("s") || "").toUpperCase().split(",").map((s) => s.trim()).filter((s) => SYM_OK.test(s)))].slice(0, 6);     // few per call: a free Worker has little CPU time per request
   const range = ["1y", "2y", "5y", "10y", "max"].includes(url.searchParams.get("range")) ? url.searchParams.get("range") : "5y";
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("from") || "") ? url.searchParams.get("from") : null, full = url.searchParams.get("full") === "1";
   const out = await Promise.all(list.map(async (sym) => {
     // Yahoo answers range=max with one candle a month, so the whole history is asked for by dates; and any answer that is not daily is asked for again by dates
     const base = `/v8/finance/chart/${encodeURIComponent(ySym(sym))}?interval=1d&events=div%2Csplits&`, yrs = { "1y": 1, "2y": 2, "5y": 5, "10y": 10 }[range];
     const byDate = (from) => base + `period1=${from}&period2=9999999999`, start = yrs ? Math.floor(Date.now() / 864e5 - yrs * 365.25) * 86400 : 0;
     try {
+      if (from) { const h = historyFrom(sym, await yahoo(byDate(Math.floor(Date.parse(from + "T00:00:00+05:30") / 1000)), ctx, 1800), full); return { ...h, daily: h.ok ? isDaily(h.d) : false }; }      // from a date (midnight in India), as yfinance start=
       let h = historyFrom(sym, await yahoo(yrs ? base + "range=" + range : byDate(0), ctx, 1800));
       if (h.ok && !isDaily(h.d)) { const again = historyFrom(sym, await yahoo(byDate(start), ctx, 1800)); if (again.ok && (isDaily(again.d) || again.d.length > h.d.length)) h = again; }
       return { ...h, daily: h.ok ? isDaily(h.d) : false };
