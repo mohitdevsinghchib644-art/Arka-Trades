@@ -2,6 +2,7 @@
 // Secrets are read by NAME from the Cloudflare project settings and never sent to the browser:
 //   ADMIN_USER, ADMIN_PASS, MEMBER_USER, MEMBER_PASS, AUTH_SECRET   sign-in (same names and values as in Streamlit)
 //   SUPABASE_URL, SUPABASE_KEY                                      watchlist storage (same as in Streamlit)
+//   GEMINI_KEY                                                      Screener: reading a setup description or chart picture (same key Arka AI uses)
 // Optional plain variable: GITHUB_REPO (default below) for the signal files written by the "Signals" workflow.
 // Only public market data leaves this worker (Yahoo Finance). Nothing here touches a broker account.
 
@@ -837,6 +838,98 @@ async function brief(env, ctx) {
   return json({ brief: null });
 }
 
+// ── Screener (smart_scan_page.py): price files from the "Screener data" job, saved setups, and the AI reader ──
+// Price files are passed through without being read here (they are big; the browser unpacks them).
+async function repoStream(env, ctx, path, ttl, branch) {
+  const url = `https://raw.githubusercontent.com/${env.GITHUB_REPO || REPO}/${branch}/${path}`, cache = typeof caches !== "undefined" && caches.default, key = new Request(url);
+  let r = cache ? await cache.match(key) : null;
+  if (!r) { const got = await fetch(url, { headers: { "user-agent": UA } }); if (!got.ok) return null;
+    r = new Response(got.body, { headers: { "content-type": "application/json; charset=utf-8", "cache-control": `max-age=${ttl}` } });
+    if (cache) { const put = cache.put(key, r.clone()); ctx && ctx.waitUntil ? ctx.waitUntil(put) : await put; } }
+  return new Response(r.body, { headers: { "content-type": "application/json; charset=utf-8", "cache-control": `private, max-age=${Math.min(ttl, 300)}` } });
+}
+async function scanFile(env, ctx, url) {
+  const f = url.searchParams.get("f") || "";
+  if (f === "live") return (await repoStream(env, ctx, "live.json", 120, "scan-live")) || json({ missing: true });
+  if (!/^(meta|nifty|deliv|[hx]\d{1,2})$/.test(f)) return fail(400, "Unknown file.");
+  return (await repoStream(env, ctx, `${f}.json`, f === "meta" ? 300 : 900, "scan-data")) || (f === "meta" || /^[hx]/.test(f) ? fail(404, "Not built yet: run the “Screener data” job once in GitHub Actions.") : json({ missing: true }));
+}
+// saved setups: the same Supabase table the Streamlit Screener uses (setups), so both apps show the same setups
+const SETUP_COLS = "id,name,price_min,price_max,rsi_min,rsi_max,volume_multiplier,atr_pct_min,atr_pct_max,move_pct_min,move_pct_max,rule_config,visual_rules,created_at";
+const canEditSetup = (row, me, hasOwner) => me.role === "admin" || (hasOwner && (row.owner || "admin") === "member");
+async function setups(env, request, url, me) {
+  try {
+    const hasOwner = async () => { try { await sb(env, "setups?select=owner&limit=1"); return true; } catch (e) { if (e.status === 503) throw e; return false; } };
+    if (request.method === "GET") {
+      const img = url.searchParams.get("img");
+      if (img) { if (!/^\d{1,18}$/.test(img)) return fail(400, "Which setup?"); const rows = await sb(env, `setups?select=reference_image_b64&id=eq.${encodeURIComponent(img)}&limit=1`); return json({ b64: (rows && rows[0] && rows[0].reference_image_b64) || null }); }
+      let rows = null, owner = false, err = null;
+      for (const cols of [SETUP_COLS + ",owner", SETUP_COLS]) { try { rows = await sb(env, `setups?select=${cols}&order=created_at.desc`); owner = cols.endsWith(",owner"); err = null; break; } catch (e) { if (e.status === 503) throw e; err = e; } }
+      if (err) return fail(502, missingTable(err) ? "The setups table is not in Supabase yet: run the SQL shown under My setups → Storage once." : "Setups could not be loaded: " + String(err.message).slice(0, 120));
+      return json({ setups: (rows || []).map((r) => ({ ...r, can_edit: canEditSetup(r, me, owner) })), has_owner: owner, role: me.role, ai: Boolean(env.GEMINI_KEY && String(env.GEMINI_KEY).trim()) });
+    }
+    if (request.method === "POST") {
+      const b = await request.json().catch(() => ({})), name = String(b.name || "").trim().slice(0, 80), pmin = Number(b.pmin), pmax = Number(b.pmax), rules = Array.isArray(b.rules) ? b.rules.slice(0, 40) : [];
+      if (!name) return fail(400, "Give the setup a name.");
+      if (!(pmin >= 0) || !(pmax >= 0) || pmin > pmax) return fail(400, "The price band is not right.");
+      if (!rules.length) return fail(400, "Add at least one rule.");
+      const tol = Number(b.tol), row = { name, price_min: pmin, price_max: pmax, rsi_min: 0, rsi_max: 100, volume_multiplier: 0, atr_pct_min: 0, atr_pct_max: 0, move_pct_min: 0, move_pct_max: 0, visual_rules: String(b.desc || "").slice(0, 6000),
+        rule_config: { version: 2, min_pass: Math.max(0, Math.trunc(Number(b.min_pass) || 0)), tol: isFinite(tol) ? Math.max(0, Math.min(0.3, tol)) : 0.05, rules: rules.map((r) => { const o = { ...r }; delete o._id; return o; }) } };
+      if (b.img_b64) { if (String(b.img_b64).length > 2_000_000) return fail(400, "That picture is too large (1.5 MB at most)."); row.reference_image_b64 = String(b.img_b64); }
+      const owner = await hasOwner(), id = b.id == null || b.id === "" ? null : String(b.id);
+      if (id && !/^\d{1,18}$/.test(id)) return fail(400, "Which setup?");
+      const send = async (payload) => (id ? sb(env, `setups?id=eq.${encodeURIComponent(id)}`, { method: "PATCH", headers: { prefer: "return=representation" }, body: JSON.stringify(payload) })
+        : sb(env, "setups", { method: "POST", headers: { prefer: "return=representation" }, body: JSON.stringify([payload]) }));
+      if (id) { const cur = await sb(env, `setups?select=${owner ? "id,owner" : "id"}&id=eq.${encodeURIComponent(id)}&limit=1`); if (!cur || !cur[0]) return fail(404, "That setup is no longer there.");
+        if (!canEditSetup(cur[0], me, owner)) return fail(403, "This is a desk setup: duplicate it to make your own copy."); }
+      try { const out = await send(!id && owner ? { ...row, owner: me.role } : row); return json({ ok: true, id: out && out[0] ? out[0].id : id }); }
+      catch (e) { if (/rule_config/.test(String(e.body || e.message))) return fail(400, "Your setups table has no rule_config column: run the SQL shown under My setups → Storage once, then save again."); throw e; }
+    }
+    if (request.method === "DELETE") {
+      const id = url.searchParams.get("id"); if (!id || !/^\d{1,18}$/.test(id)) return fail(400, "Which setup?");
+      const owner = await hasOwner(), cur = await sb(env, `setups?select=${owner ? "id,owner" : "id"}&id=eq.${encodeURIComponent(id)}&limit=1`);
+      if (!cur || !cur[0]) return json({ ok: true });
+      if (!canEditSetup(cur[0], me, owner)) return fail(403, "This is a desk setup: only the desk can delete it.");
+      await sb(env, `setups?id=eq.${encodeURIComponent(id)}`, { method: "DELETE" }); return json({ ok: true });
+    }
+    return fail(405, "Not supported.");
+  } catch (e) { return fail(e.status === 503 ? 503 : 502, e.status === 503 ? e.message : "Setups: " + String(e.message || e).slice(0, 160)); }
+}
+// Gemini (secret GEMINI_KEY, the same key Arka AI uses in Streamlit). Only what the page sends goes out: a setup description, the rules as text,
+// a reference chart picture and a chart of a public stock. Never holdings or the watchlist.
+const GEMINI = "https://generativelanguage.googleapis.com/v1beta";
+export function pickGeminiModels(names, prefer = "gemini-2.5-flash") {     // smart_scan_page.gemini_model: the newest stable "flash" this key can use, then the others as spares
+  const ok = names.filter((n) => n.startsWith("gemini-") && n.includes("flash") && !["lite", "preview", "exp", "image", "tts", "live", "audio", "embedding", "thinking"].some((x) => n.includes(x)));
+  const ver = (n) => parseFloat((n.match(/\d+(?:\.\d+)?/) || ["0"])[0]), sorted = ok.slice().sort((a, b) => ver(b) - ver(a) || a.length - b.length);
+  const first = ok.includes(prefer) || !sorted.length ? prefer : sorted[0];
+  return [...new Set([first, ...sorted, prefer, "gemini-flash-latest"])].slice(0, 4);
+}
+async function geminiModels(env, ctx) {
+  try { const d = await cached("gemini-models", 6 * 3600, async () => { const r = await fetch(`${GEMINI}/models?pageSize=200`, { headers: { "x-goog-api-key": env.GEMINI_KEY } }); if (!r.ok) throw new Error("models " + r.status);
+      const j = await r.json(); return { names: (j.models || []).filter((m) => (m.supportedGenerationMethods || ["generateContent"]).includes("generateContent")).map((m) => String(m.name || "").split("/").pop()) }; }, ctx, 7 * 86400);
+    return pickGeminiModels(d.names || []); } catch { return pickGeminiModels([]); }
+}
+async function ai(env, ctx, request) {
+  if (request.method !== "POST") return fail(405, "Not supported.");
+  if (!env.GEMINI_KEY || !String(env.GEMINI_KEY).trim()) return fail(503, "Arka AI is not connected: add the secret GEMINI_KEY in the Cloudflare project settings.");
+  const b = await request.json().catch(() => ({})), prompt = String(b.prompt || "").slice(0, 24000), images = (Array.isArray(b.images) ? b.images : []).slice(0, 2);
+  if (!prompt.trim()) return fail(400, "Nothing to read.");
+  const parts = [{ text: prompt }];
+  for (const im of images) { const data = String((im && im.data) || ""), mime = /^image\/(png|jpeg|webp)$/.test((im && im.mime) || "") ? im.mime : "image/png"; if (!data || data.length > 2_800_000) return fail(400, "That picture is too large (2 MB at most)."); parts.push({ inline_data: { mime_type: mime, data } }); }
+  const temp = Math.max(0, Math.min(1, Number(b.temperature) || 0.1)), models = await geminiModels(env, ctx); let last = "";
+  for (const model of models) for (const think of b.think === false ? [false] : [true, false]) {
+    const cfg = { responseMimeType: "application/json", temperature: temp }; if (think) cfg.thinkingConfig = { thinkingBudget: 1024 };
+    let r; try { r = await fetch(`${GEMINI}/models/${model}:generateContent`, { method: "POST", headers: { "x-goog-api-key": env.GEMINI_KEY, "content-type": "application/json" }, body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: cfg }) }); }
+    catch (e) { last = "network"; break; }
+    const text = await r.text();
+    if (r.ok) { try { const j = JSON.parse(text), out = (((j.candidates || [])[0] || {}).content || {}).parts || [], txt = out.filter((x) => !x.thought).map((x) => x.text || "").join("").trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim(); return json({ ok: true, model, data: JSON.parse(txt) }); }
+      catch { last = "The AI reply could not be read."; break; } }
+    last = `${r.status}`; if (think && /think/i.test(text)) continue;                  // this model has no thinking setting: ask again without it
+    break;                                                                           // busy (429 / 503) or not available: try the next model
+  }
+  return fail(502, /^(429|503)$/.test(last) ? "Arka AI is busy right now. Try again in a minute, or use the built-in reader." : "Arka AI could not answer (" + last + ").");
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url), p = url.pathname;
@@ -844,7 +937,7 @@ export default {
     try {
       if (p === "/api/health") {                        // which settings exist (true/false only, never a value)
         const has = (n) => Boolean(env[n] && String(env[n]).trim());
-        return json({ sign_in: has("AUTH_SECRET") && (has("ADMIN_PASS") || has("MEMBER_PASS")), storage: has("SUPABASE_URL") && has("SUPABASE_KEY") });
+        return json({ sign_in: has("AUTH_SECRET") && (has("ADMIN_PASS") || has("MEMBER_PASS")), storage: has("SUPABASE_URL") && has("SUPABASE_KEY"), ai: has("GEMINI_KEY") });
       }
       if (p === "/api/login" && request.method === "POST") return login(env, request);
       if (p === "/api/logout" && request.method === "POST") return json({ ok: true }, 200, { "set-cookie": cookie("", 0) });
@@ -875,6 +968,9 @@ export default {
       if (p === "/api/deals") return deals(env, ctx);
       if (p === "/api/brief") return brief(env, ctx);
       if (p === "/api/market") return market(env, ctx, url);
+      if (p === "/api/scan") return scanFile(env, ctx, url);
+      if (p === "/api/setups") return setups(env, request, url, me);
+      if (p === "/api/ai") return ai(env, ctx, request);
       if (["/api/portfolio", "/api/portfolio/sell", "/api/portfolio/plan", "/api/portfolio/move", "/api/portfolio/snapshot", "/api/portfolio/settings"].includes(p)) return portfolio(env, request, url, p.slice("/api/portfolio".length));
       return fail(404, "Not found.");
     } catch (e) {
