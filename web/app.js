@@ -2,6 +2,7 @@
 import * as PFV from "./portfolio.js";
 import * as PFM from "./pf.js";
 import * as WL from "./watchlist.js";
+import * as DK from "./desk.js";
 import * as RG from "./regime.js";
 import * as HM from "./home.js";
 import * as MF from "./flow.js";
@@ -40,7 +41,7 @@ const MORE = [["Arka AI", "Chart reading with your own playbook."],
   
   ["Screener", "Describe a setup and scan the market."], ["Backtest", "Test a rule on past prices."]];
 
-const S = { me: null, tab: "home", q: {}, at: {}, wl: { rows: [], list: "Main", loaded: false, err: "", ...WL.wlDefaults() }, sig: null, sigErr: "", sigTab: "Leaders", mkTab: "India", sort: "order",
+const S = { me: null, tab: "home", q: {}, at: {}, wl: { rows: [], list: "Main", loaded: false, err: "", ...WL.wlDefaults() }, sig: null, sigErr: "", fd: DK.deskDefaults(), sigTab: "Leaders", mkTab: "India", sort: "order",
             pf: PFV.pfDefaults(), rg: RG.rgDefaults(), qv: 0, hm: HM.homeDefaults(), mf: MF.flowDefaults(), nw: NW.newsDefaults(), sk: SK.stockDefaults(), deals: null, brief: undefined,
             sheet: null, results: null, searching: false };
 
@@ -174,51 +175,6 @@ function ordersCard(short) {
     : `<div class="empty"><b>No orders for the next open</b>Signals from the close of ${esc(S.sig.asof)}. Leaders are checked once a week; swing and index signals appear on the day they trigger.</div>`;
   return `<div class="card">${body}</div>`;
 }
-function signals() {
-  const d = S.sig;
-  if (!d) return `<div><div class="hd"><div><h1>Signals</h1></div></div><div class="card"><div class="note">${S.sigErr ? esc(S.sigErr) : "Loading…"}</div></div></div>`;
-  const tabs = ["Leaders", "Swing", "Index", "Big players", "Avoid"];
-  let body = "";
-  if (S.sigTab === "Leaders") {
-    const L = d.leaders || {}, w = ((L.record || {}).windows || [])[0];
-    const rec = w ? `<div class="verdict">In the test since ${esc((L.record.start || "").slice(0, 4))} this book made <b>${frac(w.book.cagr)}</b> a year against <b>${frac(w.index.cagr)}</b> for NIFTY 500, with a worst fall of <b>${frac(w.book.dd, 0)}</b>. A past test is not a promise.</div>` : "";
-    const rows = (L.holdings || []).map((h) => `<button class="row two" data-sym="${esc(h.sym)}"><span class="a"><b>${esc(h.sym)}${h.flag === "sell" ? ' <span class="chip r">Sell</span>' : h.flag === "risk" ? ' <span class="chip a">At risk</span>' : ""}</b>
-      <small>Since ${esc(h.since)} · bought at ${num(h.entry)}</small></span><span class="z"><b>${num(h.price)}</b><small class="${cls(h.pnl)}">${frac(h.pnl)}</small></span></button>`).join("");
-    body = `<div class="card">${rec}<div class="note" style="border-bottom:1px solid var(--line)">${esc(L.rule || "")}</div>${rows || '<div class="empty">No holdings.</div>'}</div>`;
-  } else if (S.sigTab === "Swing") {
-    const W = d.swing || {}, a = (W.record || {}).all;
-    const rec = a ? `<div class="verdict">In the test: <b>${a.n}</b> trades, <b>${num(a.win * 100, 0)}%</b> made money, average result <b>${frac(a.exp, 2)}</b> a trade. A past test is not a promise.</div>` : "";
-    const open = (W.open || []).map((r) => `<button class="row two" data-sym="${esc(r.sym)}"><span class="a"><b>${esc(r.sym)} <span class="chip a">Open</span></b><small>${r.stop ? "Stop " + num(r.stop) : ""}</small></span><span class="z"><b>${num(r.price)}</b></span></button>`).join("");
-    const recent = (W.recent || []).slice(0, 12).map((r) => `<button class="row two" data-sym="${esc(r.sym)}"><span class="a"><b>${esc(r.sym)}</b><small>${esc(r.in)} to ${esc(r.out)} · ${esc(r.why || "")}</small></span>
-      <span class="z"><b class="${cls(r.ret)}">${frac(r.ret)}</b><small class="mu">${r.bars} days</small></span></button>`).join("");
-    body = `<div class="card">${rec}<div class="note" style="border-bottom:1px solid var(--line)">${esc(W.rule || "")}</div>${open}${recent || '<div class="empty">No closed trades yet.</div>'}</div>`;
-  } else if (S.sigTab === "Big players") {
-    const F = d.footprints || {};
-    const block = (title, sub, rows, col) => !rows || !rows.length ? "" : `<h2>${title} <span>${sub}</span></h2><div class="card">${rows.slice(0, 8).map((r) =>
-      `<button class="row two" data-sym="${esc(r.sym)}"><span class="a"><b>${esc(r.sym)}</b><small>${num(r.x, 1)}× the usual · ${num(r.dshare * 100, 0)}% taken for delivery</small></span>
-       <span class="z"><b>${num(r.price)}</b><small class="${cls(r.d10)}">${frac(r.d10)} in 10 days</small></span></button>`).join("")}</div>`;
-    const dl = S.deals == null ? '<div class="note">Loading deals…</div>' : !S.deals.length ? '<div class="empty">No bulk or block deals collected yet.</div>' : S.deals.slice(0, 25).map((x) =>
-      `<button class="row two" data-sym="${esc(x.sym)}"><span class="a"><b>${esc(x.sym)} <span class="chip ${x.side === "BUY" ? "g" : "r"}">${x.side === "BUY" ? "Bought" : "Sold"}</span></b><small>${esc(x.who)} · ${esc(x.date)} · ${esc(x.kind)} deal</small></span>
-       <span class="z"><b>₹${num(x.cr, 1)} Cr</b><small class="mu">at ${num(x.price)}</small></span></button>`).join("");
-    body = block("Quiet buying", "heavy delivery, price holding up", F.accumulation) + block("Quiet selling", "heavy delivery, price falling", F.distribution)
-      + block("Delivery spikes", "far more shares taken home than usual", F.delivery_spike) + block("Big tickets", "unusually large trades", F.big_tickets)
-      + `<h2>Bulk and block deals <span>from NSE, latest first</span></h2><div class="card">${dl}</div>`;
-  } else if (S.sigTab === "Avoid") {
-    body = `<div class="card"><div class="note" style="border-bottom:1px solid var(--line)">The weakest liquid stocks by 12-month strength, below their 200-day average. Not short calls: a list of what the rules stay away from.</div>${(d.avoid || []).map((r) =>
-      `<button class="row two" data-sym="${esc(r.sym)}"><span class="a"><b>${esc(r.sym)}</b><small>${frac(r.below200, 0)} against its 200-day average</small></span>
-       <span class="z"><b>${num(r.price)}</b><small class="${cls(r.d1)}">${frac(r.d1)}</small></span></button>`).join("") || '<div class="empty">Nothing here today.</div>'}</div>`;
-  } else {
-    body = (d.index || []).map((x) => { const a = (x.record || {}).all;
-      return `<div class="card" style="margin-bottom:12px"><div class="verdict"><b>${esc(x.name)}</b> · ${esc(x.setup || "")} ${x.status === "trial" ? '<span class="chip a">On trial</span>' : '<span class="chip g">Approved</span>'}</div>
-        <div class="stats"><div><span>Last close</span><b>${num(x.last)}</b></div><div><span>Buys at or below</span><b>${num(x.trigger)}</b></div>
-        <div><span>200-day average</span><b class="${x.above200 ? "up" : "dn"}">${x.above200 ? "Above" : "Below"}</b></div><div><span>In the test</span><b>${a ? a.n + " trades · " + num(a.win * 100, 0) + "% won" : "—"}</b></div></div>
-        <div class="note">${esc(x.rule || "")}</div></div>`; }).join("") || '<div class="card"><div class="empty">No index setups.</div></div>';
-  }
-  return `<div><div class="hd"><div><h1>Signals</h1><div class="sub">Fixed rules tested on real prices · from the close of ${esc(d.asof)}</div></div></div>
-    <h2 style="margin-top:6px">Orders for the next open</h2>${ordersCard(false)}
-    <h2>The books</h2><div class="seg">${tabs.map((t) => `<button class="${t === S.sigTab ? "on" : ""}" data-act="sigtab" data-v="${t}">${t}</button>`).join("")}</div>${body}
-    <div class="note" style="padding:14px 2px">Signals are rules applied to past and present prices. They can lose money, sometimes for long stretches. This is information, not investment advice. The options map and the full evidence tables are in the <a href="${CLASSIC}" target="_blank" rel="noopener" style="color:var(--amber)">classic app</a>.</div></div>`;
-}
 function markets() {
   const rows = MARKETS[S.mkTab].map(([n, s]) => stockRow(s, { title: n, name: " " })).join("");
   return `<div><div class="hd"><div><h1>Markets</h1><div class="sub">Indices, commodities, currencies and rates</div></div></div>
@@ -252,7 +208,7 @@ function more() {
     <div class="links">${MORE.map(([t, d]) => `<a class="link" href="${CLASSIC}" target="_blank" rel="noopener"><b>${t}</b><small>${d}</small></a>`).join("")}</div>
     <h2>Account</h2><div class="card pad"><div style="margin-bottom:12px">Signed in as <b>${esc(S.me.user)}</b> <span class="chip">${esc(S.me.role)}</span></div><button class="btn" data-act="logout">Sign out</button></div></div>`;
 }
-const PAGES = { home: HM.page, watchlist: WL.page, portfolio: PFV.page, regime: RG.page, flow: MF.page, news: NW.page, s: SK.page, research: SK.landing, signals, markets, brief, more };
+const PAGES = { home: HM.page, watchlist: WL.page, portfolio: PFV.page, regime: RG.page, flow: MF.page, news: NW.page, s: SK.page, research: SK.landing, signals: DK.page, markets, brief, more };
 
 // ── painting ──
 function renderShell() {
@@ -265,17 +221,17 @@ function renderShell() {
     <div id="msearch"></div><main id="main"></main>
     <nav class="nav"><a class="brand only-d" href="#/home"><img src="/icon-180.png" alt="">ARKA <i>TRADES</i></a>
       ${TABS.map(([k, n, d, mob]) => `<a href="#/${k}" data-tab="${k}"${mob ? "" : ' class="only-d"'}>${icon(d)}<span>${n}</span></a>`).join("")}
-      <div class="who">Signed in as <b>${esc(S.me.user)}</b><br>New app · stage 11</div></nav></div>`;
+      <div class="who">Signed in as <b>${esc(S.me.user)}</b><br>New app · stage 12</div></nav></div>`;
 }
 function paint() {
   const main = $("#main"); if (!main || !S.me) return;
   const phoneTab = TABS.some(([k, , , mob]) => k === S.tab && mob) ? S.tab : "more";      // Markets and the brief light up More on a phone
   document.querySelectorAll(".nav a[data-tab]").forEach((a) => { a.classList.toggle("on", a.dataset.tab === (S.tab === "s" ? "research" : S.tab)); a.classList.toggle("onm", a.dataset.tab === phoneTab); });
-  const withRail = !["home", "watchlist", "more", "brief", "portfolio", "regime", "flow", "news", "s", "research"].includes(S.tab);
+  const withRail = !["home", "watchlist", "more", "brief", "portfolio", "regime", "flow", "news", "s", "research", "signals"].includes(S.tab);
   const ae = document.activeElement;                       // typing in a Portfolio box: leave the page alone so the cursor stays put
-  if (ae && main.contains(ae) && ((ae.dataset.pf && ae.tagName === "INPUT") || (S.tab === "portfolio" && /INPUT|TEXTAREA/.test(ae.tagName) && ae.closest("form"))) && !/range|checkbox/.test(ae.type)) { if (S.sheet && !typingInSheet()) paintSheet(); return; }
+  if (ae && main.contains(ae) && ((ae.dataset.pf && ae.tagName === "INPUT") || (ae.dataset.fd && ae.tagName === "INPUT") || (S.tab === "portfolio" && /INPUT|TEXTAREA/.test(ae.tagName) && ae.closest("form"))) && !/range|checkbox/.test(ae.type)) { if (S.sheet && !typingInSheet()) paintSheet(); return; }
   const keep = ae && main.contains(ae) && ae.dataset && (ae.dataset.nw || ae.dataset.rs === "find" || ae.dataset.wl === "q") ? [ae.dataset.nw ? "nw" : ae.dataset.wl ? "wl" : "rs", ae.dataset.nw || ae.dataset.wl || ae.dataset.rs, ae.selectionStart, ae.selectionEnd] : null;
-  main.className = withRail ? "rail" : ["home", "portfolio", "regime", "flow", "news", "s"].includes(S.tab) ? "wide" : "";
+  main.className = withRail ? "rail" : ["home", "portfolio", "regime", "flow", "news", "s", "signals"].includes(S.tab) ? "wide" : "";
   const y = window.scrollY;
   const newsSide = (S.tab === "home" || S.tab === "s") && innerWidth >= 1280, showNews = newsSide && railPref();
   if (newsSide) {                                         // Home and the stock page on a wide screen: the news panel on the right (Streamlit's news rail)
@@ -302,7 +258,7 @@ function route() {
   if (S.tab === "flow") MF.loadFlow();
   if (S.tab === "news") NW.loadNews();
   if (S.tab === "watchlist" && S.wl.loaded) WL.load();
-  if (S.tab === "signals" && S.sigTab === "Big players") loadDeals();
+  if (S.tab === "signals") DK.load();
 }
 
 // ── stock sheet ──
@@ -480,7 +436,7 @@ function pfInput(el, ev) {                                // a control on the Po
 let nwTimer = 0;
 document.addEventListener("input", (e) => { if (e.target.id === "q" || e.target.id === "mq") onSearch(e.target.value); else if (e.target.dataset.pf) pfInput(e.target, "input"); else if (e.target.dataset.wl) WL.input(e.target, "input"); else if (e.target.dataset.rs) SK.input(e.target, "input");
   else if (e.target.dataset.nw) { S.nw[e.target.dataset.nw] = e.target.value; clearTimeout(nwTimer); nwTimer = setTimeout(paint, 180); } });
-document.addEventListener("change", (e) => { if (e.target.dataset.rs) return SK.input(e.target, "change"); if (e.target.dataset.wl) return WL.input(e.target, "change"); if (e.target.dataset.mf === "pick") { S.mf.pick = e.target.value; paint(); return; } if (e.target.dataset.act === "sort") { S.sort = e.target.value; paint(); } else if (e.target.dataset.pf) pfInput(e.target, "change"); });
+document.addEventListener("change", (e) => { if (e.target.dataset.rs) return SK.input(e.target, "change"); if (e.target.dataset.wl) return WL.input(e.target, "change"); if (e.target.dataset.fd) return DK.input(e.target, "change"); if (e.target.dataset.mf === "pick") { S.mf.pick = e.target.value; paint(); return; } if (e.target.dataset.act === "sort") { S.sort = e.target.value; paint(); } else if (e.target.dataset.pf) pfInput(e.target, "change"); });
 document.addEventListener("pointermove", chartMove, { passive: true });
 document.addEventListener("pointerdown", chartMove, { passive: true });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") { if (S.sheet) closeSheet(); else endSearch(); }
@@ -499,7 +455,7 @@ document.addEventListener("click", async (e) => {
     if (act === "sksheet") return openSheet(a.dataset.s);
     if (act === "range") { S.sheet.range = a.dataset.v; return paintSheet(); }
     if (act === "list") { S.wl.list = a.dataset.v; S.wl.flt = "All"; S.wl.q = ""; S.wl.addMsg = ""; S.wl.sel = {}; paint(); refresh(); return WL.load(); }
-    if (act === "sigtab") { S.sigTab = a.dataset.v; if (S.sigTab === "Big players") loadDeals(); return paint(); }
+    if (act === "fdtab") return DK.act(act, a);
     if (act === "buyform") { S.sheet = { form: "buy", sym: a.dataset.s || "" }; paintSheet(); const i = $("#buy input[name=" + (a.dataset.s ? "qty" : "sym") + "]"); if (i) i.focus(); return; }
     if (act === "dellot") { if (!confirm("Delete this buy? This cannot be undone.")) return; try { await api("/api/portfolio?id=" + a.dataset.id, { method: "DELETE" }); toast("Buy deleted"); } catch (er) { toast(er.message); }
       await loadPortfolio(); return paintSheet(); }
@@ -534,6 +490,8 @@ document.addEventListener("click", async (e) => {
     if (act === "search") return toggleMobileSearch(!S.searching);
     if (act === "logout") { try { await api("/api/logout", { method: "POST" }); } catch { /* ignore */ } S.me = null; return renderLogin(); }
   }
+  const ds = e.target.closest(".fd span.s > b, .fd .fd-oc > div > b");      // a symbol on the desk opens its stock page
+  if (ds && /^[A-Z0-9&_-]{1,24}$/.test(ds.textContent)) { location.hash = "#/s/" + encodeURIComponent(ds.textContent); return; }
   const s = e.target.closest("[data-sym]");
   if (s) {                                                 // a search result, or a stock on the stock page, opens the full stock page; elsewhere the quick sheet
     if (s.dataset.fromsearch) { endSearch(); if (!/[\^=.]|-USD$/.test(s.dataset.sym)) { location.hash = "#/s/" + encodeURIComponent(s.dataset.sym); return; } }

@@ -549,3 +549,64 @@ select.rs-in{flex:0 1 220px}
   .wl-sp svg{width:100px;margin:0 auto} .wl-row.v-ret .wl-sp svg{width:96px;margin-left:auto} .wl-st b{font-size:14.5px} .wl-heat{grid-template-columns:repeat(auto-fill,minmax(124px,1fr))}
 }
 @media (max-width:1180px) and (min-width:900px){ .wl-hd .wide,.wl-row .wide{display:none} .wl-hd.v-today,.wl-row.v-today{grid-template-columns:minmax(140px,1.4fr) 100px 88px 76px 76px minmax(150px,1.4fr) 26px} .wl-hd.v-ret,.wl-row.v-ret{grid-template-columns:minmax(140px,1.6fr) 88px repeat(5,80px) 26px} .wl-hd.v-tech,.wl-row.v-tech{grid-template-columns:minmax(140px,1.5fr) 88px 80px 146px 136px 104px 26px} }
+
+/* ── Signal desk (fno_page.py): the same blocks, in this app's look ── */
+.fd{--sans:var(--font);--green:var(--up);--red:var(--dn);--cyan:#5AC8FA;--purple:#BF5AF2;container-type:inline-size;width:100%;font-variant-numeric:tabular-nums;font-size:13.5px;line-height:1.4;color:var(--tx)}
+.fd *{box-sizing:border-box} .fd .up{color:var(--up)} .fd .dn{color:var(--dn)} .fd .mu{color:var(--tx3)} .fd .am{color:var(--amber)} .fd .fl{color:var(--tx2)}
+.fd-tabs{margin:12px 0;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none} .fd-tabs::-webkit-scrollbar{display:none} .fd-size{margin:0 0 12px} .fd-size .mini{margin-top:8px}
+.fd-tk,.fd-ks{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));border:1px solid var(--line);border-radius:var(--r);background:var(--s1);overflow:hidden;margin-bottom:12px}
+.fd-tk>div,.fd-k{padding:11px 14px;box-shadow:0 0 0 .5px var(--line);min-width:0}
+.fd-tk small,.fd-k small{display:block;font-size:12px;font-weight:500;color:var(--tx3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fd-tk b{display:block;font-size:14.5px;font-weight:600;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
+.fd-k b{display:block;font-size:17px;font-weight:650;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;letter-spacing:-.01em}
+.fd-k em{display:block;font-size:12px;font-style:normal;color:var(--tx3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+.fd-ks.in{border:0;border-radius:0;margin:0;background:none}
+.fd-g{display:grid;grid-template-columns:minmax(0,1fr);gap:12px;margin-bottom:12px;align-items:stretch} .fd-col{display:flex;flex-direction:column;gap:12px;min-width:0}
+.fd-p{background:var(--s1);border:1px solid var(--line);border-radius:var(--r);min-width:0;display:flex;flex-direction:column;overflow:hidden}
+.fd-p>header{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 16px 10px;min-height:44px}
+.fd-p>header b{font-size:14.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis} .fd-p>header span{font-size:12.5px;color:var(--tx3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.fd-b{padding:4px 16px 16px;flex:1;min-width:0} .fd-b.f{padding:0;border-top:1px solid var(--line)}
+.fd-sc{overflow:auto;max-height:520px} .fd-t{width:100%;border-collapse:collapse;font-size:13.5px;margin:0}
+.fd-t th{position:sticky;top:0;z-index:1;background:var(--s1);text-align:right;font-size:12px;font-weight:500;color:var(--tx3);padding:9px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+.fd-t td{text-align:right;padding:9px 10px;border-bottom:1px solid var(--line);white-space:nowrap;color:var(--tx2);vertical-align:middle}
+.fd-t th:first-child,.fd-t td:first-child{padding-left:16px} .fd-t th:last-child,.fd-t td:last-child{padding-right:16px} .fd-t tr:last-child td{border-bottom:0} .fd-t tbody tr:hover td{background:var(--s2)}
+.fd-t .l{text-align:left} .fd-t td.b{color:var(--tx);font-weight:600} .fd-t td.w{white-space:normal;min-width:140px}
+.fd .s{display:inline-flex;align-items:baseline;gap:7px;max-width:100%;min-width:0} .fd .s b{color:var(--tx);font-weight:600;cursor:pointer} .fd .s b:hover{color:var(--amber)}
+.fd .s small{display:none;font-size:12px;color:var(--tx3);max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap} .fd .s.w{display:block;white-space:normal} .fd .s.w small{display:block;max-width:none;white-space:normal}
+.fd .s2{display:block;text-align:left} .fd .s2 b{display:block;color:var(--tx);font-weight:600} .fd .s2 small{display:block;font-size:12px;color:var(--tx3);white-space:nowrap}
+.fd .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:8px}
+.fd-oc>div{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:3px 10px;align-items:center;padding:11px 16px;border-bottom:1px solid var(--line)} .fd-oc>div:last-child{border-bottom:0}
+.fd-oc b{font-size:15px;font-weight:600;cursor:pointer} .fd-oc .v{font-size:15px;font-weight:600;text-align:right} .fd-oc small{grid-column:2 / 4;font-size:12.5px;color:var(--tx3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fd .wide{display:none}
+.fd-s{display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 9px;border-radius:999px;font-size:12px;font-weight:500;background:var(--s3);color:var(--tx2);white-space:nowrap} .fd-s i{width:6px;height:6px;border-radius:50%;background:var(--tx3)} .fd-s.g i{background:var(--up)} .fd-s.a i{background:var(--amber)}
+.fd-a{display:inline-block;min-width:46px;text-align:center;height:22px;line-height:22px;padding:0 9px;border-radius:999px;font-size:12px;font-weight:600;background:var(--s3);color:var(--tx2)}
+.fd-a.b{background:rgba(47,208,103,.13);color:var(--up)} .fd-a.s{background:rgba(255,82,71,.13);color:var(--dn)} .fd-a.w{background:rgba(255,159,10,.13);color:var(--amber)}
+.fd-big{font-size:20px;font-weight:650;line-height:1.25;letter-spacing:-.01em} .fd-n{font-size:12.5px;line-height:1.55;color:var(--tx3)} .fd-n b{color:var(--tx2);font-weight:600} .fd-n+.fd-n{margin-top:6px}
+.fd-e{padding:16px;font-size:13.5px;line-height:1.55;color:var(--tx2)} .fd-e b{color:var(--tx)}
+.fd-leg{display:flex;gap:4px 14px;flex-wrap:wrap;font-size:12px;color:var(--tx3);margin-bottom:8px} .fd-leg i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px} .fd-leg b{font-weight:600;color:var(--tx2)}
+.fd-ch{position:relative;width:100%} .fd-ch svg{position:absolute;left:0;top:0;width:calc(100% - 56px);height:100%;overflow:visible}
+.fd-ch .yl{position:absolute;right:0;width:52px;text-align:right;font-size:11px;color:var(--tx3);transform:translateY(-50%);white-space:nowrap}
+.fd-ch .hl{position:absolute;left:4px;font-size:11px;font-weight:500;transform:translateY(-110%);white-space:nowrap;padding:0 4px;border-radius:4px;background:var(--s1)}
+.fd-xl{display:flex;justify-content:space-between;margin:5px 56px 0 0;font-size:11px;color:var(--tx3)}
+.fd-bar{display:inline-block;width:54px;height:5px;border-radius:3px;background:var(--s3);vertical-align:middle;overflow:hidden;margin-left:8px} .fd-bar i{display:block;height:100%;border-radius:3px;background:var(--amber)}
+.fd-vb{display:flex;align-items:flex-end;gap:4px;height:130px;padding-top:16px} .fd-vb div{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%}
+.fd-vb i{display:block;width:100%;border-radius:3px 3px 0 0;background:var(--amber);min-height:1px} .fd-vb span{font-size:10.5px;font-weight:500;color:var(--tx2);margin-bottom:3px;white-space:nowrap}
+.fd-mix div{display:grid;grid-template-columns:minmax(0,1fr) 90px 38px;gap:10px;align-items:center;padding:5px 0;font-size:13px;color:var(--tx2)} .fd-mix div>span:first-child{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fd-mix u{display:block;height:5px;border-radius:3px;background:var(--s3);overflow:hidden;text-decoration:none} .fd-mix u i{display:block;height:100%;background:#5AC8FA;border-radius:3px} .fd-mix div>span:last-child{text-align:right;color:var(--tx);font-weight:600}
+.fd-rule{display:grid;grid-template-columns:54px minmax(0,1fr);gap:7px 12px;font-size:13px;line-height:1.5;color:var(--tx2)} .fd-rule span{color:var(--tx3)}
+.fd-list{margin:0;padding:0;list-style:none} .fd-list li{position:relative;padding:4px 0 4px 14px;font-size:13px;line-height:1.5;color:var(--tx2)} .fd-list li::before{content:"";position:absolute;left:0;top:12px;width:4px;height:4px;border-radius:50%;background:var(--tx3)}
+.fd-pick{display:flex;gap:8px;align-items:center;margin:0 0 12px} .fd-pick select{height:40px;border-radius:10px;border:1px solid var(--line2);background:var(--s1);color:var(--tx);font:inherit;font-size:14px;padding:0 10px;min-width:180px}
+.fd .x,.fd .xx{display:none}
+@container (min-width:560px){.fd-tk,.fd-ks{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@container (min-width:720px){ .fd-g{grid-template-columns:repeat(12,minmax(0,1fr))} .fd .wide{display:block} .fd .narrow{display:none} .fd .s small{display:inline} .fd .t4{grid-column:span 4} .fd .t6{grid-column:span 6} .fd .t12{grid-column:span 12} .fd .x{display:revert} }
+@container (min-width:1100px){ .fd-tk{grid-template-columns:repeat(8,minmax(0,1fr))} .fd-ks{grid-template-columns:repeat(var(--n,8),minmax(0,1fr))} .fd-ks.in{grid-template-columns:repeat(var(--n,4),minmax(0,1fr))}
+  .fd .c2{grid-column:span 2} .fd .c3{grid-column:span 3} .fd .c4{grid-column:span 4} .fd .c5{grid-column:span 5} .fd .c6{grid-column:span 6} .fd .c7{grid-column:span 7} .fd .c8{grid-column:span 8} .fd .c9{grid-column:span 9} .fd .c12{grid-column:span 12} .fd .xx{display:revert} }
+.fd .fl{border:0;padding:0;margin:0;background:none;display:revert} .fd-big.fl{display:block}
+.fd-b.f{overflow-x:auto} .fd .s2 small{white-space:normal} .fd-p>header{flex-wrap:wrap;row-gap:2px} .fd-p>header b{white-space:normal} .fd-tk small,.fd-tk b{white-space:normal}
+@container (min-width:1100px){ .fd-tk{grid-template-columns:repeat(4,minmax(0,1fr))} .fd-t th,.fd-t td{padding-left:8px;padding-right:8px} }
+@container (min-width:1500px){ .fd-tk{grid-template-columns:repeat(8,minmax(0,1fr))} }
+.fd .fl b,.fd .fl span{display:revert;font-size:inherit;font-weight:inherit;color:inherit}
+@container (min-width:720px){ .fd th.x,.fd td.x{display:table-cell} }
+@container (min-width:1100px){ .fd th.xx,.fd td.xx{display:table-cell} .fd-ks:not(.in){grid-template-columns:repeat(4,minmax(0,1fr))} }
+@container (min-width:1500px){ .fd-ks:not(.in){grid-template-columns:repeat(var(--n,8),minmax(0,1fr))} }
+@container (max-width:1399px){ .fd .xx{display:none !important} }
