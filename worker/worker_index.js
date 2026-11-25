@@ -84,12 +84,16 @@ async function yahoo(path, ctx, ttl) {
 export function quoteFrom(sym, data) {
   const res = data && data.chart && data.chart.result && data.chart.result[0];
   if (!res || !res.meta) return { sym, ok: false };
-  const m = res.meta, closes = ((res.indicators || {}).quote || [{}])[0].close || [];
+  const m = res.meta, q0 = ((res.indicators || {}).quote || [{}])[0], closes = q0.close || [];
   const price = m.regularMarketPrice, prev = m.chartPreviousClose ?? m.previousClose;
   if (price == null) return { sym, ok: false };
+  // today in 5-minute steps as [minutes since 09:15 IST, price] (the watchlist's chart column), every second bar and always the last one
+  const ts = res.timestamp || [], off = m.gmtoffset ?? 19800, all = [];
+  for (let i = 0; i < ts.length; i++) if (closes[i] != null) all.push([Math.floor((((ts[i] + off) % 86400) + 86400) % 86400 / 60) - 555, +closes[i].toFixed(2)]);
+  const pts = all.filter((_, i) => i % 2 === 0 || i === all.length - 1), open = (q0.open || []).find((v) => v != null);
   return { sym, ok: true, name: m.longName || m.shortName || "", price, prev, chg: prev ? price - prev : null, pct: prev ? (price / prev - 1) * 100 : null,
            high: m.regularMarketDayHigh ?? null, low: m.regularMarketDayLow ?? null, vol: m.regularMarketVolume ?? null,
-           hi52: m.fiftyTwoWeekHigh ?? null, lo52: m.fiftyTwoWeekLow ?? null, t: m.regularMarketTime ?? null, cur: m.currency || "", spark: thin(closes, 36) };
+           hi52: m.fiftyTwoWeekHigh ?? null, lo52: m.fiftyTwoWeekLow ?? null, t: m.regularMarketTime ?? null, cur: m.currency || "", spark: thin(closes, 36), open: open != null ? +open.toFixed(2) : null, pts };
 }
 async function quotes(url, ctx) {
   const list = [...new Set((url.searchParams.get("s") || "").toUpperCase().split(",").map((s) => s.trim()).filter((s) => SYM_OK.test(s)))].slice(0, 40);
@@ -501,6 +505,36 @@ async function dlv(env, ctx, url) {
   const text = await repoFile(env, ctx, `dlv/${sym.replace(/&/g, "%26")}.json`, 3600, "market-data");
   return text == null ? json({ ok: false, err: "No delivery file for this stock yet" }) : raw(text);
 }
+export function dlvLast(j) {                              // watchlist_page._delivery_cached: the latest delivery % and the average of the 5 sessions before it
+  if (!j || !j.d) return null;
+  const rows = j.d.map((d, i) => [d, j.q[i] != null && j.v[i] > 0 ? (j.q[i] / j.v[i]) * 100 : null]).filter((r) => r[1] != null).slice(-6);
+  if (!rows.length) return null;
+  const prior = rows.slice(0, -1).map((r) => r[1]);
+  return { pct: rows[rows.length - 1][1], date: rows[rows.length - 1][0], avg: prior.length ? prior.reduce((a, b) => a + b, 0) / prior.length : null };
+}
+async function dlvMany(env, ctx, url) {
+  const list = [...new Set((url.searchParams.get("s") || "").split(",").map(cleanSym).filter(Boolean))].slice(0, 40), out = {};
+  await Promise.all(list.map(async (sym) => { try { const t = await repoFile(env, ctx, `dlv/${sym.replace(/&/g, "%26")}.json`, 3600, "market-data"); const v = t == null ? null : dlvLast(JSON.parse(t)); if (v) out[sym] = v; } catch { /* no file */ } }));
+  return json({ dlv: out });
+}
+export function calFrom(q, today) {                        // next results date and ex-dividend date (watchlist_page._calendar_one)
+  const m = (((q || {}).quoteSummary || {}).result || [])[0] || {}, ce = m.calendarEvents || {}, sd = m.summaryDetail || {};
+  const day = (v) => (typeof v === "number" ? new Date(v * 1000).toISOString().slice(0, 10) : null);
+  const ed = ((ce.earnings || {}).earningsDate || []).map(rawv).map(day).filter(Boolean).sort();
+  return { results: ed.find((d) => d >= today) || ed[0] || null, exdiv: day(rawv(ce.exDividendDate)) || day(rawv(sd.exDividendDate)) };
+}
+async function calMany(url, ctx) {
+  const list = [...new Set((url.searchParams.get("s") || "").split(",").map(cleanSym).filter(Boolean))].slice(0, 8), out = {};
+  let a = null; try { a = await yahooAuth(ctx); } catch { return json({ cal: out, err: "Yahoo calendar unavailable" }); }
+  await Promise.all(list.map(async (sym) => {
+    try { out[sym] = await cached("cal/" + sym, 12 * 3600, async () => {
+      const r = await fetch(`https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(sym + ".NS")}?modules=calendarEvents,summaryDetail&crumb=${encodeURIComponent(a.crumb)}`, { headers: { "user-agent": UA, cookie: a.ck, accept: "application/json" } });
+      if (!r.ok) throw new Error("Yahoo answered " + r.status);
+      return calFrom(await r.json(), today());
+    }, ctx); } catch { /* filled on a later refresh */ }
+  }));
+  return json({ cal: out });
+}
 // thesis notes: the research_notes table the classic page uses (user "default", so both apps share the notes)
 async function notes(env, request, url) {
   try {
@@ -544,8 +578,56 @@ async function sb(env, path, init = {}) {
   if (!r.ok) throw Object.assign(new Error(text.slice(0, 200) || "Storage error " + r.status), { status: r.status, body: text });
   return text ? JSON.parse(text) : null;
 }
-async function watchlist(env, request, url) {
+async function deskList(env, request, url, me) {            // the Arka desk list (table admin_watchlist): everyone reads, only the admin changes it
   try {
+    if (request.method === "GET") {
+      let rows = []; try { rows = await sb(env, "admin_watchlist?select=symbol&order=id"); } catch (e) { if (e.status === 503) throw e; rows = []; }
+      return json({ syms: [...new Set((rows || []).map((r) => cleanSym(r.symbol)).filter(Boolean))], can_edit: me.role === "admin" });
+    }
+    if (me.role !== "admin") return fail(403, "Only the Arka desk can change this list.");
+    const b = request.method === "POST" ? await request.json().catch(() => ({})) : {};
+    const syms = [...new Set((request.method === "POST" ? b.syms || [b.sym] : (url.searchParams.get("s") || "").split(",")).map(cleanSym).filter(Boolean))].slice(0, 200);
+    if (!syms.length) return fail(400, "Which stock?");
+    if (request.method === "POST") {
+      const have = new Set(((await sb(env, "admin_watchlist?select=symbol")) || []).map((r) => cleanSym(r.symbol))), fresh = syms.filter((x) => !have.has(x));
+      if (fresh.length) await sb(env, "admin_watchlist", { method: "POST", body: JSON.stringify(fresh.map((symbol) => ({ symbol }))) });
+      return json({ ok: true, added: fresh });
+    }
+    if (request.method === "DELETE") { await sb(env, `admin_watchlist?symbol=in.(${syms.map((x) => `"${x}"`).map(encodeURIComponent).join(",")})`, { method: "DELETE" }); return json({ ok: true }); }
+    return fail(405, "Not supported.");
+  } catch (e) { return fail(e.status === 503 ? 503 : 502, e.message); }
+}
+async function watchlist(env, request, url, me) {
+  if (url.searchParams.get("desk")) return deskList(env, request, url, me);
+  try {
+    if (request.method === "PUT") {                     // rename a list (watchlist_page.rename_list)
+      const b = await request.json().catch(() => ({})), from = cleanList(b.from), to = cleanList(b.to);
+      if (!b.from || !b.to || from === to) return fail(400, "Give the list a new name.");
+      await sb(env, `watchlist?list_name=eq.${encodeURIComponent(from)}`, { method: "PATCH", body: JSON.stringify({ list_name: to }) });
+      return json({ ok: true, to });
+    }
+    if (request.method === "POST" || request.method === "DELETE") {       // several stocks in one call (add box, import, remove selected)
+      const body = request.method === "POST" ? await request.clone().json().catch(() => ({})) : {};
+      const many = request.method === "POST" ? body.syms : url.searchParams.get("ss") ? url.searchParams.get("ss").split(",") : null;
+      if (Array.isArray(many)) {
+        const list = cleanList(request.method === "POST" ? body.list : url.searchParams.get("list")), syms = [...new Set(many.map(cleanSym).filter(Boolean))].slice(0, 300);
+        if (!syms.length) return fail(400, "Which stocks?");
+        const inq = `symbol=in.(${syms.map((x) => encodeURIComponent(`"${x}"`)).join(",")})`;
+        if (request.method === "DELETE") {
+          try { await sb(env, `watchlist?${inq}&list_name=eq.${encodeURIComponent(list)}`, { method: "DELETE" }); }
+          catch (e) { if (e.status === 503) throw e; await sb(env, `watchlist?${inq}`, { method: "DELETE" }); }
+          return json({ ok: true });
+        }
+        let have = []; try { have = await sb(env, `watchlist?select=symbol&list_name=eq.${encodeURIComponent(list)}`); } catch (e) { if (e.status === 503) throw e; have = await sb(env, "watchlist?select=symbol"); }
+        const got = new Set((have || []).map((r) => cleanSym(r.symbol))), fresh = syms.filter((x) => !got.has(x)), meta = body.meta || {}, pos = (v) => (v == null || v === "" || !(Number(v) > 0) ? null : Number(v));
+        if (fresh.length) {
+          const row = (symbol) => { const m = meta[symbol] || {}; return { symbol, list_name: list, note: String(m.note || "").trim().slice(0, 200) || null, alert_above: pos(m.above), alert_below: pos(m.below) }; };
+          try { await sb(env, "watchlist", { method: "POST", body: JSON.stringify(fresh.map(row)) }); }
+          catch (e) { if (e.status === 503) throw e; await sb(env, "watchlist", { method: "POST", body: JSON.stringify(fresh.map((symbol) => ({ symbol }))) }); }
+        }
+        return json({ ok: true, added: fresh, list });
+      }
+    }
     if (request.method === "GET") {
       let rows, lists = true;
       try { rows = await sb(env, "watchlist?select=symbol,list_name,note,alert_above,alert_below&order=id"); }
@@ -767,7 +849,9 @@ export default {
       if (p === "/api/intraday") return intraday(url, ctx);
       if (p === "/api/fpi") return fpiReport(url, ctx);
       if (p === "/api/note") return notes(env, request, url);
-      if (p === "/api/watchlist") return watchlist(env, request, url);
+      if (p === "/api/watchlist") return watchlist(env, request, url, me);
+      if (p === "/api/dlvlast") return dlvMany(env, ctx, url);
+      if (p === "/api/cal") return calMany(url, ctx);
       if (p === "/api/signals") return signals(env, ctx);
       if (p === "/api/deals") return deals(env, ctx);
       if (p === "/api/brief") return brief(env, ctx);
