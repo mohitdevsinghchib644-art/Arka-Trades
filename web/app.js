@@ -27,6 +27,7 @@ const NAMES = Object.fromEntries([...INDICES, ...SECTORS, ...Object.values(MARKE
 // [key, name, icon, shown in the phone's bottom bar]. Markets and the brief sit under More on a phone.
 const TABS = [["home", "Home", '<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/>', true], ["watchlist", "Watchlist", '<path d="M6 3h12v18l-6-4.5L6 21z"/>', true],
   ["portfolio", "Portfolio", '<path d="M3 7h18v13H3z"/><path d="M8 7V4h8v3M3 12h18"/>', true], ["signals", "Signals", '<path d="M3 17l5-6 4 4 8-10"/><path d="M15 5h5v5"/>', true],
+  ["research", "Research", '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/><path d="M8 12.5v-2M10.5 12.5v-4M13 12.5v-3"/>', false],
   ["flow", "Money flow", '<path d="M4 17c3-6 5 2 8-4s5-1 8-6"/><path d="M4 21h16"/>', false],
   ["news", "News", '<path d="M4 5h13v14H6a2 2 0 0 1-2-2z"/><path d="M17 9h3v8a2 2 0 0 1-2 2"/><path d="M8 9h5M8 13h5"/>', false],
   ["regime", "Regime", '<path d="M3 20h18"/><path d="M6 16l4-5 3 3 5-7"/><circle cx="18" cy="7" r="1.6"/>', false],
@@ -116,6 +117,7 @@ function pageSymbols() {
   if (S.tab === "watchlist") return wl;
   if (S.tab === "portfolio") return [...new Set(S.pf.lots.map((l) => l.sym)), ...wl.slice(0, 12)];
   if (S.tab === "news") return [...new Set([...S.wl.rows.map((r) => r.sym), ...S.pf.lots.map((l) => l.sym)])].slice(0, 120);
+  if (S.tab === "research") return [...new Set([...(() => { try { return JSON.parse(localStorage.getItem("arka_recent") || "[]"); } catch { return []; } })(), ...S.pf.lots.map((l) => l.sym), ...wl])].slice(0, 40);
   if (S.tab === "markets") return [...MARKETS[S.mkTab].map((x) => x[1]), ...wl.slice(0, 12)];
   if (S.tab === "s") return [S.sk.sym, ...(S.sk.code === "RV" ? [] : [])].filter(Boolean);
   return wl.slice(0, 12);
@@ -255,13 +257,13 @@ function brief() {
 }
 function more() {
   return `<div><div class="hd"><div><h1>More</h1></div></div>
-    <div class="links only-m" style="margin-bottom:10px"><a class="link" href="#/news"><b>News desk</b><small>Market wire, your stocks and exchange filings.</small></a><a class="link" href="#/flow"><b>Money flow</b><small>Sector rotation: where to be, and when.</small></a><a class="link" href="#/regime"><b>Market regime</b><small>Trend, breadth and volatility: how hard to push today.</small></a><a class="link" href="#/markets"><b>Markets</b><small>Indices, commodities, currencies and rates.</small></a>
+    <div class="links only-m" style="margin-bottom:10px"><a class="link" href="#/research"><b>Research</b><small>Chart, financials, valuation and filings for any stock.</small></a><a class="link" href="#/news"><b>News desk</b><small>Market wire, your stocks and exchange filings.</small></a><a class="link" href="#/flow"><b>Money flow</b><small>Sector rotation: where to be, and when.</small></a><a class="link" href="#/regime"><b>Market regime</b><small>Trend, breadth and volatility: how hard to push today.</small></a><a class="link" href="#/markets"><b>Markets</b><small>Indices, commodities, currencies and rates.</small></a>
       <a class="link" href="#/brief"><b>Daily brief</b><small>What happened overnight and what can move stocks today.</small></a></div>
     <h2 style="margin-top:8px">Still in the classic app <span>opens in a new tab</span></h2>
     <div class="links">${MORE.map(([t, d]) => `<a class="link" href="${CLASSIC}" target="_blank" rel="noopener"><b>${t}</b><small>${d}</small></a>`).join("")}</div>
     <h2>Account</h2><div class="card pad"><div style="margin-bottom:12px">Signed in as <b>${esc(S.me.user)}</b> <span class="chip">${esc(S.me.role)}</span></div><button class="btn" data-act="logout">Sign out</button></div></div>`;
 }
-const PAGES = { home: HM.page, watchlist, portfolio: PFV.page, regime: RG.page, flow: MF.page, news: NW.page, s: SK.page, signals, markets, brief, more };
+const PAGES = { home: HM.page, watchlist, portfolio: PFV.page, regime: RG.page, flow: MF.page, news: NW.page, s: SK.page, research: SK.landing, signals, markets, brief, more };
 
 // ── painting ──
 function renderShell() {
@@ -279,16 +281,16 @@ function renderShell() {
 function paint() {
   const main = $("#main"); if (!main || !S.me) return;
   const phoneTab = TABS.some(([k, , , mob]) => k === S.tab && mob) ? S.tab : "more";      // Markets and the brief light up More on a phone
-  document.querySelectorAll(".nav a[data-tab]").forEach((a) => { a.classList.toggle("on", a.dataset.tab === S.tab); a.classList.toggle("onm", a.dataset.tab === phoneTab); });
-  const withRail = !["home", "watchlist", "more", "brief", "portfolio", "regime", "flow", "news", "s"].includes(S.tab);
+  document.querySelectorAll(".nav a[data-tab]").forEach((a) => { a.classList.toggle("on", a.dataset.tab === (S.tab === "s" ? "research" : S.tab)); a.classList.toggle("onm", a.dataset.tab === phoneTab); });
+  const withRail = !["home", "watchlist", "more", "brief", "portfolio", "regime", "flow", "news", "s", "research"].includes(S.tab);
   const ae = document.activeElement;                       // typing in a Portfolio box: leave the page alone so the cursor stays put
   if (ae && main.contains(ae) && ae.dataset.pf && ae.tagName === "INPUT" && !/range|checkbox/.test(ae.type)) { if (S.sheet && !typingInSheet()) paintSheet(); return; }
-  const keep = ae && main.contains(ae) && ae.dataset && ae.dataset.nw ? [ae.dataset.nw, ae.selectionStart, ae.selectionEnd] : null;
+  const keep = ae && main.contains(ae) && ae.dataset && (ae.dataset.nw || ae.dataset.rs === "find") ? [ae.dataset.nw ? "nw" : "rs", ae.dataset.nw || ae.dataset.rs, ae.selectionStart, ae.selectionEnd] : null;
   main.className = withRail ? "rail" : ["home", "portfolio", "regime", "flow", "news", "s"].includes(S.tab) ? "wide" : "";
   const y = window.scrollY;
   if (S.tab === "s") SK.paintInto(main); else main.innerHTML = PAGES[S.tab]() + (withRail ? rail() : "");
   window.scrollTo(0, y);
-  if (keep) { const el = main.querySelector(`[data-nw="${keep[0]}"]`); if (el) { el.focus(); try { el.setSelectionRange(keep[1], keep[2]); } catch { /* not a text box */ } } }
+  if (keep) { const el = main.querySelector(`[data-${keep[0]}="${keep[1]}"]`); if (el) { el.focus(); try { el.setSelectionRange(keep[2], keep[3]); } catch { /* not a text box */ } } }
   if (S.sheet && !typingInSheet()) paintSheet();
 }
 const typingInSheet = () => { const a = document.activeElement; return !!(a && $("#sheet").contains(a) && /INPUT|SELECT|TEXTAREA/.test(a.tagName)); };
