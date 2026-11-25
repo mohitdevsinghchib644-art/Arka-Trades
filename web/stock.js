@@ -25,7 +25,7 @@ async function step(D, key, fn) {
 export async function open(sym, code) {
   const K = S.sk; sym = String(sym || "").toUpperCase();
   if (K.sym !== sym) { K.o = {}; K.grp = null; }
-  K.sym = sym; if (code && R.FN[code]) K.code = code;
+  K.sym = sym; if (code && R.FN[code]) K.code = code; remember(sym);
   const D = dataOf(sym);
   need([sym]);
   if (D.at && Date.now() - D.at < 10 * 60000) return;
@@ -145,6 +145,26 @@ function parts() {
     b2: phone ? `<div class="sw-stack">${trend}${ladder}${session}${funda}${aboutC}</div>` : `<div class="sw-stack side">${trend}${ladder}</div>`, b3: phone ? "" : `<div class="sw-stack">${aboutC}</div>`,
     chart: proChart(sym, phone ? 480 : 640), r: research(sym, D) };
 }
+// ── the Research landing page (#/research): find a stock, or reopen a recent one ──
+const recent = () => { try { return JSON.parse(localStorage.getItem("arka_recent") || "[]"); } catch { return []; } };
+function remember(sym) { try { localStorage.setItem("arka_recent", JSON.stringify([sym, ...recent().filter((x) => x !== sym)].slice(0, 12))); } catch { /* private mode */ } }
+let findTimer = 0, findSeq = 0;
+export function landing() {
+  const K = S.sk, chip = (s) => `<button class="rs-pick" data-sym="${esc(s)}" data-fromsearch="1"><b>${esc(s)}</b>${S.q[s] && S.q[s].ok ? `<i class="${cls(S.q[s].pct)}">${pc(S.q[s].pct, 1)}</i>` : ""}</button>`;
+  const rec = recent(), mine = [...new Set([...S.pf.lots.map((l) => l.sym), ...S.wl.rows.map((r) => r.sym)])].filter((x) => !/[\^=.]/.test(x));
+  const res = K.found == null ? "" : K.found.length ? `<div class="rs-res">${K.found.map((x) => `<button data-sym="${esc(x.sym)}" data-fromsearch="1"><b>${esc(x.sym)}</b><small>${esc(x.name)}</small></button>`).join("")}</div>` : '<div class="note">No NSE stock found. Try the ticker, for example HDFCBANK.</div>';
+  return `<div class="rs-land"><div class="hd"><div><h1>Research</h1><div class="sub">Price chart, financials, valuation, quality, ownership, filings and news for any NSE stock: 39 screens, the same as the classic Research page.</div></div></div>
+    <div class="rs-find"><input data-rs="find" value="${esc(K.find || "")}" placeholder="Type a stock: TCS, Reliance, HDFC…" autocomplete="off" spellcheck="false" aria-label="Find a stock"></div>${res}
+    ${rec.length ? `<h2>Recently opened</h2><div class="rs-picks">${rec.map(chip).join("")}</div>` : ""}
+    ${mine.length ? `<h2>Your stocks <span>watchlist and holdings</span></h2><div class="rs-picks">${mine.slice(0, 40).map(chip).join("")}</div>` : ""}
+    <div class="note" style="padding:14px 2px">You can also open a stock from the search at the top of any page, or from the “Open the stock page” button when you tap a stock in a list.</div></div>`;
+}
+function find(text) {
+  const K = S.sk; K.find = text; clearTimeout(findTimer);
+  if (text.trim().length < 2) { K.found = null; return paint(); }
+  findTimer = setTimeout(async () => { const n = ++findSeq; try { const d = await api("/api/search?q=" + encodeURIComponent(text.trim())); if (n === findSeq) { K.found = d.results || []; paint(); } } catch { /* keep the old list */ } }, 250);
+}
+
 export function page() {                                     // the first paint of the page (later paints update the parts, see paintInto)
   const K = S.sk; if (!K.sym) return '<div class="card"><div class="note">Pick a stock from the search.</div></div>';
   const P = parts();
@@ -420,6 +440,7 @@ export function act(name, el) {
 let inTimer = 0;
 export function input(el, ev) {                              // a box on the research screen changed
   const k = el.dataset.rs, K = S.sk;
+  if (k === "find") { if (ev === "input") find(el.value); return; }
   if (k === "cmd") { if (ev === "enter") { const c = R.resolveCode(el.value); if (c) { K.code = c; K.grp = null; el.value = ""; history.replaceState(null, "", `#/s/${encodeURIComponent(K.sym)}/${c}`); paint(); } else toast("No screen called " + el.value.trim().toUpperCase() + ". Try VAL, PB, DCF or SC."); } return; }
   const text = el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && el.type !== "number");
   if (el.type === "number") { if (ev !== "change") return; const n = el.value === "" ? null : +el.value; if (n == null || !isFinite(n)) return; K.o[k] = n; K.force = true; return paint(); }
