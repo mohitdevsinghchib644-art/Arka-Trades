@@ -781,6 +781,9 @@ async function deskFile(env, ctx, url) {
   if (f === "chain") { const t = await repoFile(env, ctx, "arka_data/fno/chain_latest.csv", 1800); return json({ rows: t == null ? [] : chainRows(t) }); }
   if (f === "log") { const t = await repoFile(env, ctx, "arka_data/signals/log.csv"); if (t == null) return json({ rows: [] });
     const [head, ...rows] = parseCsv(t); return json({ rows: rows.map((r) => Object.fromEntries((head || []).map((h, i) => [h.trim(), r[i] ?? ""]))) }); }
+  if (f === "om") { const t = await repoFile(env, ctx, "arka_data/fno/om.json", 1800); return t == null ? json({ ok: false, missing: true }) : raw(t); }       // the Options map (fno_export.py)
+  if (f === "oms") { const sym = cleanSym(url.searchParams.get("s")); if (!sym) return fail(400, "Which stock?");
+    const t = await repoFile(env, ctx, `arka_data/fno/om/${sym.replace(/&/g, "%26")}.json`, 1800); return t == null ? json({ ok: false, missing: true }) : raw(t); }
   return fail(400, "Which file?");
 }
 export function chainRows(text) {                          // chain_latest.csv → [{sym, exp, strike, ce_oi, pe_oi}] for the two indexes (a line scan: the file has every F&O stock)
