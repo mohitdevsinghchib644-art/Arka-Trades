@@ -19,7 +19,7 @@ const tagLabel = (t) => TAG_LABEL[t] || t[0] + t.slice(1).toLowerCase();
 export const newsDefaults = () => ({ rmode: "TOP", rq: "", days: 1, q: "", sort: "Priority", mode: "TOP", part: "Stories", res: {}, items: null, at: 0, busy: false, names: null, seen: null, ver: 0, built: -1 });
 
 // ── data ──
-const universe = () => [...new Set([...S.wl.rows.map((r) => r.sym), ...S.pf.lots.map((l) => l.sym)])].slice(0, 120);
+const universe = () => [...new Set([...S.wl.rows.map((r) => r.sym), ...S.pf.lots.map((l) => l.sym), ...((S.wl.desk && S.wl.desk.syms) || [])])].slice(0, 120);
 const coKey = (n) => String(n || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim().replace(/\s+(limited|ltd)$/, "");
 let nameIdx = null;
 function seenSet() { if (S.nw.seen) return S.nw.seen; try { S.nw.seen = new Set(JSON.parse(localStorage.getItem("arka_news_seen") || "[]")); } catch { S.nw.seen = new Set(); } return S.nw.seen; }
@@ -100,6 +100,13 @@ export function rail(current = "", secItems = null) {
     <a class="btn full nr-open" href="#/news">Open news desk</a></div>`;
 }
 
+// the last 24 hours of stories and filings per stock, newest first (watchlist_page.news_by_symbol)
+export function storiesFor(symbols) {
+  const want = new Set(symbols), cutoff = Date.now() - 864e5, out = {};
+  for (const a of build().items) { if (a.pub < cutoff) continue; for (const s of a.symbols || []) if (want.has(s)) (out[s] = out[s] || []).push(a); }
+  for (const s in out) out[s].sort((a, b) => b.pub - a.pub);
+  return out;
+}
 function build() {                                            // assemble once per new batch of results, then only refresh ages
   const W = S.nw, U = universe(), key = W.ver + "|" + W.days + "|" + U.join(",");
   const results = Object.entries(W.res).filter(([k]) => k.endsWith("|" + W.days)).map(([, v]) => v);

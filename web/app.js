@@ -1,6 +1,7 @@
 // Arka Trades · new app (stage 8): Home, Watchlist, Portfolio, the stock page with Research, Signals, Money flow, News, Regime, Markets, Daily brief, More. Plain JavaScript, no build step.
 import * as PFV from "./portfolio.js";
 import * as PFM from "./pf.js";
+import * as WL from "./watchlist.js";
 import * as RG from "./regime.js";
 import * as HM from "./home.js";
 import * as MF from "./flow.js";
@@ -39,7 +40,7 @@ const MORE = [["Arka AI", "Chart reading with your own playbook."],
   
   ["Screener", "Describe a setup and scan the market."], ["Backtest", "Test a rule on past prices."]];
 
-const S = { me: null, tab: "home", q: {}, at: {}, wl: { rows: [], list: "Main", loaded: false, err: "" }, sig: null, sigErr: "", sigTab: "Leaders", mkTab: "India", sort: "order",
+const S = { me: null, tab: "home", q: {}, at: {}, wl: { rows: [], list: "Main", loaded: false, err: "", ...WL.wlDefaults() }, sig: null, sigErr: "", sigTab: "Leaders", mkTab: "India", sort: "order",
             pf: PFV.pfDefaults(), rg: RG.rgDefaults(), qv: 0, hm: HM.homeDefaults(), mf: MF.flowDefaults(), nw: NW.newsDefaults(), sk: SK.stockDefaults(), deals: null, brief: undefined,
             sheet: null, results: null, searching: false };
 
@@ -94,9 +95,9 @@ async function need(symbols) {                             // fetch quotes that 
   }
 }
 async function loadWatchlist() {
-  try { const d = await api("/api/watchlist"); S.wl.rows = d.rows; S.wl.err = ""; if (!lists().includes(S.wl.list)) S.wl.list = lists()[0] || "Main"; }
+  try { const d = await api("/api/watchlist"); S.wl.rows = d.rows; S.wl.lists = d.lists; S.wl.err = ""; if (S.wl.list !== "Arka desk" && !lists().includes(S.wl.list)) S.wl.list = lists()[0] || "Main"; }
   catch (e) { if (e.message !== "signed out") S.wl.err = e.message; }
-  S.wl.loaded = true; paint(); refresh();
+  S.wl.loaded = true; S.wl.ver = (S.wl.ver || 0) + 1; paint(); refresh(); if (S.tab === "watchlist") WL.load();
 }
 async function loadSignals() {
   try { S.sig = await api("/api/signals"); S.sigErr = ""; } catch (e) { if (e.message !== "signed out") S.sigErr = e.message; }
@@ -110,12 +111,13 @@ async function loadPortfolio() {
 async function loadDeals() { if (S.deals) return; try { S.deals = (await api("/api/deals")).deals; } catch { S.deals = []; } paint(); }
 async function loadBrief() { try { S.brief = (await api("/api/brief")).brief; } catch (e) { if (e.message !== "signed out") S.brief = null; } paint(); }
 const lists = () => [...new Set([...S.wl.rows.map((r) => r.list), ...(S.wl.extra || [])])];
-const mine = () => S.wl.rows.filter((r) => r.list === S.wl.list).map((r) => r.sym);
-const inList = (sym) => S.wl.rows.some((r) => r.sym === sym && r.list === S.wl.list);
+const myList = () => (S.wl.list === "Arka desk" ? "Main" : S.wl.list);     // on the desk list, adding and notes go to your own Main list
+const mine = () => S.wl.rows.filter((r) => r.list === myList()).map((r) => r.sym);
+const inList = (sym) => S.wl.rows.some((r) => r.sym === sym && r.list === myList());
 function pageSymbols() {
   const wl = mine();
   if (S.tab === "home") return [...HM.N50, ...S.pf.lots.map((l) => l.sym), ...wl.slice(0, 7)];
-  if (S.tab === "watchlist") return wl;
+  if (S.tab === "watchlist") return [...WL.symbols(), "^NSEI"];
   if (S.tab === "portfolio") return [...new Set(S.pf.lots.map((l) => l.sym)), ...wl.slice(0, 12)];
   if (S.tab === "news") return [...new Set([...S.wl.rows.map((r) => r.sym), ...S.pf.lots.map((l) => l.sym)])].slice(0, 120);
   if (S.tab === "research") return [...new Set([...(() => { try { return JSON.parse(localStorage.getItem("arka_recent") || "[]"); } catch { return []; } })(), ...S.pf.lots.map((l) => l.sym), ...wl])].slice(0, 40);
@@ -171,20 +173,6 @@ function ordersCard(short) {
     + (short && o.length > 4 ? `<div class="note">and ${o.length - 4} more</div>` : "")
     : `<div class="empty"><b>No orders for the next open</b>Signals from the close of ${esc(S.sig.asof)}. Leaders are checked once a week; swing and index signals appear on the day they trigger.</div>`;
   return `<div class="card">${body}</div>`;
-}
-function watchlist() {
-  const ls = lists().length ? lists() : ["Main"], wl = mine();
-  let rows = wl.slice();
-  if (S.sort === "pct") rows.sort((a, b) => ((qOf(b) || {}).pct ?? -1e9) - ((qOf(a) || {}).pct ?? -1e9));
-  if (S.sort === "az") rows.sort();
-  const ok = wl.map(qOf).filter((q) => q && q.ok && q.pct != null), up = ok.filter((q) => q.pct > 0).length;
-  const body = !S.wl.loaded ? '<div class="note">Loading your watchlist…</div>' : S.wl.err ? `<div class="empty"><b>Watchlist is not available</b>${esc(S.wl.err)}</div>`
-    : !rows.length ? '<div class="empty"><b>This list is empty</b>Search a stock, open it and tap “Add to watchlist”.</div>' : rows.map((s) => stockRow(s, { remove: true, wide: true })).join("");
-  return `<div><div class="hd"><div><h1>Watchlist</h1><div class="sub">${wl.length} stock${wl.length === 1 ? "" : "s"}${ok.length ? ` · <span class="up">${up} up</span> · <span class="dn">${ok.length - up} down</span>` : ""}</div></div>
-      <select class="sel" data-act="sort"><option value="order"${S.sort === "order" ? " selected" : ""}>Your order</option><option value="pct"${S.sort === "pct" ? " selected" : ""}>Biggest gainers</option><option value="az"${S.sort === "az" ? " selected" : ""}>Name A–Z</option></select></div>
-    <div class="seg">${ls.map((l) => `<button class="${l === S.wl.list ? "on" : ""}" data-act="list" data-v="${esc(l)}">${esc(l)}</button>`).join("")}<button class="ghost" data-act="newlist">+ New list</button></div>
-    <div class="card">${body}</div>
-    <div class="note" style="padding:14px 2px">Tap a stock for its chart, a note and price alerts. To add one, search it at the top.</div></div>`;
 }
 function signals() {
   const d = S.sig;
@@ -264,7 +252,7 @@ function more() {
     <div class="links">${MORE.map(([t, d]) => `<a class="link" href="${CLASSIC}" target="_blank" rel="noopener"><b>${t}</b><small>${d}</small></a>`).join("")}</div>
     <h2>Account</h2><div class="card pad"><div style="margin-bottom:12px">Signed in as <b>${esc(S.me.user)}</b> <span class="chip">${esc(S.me.role)}</span></div><button class="btn" data-act="logout">Sign out</button></div></div>`;
 }
-const PAGES = { home: HM.page, watchlist, portfolio: PFV.page, regime: RG.page, flow: MF.page, news: NW.page, s: SK.page, research: SK.landing, signals, markets, brief, more };
+const PAGES = { home: HM.page, watchlist: WL.page, portfolio: PFV.page, regime: RG.page, flow: MF.page, news: NW.page, s: SK.page, research: SK.landing, signals, markets, brief, more };
 
 // ── painting ──
 function renderShell() {
@@ -277,7 +265,7 @@ function renderShell() {
     <div id="msearch"></div><main id="main"></main>
     <nav class="nav"><a class="brand only-d" href="#/home"><img src="/icon-180.png" alt="">ARKA <i>TRADES</i></a>
       ${TABS.map(([k, n, d, mob]) => `<a href="#/${k}" data-tab="${k}"${mob ? "" : ' class="only-d"'}>${icon(d)}<span>${n}</span></a>`).join("")}
-      <div class="who">Signed in as <b>${esc(S.me.user)}</b><br>New app · stage 8</div></nav></div>`;
+      <div class="who">Signed in as <b>${esc(S.me.user)}</b><br>New app · stage 11</div></nav></div>`;
 }
 function paint() {
   const main = $("#main"); if (!main || !S.me) return;
@@ -286,7 +274,7 @@ function paint() {
   const withRail = !["home", "watchlist", "more", "brief", "portfolio", "regime", "flow", "news", "s", "research"].includes(S.tab);
   const ae = document.activeElement;                       // typing in a Portfolio box: leave the page alone so the cursor stays put
   if (ae && main.contains(ae) && ((ae.dataset.pf && ae.tagName === "INPUT") || (S.tab === "portfolio" && /INPUT|TEXTAREA/.test(ae.tagName) && ae.closest("form"))) && !/range|checkbox/.test(ae.type)) { if (S.sheet && !typingInSheet()) paintSheet(); return; }
-  const keep = ae && main.contains(ae) && ae.dataset && (ae.dataset.nw || ae.dataset.rs === "find") ? [ae.dataset.nw ? "nw" : "rs", ae.dataset.nw || ae.dataset.rs, ae.selectionStart, ae.selectionEnd] : null;
+  const keep = ae && main.contains(ae) && ae.dataset && (ae.dataset.nw || ae.dataset.rs === "find" || ae.dataset.wl === "q") ? [ae.dataset.nw ? "nw" : ae.dataset.wl ? "wl" : "rs", ae.dataset.nw || ae.dataset.wl || ae.dataset.rs, ae.selectionStart, ae.selectionEnd] : null;
   main.className = withRail ? "rail" : ["home", "portfolio", "regime", "flow", "news", "s"].includes(S.tab) ? "wide" : "";
   const y = window.scrollY;
   const newsSide = (S.tab === "home" || S.tab === "s") && innerWidth >= 1280, showNews = newsSide && railPref();
@@ -313,6 +301,7 @@ function route() {
   if (S.tab === "regime") RG.loadRegime();
   if (S.tab === "flow") MF.loadFlow();
   if (S.tab === "news") NW.loadNews();
+  if (S.tab === "watchlist" && S.wl.loaded) WL.load();
   if (S.tab === "signals" && S.sigTab === "Big players") loadDeals();
 }
 
@@ -336,11 +325,11 @@ function buyForm() {
       <div class="err"></div><button class="btn pri full" type="submit">Save buy</button></form></section>`;
 }
 function watchBlock(sym) {                                 // note, price alerts and moving between lists, for a stock in the open list
-  const w = S.wl.rows.find((r) => r.sym === sym && r.list === S.wl.list); if (!w) return "";
-  const others = lists().filter((l) => l !== S.wl.list);
+  const w = S.wl.rows.find((r) => r.sym === sym && r.list === myList()); if (!w) return "";
+  const others = lists().filter((l) => l !== myList());
   return `<h2>Note and price alerts</h2><form id="wmeta" class="form" data-s="${esc(sym)}">${field("Note", "note", w.note || "", 'placeholder="Why it is on your list" maxlength="200"')}
     <div class="g2">${field("Alert above (₹)", "above", w.above ?? "", 'inputmode="decimal" placeholder="none"')}${field("Alert below (₹)", "below", w.below ?? "", 'inputmode="decimal" placeholder="none"')}</div>
-    ${others.length ? `<label class="f"><span>Move to another list</span><select name="to"><option value="">Keep in ${esc(S.wl.list)}</option>${others.map((l) => `<option>${esc(l)}</option>`).join("")}</select></label>` : ""}
+    ${others.length ? `<label class="f"><span>Move to another list</span><select name="to"><option value="">Keep in ${esc(myList())}</option>${others.map((l) => `<option>${esc(l)}</option>`).join("")}</select></label>` : ""}
     <div class="err"></div><button class="btn full" type="submit">Save</button></form>`;
 }
 function paintSheet() {
@@ -357,7 +346,7 @@ function paintSheet() {
   const stats = sh.d ? `<div class="stats">${stat("1 week", `<b class="${cls(d.r1w)}">${pc(d.r1w, 1)}</b>`)}${stat("1 month", `<b class="${cls(d.r1m)}">${pc(d.r1m, 1)}</b>`)}${stat("3 months", `<b class="${cls(d.r3m)}">${pc(d.r3m, 1)}</b>`)}
       ${stat("1 year", `<b class="${cls(d.r1y)}">${pc(d.r1y, 1)}</b>`)}${stat("Trend", trend)}${stat("Volume today", `<b>${qty(q.vol)}</b>`)}</div>`
     : sh.err ? `<div class="note">${esc(sh.err)}</div>` : '<div class="note">Loading numbers…</div>';
-  const has = inList(sh.sym);
+  const has = inList(sh.sym), wlx = isStock && S.tab === "watchlist" ? WL.sheetBlocks(sh.sym) : null;
   const acts = isStock ? `<div class="acts"><button class="btn ${has ? "red" : "pri"}" data-act="${has ? "remove" : "add"}" data-s="${esc(sh.sym)}">${has ? "Remove" : "Add to watchlist"}</button>
       <button class="btn" data-act="buyform" data-s="${esc(sh.sym)}">Add a buy</button></div><a class="btn full stockpage" href="#/s/${encodeURIComponent(sh.sym)}" data-act="close">Open the stock page · chart and full research</a>` : "";
   $("#sheet").innerHTML = `<div class="scrim" data-act="close"></div><section class="sheet" role="dialog" aria-label="${esc(title)}"><div class="grab"></div>
@@ -365,7 +354,7 @@ function paintSheet() {
     <div class="px">${q.price != null ? num(q.price) : '<span class="sk">0000.00</span>'}<small class="${cls(q.pct)}">${q.price != null ? sgn(q.chg) + " (" + pc(q.pct) + ")" : ""}</small></div>
     <div class="chart">${chart}</div>
     <div class="seg"><button class="${sh.range === "day" ? "on" : ""}" data-act="range" data-v="day">Today</button><button class="${sh.range === "year" ? "on" : ""}" data-act="range" data-v="year">1 year</button></div>
-    ${band(q.low, q.high, q.price, "Today's range")}${band(q.lo52, q.hi52, q.price, "52-week range")}${stats}${acts}${isStock ? PFV.positionBlock(sh.sym) + watchBlock(sh.sym) : ""}</section>`;
+    ${band(q.low, q.high, q.price, "Today's range")}${band(q.lo52, q.hi52, q.price, "52-week range")}${wlx ? wlx.stats : stats}${acts}${wlx ? wlx.more : ""}${isStock ? PFV.positionBlock(sh.sym) + watchBlock(sh.sym) : ""}</section>`;
   if (sh.keep != null) { $(".sheet").scrollTop = sh.keep; sh.keep = null; }
 }
 
@@ -401,13 +390,14 @@ function toast(text, undo) {
 }
 async function addStock(sym, quiet) {
   if (inList(sym)) return;
-  S.wl.rows.push({ sym, list: S.wl.list, note: "" }); paint(); need([sym]);
-  try { await api("/api/watchlist", { method: "POST", body: JSON.stringify({ sym, list: S.wl.list }) }); if (!quiet) toast(sym + " added to " + S.wl.list); }
-  catch (e) { S.wl.rows = S.wl.rows.filter((r) => !(r.sym === sym && r.list === S.wl.list)); paint(); toast("Could not add " + sym + ". " + e.message); }
+  const list = myList();
+  S.wl.rows.push({ sym, list, note: "" }); S.wl.ver = (S.wl.ver || 0) + 1; paint(); need([sym]);
+  try { await api("/api/watchlist", { method: "POST", body: JSON.stringify({ sym, list }) }); if (!quiet) toast(sym + " added to " + list); if (S.tab === "watchlist") WL.load(); }
+  catch (e) { S.wl.rows = S.wl.rows.filter((r) => !(r.sym === sym && r.list === list)); S.wl.ver++; paint(); toast("Could not add " + sym + ". " + e.message); }
 }
 async function removeStock(sym) {
-  const list = S.wl.list, before = S.wl.rows.slice();
-  S.wl.rows = S.wl.rows.filter((r) => !(r.sym === sym && r.list === list)); paint();
+  const list = myList(), before = S.wl.rows.slice();
+  S.wl.rows = S.wl.rows.filter((r) => !(r.sym === sym && r.list === list)); S.wl.ver = (S.wl.ver || 0) + 1; paint();
   try { await api(`/api/watchlist?s=${encodeURIComponent(sym)}&list=${encodeURIComponent(list)}`, { method: "DELETE" }); toast(sym + " removed", () => addStock(sym, true)); }
   catch (e) { S.wl.rows = before; paint(); toast("Could not remove " + sym + ". " + e.message); }
 }
@@ -432,10 +422,12 @@ async function sendForm(form, path, body, method = "POST") {
   const b = form.querySelector("button[type=submit]"); if (b) b.disabled = true;
   try { await api(path, { method, body: JSON.stringify(body) }); return true; } catch (er) { formErr(form, er.message); return false; }
 }
-document.addEventListener("toggle", (e) => { if (e.target.classList && e.target.classList.contains("pf-tax")) S.pf.taxOpen = e.target.open; }, true);
+document.addEventListener("toggle", (e) => { if (e.target.classList && e.target.classList.contains("pf-tax")) S.pf.taxOpen = e.target.open; if (e.target.classList && e.target.classList.contains("wl-man")) S.wl.manage = e.target.open; }, true);
 document.addEventListener("submit", async (e) => {
   const f = e.target, id = f.getAttribute("id");       // not f.id: a field named "id" would hide it
   if (id === "thesis") { e.preventDefault(); return SK.saveNote(f); }
+  if (id === "wladd") { e.preventDefault(); const t = f.querySelector("[name=text]").value; f.querySelector("[name=text]").value = ""; document.activeElement && document.activeElement.blur(); return WL.addText(t); }
+  if (id === "wlren") { e.preventDefault(); return WL.rename(f); }
   if (id === "pftax") { e.preventDefault(); document.activeElement && document.activeElement.blur(); return PFV.saveTax(f); }
   if (["buy", "sell", "plan", "wmeta", "move"].includes(id)) {
     e.preventDefault();
@@ -463,7 +455,7 @@ document.addEventListener("submit", async (e) => {
     } else if (id === "move") {
       if (await sendForm(f, "/api/portfolio/move", { id: v.lot, book: v.book })) { toast("Moved to " + v.book); keep(); document.activeElement && document.activeElement.blur(); await loadPortfolio(); paintSheet(); }
     } else {
-      if (await sendForm(f, "/api/watchlist", { sym, list: S.wl.list, note: v.note, above: v.above, below: v.below, to: v.to || "" }, "PATCH")) {
+      if (await sendForm(f, "/api/watchlist", { sym, list: myList(), note: v.note, above: v.above, below: v.below, to: v.to || "" }, "PATCH")) {
         toast(v.to ? sym + " moved to " + v.to : "Saved"); keep(); await loadWatchlist(); document.activeElement && document.activeElement.blur(); paintSheet(); }
     }
     return;
@@ -486,9 +478,9 @@ function pfInput(el, ev) {                                // a control on the Po
   paint();
 }
 let nwTimer = 0;
-document.addEventListener("input", (e) => { if (e.target.id === "q" || e.target.id === "mq") onSearch(e.target.value); else if (e.target.dataset.pf) pfInput(e.target, "input"); else if (e.target.dataset.rs) SK.input(e.target, "input");
+document.addEventListener("input", (e) => { if (e.target.id === "q" || e.target.id === "mq") onSearch(e.target.value); else if (e.target.dataset.pf) pfInput(e.target, "input"); else if (e.target.dataset.wl) WL.input(e.target, "input"); else if (e.target.dataset.rs) SK.input(e.target, "input");
   else if (e.target.dataset.nw) { S.nw[e.target.dataset.nw] = e.target.value; clearTimeout(nwTimer); nwTimer = setTimeout(paint, 180); } });
-document.addEventListener("change", (e) => { if (e.target.dataset.rs) return SK.input(e.target, "change"); if (e.target.dataset.mf === "pick") { S.mf.pick = e.target.value; paint(); return; } if (e.target.dataset.act === "sort") { S.sort = e.target.value; paint(); } else if (e.target.dataset.pf) pfInput(e.target, "change"); });
+document.addEventListener("change", (e) => { if (e.target.dataset.rs) return SK.input(e.target, "change"); if (e.target.dataset.wl) return WL.input(e.target, "change"); if (e.target.dataset.mf === "pick") { S.mf.pick = e.target.value; paint(); return; } if (e.target.dataset.act === "sort") { S.sort = e.target.value; paint(); } else if (e.target.dataset.pf) pfInput(e.target, "change"); });
 document.addEventListener("pointermove", chartMove, { passive: true });
 document.addEventListener("pointerdown", chartMove, { passive: true });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") { if (S.sheet) closeSheet(); else endSearch(); }
@@ -496,7 +488,8 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") { if (S.sh
 document.addEventListener("click", async (e) => {
   const a = e.target.closest("[data-act]"), act = a && a.dataset.act;
   if (act) {
-    if (act === "remove") { e.preventDefault(); e.stopPropagation(); await removeStock(a.dataset.s); if (S.sheet) paintSheet(); return; }
+    if (act && act.startsWith("wl")) { e.preventDefault(); e.stopPropagation(); return WL.act(act, a); }
+    if (act === "remove") { e.preventDefault(); e.stopPropagation(); if (S.tab === "watchlist" && S.wl.list !== "Arka desk") { closeSheet(); return WL.remove([a.dataset.s], true); } await removeStock(a.dataset.s); if (S.sheet) paintSheet(); return; }
     if (act === "add") { await addStock(a.dataset.s); if (S.sheet) paintSheet(); return; }
     if (act === "undo") { const u = S.undo; $("#toast").innerHTML = ""; if (u) u(); return; }
     if (act === "close") { if (a.tagName === "A") { closeSheet(); return; } return closeSheet(); }
@@ -505,7 +498,7 @@ document.addEventListener("click", async (e) => {
     if (act === "nrmode") { S.nw.rmode = a.dataset.v; return paint(); }
     if (act === "sksheet") return openSheet(a.dataset.s);
     if (act === "range") { S.sheet.range = a.dataset.v; return paintSheet(); }
-    if (act === "list") { S.wl.list = a.dataset.v; paint(); return refresh(); }
+    if (act === "list") { S.wl.list = a.dataset.v; S.wl.flt = "All"; S.wl.q = ""; S.wl.addMsg = ""; S.wl.sel = {}; paint(); refresh(); return WL.load(); }
     if (act === "sigtab") { S.sigTab = a.dataset.v; if (S.sigTab === "Big players") loadDeals(); return paint(); }
     if (act === "buyform") { S.sheet = { form: "buy", sym: a.dataset.s || "" }; paintSheet(); const i = $("#buy input[name=" + (a.dataset.s ? "qty" : "sym") + "]"); if (i) i.focus(); return; }
     if (act === "dellot") { if (!confirm("Delete this buy? This cannot be undone.")) return; try { await api("/api/portfolio?id=" + a.dataset.id, { method: "DELETE" }); toast("Buy deleted"); } catch (er) { toast(er.message); }
@@ -552,7 +545,7 @@ document.addEventListener("click", async (e) => {
 window.addEventListener("hashchange", route);
 window.addEventListener("scroll", () => { if (S.tab === "home") HM.spy(); }, { passive: true });
 document.addEventListener("visibilitychange", () => { if (!document.hidden && S.me) refresh(); });
-setInterval(() => { if (S.me && !document.hidden && marketOpen()) refresh(); if (S.me && !document.hidden && (S.tab === "news" || ((S.tab === "home" || S.tab === "s") && innerWidth >= 1280 && railPref()))) { NW.loadNews(); paint(); } }, 30000);
+setInterval(() => { if (S.me && !document.hidden && marketOpen() && !(S.tab === "watchlist" && !S.wl.auto)) refresh(); if (S.me && !document.hidden && S.tab === "watchlist") paint(); if (S.me && !document.hidden && (S.tab === "news" || ((S.tab === "home" || S.tab === "s") && innerWidth >= 1280 && railPref()))) { NW.loadNews(); paint(); } }, 30000);
 let rsTimer = 0, lastW = innerWidth;
 window.addEventListener("resize", () => { clearTimeout(rsTimer); rsTimer = setTimeout(() => { if (S.me && (innerWidth >= 1280) !== (lastW >= 1280) || (innerWidth >= 900) !== (lastW >= 900)) paint(); lastW = innerWidth; }, 200); });
 boot();
