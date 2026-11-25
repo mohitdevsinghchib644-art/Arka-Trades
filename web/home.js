@@ -96,6 +96,14 @@ const iso2 = (t) => `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "
 const wday = (s) => dateOf(s).getDay();                                       // 0 Sunday … 6 Saturday
 export const isTradingDay = (s) => wday(s) >= 1 && wday(s) <= 5 && !HOLIDAYS[s];
 const nextTradingDay = (s) => { let n = addDays(s, 1); for (let i = 0; i < 15 && !isTradingDay(n); i++) n = addDays(n, 1); return n; };
+// Sessions the nightly "Market data" job should already have published: a trading day counts once its evening runs are done (22:00 IST).
+export function dataBehind(asof, now = istNow()) {
+  if (!asof) return { n: 0, due: null };
+  let due = iso2(now); if (now.getHours() < 22) due = addDays(due, -1);
+  due = prevTradingOnOrBefore(due); let n = 0;
+  for (let d = addDays(asof, 1), i = 0; d <= due && i < 60; d = addDays(d, 1), i++) if (isTradingDay(d)) n++;
+  return { n, due };
+}
 const prevTradingOnOrBefore = (s) => { for (let i = 0; i < 15 && !isTradingDay(s); i++) s = addDays(s, -1); return s; };
 const fmtDay = (s, o = { weekday: "short", day: "2-digit", month: "short" }) => dateOf(s).toLocaleDateString("en-IN", o);
 export function session(now = istNow()) {
