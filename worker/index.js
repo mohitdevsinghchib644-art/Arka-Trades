@@ -774,6 +774,21 @@ async function signals(env, ctx) {
   const text = await repoFile(env, ctx, "arka_data/signals/signals.json");
   return text == null ? fail(502, "The signal file could not be read.") : raw(text);
 }
+// the desk's other files: candles for the chart picker, the index option chain (NIFTY and BANKNIFTY rows only) and the live order log
+async function deskFile(env, ctx, url) {
+  const f = url.searchParams.get("f");
+  if (f === "charts") { const t = await repoFile(env, ctx, "arka_data/signals/charts.json"); return t == null ? json({}) : raw(t); }
+  if (f === "chain") { const t = await repoFile(env, ctx, "arka_data/fno/chain_latest.csv", 1800); return json({ rows: t == null ? [] : chainRows(t) }); }
+  if (f === "log") { const t = await repoFile(env, ctx, "arka_data/signals/log.csv"); if (t == null) return json({ rows: [] });
+    const [head, ...rows] = parseCsv(t); return json({ rows: rows.map((r) => Object.fromEntries((head || []).map((h, i) => [h.trim(), r[i] ?? ""]))) }); }
+  return fail(400, "Which file?");
+}
+export function chainRows(text) {                          // chain_latest.csv → [{sym, exp, strike, ce_oi, pe_oi}] for the two indexes (a line scan: the file has every F&O stock)
+  const lines = String(text).split("\n"), h = (lines[0] || "").trim().split(","), ix = Object.fromEntries(h.map((k, i) => [k, i])), out = [];
+  for (let i = 1; i < lines.length; i++) { const l = lines[i]; if (!(l.startsWith("NIFTY,") || l.startsWith("BANKNIFTY,"))) continue;
+    const c = l.trim().split(","); out.push({ sym: c[ix.sym], exp: c[ix.exp], strike: c[ix.strike], ce_oi: c[ix.ce_oi], pe_oi: c[ix.pe_oi] }); }
+  return out;
+}
 export function parseCsv(text) {                           // small CSV reader (handles quoted names with commas)
   const rows = [];
   for (const line of String(text || "").split(/\r?\n/)) {
@@ -853,6 +868,7 @@ export default {
       if (p === "/api/dlvlast") return dlvMany(env, ctx, url);
       if (p === "/api/cal") return calMany(url, ctx);
       if (p === "/api/signals") return signals(env, ctx);
+      if (p === "/api/desk") return deskFile(env, ctx, url);
       if (p === "/api/deals") return deals(env, ctx);
       if (p === "/api/brief") return brief(env, ctx);
       if (p === "/api/market") return market(env, ctx, url);
