@@ -1,5 +1,8 @@
 """
-Arka Trades — market_export.py (v1.2)
+Arka Trades — market_export.py (v1.4)
+
+v1.4: NSE deliveries (python market_export.py delivery): delivered and traded quantity for every stock over the last 260 sessions,
+      one small file per stock (dlv/SYMBOL.json), for the Research DLV, PB, SC and OV screens of the new app.
 
 v1.3: names.json, NSE's company names by symbol (news tagging and filings in the new app).
 v1.2: Money flow (python market_export.py flow): the rotation engine of money_flow.py with the classic page's default data options
@@ -13,6 +16,7 @@ after the market closes.
 
     python market_export.py regime            # Regime for Nifty 500, Nifty 200 and Nifty 100
     python market_export.py names             # NSE company names by symbol (names.json)
+    python market_export.py delivery          # NSE deliveries per stock (dlv/SYMBOL.json), only new days are downloaded
     python market_export.py flow              # Money flow: flow.json (page), flow_sectors.json (sector view), flow_fpi.json
     python market_export.py regime --out DIR
 
@@ -317,10 +321,83 @@ def run_names(out: Path) -> list:
     return []
 
 
+def run_delivery(out: Path, sessions: int = 260, max_new: int = 330) -> list:
+    """Delivered vs traded quantity per stock from NSE's daily security-wise bhavcopy (research_data.parse_bhavcopy, the file the
+    classic DLV screen reads). A rolling store (dlv/_store.csv.gz) keeps every day already fetched, so after the first run only
+    the new day is downloaded. Writes dlv/SYMBOL.json = {"d": dates, "c": close, "p": previous close, "v": traded qty, "q": delivered qty}."""
+    import time
+    from datetime import timedelta
+    import requests
+    import research_data as rd
+    folder = out / "dlv"
+    folder.mkdir(parents=True, exist_ok=True)
+    store_f, miss_f = folder / "_store.csv.gz", folder / "_missing.json"
+    cols = ["symbol", "date", "close", "prev_close", "volume", "deliv_qty"]
+    store = pd.read_csv(store_f, dtype={"symbol": str, "date": str}) if store_f.exists() else pd.DataFrame(columns=cols)
+    missing = set(json.loads(miss_f.read_text())) if miss_f.exists() else set()
+    have = set(store["date"].astype(str))
+    now = datetime.now(qd.IST)
+    today = now.date()
+    days = [today - timedelta(days=i) for i in range(0, int(sessions * 1.5) + 10)]
+    floor = min(have) if len(have) >= sessions else ""             # once the store is full, older days are not fetched again
+    days = [d for d in days if d.weekday() < 5 and d.isoformat() > floor and d.isoformat() not in have and d.isoformat() not in missing and not (d == today and now.hour < 19)]
+    got, errors, frames = 0, 0, []
+    for d in days[:max_new]:                                        # newest first
+        res = None
+        for u in rd.BHAV_URLS:
+            try:
+                r = requests.get(u.format(d=f"{d:%d%m%Y}"), headers={"User-Agent": rd.UA, "Accept": "text/csv,*/*"}, timeout=20)
+            except Exception:
+                continue
+            if r.status_code == 404:
+                res = "missing"
+                break
+            if r.status_code == 200 and "SYMBOL" in r.text[:200].upper():
+                res = rd.parse_bhavcopy(r.text)
+                break
+        if isinstance(res, pd.DataFrame):
+            res = res.assign(o=res["series"].map(lambda v: 0 if v == "EQ" else 1)).sort_values("o").drop_duplicates("symbol")
+            frames.append(res[cols])
+            got, errors = got + 1, 0
+        elif res == "missing":
+            if (today - d).days > 4:                                # a holiday (NSE sometimes publishes a day late, so recent gaps are retried)
+                missing.add(d.isoformat())
+        else:
+            errors += 1
+            if errors >= 6:
+                print("delivery: NSE archive not answering, stopping for today", file=sys.stderr)
+                break
+        time.sleep(0.25)
+    if frames:
+        store = pd.concat([store] + frames, ignore_index=True)
+    if store.empty:
+        print("delivery: nothing fetched", file=sys.stderr)
+        return []
+    store["date"] = store["date"].astype(str)
+    store = store.drop_duplicates(["symbol", "date"], keep="last")
+    keep = sorted(store["date"].unique())[-sessions:]
+    store = store[store["date"].isin(keep)].sort_values(["symbol", "date"])
+    store.to_csv(store_f, index=False, compression="gzip")
+    miss_f.write_text(json.dumps(sorted(m for m in missing if m >= keep[0])))
+    n = lambda v: None if pd.isna(v) else (int(v) if float(v).is_integer() else round(float(v), 2))
+    written = set()
+    for sym, g in store.groupby("symbol"):
+        if not sym or not all(ch.isalnum() or ch in "&-_." for ch in sym):
+            continue
+        (folder / f"{sym}.json").write_text(json.dumps({"d": g["date"].tolist(), "c": [n(v) for v in g["close"]], "p": [n(v) for v in g["prev_close"]],
+                                                       "v": [n(v) for v in g["volume"]], "q": [n(v) for v in g["deliv_qty"]]}, separators=(",", ":")))
+        written.add(f"{sym}.json")
+    for old in folder.glob("*.json"):
+        if not old.name.startswith("_") and old.name not in written:
+            old.unlink()
+    print(f"delivery: {got} new day(s), {len(keep)} sessions kept, {len(written)} stocks")
+    return ["dlv/"]
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("what", choices=["regime", "flow", "names"])
+    ap.add_argument("what", choices=["regime", "flow", "names", "delivery"])
     ap.add_argument("--out", default=str(OUT))
     a = ap.parse_args()
-    got = {"regime": run_regime, "flow": run_flow, "names": run_names}[a.what](Path(a.out))
+    got = {"regime": run_regime, "flow": run_flow, "names": run_names, "delivery": run_delivery}[a.what](Path(a.out))
     sys.exit(0 if got else 1)
