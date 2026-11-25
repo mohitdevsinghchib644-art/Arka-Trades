@@ -5,7 +5,7 @@ import { nice } from "./app.js";
 const CH = new Map(); let chN = 0;
 export function resetCharts() { CH.clear(); chN = 0; }
 
-// dates: ["YYYY-MM-DD"]; series: [{n, c, v, w, dash, fill}]; o: {h, fmt, bands: [[i0, i1, colour]], hlines: [[y, colour]], log, bars}
+// dates: ["YYYY-MM-DD"]; series: [{n, c, v, w, dash, fill}]; o: {h, fmt, bands: [[i0, i1, colour]], hlines: [[y, colour]], log, bars, marks: [[i, price, "up"|"dn"]]}
 export function lineChart(dates, series, o = {}) {
   const H = o.h || 220, W = 1000, n = dates.length, tf = o.log ? (v) => (v > 0 ? Math.log(v) : null) : (v) => v;
   const all = series.flatMap((s) => s.v.map(tf).filter((x) => x != null && isFinite(x))).concat((o.hlines || []).map((x) => tf(x[0])).filter((x) => x != null));
@@ -25,7 +25,7 @@ export function lineChart(dates, series, o = {}) {
   const ticks = [0, 1, 2, 3].map((k) => { const t = lo + ((hi - lo) * (k + 0.5)) / 4; return o.log ? Math.exp(t) : t; });
   CH.set(id, { dates, series, fmt, extra: o.extra });
   return `<div class="ch" data-ch="${id}"><div class="rd">${readout(id, n - 1)}</div><div class="plot" style="height:${H}px"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${bands}${
-    ticks.map((t) => `<line x1="0" x2="${W}" y1="${Y(t).toFixed(1)}" y2="${Y(t).toFixed(1)}" stroke="rgba(255,255,255,.06)" vector-effect="non-scaling-stroke"/>`).join("")}${hl}${bars}${paths}</svg><i class="vx"></i>${
+    ticks.map((t) => `<line x1="0" x2="${W}" y1="${Y(t).toFixed(1)}" y2="${Y(t).toFixed(1)}" stroke="rgba(255,255,255,.06)" vector-effect="non-scaling-stroke"/>`).join("")}${hl}${bars}${paths}</svg>${(o.marks || []).filter(([i, v]) => i >= 0 && i < n && v != null && isFinite(tf(v))).map(([i, v, cl]) => `<b class="mk ${cl}" style="left:${((X(i) / W) * 100).toFixed(2)}%;top:${((Y(v) / H) * 100).toFixed(2)}%"></b>`).join("")}<i class="vx"></i>${
     ticks.map((t) => `<em style="top:${((Y(t) / H) * 100).toFixed(1)}%">${fmt(t)}</em>`).join("")}</div><div class="xl"><span>${nice(dates[0])}</span><span>${nice(dates[n >> 1])}</span><span>${nice(dates[n - 1])}</span></div></div>`;
 }
 function readout(id, i) {
