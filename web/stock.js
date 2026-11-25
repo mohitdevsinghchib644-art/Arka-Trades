@@ -193,13 +193,50 @@ export function paintInto(main) {
 const swQty = (v) => { if (v == null || !isFinite(v)) return "—"; for (const [d, s] of [[1e7, " Cr"], [1e5, " L"], [1e3, " K"]]) if (Math.abs(v) >= d) return E.fx(v / d, 2) + s; return E.fx(v, 0); };
 
 // ── the pro chart (chart_engine.py, drawn with TradingView's Lightweight Charts in a frame) ──
+// ── the index the RS line is measured against (chart_engine.RS_INDICES, rs_candidates, render_rs_index_setting) ──
+export const RS_INDICES = { "NIFTY 50": ["^NSEI"], "NIFTY 500": ["^CRSLDX"], "NIFTY NEXT 50": ["^NSMIDCP"], "NIFTY MIDCAP 100": ["NIFTY_MIDCAP_100.NS", "^CRSMID"], "NIFTY SMALLCAP 100": ["^CNXSC"], "BANK NIFTY": ["^NSEBANK"],
+  "NIFTY IT": ["^CNXIT"], "NIFTY AUTO": ["^CNXAUTO"], "NIFTY PHARMA": ["^CNXPHARMA"], "NIFTY FMCG": ["^CNXFMCG"], "NIFTY METAL": ["^CNXMETAL"], "NIFTY ENERGY": ["^CNXENERGY"],
+  "NIFTY MIDSMALLCAP 400": ["NIFTYMIDSML400.NS", "NIFTY_MIDSML_400.NS"], "NIFTY PSU BANK": ["^CNXPSUBANK"], "NIFTY REALTY": ["^CNXREALTY"] };
+export function rsCandidates(name) {                         // Yahoo tickers to try for an index name: a known label, or what was typed (NSE:NIFTYMIDSML400, ^CNXIT, NIFTY_FIN_SERVICE.NS …)
+  const raw = String(name || "").trim(); if (RS_INDICES[raw.toUpperCase()]) return RS_INDICES[raw.toUpperCase()];
+  const t = raw.toUpperCase().replace("NSE:", "").replace("BSE:", "").trim();
+  if (!t || !/^[\^A-Z0-9_.&\- ]{1,40}$/.test(t)) return [];
+  if (t.startsWith("^") || t.endsWith(".NS") || t.endsWith(".BO")) return [t];
+  const compact = t.replace(/ /g, ""), under = t.replace(/ /g, "_");
+  return [...new Set([compact + ".NS", under + ".NS", "^" + compact, "^CNX" + compact.replace("NIFTY", "")])];
+}
+export const rsLabel = () => { let v = ""; try { v = (localStorage.getItem("arka_rs_index") || "").trim(); } catch { v = ""; } v = v || "NIFTY 50"; return RS_INDICES[v.toUpperCase()] ? v.toUpperCase() : v; };
+async function loadRsIndex(label) {                          // the first ticker that answers with enough history wins
+  const K = S.sk; K.rsIx = K.rsIx || {};
+  if (K.rsIx[label] && (K.rsIx[label].h || Date.now() - K.rsIx[label].at < 600000)) return K.rsIx[label].h;
+  K.rsIx[label] = { h: null, at: Date.now(), busy: true };
+  for (const t of rsCandidates(label)) { try { const d = await api("/api/history?range=5y&s=" + encodeURIComponent(t)), h = (d.history || [])[0]; if (h && h.ok && h.d.length >= 60) { K.rsIx[label] = { h, at: Date.now() }; break; } } catch { /* next ticker */ } }
+  K.rsIx[label].busy = false; return K.rsIx[label].h;
+}
+export async function setRsIndex(name) {                     // pick an index; it is kept only if its history loads
+  const K = S.sk, raw = String(name || "").trim(); if (!raw) return;
+  const label = RS_INDICES[raw.toUpperCase()] ? raw.toUpperCase() : raw, cur = rsLabel();
+  K.rsMsg = "Loading " + label + "…"; K.rsOther = !RS_INDICES[label]; rsBar();
+  const h = await loadRsIndex(label);
+  if (!h) { K.rsMsg = `No price history found for “${label}”. Check the symbol; the RS line keeps using ${cur}.`; return rsBar(); }
+  try { localStorage.setItem("arka_rs_index", label); } catch { /* private mode */ }
+  K.rsMsg = ""; paint();
+}
+function rsBarHtml() {
+  const K = S.sk, cur = rsLabel(), known = Object.keys(RS_INDICES), other = K.rsOther || !RS_INDICES[cur];
+  return `<span>RS line compares with</span><select data-rs="rsix" aria-label="Index for the RS line">${known.map((n) => `<option${!other && n === cur ? " selected" : ""}>${n}</option>`).join("")}<option value="__other"${other ? " selected" : ""}>Another index (type its symbol)</option></select>` +
+    (other ? `<input data-rs="rsixc" value="${esc(RS_INDICES[cur] ? "" : cur)}" placeholder="e.g. NIFTYMIDSML400, NIFTY_FIN_SERVICE.NS, ^CNXIT" autocomplete="off" spellcheck="false" aria-label="Index symbol">` : "") + (K.rsMsg ? `<em>${esc(K.rsMsg)}</em>` : "");
+}
+function rsBar() { const el = document.querySelector(".pc-rs"); if (el) el.innerHTML = rsBarHtml(); }
 function proChart(sym, h) {
   const K = S.sk, D = dataOf(sym);
   if (!D.Hfull) return `<div class="card pc-wait" style="height:${Math.min(h, 360)}px"><div class="note">${D.err.H ? "No chart: Yahoo Finance returned no price history. Try again in a minute." : "Loading the chart…"}</div></div>`;
   if (!K.tpl) { if (!K.tplBusy) { K.tplBusy = true; fetch("/chart.html").then((r) => r.text()).then((t) => { K.tpl = t; paint(); }).catch(() => { K.tplBusy = false; }); } return `<div class="card" style="height:${Math.min(h, 360)}px"><div class="note">Loading the chart…</div></div>`; }
-  const key = `${sym}|${D.Hfull.d.length}|${K.ix ? 1 : 0}`;
+  const label = rsLabel(), rx = (K.rsIx || {})[label];
+  if (!rx) loadRsIndex(label).then(() => paint());
+  const key = `${sym}|${D.Hfull.d.length}|${label}|${rx && rx.h ? 1 : 0}`;
   if (D.chartKey !== key) { D.chartKey = key; D.chartDoc = chartDoc(sym, D.Hfull); }
-  return `<iframe class="pc" title="${esc(sym)} chart" style="height:${h}px" srcdoc="${esc(D.chartDoc)}" data-key="${esc(key)}"></iframe>`;
+  return `<div class="pc-rs">${rsBarHtml()}</div><iframe class="pc" title="${esc(sym)} chart" style="height:${h}px" srcdoc="${esc(D.chartDoc)}" data-key="${esc(key)}"></iframe>`;
 }
 function group(rows, by) {                                   // chart_engine._group: weekly (to Friday) or monthly candles, dated on the last traded day
   const out = [], key = (d) => { if (by === "M") return d.slice(0, 7); const t = new Date(d + "T00:00:00Z"), k = (5 - t.getUTCDay() + 7) % 7; return new Date(t.getTime() + k * 864e5).toISOString().slice(0, 10); };
@@ -222,8 +259,7 @@ export function chartPayload(Hf, ixH, label) {               // chart_engine.bui
   return P;
 }
 function chartDoc(sym, Hf) {
-  let label = "NIFTY 50"; try { label = localStorage.getItem("arka_rs_index") || "NIFTY 50"; } catch { /* default */ }
-  const ixH = (S.sk.ix || {})[label === "NIFTY 500" ? "NIFTY 500" : "NIFTY 50"], P = chartPayload(Hf, ixH, ixH ? label : label);
+  const label = rsLabel(), ixH = ((S.sk.rsIx || {})[label] || {}).h || null, P = chartPayload(Hf, ixH, label);
   return S.sk.tpl.replace("__LIB__", LIB).replace("__PAYLOAD__", JSON.stringify(P || {}).replace(/<\//g, "<\\/")).replace("__SYM__", JSON.stringify(sym).replace(/<\//g, "<\\/")).replace("__MODE__", "chart").replace("__RANGE__", "6M");
 }
 
@@ -445,6 +481,8 @@ let inTimer = 0;
 export function input(el, ev) {                              // a box on the research screen changed
   const k = el.dataset.rs, K = S.sk;
   if (k === "find") { if (ev === "input") find(el.value); return; }
+  if (k === "rsix") { if (ev !== "change") return; if (el.value === "__other") { K.rsOther = true; K.rsMsg = ""; return rsBar(); } K.rsOther = false; return setRsIndex(el.value); }
+  if (k === "rsixc") { if (ev === "change" || ev === "enter") setRsIndex(el.value); return; }
   if (k === "cmd") { if (ev === "enter") { const c = R.resolveCode(el.value); if (c) { K.code = c; K.grp = null; el.value = ""; history.replaceState(null, "", `#/s/${encodeURIComponent(K.sym)}/${c}`); paint(); } else toast("No screen called " + el.value.trim().toUpperCase() + ". Try VAL, PB, DCF or SC."); } return; }
   const text = el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && el.type !== "number");
   if (el.type === "number") { if (ev !== "change") return; const n = el.value === "" ? null : +el.value; if (n == null || !isFinite(n)) return; K.o[k] = n; K.force = true; return paint(); }

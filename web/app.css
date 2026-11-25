@@ -610,3 +610,35 @@ select.rs-in{flex:0 1 220px}
 @container (min-width:1100px){ .fd th.xx,.fd td.xx{display:table-cell} .fd-ks:not(.in){grid-template-columns:repeat(4,minmax(0,1fr))} }
 @container (min-width:1500px){ .fd-ks:not(.in){grid-template-columns:repeat(var(--n,8),minmax(0,1fr))} }
 @container (max-width:1399px){ .fd .xx{display:none !important} }
+
+/* ── Options map (fno_legacy.py views) ── */
+.fo{--sans:var(--font);--green:var(--up);--red:var(--dn);--c:#5AC8FA;container-type:inline-size;width:100%;font-variant-numeric:tabular-nums;color:var(--tx);font-size:13.5px}
+.fo *{box-sizing:border-box} .fo .up{color:var(--up)} .fo .dn{color:var(--dn)} .fo .mu{color:var(--tx3)} .fo .fl{color:var(--tx2);border:0;padding:0}
+.fo-seg{margin:0 0 12px;flex-wrap:wrap}
+.fo-g{display:grid;grid-template-columns:minmax(0,1fr);gap:12px;margin-bottom:12px} .fo-card{background:var(--s1);border:1px solid var(--line);border-radius:var(--r);min-width:0;overflow:hidden}
+.fo-ct{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 16px 10px} .fo-ct b{font-size:14.5px;font-weight:600} .fo-ct span{font-size:12.5px;color:var(--tx3)} .fo-cb{padding:4px 16px 16px}
+.fo-tiles{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));border:1px solid var(--line);border-radius:12px;overflow:hidden;gap:1px;background:var(--line);margin-top:12px} .fo-tiles.two{grid-template-columns:repeat(2,minmax(0,1fr)) !important}
+.fo-tile{padding:10px 12px;background:var(--s1);min-width:0} .fo-tile small{display:block;font-size:12px;color:var(--tx3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis} .fo-tile b{display:block;font-size:16px;font-weight:650;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fo-tile em{display:block;font-size:12px;font-style:normal;color:var(--tx3);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fo-leg{display:flex;gap:4px 14px;flex-wrap:wrap;font-size:12px;color:var(--tx3);margin:6px 0 8px} .fo-leg i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px} .fo-leg b{font-weight:600;color:var(--tx2)}
+.fo-ch{position:relative;width:100%} .fo-ch svg{position:absolute;left:0;top:0;width:calc(100% - 56px);height:100%;overflow:visible} .fo-ch .yl{position:absolute;right:0;width:52px;text-align:right;font-size:11px;color:var(--tx3);transform:translateY(-50%);white-space:nowrap}
+.fo-xl{display:flex;justify-content:space-between;gap:8px;margin:5px 56px 0 0;font-size:11px;color:var(--tx3)}
+.fo-bar{position:relative;height:30px;margin:6px 0 2px} .fo-bar .tr{position:absolute;left:0;right:0;top:13px;height:4px;border-radius:2px;background:var(--s3)} .fo-bar .bd{position:absolute;top:9px;height:12px;border-radius:4px;background:rgba(161,161,170,.18);border:1px solid var(--line2)}
+.fo-bar i{position:absolute;top:5px;width:3px;height:20px;border-radius:2px;transform:translateX(-50%)}
+.fo-mini{display:grid;grid-template-columns:minmax(0,1fr);gap:18px} .fo-tx{font-size:13px;line-height:1.5;color:var(--tx2);margin-top:10px} .fo-note{font-size:12.5px;line-height:1.5;color:var(--tx3);margin-top:10px} .fo-empty{padding:16px;font-size:13.5px;color:var(--tx2);line-height:1.55}
+.fo-pill{display:inline-flex;align-items:center;height:22px;padding:0 9px;border-radius:999px;font-size:12px;font-weight:600;background:var(--s3);color:var(--tx2)} .fo-pill.g{background:rgba(47,208,103,.13);color:var(--up)} .fo-pill.r{background:rgba(255,82,71,.13);color:var(--dn)}
+.fo-tw{overflow:auto;max-height:620px;border-top:1px solid var(--line)} .fo-t{width:100%;border-collapse:collapse;font-size:13.5px}
+.fo-t th{position:sticky;top:0;z-index:1;background:var(--s1);text-align:right;font-size:12px;font-weight:500;color:var(--tx3);padding:9px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+.fo-t td{text-align:right;padding:9px 8px;border-bottom:1px solid var(--line);white-space:nowrap;color:var(--tx2)} .fo-t th:first-child,.fo-t td:first-child{text-align:left;padding-left:16px} .fo-t th:last-child,.fo-t td:last-child{padding-right:16px}
+.fo-t td:first-child{color:var(--tx);font-weight:600;cursor:pointer} .fo-t td:first-child:hover{color:var(--amber)} .fo-t td.l,.fo-t th.l{text-align:left} .fo-t tr:last-child td{border-bottom:0}
+.fo-quad{position:relative;height:400px;border:1px solid var(--line);border-radius:12px;background:var(--s2);overflow:hidden} .fo-quad .h,.fo-quad .v{position:absolute;background:var(--line2)} .fo-quad .h{left:0;right:0;height:1px} .fo-quad .v{top:0;bottom:0;width:1px}
+.fo-quad i{position:absolute;width:8px;height:8px;border-radius:50%;transform:translate(-50%,-50%);opacity:.9} .fo-quad em{position:absolute;font-size:10.5px;font-weight:500;font-style:normal;color:var(--tx2);transform:translate(7px,-50%);white-space:nowrap}
+.fo-quad .q{position:absolute;font-size:11.5px;font-weight:600;color:var(--tx3);padding:8px 10px} .fo .xw{display:none}
+@container (min-width:620px){.fo-tiles{grid-template-columns:repeat(3,minmax(0,1fr))} .fo-tiles.four{grid-template-columns:repeat(4,minmax(0,1fr))} .fo .xw{display:table-cell} .fo-mini{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@container (min-width:900px){.fo-g.two{grid-template-columns:repeat(2,minmax(0,1fr))} .fo-g.three{grid-template-columns:repeat(3,minmax(0,1fr))} .fo-mini.four{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@container (max-width:619px){.fo-quad{height:280px}}
+.fo-tiles{gap:0;background:var(--s1)} .fo-tile{box-shadow:0 0 0 .5px var(--line)}
+.pc-rs{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0 0 8px;font-size:12.5px;color:var(--tx3)} .pc-rs select,.pc-rs input{height:32px;border-radius:9px;border:1px solid var(--line2);background:var(--s1);color:var(--tx);font:inherit;font-size:13px;padding:0 9px}
+.pc-rs input{min-width:260px} .pc-rs em{font-style:normal;color:var(--amber)}
+.wl{container-type:inline-size}
+@container (max-width:900px) and (min-width:560px){ .wl-hd .wide,.wl-row .wide{display:none !important} .wl-hd.v-today,.wl-row.v-today{grid-template-columns:minmax(120px,1.2fr) 90px 84px 72px 72px minmax(150px,1.5fr) 22px} .wl-hd.v-ret,.wl-row.v-ret{grid-template-columns:minmax(120px,1.4fr) 84px repeat(5,72px) 22px} .wl-hd.v-tech,.wl-row.v-tech{grid-template-columns:minmax(120px,1.3fr) 84px 72px 140px 130px 96px 22px} .wl-row{padding-top:6px;padding-bottom:6px} }

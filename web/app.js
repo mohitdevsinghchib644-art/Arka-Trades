@@ -221,7 +221,7 @@ function renderShell() {
     <div id="msearch"></div><main id="main"></main>
     <nav class="nav"><a class="brand only-d" href="#/home"><img src="/icon-180.png" alt="">ARKA <i>TRADES</i></a>
       ${TABS.map(([k, n, d, mob]) => `<a href="#/${k}" data-tab="${k}"${mob ? "" : ' class="only-d"'}>${icon(d)}<span>${n}</span></a>`).join("")}
-      <div class="who">Signed in as <b>${esc(S.me.user)}</b><br>New app · stage 12</div></nav></div>`;
+      <div class="who">Signed in as <b>${esc(S.me.user)}</b><br>New app · stage 14</div></nav></div>`;
 }
 function paint() {
   const main = $("#main"); if (!main || !S.me) return;
@@ -233,7 +233,7 @@ function paint() {
   const keep = ae && main.contains(ae) && ae.dataset && (ae.dataset.nw || ae.dataset.rs === "find" || ae.dataset.wl === "q") ? [ae.dataset.nw ? "nw" : ae.dataset.wl ? "wl" : "rs", ae.dataset.nw || ae.dataset.wl || ae.dataset.rs, ae.selectionStart, ae.selectionEnd] : null;
   main.className = withRail ? "rail" : ["home", "portfolio", "regime", "flow", "news", "s", "signals"].includes(S.tab) ? "wide" : "";
   const y = window.scrollY;
-  const newsSide = (S.tab === "home" || S.tab === "s") && innerWidth >= 1280, showNews = newsSide && railPref();
+  const newsSide = (S.tab === "home" || S.tab === "s" || S.tab === "watchlist") && innerWidth >= 1280, showNews = newsSide && railPref();
   if (newsSide) {                                         // Home and the stock page on a wide screen: the news panel on the right (Streamlit's news rail)
     let wrap = main.querySelector(":scope > .nr-wrap");
     if (!wrap || wrap.dataset.show !== String(showNews)) { main.innerHTML = `<div class="nr-wrap${showNews ? " on" : ""}" data-show="${showNews}">${showNews ? "" : '<button class="nr-show" data-act="nrshow" title="Show the news panel"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h13v14H6a2 2 0 0 1-2-2z"/><path d="M17 9h3v8a2 2 0 0 1-2 2"/><path d="M8 9h5M8 13h5"/></svg>Show news</button>'}<div id="nr-main"></div>${showNews ? '<aside id="nr-rail"></aside>' : ""}</div>`; wrap = main.firstElementChild; }
@@ -455,7 +455,7 @@ document.addEventListener("click", async (e) => {
     if (act === "sksheet") return openSheet(a.dataset.s);
     if (act === "range") { S.sheet.range = a.dataset.v; return paintSheet(); }
     if (act === "list") { S.wl.list = a.dataset.v; S.wl.flt = "All"; S.wl.q = ""; S.wl.addMsg = ""; S.wl.sel = {}; paint(); refresh(); return WL.load(); }
-    if (act === "fdtab") return DK.act(act, a);
+    if (act && act.startsWith("fd")) return DK.act(act, a);
     if (act === "buyform") { S.sheet = { form: "buy", sym: a.dataset.s || "" }; paintSheet(); const i = $("#buy input[name=" + (a.dataset.s ? "qty" : "sym") + "]"); if (i) i.focus(); return; }
     if (act === "dellot") { if (!confirm("Delete this buy? This cannot be undone.")) return; try { await api("/api/portfolio?id=" + a.dataset.id, { method: "DELETE" }); toast("Buy deleted"); } catch (er) { toast(er.message); }
       await loadPortfolio(); return paintSheet(); }
@@ -490,7 +490,8 @@ document.addEventListener("click", async (e) => {
     if (act === "search") return toggleMobileSearch(!S.searching);
     if (act === "logout") { try { await api("/api/logout", { method: "POST" }); } catch { /* ignore */ } S.me = null; return renderLogin(); }
   }
-  const ds = e.target.closest(".fd span.s > b, .fd .fd-oc > div > b");      // a symbol on the desk opens its stock page
+  const ds = e.target.closest(".fd span.s > b, .fd .fd-oc > div > b, .fo .fo-t td:first-child");      // a symbol on the desk opens its stock page
+  if (ds && ds.closest(".fo") && /^[A-Z0-9&_-]{1,24}$/.test(ds.textContent)) return DK.openOm(ds.textContent);      // a row of the F&O stock table opens that stock's option chain below
   if (ds && /^[A-Z0-9&_-]{1,24}$/.test(ds.textContent)) { location.hash = "#/s/" + encodeURIComponent(ds.textContent); return; }
   const s = e.target.closest("[data-sym]");
   if (s) {                                                 // a search result, or a stock on the stock page, opens the full stock page; elsewhere the quick sheet
@@ -503,7 +504,7 @@ document.addEventListener("click", async (e) => {
 window.addEventListener("hashchange", route);
 window.addEventListener("scroll", () => { if (S.tab === "home") HM.spy(); }, { passive: true });
 document.addEventListener("visibilitychange", () => { if (!document.hidden && S.me) refresh(); });
-setInterval(() => { if (S.me && !document.hidden && marketOpen() && !(S.tab === "watchlist" && !S.wl.auto)) refresh(); if (S.me && !document.hidden && S.tab === "watchlist") paint(); if (S.me && !document.hidden && (S.tab === "news" || ((S.tab === "home" || S.tab === "s") && innerWidth >= 1280 && railPref()))) { NW.loadNews(); paint(); } }, 30000);
+setInterval(() => { if (S.me && !document.hidden && marketOpen() && !(S.tab === "watchlist" && !S.wl.auto)) refresh(); if (S.me && !document.hidden && S.tab === "watchlist") paint(); if (S.me && !document.hidden && (S.tab === "news" || ((S.tab === "home" || S.tab === "s" || S.tab === "watchlist") && innerWidth >= 1280 && railPref()))) { NW.loadNews(); paint(); } }, 30000);
 let rsTimer = 0, lastW = innerWidth;
 window.addEventListener("resize", () => { clearTimeout(rsTimer); rsTimer = setTimeout(() => { if (S.me && (innerWidth >= 1280) !== (lastW >= 1280) || (innerWidth >= 900) !== (lastW >= 900)) paint(); lastW = innerWidth; }, 200); });
 boot();
