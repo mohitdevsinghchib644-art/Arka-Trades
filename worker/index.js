@@ -1,4 +1,4 @@
-// Arka Trades · API (stage 7: adds the news sources, one per request). Runs on Cloudflare for every request to /api/*.
+// Arka Trades · API (stage 8: adds the stock page and research sources: Screener, Yahoo company details, BSE filings, NSE deliveries, notes). Runs on Cloudflare for every request to /api/*.
 // Secrets are read by NAME from the Cloudflare project settings and never sent to the browser:
 //   ADMIN_USER, ADMIN_PASS, MEMBER_USER, MEMBER_PASS, AUTH_SECRET   sign-in (same names and values as in Streamlit)
 //   SUPABASE_URL, SUPABASE_KEY                                      watchlist storage (same as in Streamlit)
@@ -127,16 +127,16 @@ export function historyFrom(sym, data) {
   if (!res || !res.timestamp) return { sym, ok: false };
   const off = (res.meta && res.meta.gmtoffset) || 19800, q = ((res.indicators || {}).quote || [{}])[0], r2 = (v) => (v == null ? null : +v.toFixed(2));
   const rows = new Map();                               // one row per day, the last one wins; days with no close are dropped
-  res.timestamp.forEach((t, i) => { const c = q.close && q.close[i]; if (c != null) rows.set(dayOf(t, off), [r2(c), r2(q.high && q.high[i]), r2(q.low && q.low[i]), (q.volume && q.volume[i]) || 0]); });
+  res.timestamp.forEach((t, i) => { const c = q.close && q.close[i]; if (c != null) rows.set(dayOf(t, off), [r2(c), r2(q.high && q.high[i]), r2(q.low && q.low[i]), (q.volume && q.volume[i]) || 0, r2(q.open && q.open[i])]); });
   const d = [...rows.keys()].sort(), col = (k) => d.map((x) => rows.get(x)[k]);
   const ev = res.events || {}, list = (o, f) => Object.values(o || {}).map(f).filter((x) => x[1] > 0).sort((a, b) => (a[0] < b[0] ? -1 : 1));
-  return { sym, ok: d.length > 0, d, c: col(0), h: col(1), l: col(2), v: col(3),
+  return { sym, ok: d.length > 0, d, c: col(0), h: col(1), l: col(2), v: col(3), o: col(4),
            splits: list(ev.splits, (x) => [dayOf(x.date, off), x.denominator ? x.numerator / x.denominator : 0]),
            divs: list(ev.dividends, (x) => [dayOf(x.date, off), +Number(x.amount).toFixed(4)]) };
 }
 async function history(url, ctx) {
   const list = [...new Set((url.searchParams.get("s") || "").toUpperCase().split(",").map((s) => s.trim()).filter((s) => SYM_OK.test(s)))].slice(0, 6);     // few per call: a free Worker has little CPU time per request
-  const range = ["1y", "2y", "5y", "10y"].includes(url.searchParams.get("range")) ? url.searchParams.get("range") : "5y";
+  const range = ["1y", "2y", "5y", "10y", "max"].includes(url.searchParams.get("range")) ? url.searchParams.get("range") : "5y";
   const out = await Promise.all(list.map(async (sym) => {
     try { return historyFrom(sym, await yahoo(`/v8/finance/chart/${encodeURIComponent(ySym(sym))}?range=${range}&interval=1d&events=div%2Csplits`, ctx, 1800)); }
     catch { return { sym, ok: false }; }
@@ -292,6 +292,180 @@ async function feed(url, ctx) {
     return json({ ok: false, err: String(e && e.name === "TimeoutError" ? "Timeout" : (e && e.message) || "failed").slice(0, 60), rows: prev ? prev.rows : [], at: prev ? prev.at : null });
   }
 }
+// ── research: the sources the classic Research terminal reads (research_page.py, screener_scraper.py, research_data.py) ──
+// The pages are passed to the browser almost as they come; the browser parses them (cheap here, and the Worker stays fast).
+const SCREENER = "https://www.screener.in";
+const HTML_HEAD = { "user-agent": UA, accept: "text/html,application/xhtml+xml" };
+async function cached(key, ttl, make, ctx, lastTtl = 3 * 86400) {      // a fresh copy for ttl, the last good copy for lastTtl when the source fails
+  const cache = typeof caches !== "undefined" && caches.default, k = new Request("https://cache.arka/" + key), l = new Request("https://cache.arka/last/" + key);
+  if (cache) { const hit = await cache.match(k); if (hit) return { ...(await hit.json()), cached: true }; }
+  try {
+    const v = await make();
+    if (cache) { const body = JSON.stringify(v), a = cache.put(k, new Response(body, { headers: { "cache-control": `max-age=${ttl}` } })), b = cache.put(l, new Response(body, { headers: { "cache-control": `max-age=${lastTtl}` } }));
+      ctx && ctx.waitUntil ? ctx.waitUntil(Promise.all([a, b])) : await Promise.all([a, b]); }
+    return v;
+  } catch (e) {
+    const old = cache ? await cache.match(l) : null;
+    if (old) return { ...(await old.json()), stale: true, err: String(e.message || e).slice(0, 80) };
+    throw e;
+  }
+}
+const slim = (html) => String(html).replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<svg[\s\S]*?<\/svg>/gi, "").replace(/<!--[\s\S]*?-->/g, "");
+async function screener(url, ctx) {                     // screener_scraper.resolve_symbol + one page fetch
+  const sym = cleanSym(url.searchParams.get("s"));
+  if (!sym) return fail(400, "Which stock?");
+  try {
+    const v = await cached("screener/" + sym, 6 * 3600, async () => {
+      const get = async (u) => { const r = await fetch(u, { headers: HTML_HEAD, redirect: "follow" }); return r.ok ? r.text() : null; };
+      for (const path of [`/company/${encodeURIComponent(sym)}/consolidated/`, `/company/${encodeURIComponent(sym)}/`]) {
+        const html = await get(SCREENER + path);
+        if (html && html.includes("Screener")) return { ok: true, url: SCREENER + path, html: slim(html), at: Date.now() };
+      }
+      const r = await fetch(`${SCREENER}/api/company/search/?q=${encodeURIComponent(sym)}`, { headers: { ...HTML_HEAD, accept: "application/json" } });
+      const first = r.ok ? ((await r.json()) || [])[0] : null;
+      if (first && first.url) { let u = SCREENER + first.url; if (!u.endsWith("/")) u += "/"; const html = await get(u); if (html) return { ok: true, url: u, html: slim(html), at: Date.now() }; }
+      throw new Error("not found on Screener");
+    }, ctx);
+    return json(v);
+  } catch (e) { return json({ ok: false, err: "Screener unavailable right now (" + String(e.message || e).slice(0, 60) + ")" }); }
+}
+async function screenerPeers(url, ctx) {                // data_engine._peers_cached: Screener's peer table for one company id
+  const id = String(url.searchParams.get("id") || "");
+  if (!/^\d{1,9}$/.test(id)) return fail(400, "Which company?");
+  try {
+    return json(await cached("peers/" + id, 6 * 3600, async () => {
+      const r = await fetch(`${SCREENER}/api/company/${id}/peers/`, { headers: { ...HTML_HEAD, "x-requested-with": "XMLHttpRequest", referer: SCREENER + "/" } });
+      const html = r.ok ? await r.text() : "";
+      if (!/<table/i.test(html)) throw new Error("no peer table");
+      return { ok: true, html };
+    }, ctx));
+  } catch (e) { return json({ ok: false, err: String(e.message || e).slice(0, 80) }); }
+}
+// Yahoo company details: profile, analyst targets and ratings, rating changes, next results date, and the yearly statement lines
+// the classic page reads through yfinance (info, analyst_price_targets, recommendations, upgrades_downgrades, balance_sheet, cashflow).
+async function yahooAuth(ctx) {
+  const cache = typeof caches !== "undefined" && caches.default, key = new Request("https://cache.arka/yahoo-crumb");
+  if (cache) { const hit = await cache.match(key); if (hit) return hit.json(); }
+  const r = await fetch("https://fc.yahoo.com/", { headers: { "user-agent": UA }, redirect: "manual" });
+  const ck = (r.headers.get("set-cookie") || "").split(/,(?=\s*[A-Za-z0-9_]+=)/).map((c) => c.split(";")[0].trim()).filter(Boolean).join("; ");
+  const c = await fetch("https://query2.finance.yahoo.com/v1/test/getcrumb", { headers: { "user-agent": UA, cookie: ck } });
+  const crumb = c.ok ? (await c.text()).trim() : "";
+  if (!crumb || crumb.length > 40 || /</.test(crumb)) throw new Error("Yahoo sign-in token not given");
+  const v = { ck, crumb };
+  if (cache) { const put = cache.put(key, new Response(JSON.stringify(v), { headers: { "cache-control": "max-age=21600" } })); ctx && ctx.waitUntil ? ctx.waitUntil(put) : await put; }
+  return v;
+}
+const rawv = (x) => (x && typeof x === "object" && "raw" in x ? x.raw : x && typeof x === "object" && "fmt" in x ? x.fmt : x);
+export function yinfoFrom(qs, ts) {
+  const R = ((qs || {}).quoteSummary || {}).result || [], m = R[0] || {}, ap = m.assetProfile || {}, fd = m.financialData || {}, ce = m.calendarEvents || {}, sd = m.summaryDetail || {};
+  const info = { longBusinessSummary: ap.longBusinessSummary || null, fullTimeEmployees: rawv(ap.fullTimeEmployees) ?? null, sector: ap.sector || null, industry: ap.industry || null,
+    companyOfficers: (ap.companyOfficers || []).map((o) => ({ name: o.name, title: o.title, age: rawv(o.age) ?? null, totalPay: rawv(o.totalPay) ?? null })),
+    targetMeanPrice: rawv(fd.targetMeanPrice) ?? null, targetHighPrice: rawv(fd.targetHighPrice) ?? null, targetLowPrice: rawv(fd.targetLowPrice) ?? null, targetMedianPrice: rawv(fd.targetMedianPrice) ?? null,
+    currentPrice: rawv(fd.currentPrice) ?? null, numberOfAnalystOpinions: rawv(fd.numberOfAnalystOpinions) ?? null, recommendationKey: fd.recommendationKey || null,
+    totalDebt: rawv(fd.totalDebt) ?? null, totalCash: rawv(fd.totalCash) ?? null, ebitda: rawv(fd.ebitda) ?? null, dividendYield: rawv(sd.dividendYield) ?? null };
+  const targets = info.targetMeanPrice != null ? { current: info.currentPrice, high: info.targetHighPrice, low: info.targetLowPrice, mean: info.targetMeanPrice, median: info.targetMedianPrice } : {};
+  const rec = ((m.recommendationTrend || {}).trend || []).map((t) => ({ period: t.period, strongBuy: t.strongBuy, buy: t.buy, hold: t.hold, sell: t.sell, strongSell: t.strongSell }));
+  const ud = ((m.upgradeDowngradeHistory || {}).history || []).map((h) => ({ date: new Date((rawv(h.epochGradeDate) || 0) * 1000).toISOString().slice(0, 10), firm: h.firm || "", to: h.toGrade || "", from: h.fromGrade || "", action: h.action || "" }))
+    .sort((a, b) => (a.date < b.date ? 1 : -1));
+  const ed = ((ce.earnings || {}).earningsDate || []).map(rawv).filter(Boolean).map((t) => new Date(t * 1000).toISOString().slice(0, 10)).sort();
+  const today = new Date(Date.now() + 330 * 60000).toISOString().slice(0, 10), next = ed.find((d) => d >= today) || null;
+  // yearly statement lines (fundamentals timeseries), newest year first, as yfinance's frames
+  const S = {}; for (const x of ((ts || {}).timeseries || {}).result || []) { const t = (x.meta || {}).type && x.meta.type[0]; if (!t || !x[t]) continue;
+    S[t] = x[t].filter(Boolean).map((p) => [p.asOfDate, rawv(p.reportedValue)]).sort((a, b) => (a[0] < b[0] ? 1 : -1)); }
+  const col = (t) => (S[t] || []).map((p) => p[1]);
+  const stmt = {};
+  const frame = (pairs) => { const cols = [...new Set(pairs.flatMap(([, t]) => (S[t] || []).map((p) => p[0])))].sort().reverse();
+    const rows = pairs.filter(([, t]) => S[t] && S[t].length).map(([lab, t]) => [lab, cols.map((c) => { const hit = S[t].find((p) => p[0] === c); return hit ? hit[1] : null; })]);
+    return rows.length ? { cols, rows } : null; };
+  stmt.income = frame([["Total Revenue", "annualTotalRevenue"], ["EBITDA", "annualEBITDA"], ["Net Income", "annualNetIncome"], ["Diluted EPS", "annualDilutedEPS"]]);
+  stmt.qincome = frame([["Total Revenue", "quarterlyTotalRevenue"], ["EBITDA", "quarterlyEBITDA"], ["Net Income", "quarterlyNetIncome"], ["Diluted EPS", "quarterlyDilutedEPS"]]);
+  stmt.balance = frame([["Total Assets", "annualTotalAssets"], ["Current Assets", "annualCurrentAssets"], ["Current Liabilities", "annualCurrentLiabilities"], ["Total Debt", "annualTotalDebt"], ["Stockholders Equity", "annualStockholdersEquity"]]);
+  stmt.cashflow = frame([["Operating Cash Flow", "annualOperatingCashFlow"], ["Capital Expenditure", "annualCapitalExpenditure"], ["Free Cash Flow", "annualFreeCashFlow"]]);
+  return { ok: Boolean(R.length), info, targets, rec, ud, earnings: next, bs: { ca: col("annualCurrentAssets"), cl: col("annualCurrentLiabilities") }, cf: { fcf: col("annualFreeCashFlow") }, stmt };
+}
+const TS_TYPES = ["annualTotalRevenue", "annualEBITDA", "annualNetIncome", "annualDilutedEPS", "quarterlyTotalRevenue", "quarterlyEBITDA", "quarterlyNetIncome", "quarterlyDilutedEPS", "annualTotalAssets",
+  "annualCurrentAssets", "annualCurrentLiabilities", "annualTotalDebt", "annualStockholdersEquity", "annualOperatingCashFlow", "annualCapitalExpenditure", "annualFreeCashFlow"];
+async function yinfo(url, ctx) {
+  const sym = cleanSym(url.searchParams.get("s"));
+  if (!sym) return fail(400, "Which stock?");
+  try {
+    return json(await cached("yinfo/" + sym, 6 * 3600, async () => {
+      const a = await yahooAuth(ctx), y = encodeURIComponent(sym + ".NS"), h = { "user-agent": UA, cookie: a.ck, accept: "application/json" };
+      const mods = "assetProfile,financialData,recommendationTrend,upgradeDowngradeHistory,calendarEvents,summaryDetail";
+      const now = Math.floor(Date.now() / 1000);
+      const [q, t] = await Promise.all([
+        fetch(`https://query2.finance.yahoo.com/v10/finance/quoteSummary/${y}?modules=${mods}&crumb=${encodeURIComponent(a.crumb)}`, { headers: h }).then((r) => (r.ok ? r.json() : null)),
+        fetch(`https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/${y}?type=${TS_TYPES.join(",")}&period1=${now - 6 * 366 * 86400}&period2=${now}&crumb=${encodeURIComponent(a.crumb)}`, { headers: h }).then((r) => (r.ok ? r.json() : null)).catch(() => null)]);
+      if (!q) throw new Error("Yahoo company details unavailable");
+      return yinfoFrom(q, t);
+    }, ctx));
+  } catch (e) { return json({ ok: false, err: String(e.message || e).slice(0, 80) }); }
+}
+// BSE corporate filings for one company (research_data._bse_ann_cached): up to 3 pages of 40
+export function bseFilings(pages) {
+  const out = [];
+  for (const data of pages) for (const x of (data || {}).Table || []) {
+    const head = String(x.HEADLINE || x.NEWSSUB || "").trim(); if (!head) continue;
+    const att = String(x.ATTACHMENTNAME || "").trim();
+    out.push({ dt: String(x.DT_TM || x.NEWS_DT || "").slice(0, 16).replace("T", " "), title: head.slice(0, 300), category: String(x.CATEGORYNAME || "").trim() || "Other", sub: String(x.SUBCATNAME || "").trim(),
+      url: att ? `https://www.bseindia.com/xml-data/corpfiling/AttachLive/${att}` : "https://www.bseindia.com/corporates/ann.html" });
+  }
+  return out;
+}
+async function bse(url, ctx) {
+  const code = String(url.searchParams.get("code") || ""), days = Math.max(1, Math.min(365, +url.searchParams.get("days") || 365));
+  if (!/^\d{6}$/.test(code)) return fail(400, "Which BSE code?");
+  try {
+    return json(await cached(`bse/${code}/${days}`, 900, async () => {
+      const t = new Date(Date.now() + 330 * 60000), f = new Date(t.getTime() - days * 864e5), ymd = (d) => d.toISOString().slice(0, 10).replace(/-/g, "");
+      const pages = [];
+      for (const page of [1, 2, 3]) {
+        const r = await fetch(`https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pageno=${page}&strCat=-1&strPrevDate=${ymd(f)}&strScrip=${code}&strSearch=P&strToDate=${ymd(t)}&strType=C&subcategory=-1`,
+          { headers: { "user-agent": UA, referer: "https://www.bseindia.com/", origin: "https://www.bseindia.com", accept: "application/json, text/plain, */*" } });
+        if (!r.ok) throw new Error("BSE answered " + r.status);
+        const d = await r.json(); pages.push(d);
+        if (((d || {}).Table || []).length < 40) break;
+      }
+      return { ok: true, rows: bseFilings(pages) };
+    }, ctx, 86400));
+  } catch (e) { return json({ ok: false, err: String(e.message || e).slice(0, 80), rows: [] }); }
+}
+// 15-minute closes for the last 5 sessions (news_feed._intraday): how far a stock has moved since a story came out
+async function intraday(url, ctx) {
+  const sym = cleanSym(url.searchParams.get("s")); if (!sym) return fail(400, "Which stock?");
+  try {
+    const d = await yahoo(`/v8/finance/chart/${encodeURIComponent(ySym(sym))}?range=5d&interval=15m`, ctx, 300), res = d.chart.result[0], c = res.indicators.quote[0].close;
+    return json({ ok: true, pts: res.timestamp.map((t, i) => [t * 1000, c[i]]).filter((p) => p[1] != null) });
+  } catch { return json({ ok: false, pts: [] }); }
+}
+// NSE deliveries for one stock, saved each evening by the "Market data" job (market_export.py delivery)
+async function dlv(env, ctx, url) {
+  const sym = cleanSym(url.searchParams.get("s"));
+  if (!sym) return fail(400, "Which stock?");
+  const text = await repoFile(env, ctx, `dlv/${sym.replace(/&/g, "%26")}.json`, 3600, "market-data");
+  return text == null ? json({ ok: false, err: "No delivery file for this stock yet" }) : raw(text);
+}
+// thesis notes: the research_notes table the classic page uses (user "default", so both apps share the notes)
+async function notes(env, request, url) {
+  try {
+    if (request.method === "GET") {
+      const sym = cleanSym(url.searchParams.get("s")); if (!sym) return fail(400, "Which stock?");
+      const rows = await sb(env, `research_notes?select=payload,updated_at&user_id=eq.default&symbol=eq.${encodeURIComponent(sym)}&limit=1`);
+      return json({ note: rows && rows[0] ? rows[0] : null });
+    }
+    if (request.method === "POST") {
+      let b = {}; try { b = await request.json(); } catch { /* empty */ }
+      const sym = cleanSym(b.sym); if (!sym) return fail(400, "Which stock?");
+      const p = b.payload || {}, payload = { stance: ["—", "Bullish", "Neutral", "Bearish"].includes(p.stance) ? p.stance : "—", tp: Math.max(0, +p.tp || 0), conv: Math.max(1, Math.min(5, Math.round(+p.conv || 3))) };
+      for (const k of ["bull", "bear", "cat", "risk"]) payload[k] = String(p[k] || "").slice(0, 4000);
+      await sb(env, "research_notes?on_conflict=user_id,symbol", { method: "POST", headers: { prefer: "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify([{ user_id: "default", symbol: sym, payload, updated_at: new Date().toISOString() }]) });
+      return json({ ok: true, at: new Date().toISOString() });
+    }
+    return fail(405, "Not allowed.");
+  } catch (e) { return fail(e.status === 503 ? 503 : 502, e.status === 503 ? e.message : "Notes could not be saved: check that the research_notes table exists (supabase_setup.sql)."); }
+}
+
 async function search(url, ctx) {
   const q = (url.searchParams.get("q") || "").trim().slice(0, 40);
   if (q.length < 2) return json({ results: [] });
@@ -512,6 +686,13 @@ export default {
       if (p === "/api/mmi") return mmi(ctx);
       if (p === "/api/feed") return feed(url, ctx);
       if (p === "/api/search") return search(url, ctx);
+      if (p === "/api/screener") return screener(url, ctx);
+      if (p === "/api/screener/peers") return screenerPeers(url, ctx);
+      if (p === "/api/yinfo") return yinfo(url, ctx);
+      if (p === "/api/bse") return bse(url, ctx);
+      if (p === "/api/dlv") return dlv(env, ctx, url);
+      if (p === "/api/intraday") return intraday(url, ctx);
+      if (p === "/api/note") return notes(env, request, url);
       if (p === "/api/watchlist") return watchlist(env, request, url);
       if (p === "/api/signals") return signals(env, ctx);
       if (p === "/api/deals") return deals(env, ctx);
