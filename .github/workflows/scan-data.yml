@@ -1,0 +1,88 @@
+# Arka Trades · Screener data
+# The Screener of the new app checks your rules in the browser. This job gives it the prices:
+#
+#   every evening (18:50 and 22:10 IST)    2 years of daily candles for every NSE stock, NIFTY 50, the stock lists and
+#                                          deliveries  ->  branch "scan-data"
+#   every 15 minutes in market hours       today's candle so far for every stock  ->  branch "scan-live"
+#
+# It uses the same download code as the Streamlit Screener (smart_scan_page.py). Only public data (Yahoo Finance, NSE lists).
+# No secrets needed. Both branches hold only the latest files, so the main branch stays small and Cloudflare does not rebuild.
+#
+# First time: Actions tab -> "Screener data" -> "Run workflow" (leave "history" selected). It takes about 6 minutes.
+name: Screener data
+
+on:
+  schedule:
+    - cron: "20 13 * * 1-5"         # 18:50 IST: the day's final candles
+    - cron: "40 16 * * 1-5"         # 22:10 IST: once more, in case Yahoo was late
+    - cron: "*/15 3-10 * * 1-5"     # 08:30-16:00 IST every 15 minutes; the script itself skips times when the market is closed
+  workflow_dispatch:
+    inputs:
+      what:
+        description: "history = the evening files · live = today's candle now"
+        type: choice
+        options: [history, live]
+        default: history
+
+permissions:
+  contents: write                   # needed to publish the result files
+
+concurrency:
+  group: screener-${{ github.event.schedule == '*/15 3-10 * * 1-5' && 'live' || github.event.inputs.what || 'history' }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Which run
+        run: |
+          WHAT="${{ github.event.inputs.what }}"
+          if [ -z "$WHAT" ]; then
+            if [ "${{ github.event.schedule }}" = "*/15 3-10 * * 1-5" ]; then WHAT=live; else WHAT=history; fi
+          fi
+          echo "WHAT=$WHAT" >> "$GITHUB_ENV"
+          echo "OUT=$RUNNER_TEMP/scan" >> "$GITHUB_ENV"
+          if [ "$WHAT" = live ]; then echo "BRANCH=scan-live" >> "$GITHUB_ENV"; else echo "BRANCH=scan-data" >> "$GITHUB_ENV"; fi
+          echo "Run: $WHAT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: pip install --quiet "yfinance==0.2.61" "pandas>=2,<4" "numpy>=1.26" requests streamlit lxml html5lib beautifulsoup4
+
+      - name: Delivery store from the Market data job
+        if: env.WHAT == 'history'
+        continue-on-error: true
+        run: |
+          mkdir -p "$RUNNER_TEMP/md"
+          if git fetch --quiet --depth 1 origin market-data; then git archive FETCH_HEAD dlv/_store.csv.gz | tar -x -C "$RUNNER_TEMP/md" || true; fi
+          ls -la "$RUNNER_TEMP/md/dlv" || true
+
+      - name: Build
+        run: |
+          mkdir -p "$OUT"
+          if [ "$WHAT" = live ]; then
+            python scan_export.py live --out "$OUT"
+          else
+            python scan_export.py history --out "$OUT" --deliv "$RUNNER_TEMP/md/dlv/_store.csv.gz"
+          fi
+
+      - name: Publish
+        run: |
+          cd "$OUT"
+          if [ -z "$(ls -A . 2>/dev/null)" ]; then echo "Nothing new to publish."; exit 0; fi
+          rm -rf .git
+          git init --quiet -b "$BRANCH"
+          git config user.name "arka-data-bot"
+          git config user.email "arka-data-bot@users.noreply.github.com"
+          git add -A
+          git commit --quiet -m "Screener $WHAT $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push --quiet --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" "$BRANCH"
+          echo "Published on $BRANCH: $(ls | tr '\n' ' ')"
