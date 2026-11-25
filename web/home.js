@@ -16,7 +16,7 @@ const SPECIAL = { "2026-11-08": "Muhurat trading (Diwali) · timing per NSE circ
 const PRE_OPEN = 540, OPEN = 555, CLOSE = 930;
 // ── instruments: [group, label, tickers (first that answers wins), kind] ──
 const WEI = [["India", "NIFTY 50", ["^NSEI"], "idx"], ["India", "SENSEX", ["^BSESN"], "idx"], ["India", "BANK NIFTY", ["^NSEBANK"], "idx"], ["India", "FIN NIFTY", ["NIFTY_FIN_SERVICE.NS"], "idx"],
-  ["India", "NIFTY NEXT 50", ["^NSMIDCP"], "idx"], ["India", "NIFTY MIDCAP 100", ["^CRSMID", "NIFTY_MIDCAP_100.NS"], "idx"], ["India", "NIFTY 500", ["^CRSLDX"], "idx"],
+  ["India", "NIFTY NEXT 50", ["^NSMIDCP"], "idx"], ["India", "NIFTY MIDCAP 100", ["^CRSMID", "NIFTY_MIDCAP_100.NS"], "idx"], ["India", "NIFTY SMALLCAP 100", ["^CNXSC", "NIFTY_SMLCAP_100.NS"], "idx"], ["India", "NIFTY 500", ["^CRSLDX"], "idx"],
   ["Americas", "S&P 500", ["^GSPC"], "idx"], ["Americas", "Nasdaq Comp", ["^IXIC"], "idx"], ["Americas", "Dow Jones", ["^DJI"], "idx"], ["Americas", "Russell 2000", ["^RUT"], "idx"],
   ["Europe", "FTSE 100", ["^FTSE"], "idx"], ["Europe", "DAX", ["^GDAXI"], "idx"], ["Europe", "CAC 40", ["^FCHI"], "idx"], ["Europe", "Euro Stoxx 50", ["^STOXX50E"], "idx"],
   ["Asia-Pacific", "Nikkei 225", ["^N225"], "idx"], ["Asia-Pacific", "Hang Seng", ["^HSI"], "idx"], ["Asia-Pacific", "Shanghai Comp", ["000001.SS"], "idx"], ["Asia-Pacific", "KOSPI", ["^KS11"], "idx"],
@@ -28,6 +28,7 @@ const XASSET = [["Commodities · USD", "Gold", ["GC=F"], "usd"], ["Commodities �
 const SECT = [["Bank", ["^NSEBANK"]], ["Private bank", ["NIFTY_PVT_BANK.NS"]], ["PSU bank", ["^CNXPSUBANK"]], ["Fin services", ["NIFTY_FIN_SERVICE.NS"]], ["IT", ["^CNXIT"]], ["Auto", ["^CNXAUTO"]], ["FMCG", ["^CNXFMCG"]],
   ["Pharma", ["^CNXPHARMA"]], ["Metal", ["^CNXMETAL"]], ["Energy", ["^CNXENERGY"]], ["Realty", ["^CNXREALTY"]], ["Media", ["^CNXMEDIA"]], ["Infra", ["^CNXINFRA"]], ["PSE", ["^CNXPSE"]],
   ["Commodities", ["^CNXCMDT"]], ["Consumption", ["^CNXCONSUM"]], ["MNC", ["^CNXMNC"]], ["Services", ["^CNXSERVICE"]]];
+const PULSE = [["NIFTY 50", "NIFTY 50"], ["NIFTY MIDCAP 100", "Midcap 100"], ["NIFTY SMALLCAP 100", "Smallcap 100"], ["BANK NIFTY", "Bank Nifty"], ["India VIX", "India VIX"]];
 const TAPE = ["NIFTY 50", "SENSEX", "BANK NIFTY", "India VIX", "USD / INR", "Gold", "Brent Crude", "US 10Y", "Bitcoin", "S&P 500", "Nasdaq Comp", "Dow Jones", "FTSE 100", "DAX", "Nikkei 225", "Hang Seng", "Dollar index", "Silver"];
 const BENCH = ["SENSEX", "BANK NIFTY", "FIN NIFTY", "NIFTY MIDCAP 100", "NIFTY NEXT 50", "NIFTY 500"];
 // NIFTY 50 as of 30 Sep 2026 (BSE in, Wipro out), grouped as on the classic Home
@@ -40,7 +41,7 @@ const WORLD = [["Tokyo", "Asia/Tokyo", 540, 930], ["Hong Kong", "Asia/Hong_Kong"
   ["Frankfurt", "Europe/Berlin", 540, 1050], ["London", "Europe/London", 480, 990], ["New York", "America/New_York", 570, 960]];
 const SECTIONS = [["hm-today", "Today"], ["hm-book", "My book"], ["hm-lead", "Leaders"], ["hm-world", "World"], ["hm-cal", "Calendar"]];
 
-export const homeDefaults = () => ({ ov: {}, ovAt: 0, ovBusy: false, mmi: null, mmiAt: 0, meta: null });
+export const homeDefaults = () => ({ ov: {}, ovAt: 0, ovBusy: false, mmi: null, mmiAt: 0, meta: null, gift: null, giftAt: 0 });
 const ALL = [...WEI, ...XASSET].map(([, l, t, k]) => [l, t, k]).concat(SECT.map(([l, t]) => ["SEC::" + l, t, "idx"]));
 export const allTickers = () => [...new Set(ALL.flatMap(([, t]) => t))];
 
@@ -54,6 +55,7 @@ export async function loadHome(force) {
       .then((d) => { for (const o of d.overview) H.ov[o.sym] = o; paint(); }).catch(() => {}));
     Promise.all(jobs).then(() => { H.ovBusy = false; paint(); });
   }
+  if (now - H.giftAt > 60000) { H.giftAt = now; api("/api/gift").then((g) => { H.gift = g; paint(); }).catch(() => { H.gift = H.gift || { ok: false }; }); }
   if (now - H.mmiAt > 15 * 60000) { H.mmiAt = now; api("/api/mmi").then((m) => { H.mmi = m; paint(); }).catch(() => { H.mmi = { status: "unavailable" }; }); }
   if (!H.meta) { H.meta = {}; api("/api/market?f=meta").then((m) => { H.meta = m; paint(); }).catch(() => {}); }
   need([...N50, ...S.pf.lots.map((l) => l.sym)]);
@@ -139,6 +141,12 @@ const upcomingHolidays = (n, s) => Object.entries(HOLIDAYS).map(([d, nm]) => [d,
 const vixWord = (x) => (x < 13 ? "calm" : x < 18 ? "normal" : x < 24 ? "elevated" : "stressed");
 
 // ── sections ──
+function pulse(M) {                                          // the top strip: GIFT Nifty and the four numbers that say how the Indian market is doing. Nothing moves.
+  const g = S.hm.gift, tile = (label, v, c, sub, symb) => `<${symb ? `button data-sym="${esc(symb)}"` : "div"} class="hm-pl"><span>${label}</span><b>${v}</b><em class="${c}">${sub}</em></${symb ? "button" : "div"}>`;
+  const gift = !g ? tile("GIFT Nifty", '<i class="sk">00,000</i>', "mu", "loading") : g.ok ? tile("GIFT Nifty", num(g.price, 1), cl(g.chg), `${arrow(g.chg)} ${pts(g.pts, 1)} (${pct(g.chg)})`) : tile("GIFT Nifty", "—", "mu", "not available now");
+  return `<div class="hm-pulse" aria-label="Market at a glance">${gift}${PULSE.map(([l, short]) => { const m = M[l], t = (ALL.find((a) => a[0] === l) || [, []])[1].find((x) => S.hm.ov[x] && S.hm.ov[x].ok);
+    return !m ? tile(short, '<i class="sk">00,000</i>', "mu", "loading") : tile(short, px(m.price, m.kind), cl(m.chg), `${arrow(m.chg)} ${pts(m.pts)} (${pct(m.chg)})`, t); }).join("")}</div>`;
+}
 function tape(M) {
   const items = TAPE.map((l) => [l, M[l]]).filter(([, m]) => m);
   if (!items.length) return '<div class="hm-tape"><div class="hm-tt"><span class="sk">Loading prices…</span></div></div>';
@@ -393,7 +401,7 @@ export function page() {
     : hasBook ? `<div class="hm-g c75">${holdingsCard(holds, realised)}${watchCard()}</div>`
     : `<div class="hm-c"><div class="hm-empty" style="padding:16px"><b>Make this page yours.</b> Add your buys in Portfolio and the stocks you are stalking in Watchlist: your profit for the day, stops and prices then sit at the top of this page.</div></div>`;
   const nav = `<nav class="hm-nav only-m" aria-label="Home sections">${SECTIONS.map(([id, t]) => `<button class="${id === (S.hm.sec || SECTIONS[0][0]) ? "on" : ""}" data-act="hmgo" data-v="${id}">${t}</button>`).join("")}</nav>`;
-  return `<div class="hm">${tape(M)}${nav}<div id="hm-today">${header(M, B, Ss)}${bookBar(holds)}</div>
+  return `<div class="hm">${pulse(M)}${nav}<div id="hm-today">${header(M, B, Ss)}${bookBar(holds)}</div>
     <div class="hm-g c75">${hero(M, Ss)}${health(M, B)}</div>${bench(M)}${desk()}
     ${sec("hm-book", "Your book", "holdings and the stocks you are watching")}${book}
     ${sec("hm-lead", "Leadership", "sectors and stocks moving the market today")}

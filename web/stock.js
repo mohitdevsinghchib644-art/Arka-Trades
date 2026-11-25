@@ -34,7 +34,9 @@ export async function open(sym, code) {
     api("/api/history?s=%5ENSEI,%5ECRSLDX&range=5y").then((d) => { const ix = {}; for (const h of d.history || []) if (h.ok) ix[h.sym === "^NSEI" ? "NIFTY 50" : "NIFTY 500"] = h; K.ix = ix; paint(); }).catch(() => { K.ixAt = 0; }); }
   if (!S.sig) api("/api/signals").then((d) => { S.sig = d; paint(); }).catch(() => {});
   step(D, "H", async () => { const d = await api(`/api/history?s=${encodeURIComponent(sym)}&range=max`), h = (d.history || [])[0];
-    if (!h || !h.ok) throw new Error("Yahoo Finance returned no price history"); D.Hfull = h; D.H = E.hist(h, "5y"); D.divs = h.divs || []; D.splits = h.splits || []; });
+    if (!h || !h.ok) throw new Error("Yahoo Finance returned no price history");
+    if (h.daily === false) throw new Error("Yahoo Finance sent weekly or monthly prices instead of daily ones");       // never compute 10-day or 50-day numbers from monthly candles
+    D.Hfull = h; D.H = E.hist(h, "5y"); D.divs = h.divs || []; D.splits = h.splits || []; });
   step(D, "B", async () => {
     const d = await api("/api/screener?s=" + encodeURIComponent(sym));
     D.B = d.ok ? parseScreener(d.html, d.url, sym) : empty(sym, d.err); D.Bstale = !!d.stale;

@@ -94,7 +94,7 @@ const numF = (x) => {                                       // portfolio_page._f
 function fundaOf(B) {                                        // the fundamentals and quality score portfolio_page._fetch_info keeps per stock
   const m = B.summary || {}; let fs = null;
   try { const res = piotroski(B); if (res) { const av = res[0].filter((t) => t[1] != null); fs = av.length ? [av.filter((t) => t[1]).length, av.length] : null; } } catch { fs = null; }
-  return { mcap: numF(m.market_cap), pe: numF(m.pe_ratio), roe: numF(m.roe), roce: numF(m.roce), dy: numF(m.dividend_yield), fscore: fs, name: B.name || "" };
+  return { mcap: numF(m.market_cap), pe: numF(m.pe_ratio), roe: numF(m.roe), roce: numF(m.roce), dy: numF(m.dividend_yield), fscore: fs, name: B.name || "", sector: String((B.sector || {}).Industry || (B.sector || {}).Sector || (B.sector || {})["Broad Sector"] || "").trim() };
 }
 const openSyms = () => [...new Set(S.pf.lots.map((l) => l.sym))].filter((s) => calc().E.alots.some((l) => l.sym === s && l.open > 1e-9));
 async function pool(items, n, fn) { let i = 0; await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => { while (i < items.length) { const x = items[i++]; await fn(x); } })); }
@@ -146,6 +146,7 @@ export function calc() {                                    // everything the pa
   const holds = M.aggregate(alots, quotes, P.plan, P.sectors || {}, techs, P.book), rmap = stageMap();
   for (const h of holds) { const f = P.funda[h.sym] || {}, arts = P.news[h.sym] || [];
     Object.assign(h, { mcap: f.mcap ?? null, pe: f.pe ?? null, roe: f.roe ?? null, roce: f.roce ?? null, dy: f.dy ?? null, fscore: f.fscore || null, arts, newsN: arts.length, tone: M.newsTone(arts), stage: rmap[normSec(h.sector)] || null });
+    if (h.sector === "Unclassified" && f.sector) { h.sector = f.sector; h.stage = rmap[normSec(f.sector)] || null; }      // not in the Arka sector map: use Screener's industry
     if (!h.name && f.name) h.name = f.name; }
   const T = M.totals(holds, alots), sectors = M.groupBy(holds, "sector"), conc = M.concentration(holds), rates = { ...M.TAX_DEFAULTS, ...((P.settings || {}).tax || {}) };
   const nifty = P.benchData["^NSEI"] || null, bench = P.benchData[BENCH[P.bench]] || nifty, benchName = P.benchData[BENCH[P.bench]] ? P.bench : "NIFTY 50";
@@ -250,9 +251,10 @@ function psOut(A) {
 }
 const SORTS = { value: ["Value, high to low", (h) => -(h.value || 0)], pnlD: ["Profit ₹, high to low", (h) => -(h.pnl || 0)], pnlA: ["Profit ₹, low to high", (h) => h.pnl || 0], pctD: ["Profit %, high to low", (h) => -(h.pnlPct || 0)],
   pctA: ["Profit %, low to high", (h) => h.pnlPct || 0], dayD: ["Today %, high to low", (h) => -(h.chg || 0)], dayA: ["Today %, low to high", (h) => h.chg || 0], risk: ["Risk to stop, high to low", (h) => -(h.risk || 0)], az: ["A to Z", null] };
-const stagePill = (st) => (st ? `<span class="chip" style="color:${QUAD_C[st] || "inherit"}">${esc(st)}</span>` : '<span class="mu">—</span>');
+const stagePill = (st, long) => (st ? `<span class="chip" style="color:${QUAD_C[st] || "inherit"}">${long ? "Sector " + esc(st.toLowerCase()) : esc(st)}</span>` : `<span class="mu">${long ? "Sector not ranked" : "—"}</span>`);
+const newsWords = (h) => (!h.newsN ? "no headlines" : `${h.newsN} headline${h.newsN > 1 ? "s" : ""}, <span class="${h.tone > 0.3 ? "up" : h.tone < -0.3 ? "dn" : ""}">${h.tone > 0.3 ? "positive" : h.tone < -0.3 ? "negative" : "neutral"}</span>`);
 const toneHtml = (h) => (h.tone == null ? '<span class="mu">—</span>' : `<span class="${h.tone > 0.3 ? "up" : h.tone < -0.3 ? "dn" : ""}">${h.newsN} · ${h.tone >= 0 ? "+" : "−"}${Math.abs(h.tone).toFixed(1)}</span>`);
-const fsHtml = (fs) => (fs ? `<span class="${fs[0] / fs[1] >= 0.75 ? "up" : fs[0] / fs[1] >= 0.45 ? "am" : "dn"}">${fs[0]}/${fs[1]}</span>` : '<span class="mu">—</span>');
+const fsHtml = (fs) => (fs ? `<span class="${fs[0] / fs[1] >= 0.75 ? "up" : fs[0] / fs[1] >= 0.45 ? "am" : "dn"}">${fs[0]} of ${fs[1]}</span>` : '<span class="mu">—</span>');
 const newsDot = (h) => (h.newsN ? ` <i class="pf-ndot" title="${esc(h.newsN + " headline" + (h.newsN > 1 ? "s" : "") + " · latest: " + (h.arts[0] || {}).title)}"></i>` : "");
 function extrasState() {                                     // what is still loading for the extra columns
   const P = S.pf, bits = [];
@@ -266,15 +268,15 @@ function holdList(A) {
   const key = SORTS[P.sort] || SORTS.value; rows.sort(key[1] ? (a, b) => key[1](a) - key[1](b) : (a, b) => (a.sym < b.sym ? -1 : 1));
   if (!rows.length) return note("No holdings match.");
   const chips = (h) => `${h.splitAdj ? ' <span class="chip">Adjusted</span>' : ""}${h.slHit ? ' <span class="chip r">Stop hit</span>' : h.target != null && h.ltp != null && h.ltp >= h.target ? ' <span class="chip g">At target</span>' : ""}`;
-  const phone = rows.map((h) => `<button class="row two" data-sym="${esc(h.sym)}"><span class="a"><b>${esc(h.sym)}${newsDot(h)}${chips(h)}</b><small>${q4(h.qty)} shares · avg ${num(h.avg)} · ${h.weight != null ? num(h.weight, 1) + "%" : "—"}${h.sl != null ? " · stop " + num(h.sl) : ""}${h.stage ? " · " + esc(h.stage) : ""}${h.fscore ? " · quality " + h.fscore[0] + "/" + h.fscore[1] : ""}</small></span>
+  const phone = rows.map((h) => `<button class="row two" data-sym="${esc(h.sym)}"><span class="a"><b>${esc(h.sym)}${newsDot(h)}${chips(h)}</b><small>${q4(h.qty)} shares · avg ${num(h.avg)} · ${h.weight != null ? num(h.weight, 1) + "%" : "—"}${h.sl != null ? " · stop " + num(h.sl) : ""}${h.stage ? " · sector " + esc(h.stage.toLowerCase()) : ""}${h.fscore ? " · quality " + h.fscore[0] + " of " + h.fscore[1] : ""}</small></span>
     <span class="z"><b>${h.value == null ? '<span class="mu">—</span>' : rs(h.value)}</b><small class="${cls(h.pnl)}">${h.pnl == null ? "no price" : shs(h.pnl) + " (" + pc(h.pnlPct, 1) + ")"}</small></span></button>`).join("");
-  const desk = tbl(["Stock", "Qty", "Avg cost", "Last · today", "Invested", "Value", "P&amp;L", "Weight", "Stop-loss · target", "Stage · news · quality"], rows.map((h) => [
+  const desk = tbl(["Stock", "Qty", "Avg cost", "Last · today", "Invested", "Value", "P&amp;L", "Weight", "Stop-loss · target", "Sector trend · news · quality"], rows.map((h) => [
     sym(h.sym) + newsDot(h) + chips(h) + sub(`<i class="dot" style="background:${A.scol[h.sector] || GREY}"></i>${esc(h.sector)}${P.book === M.ALL && h.books.length && (h.books.length > 1 || h.books[0] !== M.MAIN) ? " · " + esc(h.books.join(", ")) : ""}`),
     q4(h.qty), num(h.avg), (h.ltp == null ? "—" : num(h.ltp)) + sub(`${col(h.chg)}${pc(h.chg)}</span>`), rs(h.invested), rs(h.value), `${col(h.pnl)}${rs(h.pnl)}</span>${sub(`${col(h.pnl)}${pc(h.pnlPct)}</span>`)}`,
     h.weight == null ? "—" : `<span class="wb"><i style="width:${Math.min(100, h.weight * 2).toFixed(0)}%;background:${A.scol[h.sector] || AMB}"></i></span>${num(h.weight, 1)}%`,
     (h.sl == null ? '<span class="mu">no stop</span>' : `<span class="${h.slHit ? "dn" : ""}">${num(h.sl)}</span>`) + (h.target == null ? "" : ` · ${num(h.target)}`) +
       sub(h.sl == null ? (h.target == null ? "" : h.reward ? "to target +" + sh(h.reward) : "target reached") : (h.slHit ? "stop hit" : "risk " + sh(h.risk)) + (h.rMult != null ? " · R " + num(h.rMult, 1) : "") + (h.target != null ? (h.reward ? " · +" + sh(h.reward) : " · target reached") : "")),
-    `<span class="pf-ctx">${stagePill(h.stage)}</span>${sub(`news ${toneHtml(h)} · quality ${fsHtml(h.fscore)}`)}`]), [1, 2, 3, 4, 5, 6], "stick");
+    `<span class="pf-ctx">${stagePill(h.stage, true)}</span>${sub(`${newsWords(h)} · ${h.fscore ? "quality " + fsHtml(h.fscore) : "quality not rated"}`)}`]), [1, 2, 3, 4, 5, 6], "stick");
   return `<div class="only-m card">${phone}</div><div class="only-d">${desk}</div>`;
 }
 function holdingsView(A) {
@@ -282,7 +284,7 @@ function holdingsView(A) {
   return `<div class="ctl"><select data-pf="sort" aria-label="Sort">${Object.entries(SORTS).map(([k, v]) => `<option value="${k}"${P.sort === k ? " selected" : ""}>${v[0]}</option>`).join("")}</select>
     <select data-pf="secF" aria-label="Sector"><option value="">All sectors</option>${secs.map((s) => `<option${P.secF === s ? " selected" : ""}>${esc(s)}</option>`).join("")}</select>
     <input data-pf="find" value="${esc(P.find)}" placeholder="Find a stock" autocomplete="off" spellcheck="false"><button class="btn sm" data-act="pfcsv" data-v="holdings">Export CSV</button></div>
-    <div id="pf-hl">${holdList(A)}</div>${extrasState()}<div class="note">Tap a stock for its buys, stop-loss, target, selling and moving between books. Amber dot: fresh headlines in the last ${esc(S.pf.nDays)} (see News). Sector stage is the sector's quadrant in Money flow. Quality is the Piotroski-style score from Research → HC. “Adjusted” means split or bonus adjusted. P&amp;L excludes charges.</div>`;
+    <div id="pf-hl">${holdList(A)}</div>${extrasState()}<div class="note">Tap a stock for its buys, stop-loss, target, selling and moving between books. An amber dot means fresh headlines in the last ${esc(S.pf.nDays)} (open News to read them). Sector trend is where the stock's sector stands in Money flow: leading, improving, weakening or lagging. Quality counts how many of the financial-health checks the company passes (Research → HC). “Adjusted” means split or bonus adjusted. P&amp;L excludes charges.</div>`;
 }
 const MCAP_C = { "Large cap": CY, "Mid cap": "#FF9F0A", "Small cap": PU, Unknown: GREY };
 function valuation(A) {                                      // portfolio_page._view_analysis: Valuation & quality

@@ -292,7 +292,7 @@ function paint() {
   const newsSide = (S.tab === "home" || S.tab === "s") && innerWidth >= 1280, showNews = newsSide && railPref();
   if (newsSide) {                                         // Home and the stock page on a wide screen: the news panel on the right (Streamlit's news rail)
     let wrap = main.querySelector(":scope > .nr-wrap");
-    if (!wrap || wrap.dataset.show !== String(showNews)) { main.innerHTML = `<div class="nr-wrap${showNews ? " on" : ""}" data-show="${showNews}">${showNews ? "" : '<button class="nr-show" data-act="nrshow">Show news</button>'}<div id="nr-main"></div>${showNews ? '<aside id="nr-rail"></aside>' : ""}</div>`; wrap = main.firstElementChild; }
+    if (!wrap || wrap.dataset.show !== String(showNews)) { main.innerHTML = `<div class="nr-wrap${showNews ? " on" : ""}" data-show="${showNews}">${showNews ? "" : '<button class="nr-show" data-act="nrshow" title="Show the news panel"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h13v14H6a2 2 0 0 1-2-2z"/><path d="M17 9h3v8a2 2 0 0 1-2 2"/><path d="M8 9h5M8 13h5"/></svg>Show news</button>'}<div id="nr-main"></div>${showNews ? '<aside id="nr-rail"></aside>' : ""}</div>`; wrap = main.firstElementChild; }
     const pm = wrap.querySelector("#nr-main");
     if (S.tab === "s") SK.paintInto(pm); else pm.innerHTML = PAGES[S.tab]();
     if (showNews) wrap.querySelector("#nr-rail").innerHTML = NW.rail(S.tab === "s" ? S.sk.sym : "", S.tab === "s" && S.nw.rmode === "SECURITY" ? SK.newsFor(S.sk.sym) : null);
