@@ -16,7 +16,7 @@ const TONE_WORD = { strong_positive: "Positive", mild_positive: "Slightly positi
 const TONE_COLOR = { strong_positive: GREEN, mild_positive: "#6FD98F", neutral: TX3, mild_negative: "#FF8A80", strong_negative: RED };
 const WINDOWS = [["24 h", 1], ["3 days", 3], ["7 days", 7], ["30 days", 30]];
 const tagLabel = (t) => TAG_LABEL[t] || t[0] + t.slice(1).toLowerCase();
-export const newsDefaults = () => ({ days: 1, q: "", sort: "Priority", mode: "TOP", part: "Stories", res: {}, items: null, at: 0, busy: false, names: null, seen: null, ver: 0, built: -1 });
+export const newsDefaults = () => ({ rmode: "TOP", rq: "", days: 1, q: "", sort: "Priority", mode: "TOP", part: "Stories", res: {}, items: null, at: 0, busy: false, names: null, seen: null, ver: 0, built: -1 });
 
 // ── data ──
 const universe = () => [...new Set([...S.wl.rows.map((r) => r.sym), ...S.pf.lots.map((l) => l.sym)])].slice(0, 120);
@@ -61,12 +61,44 @@ export async function securityNews(sym, pts) {
   }));
   return N.assemble(results, [sym], W.names || {}, 7, Date.now(), sym).filter((a) => a.symbols.includes(sym));
 }
+// One holding's headlines for Portfolio (news_feed._fetch_news_for_stock): a Google News search for the company over `days`,
+// kept when the headline names it (when the company name is known), merged across outlets and scored.
+export async function stockNews(sym, days = 1, company = null) {
+  const d = await api(`/api/feed?id=${encodeURIComponent("gnews:" + sym)}&days=${days}&q=${encodeURIComponent(N.companyQuery(sym, company))}`);
+  const T = N.tagger([sym], company ? { [sym]: company } : {}), cutoff = Date.now() - Math.max(1, Math.trunc(days)) * 864e5, out = [];
+  for (const r of d.rows || []) {
+    const a = N.make(r, "company", "Google News", sym, T);
+    if (!a || a.pub < cutoff) continue;
+    if (company && !(N.tag(a.title, "", T).length || a.title.toUpperCase().includes(sym))) continue;
+    out.push(a);
+  }
+  return N.score(N.cluster(out), new Set([sym]), sym, Date.now());
+}
 export function reaction(pts, dt) {                          // news_feed._reaction: last price vs the first 15-minute close at or after the story
   if (!pts || !pts.length) return null;
   const after = pts.filter((p) => p[0] >= dt).map((p) => p[1]);
   return after.length && after[0] > 0 ? (pts[pts.length - 1][1] / after[0] - 1) * 100 : null;
 }
 export const reactPill = (sym, r) => (r == null ? "" : pill(`${sym} ${r >= 0 ? "+" : ""}${num(r, 2)}% since`, r >= 0 ? GREEN : RED));
+
+// ── the small news panel beside Home and the stock page on a wide screen (news_feed.render_news_rail) ──
+const RAIL_MODES = ["TOP", "LIVE", "MINE", "RISK", "MACRO"];
+export function rail(current = "", secItems = null) {
+  const W = S.nw; if (!W.at) loadNews();
+  const { items } = build(), tone = N.newsTone(items), mine = items.filter((a) => a.mine).length, brk = items.filter((a) => a.is_breaking).length;
+  const modes = (current ? ["SECURITY"] : []).concat(RAIL_MODES), mode = modes.includes(W.rmode) ? W.rmode : modes[0];
+  const pool = mode === "SECURITY" && secItems ? secItems : items, shown = N.view(pool, mode === "MINE" ? "MINE" : mode, W.rq, current).slice(0, 18);
+  const moves = {}; for (const s of new Set(shown.flatMap((a) => a.symbols))) { const q = S.q[s]; if (q && q.ok) moves[s] = q.pct; }
+  const tc = tone > 0 ? GREEN : tone < 0 ? RED : "var(--tx2)";
+  return `<div class="nr-in"><div class="nr-h"><b>Market news</b><button class="nr-x" data-act="nrhide">Hide news</button></div>
+    <div class="seg nr-seg">${[["24 hours", 1], ["3 days", 3], ["7 days", 7]].map(([l, d]) => `<button class="${W.days === d ? "on" : ""}" data-act="nwdays" data-v="${d}">${l}</button>`).join("")}</div>
+    <input class="nr-q" data-nw="rq" value="${esc(W.rq)}" placeholder="Search news, stocks, sectors" autocomplete="off">
+    <div class="nr-k"><div><b>Stories</b><span>${items.length}</span></div><div><b>Mine</b><span>${mine}</span></div><div><b>Breaking</b><span style="color:${brk ? RED : "var(--tx)"}">${brk}</span></div><div><b>Tone</b><span style="color:${tc}">${tone > 0 ? "+" : ""}${tone}</span></div></div>
+    <div class="nr-tone"><i style="left:${((tone + 100) / 2).toFixed(0)}%"></i></div><div class="nr-tl"><span>Negative</span><span>Positive</span></div>
+    <div class="nr-modes">${modes.map((m) => `<button class="${m === mode ? "on" : ""}" data-act="nrmode" data-v="${m}">${m === "SECURITY" ? esc(current) : MODE_LABEL[m === "MINE" ? "MY STOCKS" : m] || m}</button>`).join("")}</div>
+    <div class="nr-list">${W.busy && !items.length ? '<div class="note">Loading news…</div>' : shown.map((a) => story(a, moves)).join("") || '<div class="note">No stories here yet. Add stocks to your watchlist or portfolio to get company news.</div>'}</div>
+    <a class="btn full nr-open" href="#/news">Open news desk</a></div>`;
+}
 
 function build() {                                            // assemble once per new batch of results, then only refresh ages
   const W = S.nw, U = universe(), key = W.ver + "|" + W.days + "|" + U.join(",");

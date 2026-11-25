@@ -216,7 +216,7 @@ select.sel{height:46px;border-radius:13px;border:1px solid var(--line2);backgrou
   .ctl input{flex:0 1 220px}
 }
 .pf .card+.card,.pf .card+.only-d,.pf .ctl+.card{margin-top:10px} .pf .note+.card{margin-top:4px}
-.tb td:last-child:has(.chip){white-space:normal;min-width:200px} .tb td .chip{margin:1px 2px 1px 0}
+.tb td:last-child:has(.chip):not(:has(.pf-ctx)){white-space:normal;min-width:200px} .tb td .chip{margin:1px 2px 1px 0}
 .pf-2>.card,.pf-3>.card,.pf-2>div>.card:first-child{margin-top:0}
 .hd .btn{white-space:nowrap;flex:0 0 auto} .pf h2{flex-wrap:wrap;row-gap:2px}
 
@@ -478,3 +478,28 @@ select.rs-in{flex:0 1 220px}
 .rs-res button:last-child{border-bottom:0} .rs-res small{color:var(--tx3)} .rs-res button:hover{background:var(--s2)}
 .rs-picks{display:flex;flex-wrap:wrap;gap:8px} .rs-pick{display:inline-flex;gap:8px;align-items:center;height:38px;padding:0 13px;border-radius:11px;background:var(--s1);border:1px solid var(--line);font-size:13.5px}
 .rs-pick i{font-style:normal;font-size:12px;font-weight:600} .rs-pick:hover{border-color:var(--line2)} .rs-land h2{margin-top:20px}
+/* news panel beside Home and the stock page (wide screens) */
+.nr-wrap{position:relative} .nr-wrap.on{display:grid;grid-template-columns:minmax(0,1fr) 330px;gap:22px;align-items:start}
+.nr-show{position:absolute;right:0;top:-46px;height:32px;padding:0 12px;border-radius:10px;border:1px solid var(--line2);background:var(--s1);font-size:12.5px;font-weight:600;color:var(--tx2);z-index:2} .nr-show:hover{color:var(--tx)}
+#nr-rail{position:sticky;top:72px;max-height:calc(100dvh - 88px);overflow:auto;scrollbar-width:thin;background:var(--s1);border:1px solid var(--line);border-radius:var(--r);padding:14px}
+.nr-h{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px} .nr-h b{font-size:15px} .nr-x{font-size:12px;color:var(--tx3)} .nr-x:hover{color:var(--tx)}
+.nr-seg{margin:0 0 8px;padding:0} .nr-seg button{height:30px;padding:0 11px;font-size:12.5px}
+.nr-q{width:100%;height:36px;border-radius:10px;border:1px solid var(--line2);background:var(--bg);padding:0 12px;font-size:13.5px;outline:none;margin-bottom:10px}
+.nr-k{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;text-align:center} .nr-k b{display:block;font-size:11px;font-weight:500;color:var(--tx3)} .nr-k span{font-size:16px;font-weight:700}
+.nr-tone{position:relative;height:5px;border-radius:5px;margin:10px 0 4px;background:linear-gradient(90deg,#FF453A,#3A3A40 50%,#30D158)} .nr-tone i{position:absolute;top:-3px;width:3px;height:11px;border-radius:2px;background:#fff;transform:translateX(-1px)}
+.nr-tl{display:flex;justify-content:space-between;font-size:10.5px;color:var(--tx3);margin-bottom:10px}
+.nr-modes{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px} .nr-modes button{height:28px;padding:0 10px;border-radius:999px;border:1px solid var(--line2);font-size:12px;font-weight:600;color:var(--tx2)} .nr-modes button.on{background:var(--tx);color:#0B0B0C;border-color:var(--tx)}
+.nr-list .nd-s{padding:10px 0;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent} .nr-list .nd-h{font-size:13.5px} .nr-list .nd-x{display:none}
+.nr-open{margin-top:12px;height:40px;font-size:13.5px}
+/* portfolio: headlines dot, news view, tax assumptions */
+.pf-ndot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--amber);margin-left:5px;vertical-align:middle}
+.pf-art{display:block;padding:11px 16px;border-left:2px solid var(--s3);text-decoration:none;color:inherit}
+.pf-art+.pf-art{border-top:1px solid rgba(255,255,255,.05)}
+.pf-art.pos{border-left-color:var(--up)}.pf-art.neg{border-left-color:var(--dn)}
+.pf-art b{display:block;font-weight:600;font-size:14px;line-height:1.35}.pf-art small{display:block;margin-top:3px;color:var(--tx3);font-size:12px}
+.pf-art:hover b{text-decoration:underline}
+.pf-tax{margin:0 0 14px}.pf-tax summary{cursor:pointer;font-weight:600;list-style:none}.pf-tax summary::-webkit-details-marker{display:none}
+.pf-tax summary::before{content:"›";display:inline-block;margin-right:8px;transition:transform .15s}.pf-tax[open] summary::before{transform:rotate(90deg)}
+.pf-tax form{margin-top:12px}
+.pf-nh{display:flex;align-items:center;flex-wrap:wrap;gap:4px 8px;margin:22px 2px 10px;font-size:14px}.pf-nh .pf-ndot{margin:0}
+.pf-nh .lnk{font-weight:600;padding:0;font-size:14px}.pf-nh span{color:var(--tx3);font-size:12.5px}

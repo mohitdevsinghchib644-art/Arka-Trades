@@ -4,6 +4,7 @@
 // every combination the classic page offers is computed each night.
 import { S, api, paint, esc, num, nice } from "./app.js";
 import { lineChart, resetCharts, legend } from "./charts.js";
+import * as FPI from "./fpi.js";
 import { dataBehind } from "./home.js";
 
 const GREEN = "#30D158", RED = "#FF453A", AMBER = "#FF9F0A", CYAN = "#5AC8FA", YELLOW = "#FFD60A", PURPLE = "#BF5AF2", T2 = "#A3A3A3", T3 = "#6B6B6B";
@@ -39,7 +40,14 @@ export async function loadFlow(what = "main") {
   const get = async (f, k, ek) => { if (F[k] || F["_" + k]) return; F["_" + k] = true; try { F[k] = await api("/api/market?f=" + f); } catch (e) { if (e.message !== "signed out") F[ek] = e.message; } F["_" + k] = false; paint(); };
   if (what === "main") return get("flow", "d", "err");
   if (what === "sectors") return get("flow_sectors", "sec", "secErr");
-  if (what === "fpi") return get("flow_fpi", "fpi", "fpiErr");
+  if (what === "fpi") {                                      // the nightly file first; if the job could not reach NSDL, read the reports live (4 at a time)
+    if (F._fpiRun) return; F._fpiRun = true;
+    await get("flow_fpi", "fpi", "fpiErr");
+    if (F.fpi) { F._fpiRun = false; return; }
+    F._live = true; F.fpiErr = ""; F.fpiDone = 0; paint();
+    const x = await FPI.loadLive(api, 48, () => { F.fpiDone++; if (F.fpiDone % 6 === 0) paint(); });
+    F.fpi = x; if (!x) F.fpiErr = "no NSDL report could be read (0 of 48), from the nightly job or live"; F._live = false; F._fpiRun = false; paint();
+  }
 }
 // ── formats (money_flow.py) ──
 const ok = (v) => v != null && isFinite(v);
@@ -227,12 +235,12 @@ export function fpiRows(x, n) {                             // the classic FPI t
 function viewFpi() {
   const F = S.mf, x = F.fpi;
   let out = note("NSDL's fortnightly report of <b>foreign portfolio investor</b> net investment by sector: recorded money, but FPIs only, NSDL's own sector list, and published after the fortnight ends. Shown as context; <b>not used in the score or the test</b>.");
-  if (!x) { loadFlow("fpi"); return out + note(F.fpiErr ? `FPI data NOT AVAILABLE: ${esc(F.fpiErr)}` : "Loading NSDL fortnights…"); }
+  if (!x) { if (!F._fpiRun && !F.fpiErr) loadFlow("fpi"); return out + note(F._live ? `Reading NSDL's fortnightly reports… ${F.fpiDone || 0} of 48` : F.fpiErr ? `FPI data NOT AVAILABLE: ${esc(F.fpiErr)}` : "Loading NSDL fortnights…"); }
   out += `<div class="rg-ctl">${seg("mffpi", [[12, "12 fortnights"], [24, "24"], [48, "48"]], F.fpiN)}</div>`;
   const n = +F.fpiN, last = x.dates[x.dates.length - 1], age = Math.round((Date.now() - Date.parse(last)) / 864e5);
   const rows = fpiRows(x, n);
   const cr = (v) => (ok(v) ? `<span class="${v > 0 ? "up" : v < 0 ? "dn" : ""}">${f(v, 0)}</span>` : "n/a");
-  return out + `<div class="note">${x.ok} of ${x.tried} reports loaded · latest fortnight ended ${nice(last)} (${age} days ago) · ₹ crore, equity.</div>` + tbl([["NSDL sector"], ["Last fortnight ₹Cr", 1], ["Last 6 ₹Cr", 1], ["Last 12 ₹Cr", 1], ["Last 6 as % of FPI holdings", 1], ["Fortnights in a row (+ in / − out)", 1], ["FPI holdings ₹Cr", 1]],
+  return out + `<div class="note">${x.ok} of ${x.tried} reports loaded${x.live ? " just now (the nightly job could not reach NSDL)" : ""} · latest fortnight ended ${nice(last)} (${age} days ago) · ₹ crore, equity.</div>` + tbl([["NSDL sector"], ["Last fortnight ₹Cr", 1], ["Last 6 ₹Cr", 1], ["Last 12 ₹Cr", 1], ["Last 6 as % of FPI holdings", 1], ["Fortnights in a row (+ in / − out)", 1], ["FPI holdings ₹Cr", 1]],
     rows.map((r) => `<tr><td><b>${esc(r.s)}</b></td><td class="r">${cr(r.last)}</td><td class="r">${cr(r.s6)}</td><td class="r">${cr(r.s12)}</td><td class="r">${ok(r.pct) ? pc(r.pct, 2, "") : "n/a"}</td><td class="r">${r.streak > 0 ? "+" + r.streak : r.streak}</td><td class="r">${ok(r.aum) ? num(r.aum, 0) : "n/a"}</td></tr>`), "stick");
 }
 function viewMethod(d) {

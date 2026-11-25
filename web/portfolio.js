@@ -2,12 +2,19 @@
 import { S, api, paint, esc, num, sgn, pc, cls, rs, nice, todayStr, field, toast } from "./app.js";
 import * as M from "./pf.js";
 import { lineChart, resetCharts } from "./charts.js";
+import { parseScreener } from "./screener.js";
+import { piotroski } from "./rsengine.js";
+import { stockNews } from "./news.js";
+import { loadFlow } from "./flow.js";
 
-export const VIEWS = ["Dashboard", "Swing desk", "Holdings", "Analysis", "Performance", "Risk", "Rebalance", "Income", "Tax", "Transactions"];
+export const VIEWS = ["Dashboard", "Swing desk", "Holdings", "Analysis", "Performance", "Risk", "Rebalance", "Income", "Tax", "Transactions", "News"];
+const NDAYS = { "24 hours": 1, "3 days": 3, "7 days": 7 };
+const QUAD_C = { Leading: "#30D158", Weakening: "#FFD60A", Lagging: "#FF453A", Improving: "#5AC8FA" };
 const BENCH = { "NIFTY 50": "^NSEI", "NIFTY 500": "^CRSLDX", "Midcap 100": "NIFTY_MIDCAP_100.NS" };
 const PAL = ["#FF9F0A", "#5AC8FA", "#BF5AF2", "#30D158", "#FF6482", "#5E8CFF", "#FFD60A", "#64D2FF", "#AC8E68", "#FF8A5B", "#7BD88F", "#C7A6FF"];
 const GREY = "#55555C", UP = "var(--up)", DN = "var(--dn)", AMB = "var(--amber)", CY = "#5AC8FA", PU = "#BF5AF2";
-export const pfDefaults = () => ({ lots: [], sells: [], plan: {}, can_sell: true, can_plan: true, can_book: true, loaded: false, err: "", view: "Dashboard", book: M.ALL, bench: "NIFTY 50", sort: "value", secF: "", find: "",
+export const pfDefaults = () => ({ lots: [], sells: [], plan: {}, can_sell: true, can_plan: true, can_book: true, loaded: false, err: "", view: "Dashboard", book: M.ALL, bench: "NIFTY 50", sort: "value", secF: "", find: "", funda: {}, fver: 0, fDone: 0, fTodo: 0, news: {}, nver: 0, nDays: "24 hours", nKey: "", nAt: 0, nState: "idle",
+  snaps: [], settings: {}, can_snap: true, can_set: true, snapDone: {}, events: null, evState: "idle",
   hist: {}, benchData: {}, sectors: null, histState: "idle", ver: 0, hver: 0, ps: { cap: "", risk: "1", entry: "", stop: "" }, st: { mkt: "-10", sec: "", shock: "-15" }, reb: { maxStock: "15", maxSector: "30", cash: "0", redeploy: true } });
 
 // ── formatting ──
@@ -74,30 +81,82 @@ export async function loadHistory(force) {                // 5 years of daily ca
       .catch(() => { todo.slice(i, i + 6).forEach((s) => { if (!P.hist[s]) P.hist[s] = { ok: false }; }); }));
   const bs = [...new Set(["^NSEI", BENCH[P.bench]])].filter((s) => force || !P.benchData[s]);
   if (bs.length && syms.length) jobs.push(api("/api/history?range=10y&s=" + encodeURIComponent(bs.join(","))).then((d) => { for (const h of d.history) if (h.ok) P.benchData[h.sym] = { d: h.d, c: h.c }; }).catch(() => {}));
+  if (force) loadExtras(true);
   if (!jobs.length) return;
   P.histState = "loading"; paint();
   await Promise.all(jobs);
   P.histState = "ready"; P.hver++; paint();
 }
+const numF = (x) => {                                       // portfolio_page._f: "1,234.5", "₹ 12 Cr", "3.2%" → number
+  if (x == null) return null; if (typeof x === "number") return isFinite(x) ? x : null;
+  const t = String(x).replace(/[₹,%\s]|Cr\.?/g, ""); if (!t || !/^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i.test(t)) return null; return Number(t);
+};
+function fundaOf(B) {                                        // the fundamentals and quality score portfolio_page._fetch_info keeps per stock
+  const m = B.summary || {}; let fs = null;
+  try { const res = piotroski(B); if (res) { const av = res[0].filter((t) => t[1] != null); fs = av.length ? [av.filter((t) => t[1]).length, av.length] : null; } } catch { fs = null; }
+  return { mcap: numF(m.market_cap), pe: numF(m.pe_ratio), roe: numF(m.roe), roce: numF(m.roce), dy: numF(m.dividend_yield), fscore: fs, name: B.name || "" };
+}
+const openSyms = () => [...new Set(S.pf.lots.map((l) => l.sym))].filter((s) => calc().E.alots.some((l) => l.sym === s && l.open > 1e-9));
+async function pool(items, n, fn) { let i = 0; await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => { while (i < items.length) { const x = items[i++]; await fn(x); } })); }
+export async function loadFunda(force) {                     // Screener page per holding: market cap, P/E, ROE, ROCE, dividend yield and the quality score
+  const P = S.pf, now = Date.now(), todo = openSyms().filter((s) => force || !P.funda[s] || (P.funda[s].fail && now - P.funda[s].at > 120000));
+  if (P._fRun || !todo.length) return;
+  P._fRun = true; P.fDone = 0; P.fTodo = todo.length;
+  await pool(todo, 4, async (s) => {
+    try { const d = await api("/api/screener?s=" + encodeURIComponent(s)), B = d.ok ? parseScreener(d.html, d.url, s) : null; P.funda[s] = B && B.resolved ? fundaOf(B) : { fail: true, at: Date.now() }; }
+    catch { P.funda[s] = { fail: true, at: Date.now() }; }
+    P.fDone++; P.fver++; if (P.fDone % 4 === 0) paint();
+  });
+  P._fRun = false; P.fver++; paint();
+}
+export async function loadPfNews(force) {                    // portfolio_page.holding_news: each holding's headlines over the chosen window, kept 10 minutes
+  const P = S.pf, syms = openSyms(), days = NDAYS[P.nDays] || 1, key = syms.join(",") + "|" + days;
+  if (P._nRun || !syms.length || (!force && P.nKey === key && Date.now() - P.nAt < 600000)) return;
+  P._nRun = true; P.nState = "loading"; if (P.nKey.split("|")[1] !== String(days)) P.news = {};
+  const names = (S.nw && S.nw.names) || {}, out = {};
+  await pool(syms, 4, async (s) => { const l = P.lots.find((x) => x.sym === s && x.name), nm = (l && l.name) || ((P.funda[s] || {}).name) || names[s] || null;
+    try { out[s] = await stockNews(s, days, nm); } catch { out[s] = []; } });
+  P.news = out; P.nKey = key; P.nAt = Date.now(); P.nver++; P._nRun = false; P.nState = "ready"; paint();
+}
+export function loadExtras(force) { loadFunda(force); loadPfNews(force); if (!S.mf.d) loadFlow("main"); }
+const normSec = (s) => String(s || "").toLowerCase().replace(/[^a-z]/g, "");
+function stageMap() {                                        // {sector: quadrant} from Money flow's nightly file (portfolio_page._rotation_map)
+  const d = S.mf && S.mf.d; if (!d || !d.sectors) return {};
+  return Object.fromEntries(d.sectors.filter((r) => r.quadrant).map((r) => [normSec(r.sector), r.quadrant]));
+}
+export const bookKey = () => (S.pf.book === M.ALL ? "ALL" : S.pf.book);
+function snapshot(A) {                                       // portfolio_page._snapshot: one row a day per book, saved when the page is open
+  const P = S.pf, key = bookKey(), flag = A.today + "|" + key, T = A.T;
+  if (!P.can_snap || P.snapDone[flag] || A.waiting || !A.histReady || !(T.val > 0)) return;
+  P.snapDone[flag] = true;
+  const row = { d: A.today, book: key, inv: T.inv, val: T.val, real: A.realisedTotal, div: A.divTotal };
+  api("/api/portfolio/snapshot", { method: "POST", body: JSON.stringify({ book: key, inv: row.inv, val: row.val, real: row.real, div: row.div }) })
+    .then((r) => { if (r && r.missing) P.can_snap = false; }).catch(() => {});
+  P.snaps = P.snaps.filter((x) => !(x.d === row.d && x.book === key)).concat([row]);
+}
 let memo = { key: "", A: null };
 export function calc() {                                    // everything the page shows, recomputed only when the inputs change
-  const P = S.pf, key = [P.ver, P.hver, S.qv, P.book, P.bench].join("|");
+  const P = S.pf, key = [P.ver, P.hver, S.qv, P.book, P.bench, P.fver, P.nver, S.mf && S.mf.d ? 1 : 0, JSON.stringify(P.settings && P.settings.tax || null)].join("|");
   if (memo.key === key && memo.A) return memo.A;
   const today = todayStr(), splits = {}, divs = {}, closes = {}, techs = {};
   for (const [s, h] of Object.entries(P.hist)) if (h.ok) { splits[s] = h.splits; divs[s] = h.divs; closes[s] = { d: h.d, c: h.c }; techs[s] = h.tech; }
   const E = M.engine(P.lots, P.sells, splits), inb = (x) => P.book === M.ALL || x.book === P.book;
   const alots = E.alots.filter(inb), realised = E.realised.filter(inb), adjSells = E.adjSells.filter(inb), quotes = {};
   for (const l of alots) { const q = S.q[l.sym]; if (q && q.ok) quotes[l.sym] = { price: q.price, prev: q.prev, name: q.name }; }
-  const holds = M.aggregate(alots, quotes, P.plan, P.sectors || {}, techs, P.book), T = M.totals(holds, alots), sectors = M.groupBy(holds, "sector"), conc = M.concentration(holds);
+  const holds = M.aggregate(alots, quotes, P.plan, P.sectors || {}, techs, P.book), rmap = stageMap();
+  for (const h of holds) { const f = P.funda[h.sym] || {}, arts = P.news[h.sym] || [];
+    Object.assign(h, { mcap: f.mcap ?? null, pe: f.pe ?? null, roe: f.roe ?? null, roce: f.roce ?? null, dy: f.dy ?? null, fscore: f.fscore || null, arts, newsN: arts.length, tone: M.newsTone(arts), stage: rmap[normSec(h.sector)] || null });
+    if (!h.name && f.name) h.name = f.name; }
+  const T = M.totals(holds, alots), sectors = M.groupBy(holds, "sector"), conc = M.concentration(holds), rates = { ...M.TAX_DEFAULTS, ...((P.settings || {}).tax || {}) };
   const nifty = P.benchData["^NSEI"] || null, bench = P.benchData[BENCH[P.bench]] || nifty, benchName = P.benchData[BENCH[P.bench]] ? P.bench : "NIFTY 50";
-  const risk = M.riskMetrics(holds, closes, nifty), dv = M.dividends(alots, divs, today), tax = M.taxSummary(realised), x = M.portfolioXirr(alots, adjSells, holds, today);
+  const risk = M.riskMetrics(holds, closes, nifty), dv = M.dividends(alots, divs, today), tax = M.taxSummary(realised, rates), x = M.portfolioXirr(alots, adjSells, holds, today);
   let tl = null; try { tl = M.timeline(alots, adjSells, closes, bench); } catch { tl = null; }
   const scol = {}; sectors.forEach((s, i) => { scol[s.name] = s.name === "Unclassified" ? GREY : PAL[i % PAL.length]; });
   const A = { today, E, alots, realised, adjSells, holds, T, sectors, scol, conc, risk, divs: dv, divTotal: dv.reduce((a, d) => a + d.amount, 0), tax, xirr: x.xirr, xirrDays: x.days, tl, bench, benchName, nifty, quotes,
     realisedTotal: realised.reduce((a, r) => a + r.gain, 0), realisedN: new Set(realised.map((r) => r.sellId)).size, score: M.diversificationScore(conc, sectors, risk), journal: M.journal(realised),
-    waiting: holds.some((h) => !S.q[h.sym]), histReady: P.histState === "ready" };
-  A.flags = M.flags(holds, T, conc, sectors, risk, E.problems);
-  A.cur = tax[M.fy(today)] || null; A.headroom = A.cur ? A.cur.exemptLeft : M.TAX_DEFAULTS.exempt;
+    waiting: holds.some((h) => !S.q[h.sym]), histReady: P.histState === "ready", rates, mcap: M.mcapSplit(holds), fund: M.weightedFundamentals(holds) };
+  A.flags = M.flags(holds, T, conc, sectors, risk, E.problems, { mcap: A.mcap, daysLabel: P.nDays });
+  A.cur = tax[M.fy(today)] || null; A.headroom = A.cur ? A.cur.exemptLeft : rates.exempt;
   memo = { key, A };
   return A;
 }
@@ -191,19 +250,31 @@ function psOut(A) {
 }
 const SORTS = { value: ["Value, high to low", (h) => -(h.value || 0)], pnlD: ["Profit ₹, high to low", (h) => -(h.pnl || 0)], pnlA: ["Profit ₹, low to high", (h) => h.pnl || 0], pctD: ["Profit %, high to low", (h) => -(h.pnlPct || 0)],
   pctA: ["Profit %, low to high", (h) => h.pnlPct || 0], dayD: ["Today %, high to low", (h) => -(h.chg || 0)], dayA: ["Today %, low to high", (h) => h.chg || 0], risk: ["Risk to stop, high to low", (h) => -(h.risk || 0)], az: ["A to Z", null] };
+const stagePill = (st) => (st ? `<span class="chip" style="color:${QUAD_C[st] || "inherit"}">${esc(st)}</span>` : '<span class="mu">—</span>');
+const toneHtml = (h) => (h.tone == null ? '<span class="mu">—</span>' : `<span class="${h.tone > 0.3 ? "up" : h.tone < -0.3 ? "dn" : ""}">${h.newsN} · ${h.tone >= 0 ? "+" : "−"}${Math.abs(h.tone).toFixed(1)}</span>`);
+const fsHtml = (fs) => (fs ? `<span class="${fs[0] / fs[1] >= 0.75 ? "up" : fs[0] / fs[1] >= 0.45 ? "am" : "dn"}">${fs[0]}/${fs[1]}</span>` : '<span class="mu">—</span>');
+const newsDot = (h) => (h.newsN ? ` <i class="pf-ndot" title="${esc(h.newsN + " headline" + (h.newsN > 1 ? "s" : "") + " · latest: " + (h.arts[0] || {}).title)}"></i>` : "");
+function extrasState() {                                     // what is still loading for the extra columns
+  const P = S.pf, bits = [];
+  if (P._fRun) bits.push(`Reading fundamentals from Screener: ${P.fDone} of ${P.fTodo}`);
+  if (P._nRun) bits.push("Checking headlines for your holdings");
+  if (!S.mf.d && !S.mf.err) bits.push("Loading sector stages from Money flow");
+  return bits.length ? `<div class="note">${bits.join(" · ")}…</div>` : "";
+}
 function holdList(A) {
   const P = S.pf, f = P.find.trim().toUpperCase(), rows = A.holds.filter((h) => (!P.secF || h.sector === P.secF) && (!f || h.sym.includes(f)));
   const key = SORTS[P.sort] || SORTS.value; rows.sort(key[1] ? (a, b) => key[1](a) - key[1](b) : (a, b) => (a.sym < b.sym ? -1 : 1));
   if (!rows.length) return note("No holdings match.");
   const chips = (h) => `${h.splitAdj ? ' <span class="chip">Adjusted</span>' : ""}${h.slHit ? ' <span class="chip r">Stop hit</span>' : h.target != null && h.ltp != null && h.ltp >= h.target ? ' <span class="chip g">At target</span>' : ""}`;
-  const phone = rows.map((h) => `<button class="row two" data-sym="${esc(h.sym)}"><span class="a"><b>${esc(h.sym)}${chips(h)}</b><small>${q4(h.qty)} shares · avg ${num(h.avg)} · ${h.weight != null ? num(h.weight, 1) + "%" : "—"}${h.sl != null ? " · stop " + num(h.sl) : ""}</small></span>
+  const phone = rows.map((h) => `<button class="row two" data-sym="${esc(h.sym)}"><span class="a"><b>${esc(h.sym)}${newsDot(h)}${chips(h)}</b><small>${q4(h.qty)} shares · avg ${num(h.avg)} · ${h.weight != null ? num(h.weight, 1) + "%" : "—"}${h.sl != null ? " · stop " + num(h.sl) : ""}${h.stage ? " · " + esc(h.stage) : ""}${h.fscore ? " · quality " + h.fscore[0] + "/" + h.fscore[1] : ""}</small></span>
     <span class="z"><b>${h.value == null ? '<span class="mu">—</span>' : rs(h.value)}</b><small class="${cls(h.pnl)}">${h.pnl == null ? "no price" : shs(h.pnl) + " (" + pc(h.pnlPct, 1) + ")"}</small></span></button>`).join("");
-  const desk = tbl(["Stock", "Qty", "Avg cost", "Last", "Today", "Invested", "Value", "P&amp;L", "Weight", "Stop-loss", "Target"], rows.map((h) => [
-    sym(h.sym) + chips(h) + sub(`<i class="dot" style="background:${A.scol[h.sector] || GREY}"></i>${esc(h.sector)}${P.book === M.ALL && h.books.length && (h.books.length > 1 || h.books[0] !== M.MAIN) ? " · " + esc(h.books.join(", ")) : ""}`),
-    q4(h.qty), num(h.avg), h.ltp == null ? "—" : num(h.ltp), `${col(h.chg)}${pc(h.chg)}</span>`, rs(h.invested), rs(h.value), `${col(h.pnl)}${rs(h.pnl)}</span>${sub(`${col(h.pnl)}${pc(h.pnlPct)}</span>`)}`,
+  const desk = tbl(["Stock", "Qty", "Avg cost", "Last · today", "Invested", "Value", "P&amp;L", "Weight", "Stop-loss · target", "Stage · news · quality"], rows.map((h) => [
+    sym(h.sym) + newsDot(h) + chips(h) + sub(`<i class="dot" style="background:${A.scol[h.sector] || GREY}"></i>${esc(h.sector)}${P.book === M.ALL && h.books.length && (h.books.length > 1 || h.books[0] !== M.MAIN) ? " · " + esc(h.books.join(", ")) : ""}`),
+    q4(h.qty), num(h.avg), (h.ltp == null ? "—" : num(h.ltp)) + sub(`${col(h.chg)}${pc(h.chg)}</span>`), rs(h.invested), rs(h.value), `${col(h.pnl)}${rs(h.pnl)}</span>${sub(`${col(h.pnl)}${pc(h.pnlPct)}</span>`)}`,
     h.weight == null ? "—" : `<span class="wb"><i style="width:${Math.min(100, h.weight * 2).toFixed(0)}%;background:${A.scol[h.sector] || AMB}"></i></span>${num(h.weight, 1)}%`,
-    h.sl == null ? '<span class="mu">not set</span>' : `<span class="${h.slHit ? "dn" : ""}">${num(h.sl)}</span>${sub((h.slHit ? "stop hit" : "risk " + sh(h.risk)) + (h.rMult != null ? " · R " + num(h.rMult, 1) : ""))}`,
-    h.target == null ? "—" : num(h.target) + sub(h.reward ? "+" + sh(h.reward) : "reached")]), [1, 2, 3, 4, 5, 6, 7], "stick");
+    (h.sl == null ? '<span class="mu">no stop</span>' : `<span class="${h.slHit ? "dn" : ""}">${num(h.sl)}</span>`) + (h.target == null ? "" : ` · ${num(h.target)}`) +
+      sub(h.sl == null ? (h.target == null ? "" : h.reward ? "to target +" + sh(h.reward) : "target reached") : (h.slHit ? "stop hit" : "risk " + sh(h.risk)) + (h.rMult != null ? " · R " + num(h.rMult, 1) : "") + (h.target != null ? (h.reward ? " · +" + sh(h.reward) : " · target reached") : "")),
+    `<span class="pf-ctx">${stagePill(h.stage)}</span>${sub(`news ${toneHtml(h)} · quality ${fsHtml(h.fscore)}`)}`]), [1, 2, 3, 4, 5, 6], "stick");
   return `<div class="only-m card">${phone}</div><div class="only-d">${desk}</div>`;
 }
 function holdingsView(A) {
@@ -211,19 +282,30 @@ function holdingsView(A) {
   return `<div class="ctl"><select data-pf="sort" aria-label="Sort">${Object.entries(SORTS).map(([k, v]) => `<option value="${k}"${P.sort === k ? " selected" : ""}>${v[0]}</option>`).join("")}</select>
     <select data-pf="secF" aria-label="Sector"><option value="">All sectors</option>${secs.map((s) => `<option${P.secF === s ? " selected" : ""}>${esc(s)}</option>`).join("")}</select>
     <input data-pf="find" value="${esc(P.find)}" placeholder="Find a stock" autocomplete="off" spellcheck="false"><button class="btn sm" data-act="pfcsv" data-v="holdings">Export CSV</button></div>
-    <div id="pf-hl">${holdList(A)}</div><div class="note">Tap a stock for its buys, stop-loss, target, selling and moving between books. “Adjusted” means split or bonus adjusted. P&amp;L excludes charges.</div>`;
+    <div id="pf-hl">${holdList(A)}</div>${extrasState()}<div class="note">Tap a stock for its buys, stop-loss, target, selling and moving between books. Amber dot: fresh headlines in the last ${esc(S.pf.nDays)} (see News). Sector stage is the sector's quadrant in Money flow. Quality is the Piotroski-style score from Research → HC. “Adjusted” means split or bonus adjusted. P&amp;L excludes charges.</div>`;
+}
+const MCAP_C = { "Large cap": CY, "Mid cap": "#FF9F0A", "Small cap": PU, Unknown: GREY };
+function valuation(A) {                                      // portfolio_page._view_analysis: Valuation & quality
+  const F = A.fund, cov = (t) => num(t[1], 0) + "% of value covered", n1 = (v, d, suf) => (v == null ? "—" : num(v, d) + suf);
+  const rows = A.holds.map((h) => [sym(h.sym) + sub(esc(h.sector)), n1(h.pe, 1, "x"), n1(h.roe, 1, "%"), n1(h.roce, 1, "%"), n1(h.dy, 2, "%"), h.mcap == null ? "—" : "₹" + num(h.mcap, 0) + " Cr", fsHtml(h.fscore), h.weight == null ? "—" : num(h.weight, 1) + "%"]);
+  return sec("Valuation &amp; quality", "value-weighted across holdings with data") + kpis([kpi("Weighted P/E", n1(F.pe[0], 1, "x"), cov(F.pe)), kpi("Weighted ROE", n1(F.roe[0], 1, "%"), cov(F.roe)),
+      kpi("Weighted ROCE", n1(F.roce[0], 1, "%"), cov(F.roce)), kpi("Dividend yield", n1(F.dy[0], 2, "%"), cov(F.dy)), kpi("Average quality", F.fscore == null ? "—" : num(F.fscore, 0) + "%", "Piotroski-style, value-weighted")], 5) +
+    (S.pf._fRun ? `<div class="note">Reading fundamentals from Screener: ${S.pf.fDone} of ${S.pf.fTodo}…</div>` : "") +
+    tbl(["Stock", "P/E", "ROE", "ROCE", "Div yield", "Market cap", "Quality", "Weight"], rows, [1, 2, 3, 4, 5, 6, 7], "stick") +
+    '<div class="note">P/E is blended as a harmonic mean (the correct way to average P/E); loss-making companies are left out of it. Fundamentals come from Screener.in.</div>';
 }
 function analysis(A) {
   const c = A.conc, holds = A.holds;
-  const secRows = A.sectors.map((s) => [`<i class="dot" style="background:${A.scol[s.name]}"></i>${esc(s.name)}`, s.n, sh(s.value), num(s.weight, 1) + "%", `${col(s.pnl)}${shs(s.pnl)}</span>${sub(pc(s.pnlPct, 1))}`, `${col(s.day)}${shs(s.day)}</span>`]);
+  const secRows = A.sectors.map((s) => [`<i class="dot" style="background:${A.scol[s.name]}"></i>${esc(s.name)}`, s.n, sh(s.value), num(s.weight, 1) + "%", `${col(s.pnl)}${shs(s.pnl)}</span>${sub(pc(s.pnlPct, 1))}`, stagePill(s.stage)]);
   const pv = holds.filter((h) => h.pnl != null).sort((a, b) => b.pnl - a.pnl).slice(0, 15);
   const rng = holds.map((h) => { const q = S.q[h.sym] || {}, ok = h.ltp != null && q.hi52 && q.lo52 && q.hi52 > q.lo52, p = ok ? Math.max(0, Math.min(1, (h.ltp - q.lo52) / (q.hi52 - q.lo52))) : null, t = h.tech || {};
     return [sym(h.sym) + sub(esc(h.sector)), ok ? num(q.lo52) : "—", ok ? num(q.hi52) : "—", p == null ? "—" : `<span class="rng"><i style="left:${(p * 100).toFixed(0)}%"></i></span> ${num(p * 100, 0)}%`,
       t.sma200 && h.ltp ? `${col(h.ltp - t.sma200)}${pc((h.ltp / t.sma200 - 1) * 100, 1)}</span>` : "—", A.risk && A.risk.betas[h.sym] != null ? num(A.risk.betas[h.sym], 2) : "—", h.weight == null ? "—" : num(h.weight, 1) + "%"]; });
-  return sec("Sector exposure", "value, weight and profit by sector") + `<div class="pf-2"><div>${tbl(["Sector", "Stocks", "Value", "Weight", "P&amp;L", "Today"], secRows, [1, 2, 3, 4, 5])}</div>
+  return sec("Sector exposure", "value, weight, profit and Money flow stage by sector") + `<div class="pf-2"><div>${tbl(["Sector", "Stocks", "Value", "Weight", "P&amp;L", "Stage"], secRows, [1, 2, 3, 4])}</div>
       <div><div class="card pad">${hbars(A.sectors.filter((s) => s.weight > 0).map((s) => ({ l: esc(s.name), v: s.weight, c: A.scol[s.name] })))}</div></div></div>` +
     sec("Composition") + (c ? kpis([kpi("Top 1", num(c.top1, 1) + "%", "largest position"), kpi("Top 3", num(c.top3, 1) + "%", "of portfolio"), kpi("Top 5", num(c.top5, 1) + "%", "of portfolio"), kpi("Effective N", num(c.effN, 1), `behaves like · of ${c.n}`)]) : "") +
-    sec("Unrealised P&amp;L by holding") + `<div class="card pad">${hbars(pv.map((h) => ({ l: esc(h.sym), v: h.pnl, c: h.pnl >= 0 ? UP : DN })), (v) => shs(v))}</div>` +
+    `<div class="pf-2"><div>${sec("Market-cap mix", "approximate AMFI buckets")}<div class="card pad">${A.mcap.some((m) => m.name !== "Unknown" && m.value > 0) ? hbars(A.mcap.filter((m) => m.value > 0).map((m) => ({ l: m.name, v: m.weight, c: MCAP_C[m.name] }))) : '<div class="note">' + (S.pf._fRun ? "Reading market caps from Screener…" : "Market caps are not available right now.") + "</div>"}</div></div>
+      <div>${sec("Unrealised P&amp;L by holding")}<div class="card pad">${hbars(pv.map((h) => ({ l: esc(h.sym), v: h.pnl, c: h.pnl >= 0 ? UP : DN })), (v) => shs(v))}</div></div></div>` + valuation(A) +
     sec("Price position", "where each stock sits in its 52-week range, against its 200-day average, and its beta to NIFTY 50") + tbl(["Stock", "52W low", "52W high", "Position in range", "vs 200-day", "Beta", "Weight"], rng, [1, 2, 4, 5, 6], "stick") +
     sec("Health check", "automatic review") + `<div class="card pad">${flagsHtml(A.flags)}</div>` +
     '<div class="note">The diversification score starts at 100 and loses points for: largest position above 10% (up to 30), largest sector above 25% (up to 30), fewer than 10 effective equal-weight stocks (up to 25) and average correlation above 0.5 (up to 15). Rules of thumb, not recommendations.</div>';
@@ -241,7 +323,13 @@ function performance(A) {
       <div>${sec("Time-weighted index (start = 100)", "removes the effect of when you added money")}<div class="card pad">${lineChart(tl.d, [{ n: "You", c: "#FF9F0A", v: t.idx, w: 2 }].concat(t.bIdx ? [{ n: A.benchName, c: CY, v: t.bIdx }] : []), { h: 220, fmt: (v) => num(v, 1) })}</div></div></div>` +
     sec("Monthly returns", "time-weighted, %") + monthHeat(m) + (beat != null ? `<div class="note">Beat ${esc(A.benchName)} in ${beat} of ${months.length} months (partial first and current months included).</div>` : "") +
     sec("What drove your returns", "unrealised + realised + estimated dividends") + `<div class="pf-2"><div class="card pad">${hbars(show.map(([s, v]) => ({ l: esc(s), v, c: v >= 0 ? UP : DN })), (v) => shs(v))}</div>
-      <div class="card pad">${hbars(Object.entries(bySec).sort((a, b) => b[1] - a[1]).map(([s, v]) => ({ l: esc(s), v, c: v >= 0 ? UP : DN })), (v) => shs(v))}</div></div>`;
+      <div class="card pad">${hbars(Object.entries(bySec).sort((a, b) => b[1] - a[1]).map(([s, v]) => ({ l: esc(s), v, c: v >= 0 ? UP : DN })), (v) => shs(v))}</div></div>` + recorded();
+}
+function recorded() {                                         // portfolio_page._view_performance: Recorded history
+  const P = S.pf, key = bookKey(), sn = P.snaps.filter((x) => x.book === key).sort((a, b) => (a.d < b.d ? -1 : 1));
+  const head = sec("Recorded history", "a snapshot is saved each day you open this page");
+  if (sn.length < 2) return head + note(`${sn.length} snapshot${sn.length === 1 ? "" : "s"} recorded so far. The curve appears from the second day you open the portfolio${P.can_snap ? "." : ". Saving needs the portfolio_snapshots table: open Portfolio in the classic app once and run the SQL it shows."}`);
+  return head + `<div class="card pad">${lineChart(sn.map((x) => x.d), [{ n: "Value", c: "#FF9F0A", v: sn.map((x) => x.val), w: 2 }, { n: "Invested (open)", c: "#8E8E93", v: sn.map((x) => x.inv), dash: true }, { n: "Realised P&L", c: PU, v: sn.map((x) => x.real) }], { h: 220, fmt: (v) => sh(v) })}</div>`;
 }
 function riskView(A) {
   const R = A.risk, holds = A.holds, tot = A.T.val || 0;
@@ -287,7 +375,7 @@ function rebOut(A) {
   let stT = 0, ltT = 0; const rows = p.rows.map((x) => { let tax = "—";
     if (x.action === "SELL") { const f = M.fifoPreview(x.h, x.qty, x.ltp, A.today); stT += f.st; ltT += f.lt; tax = `${col(f.st + f.lt)}${shs(f.st + f.lt)}</span>${sub(`short ${shs(f.st)} · long ${shs(f.lt)}`)}`; }
     return [sym(x.sym) + sub(esc(x.sector)), `<span class="chip ${x.action === "SELL" ? "r" : "g"}">${x.action === "SELL" ? "Sell" : "Buy"}</span>`, q4(x.qty), num(x.ltp), sh(x.amount), num(x.nowW, 1) + "%", num(x.newW, 1) + "%", tax]; });
-  const sells = p.rows.filter((x) => x.action === "SELL"), buys = p.rows.filter((x) => x.action === "BUY"), T = M.TAX_DEFAULTS;
+  const sells = p.rows.filter((x) => x.action === "SELL"), buys = p.rows.filter((x) => x.action === "BUY"), T = A.rates;
   const estTax = ((Math.max(0, stT) * T.stcg + Math.max(0, ltT - A.headroom) * T.ltcg) / 100) * (1 + T.cess / 100);
   return kpis([kpi("Sell", sh(sells.reduce((a, x) => a + x.amount, 0)), sells.length + " trades", "dn"), kpi("Buy", sh(buys.reduce((a, x) => a + x.amount, 0)), buys.length + " trades", "up"), kpi("Cash left over", sh(p.left), "after the plan"),
     kpi("Gains realised by trims", shs(stT + ltT), `short ${shs(stT)} · long ${shs(ltT)}`, tone(stT + ltT)), kpi("Estimated tax on trims", sh(estTax), "after this year's LTCG headroom", "am")], 5) +
@@ -304,11 +392,27 @@ function income(A) {
   const last = (s) => divs.filter((d) => d.sym === s).map((d) => d.exDate).sort().pop();
   return out + `<div class="pf-2"><div>${sec("By financial year")}<div class="card pad">${hbars(Object.keys(byFy).sort().map((k) => ({ l: k, v: byFy[k], c: UP })), (v) => sh(v))}</div></div>
     <div>${sec("By stock")}${tbl(["Stock", "Received (est.)", "Total yield on cost", "Last ex-date"], Object.entries(per).sort((a, b) => b[1] - a[1]).map(([s, amt]) => { const h = A.holds.find((x) => x.sym === s);
-      return [sym(s), sh(amt), h && h.invested ? num((amt / h.invested) * 100, 1) + "%" : "sold", nice(last(s))]; }), [1, 2])}</div></div>`;
+      return [sym(s), sh(amt), h && h.invested ? num((amt / h.invested) * 100, 1) + "%" : "sold", nice(last(s))]; }), [1, 2])}</div></div>` + events(A);
+}
+export async function loadEvents() {                          // results and dividend dates Yahoo publishes for each holding
+  const P = S.pf, A = calc(); if (P.evState === "loading") return;
+  P.evState = "loading"; paint();
+  const out = [], to = new Date(Date.parse(A.today) + 120 * 864e5).toISOString().slice(0, 10);
+  await pool(A.holds.map((h) => h.sym), 4, async (s) => { try { const d = await api("/api/yinfo?s=" + encodeURIComponent(s)), c = d.cal || {};
+    for (const [v, lab] of [[c.earnings, "Results"], [c.exdiv, "Ex-dividend"], [c.paid, "Dividend paid"]]) for (const x of [].concat(v || [])) if (x && x >= A.today && x <= to) out.push([x, s, lab]); } catch { /* skip */ } });
+  P.events = out.sort((a, b) => (a[0] + a[1] + a[2] < b[0] + b[1] + b[2] ? -1 : 1)); P.evState = "ready"; paint();
+}
+function events(A) {
+  const P = S.pf, head = sec("Upcoming events", "results and ex-dividend dates published by Yahoo (often incomplete for NSE)");
+  if (P.evState === "idle") return head + `<div class="card pad"><button class="btn sm" data-act="pfevents">Load event calendar</button></div>`;
+  if (P.evState === "loading") return head + note("Checking calendars…");
+  if (!P.events.length) return head + note("No upcoming results or dividend dates were published for your holdings in the next 120 days.");
+  const day = (d) => new Date(d + "T00:00:00").toLocaleDateString("en-IN", { weekday: "short", day: "2-digit", month: "short", year: "numeric" });
+  return head + tbl(["Date", "Stock", "Event", "In"], P.events.map(([d, s, l]) => [day(d), sym(s), l, Math.round((Date.parse(d) - Date.parse(A.today)) / 864e5) + " days"]), [3]);
 }
 function taxView(A) {
-  const T = M.TAX_DEFAULTS, cur = M.fy(A.today), c = A.cur || { stNet: 0, ltNet: 0, tax: 0, exemptLeft: T.exempt }, u = M.unrealisedByTerm(A.alots, A.quotes, A.today);
-  let out = sec("This financial year · " + cur) + kpis([kpi("Realised P&amp;L (total)", shs(A.realisedTotal), `${A.realisedN} matched sells, all years`, tone(A.realisedTotal)), kpi("Net STCG this year", shs(c.stNet), "after set-off", tone(c.stNet)),
+  const T = A.rates, cur = M.fy(A.today), c = A.cur || { stNet: 0, ltNet: 0, tax: 0, exemptLeft: T.exempt }, u = M.unrealisedByTerm(A.alots, A.quotes, A.today);
+  let out = taxForm(T) + sec("This financial year · " + cur) + kpis([kpi("Realised P&amp;L (total)", shs(A.realisedTotal), `${A.realisedN} matched sells, all years`, tone(A.realisedTotal)), kpi("Net STCG this year", shs(c.stNet), "after set-off", tone(c.stNet)),
     kpi("Net LTCG this year", shs(c.ltNet), "after set-off", tone(c.ltNet)), kpi("Tax-free LTCG left", sh(c.exemptLeft), "of the annual exemption", "up"), kpi("Estimated tax this year", sh(c.tax), "including cess", "am")], 5);
   out += tbl(["Financial year", "Sale value", "Net STCG", "Net LTCG", "Taxable LTCG", "Est. tax", "Loss to carry forward"], Object.entries(A.tax).map(([f, v]) => [f, sh(v.proceeds), `${col(v.stNet)}${shs(v.stNet)}</span>`, `${col(v.ltNet)}${shs(v.ltNet)}</span>`, sh(v.ltTaxable), sh(v.tax), v.carryLoss ? sh(v.carryLoss) : "—"]), [1, 2, 3, 4, 5, 6]);
   out += sec("Unrealised gains by tax term", "what selling today would realise") + kpis([kpi("Unrealised short-term", shs(u.st), "held 12 months or less", tone(u.st)), kpi("Unrealised long-term", shs(u.lt), "held more than 12 months", tone(u.lt)),
@@ -321,6 +425,20 @@ function taxView(A) {
     tbl(["Sold", "Stock", "Qty", "Bought", "Buy", "Sell", "Gain", "Held", "Term", "Year"], A.realised.slice().sort((a, b) => (a.sellDate < b.sellDate ? 1 : -1)).map((x) => [nice(x.sellDate), sym(x.sym) + (x.book !== M.MAIN ? sub(esc(x.book)) : ""), q4(x.qty), nice(x.buyDate), num(x.buyPrice), num(x.sellPrice),
       `${col(x.gain)}${rs(x.gain)}</span>`, x.days == null ? "—" : x.days + "d", `<span class="chip ${x.term === "LT" ? "" : "a"}">${x.term === "LT" ? "Long-term" : "Short-term"}</span>`, x.fy]), [2, 4, 5, 6, 7], "stick");
   return out + taxNote(T);
+}
+function taxForm(T) {                                        // portfolio_page._view_tax: Tax assumptions (editable), saved in portfolio_settings
+  const P = S.pf, f = (l, k, step, max) => `<label class="f"><span>${l}</span><input name="${k}" type="number" min="0"${max ? ` max="${max}"` : ""} step="${step}" value="${esc(T[k])}" inputmode="decimal"></label>`;
+  return `<details class="card pad pf-tax"${P.taxOpen ? " open" : ""}><summary>Tax assumptions <span class="mu">· editable</span></summary><form id="pftax" class="form"><div class="g4">${f("Short-term gains rate %", "stcg", 0.5, 50)}${f("Long-term gains rate %", "ltcg", 0.5, 50)}${f("Tax-free long-term gains ₹ a year", "exempt", 5000)}${f("Cess %", "cess", 0.5, 10)}</div>
+    <div class="err"></div><div class="ctl"><button class="btn pri sm" type="submit"${P.can_set ? "" : " disabled"}>Save</button><button class="btn sm" type="button" data-act="pftaxreset">Use the defaults</button></div>
+    <div class="mini">Defaults: listed equity with STT. Short-term 20%, long-term 12.5% above ₹1.25 lakh a year, long-term means held more than 12 months (rates from 23 Jul 2024, unchanged in Budget 2026), 4% cess.${P.can_set ? "" : " Saving needs the portfolio_settings table: open Portfolio in the classic app once and run the SQL it shows."}</div></form></details>`;
+}
+export async function saveTax(form, rates) {
+  const P = S.pf, err = form.querySelector(".err"), b = form.querySelector("button[type=submit]");
+  const r = rates || Object.fromEntries([...new FormData(form)].map(([k, v]) => [k, Number(v)]));
+  if (Object.values(r).some((v) => !isFinite(v) || v < 0)) { if (err) err.textContent = "Every rate must be a number, zero or more."; return; }
+  if (b) b.disabled = true;
+  try { const d = await api("/api/portfolio/settings", { method: "POST", body: JSON.stringify({ tax: r }) }); P.settings = { ...(P.settings || {}), tax: d.tax }; P.taxOpen = true; toast("Tax assumptions saved"); paint(); }
+  catch (e) { if (err) err.textContent = e.message; if (b) b.disabled = false; }
 }
 const taxNote = (T) => `<div class="note">Assumptions: listed equity with STT, short-term gains ${T.stcg}%, long-term gains ${T.ltcg}% above ₹${num(T.exempt, 0)} a year, long-term means held more than 12 months, ${T.cess}% cess. Surcharge, carried-forward losses and pre-2018 grandfathering are not modelled. An estimate to help planning, not tax advice: use your broker's capital-gains statement or AIS for filing.</div>`;
 function transactions(A) {
@@ -340,7 +458,43 @@ function transactions(A) {
     `<div class="note">The ledger shows quantities and prices exactly as entered; the analysis uses split and bonus adjusted figures. ${P.can_sell && P.can_plan && P.can_book ? "All portfolio data is saved in Supabase, the same tables the classic app uses." :
       "Some extra portfolio tables are missing, so sells, stops or books cannot be saved yet. Open Portfolio in the classic app once and run the SQL it shows under Transactions → Storage."}</div>`;
 }
-const VIEW = { Dashboard: dashboard, "Swing desk": swing, Holdings: holdingsView, Analysis: analysis, Performance: performance, Risk: riskView, Rebalance: rebalance, Income: income, Tax: taxView, Transactions: transactions };
+const VIEW = { Dashboard: dashboard, "Swing desk": swing, Holdings: holdingsView, Analysis: analysis, Performance: performance, Risk: riskView, Rebalance: rebalance, Income: income, Tax: taxView, Transactions: transactions, News: newsView };
+function newsView(A) {                                      // portfolio_page._view_news
+  const P = S.pf, days = Object.keys(NDAYS), withNews = A.holds.filter((h) => h.newsN).sort((a, b) => (b.value || 0) - (a.value || 0));
+  let out = `<div class="ctl"><select data-pf="nDays" aria-label="News window">${days.map((d) => `<option${P.nDays === d ? " selected" : ""}>${d}</option>`).join("")}</select>${P._nRun ? '<span class="mu">Checking headlines…</span>' : ""}<span class="sp"></span><button class="btn sm" data-act="pfnews">Refresh headlines</button></div>`;
+  if (!withNews.length) return out + note(P._nRun || P.nState === "idle" ? "Checking headlines for your holdings…" : `No relevant headlines for your holdings in the last ${esc(P.nDays)}. An amber dot appears next to a stock in Holdings when news arrives.`);
+  for (const h of withNews) {
+    const t = h.tone == null ? "" : ` · tone <span class="${h.tone > 0.3 ? "up" : h.tone < -0.3 ? "dn" : ""}">${h.tone >= 0 ? "+" : "−"}${Math.abs(h.tone).toFixed(1)}</span>`;
+    out += `<div class="pf-nh"><i class="pf-ndot"></i><button class="lnk" data-sym="${esc(h.sym)}">${esc(h.sym)}</button><span>${h.newsN} headline${h.newsN > 1 ? "s" : ""} · ${h.weight == null ? "—" : num(h.weight, 1) + "%"} of portfolio${t}</span></div><div class="card">${
+      h.arts.slice(0, 6).map((a) => `<a class="pf-art ${/positive/.test(a.sentiment) ? "pos" : /negative/.test(a.sentiment) ? "neg" : ""}" href="${esc(a.link || "#")}" target="_blank" rel="noopener"><b>${esc(a.title)}</b><small>${esc(a.source || "")} · ${esc(a.time_str || "")} · ${esc(a.event === "NEWS" ? "News" : (a.event || "News").toLowerCase().replace(/^./, (c) => c.toUpperCase()))}</small></a>`).join("")}</div>`;
+  }
+  return out + '<div class="note">Headlines from a Google News search for each company. Tone is the average headline sentiment from −3 to +3; it reads words, not meaning, so open the story before acting on it.</div>';
+}
+// ── the monthly review: a printable page built in the browser (portfolio_page._report_html) ──
+export function report() {
+  const P = S.pf, A = calc(), T = A.T, cl = (v) => ((v || 0) >= 0 ? "pos" : "neg"), k = (l, v, c = "") => `<div class="k"><span class="s">${l}</span><b class="${c}">${v}</b></div>`;
+  const css = "body{font-family:Inter,Arial,sans-serif;color:#111;margin:32px;}h1{margin:0;font-size:22px}h2{font-size:14px;margin:26px 0 8px;border-bottom:2px solid #FF9F0A;padding-bottom:4px}" +
+    "table{border-collapse:collapse;width:100%;font-size:11px}th,td{padding:5px 6px;border-bottom:1px solid #ddd;text-align:left}td.r,th.r{text-align:right}" +
+    ".k{display:inline-block;margin:0 18px 8px 0}.k b{display:block;font-size:16px}.s{color:#666;font-size:11px}.pos{color:#0a7a2f}.neg{color:#b3261e}";
+  const rows = A.holds.map((h) => `<tr><td>${esc(h.sym)}</td><td>${esc(h.sector)}</td><td class="r">${q4(h.qty)}</td><td class="r">${num(h.avg)}</td><td class="r">${h.ltp == null ? "—" : num(h.ltp)}</td><td class="r">${h.value == null ? "—" : num(h.value, 0)}</td>` +
+    `<td class="r ${cl(h.pnl)}">${h.pnl == null ? "—" : num(h.pnl, 0) + " (" + pc(h.pnlPct, 1) + ")"}</td><td class="r">${h.weight == null ? "—" : num(h.weight, 1) + "%"}</td></tr>`).join("");
+  const secs = A.sectors.map((s) => `<tr><td>${esc(s.name)}</td><td class="r">${s.n}</td><td class="r">${sh(s.value)}</td><td class="r">${num(s.weight, 1)}%</td><td class="r ${cl(s.pnlPct)}">${pc(s.pnlPct, 1)}</td><td>${esc(s.stage || "")}</td></tr>`).join("");
+  const fl = A.flags.filter((f) => f.level === "alert" || f.level === "watch").map((f) => `<li><b>${esc(f.title)}</b>: ${esc(f.detail)}</li>`).join("");
+  const taxr = Object.entries(A.tax).map(([f, v]) => `<tr><td>${f}</td><td class="r">${shs(v.stNet)}</td><td class="r">${shs(v.ltNet)}</td><td class="r">${sh(v.tax)}</td></tr>`).join("");
+  const now = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }), x = A.xirr;
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Arka portfolio review</title><style>${css}</style></head><body>` +
+    `<h1>Portfolio review · ${esc(P.book)}</h1><div class="s">Arka Trades · ${esc(now)} IST · prices delayed · not investment advice</div>` +
+    `<h2>Summary</h2>${k("Invested (open)", sh(T.inv))}${k("Value", sh(T.val))}${k("Unrealised P&amp;L", shs(T.pnl) + " (" + pc(T.pnlPct, 1) + ")", cl(T.pnl))}${k("Realised P&amp;L", shs(A.realisedTotal), cl(A.realisedTotal))}` +
+    `${k("Dividends (est.)", sh(A.divTotal))}${k("XIRR", x != null ? pc(x * 100, 1) : "—", cl(x))}${k("Diversification score", A.score != null ? String(A.score) : "—")}` +
+    `<h2>Holdings</h2><table><tr><th>Stock</th><th>Sector</th><th class="r">Qty</th><th class="r">Avg</th><th class="r">Last</th><th class="r">Value</th><th class="r">P&amp;L</th><th class="r">Weight</th></tr>${rows}</table>` +
+    `<h2>Sectors</h2><table><tr><th>Sector</th><th class="r">Stocks</th><th class="r">Value</th><th class="r">Weight</th><th class="r">P&amp;L</th><th>Money flow stage</th></tr>${secs}</table>` +
+    `<h2>Points to review</h2><ul>${fl || "<li>No warnings.</li>"}</ul>` +
+    `<h2>Capital gains (estimate)</h2><table><tr><th>Financial year</th><th class="r">Net STCG</th><th class="r">Net LTCG</th><th class="r">Est. tax</th></tr>${taxr || '<tr><td colspan="4">No sells.</td></tr>'}</table>` +
+    `<p class="s">Benchmark used for performance: ${esc(A.benchName)}. Print this page or save it as PDF from your browser.</p></body></html>`;
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([html], { type: "text/html" }));
+  a.download = `arka_portfolio_review_${A.today.slice(0, 4)}_${A.today.slice(5, 7)}.html`; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  toast("Downloaded " + a.download);
+}
 export const partial = { ps: ["pf-ps", psOut], st: ["pf-st", stOut], reb: ["pf-rb", rebOut], find: ["pf-hl", holdList] };
 
 export function page() {
@@ -350,10 +504,11 @@ export function page() {
   if (P.err) return `<div>${head("")}<div class="card"><div class="empty"><b>Portfolio is not available</b>${esc(P.err)}</div></div></div>`;
   if (!P.lots.length) return `<div>${head("No holdings yet")}<div class="card"><div class="empty"><b>No holdings yet</b>Tap “Add a buy” and enter the stock, how many shares and the price you paid. Everything else on this page builds itself from your buys and sells.</div></div></div>`;
   const A = calc(), T = A.T, bk = books(), view = VIEW[P.view] ? P.view : "Dashboard";
+  queueMicrotask(() => { loadExtras(); snapshot(A); });
   const hero = `<div class="card hero"><div><span>Portfolio value${P.book !== M.ALL ? " · " + esc(P.book) : ""}</span><b>${A.waiting ? '<i class="sk">₹00,00,000</i>' : sh(T.val)}</b>
       <small><span class="${cls(T.pnl)}">${shs(T.pnl)} (${pc(T.pnlPct)}) unrealised</span> · <span class="${cls(T.day)}">${shs(T.day)} today</span></small></div>
     <div class="ctl">${bk.length > 1 ? `<select data-pf="book" aria-label="Book">${[M.ALL, ...bk].map((b) => `<option${P.book === b ? " selected" : ""}>${esc(b)}</option>`).join("")}</select>` : ""}
-      <select data-pf="bench" aria-label="Benchmark">${Object.keys(BENCH).map((b) => `<option${P.bench === b ? " selected" : ""}>${b}</option>`).join("")}</select><button class="btn sm" data-act="pfrefresh">Refresh</button></div></div>`;
+      <select data-pf="bench" aria-label="Benchmark">${Object.keys(BENCH).map((b) => `<option${P.bench === b ? " selected" : ""}>${b}</option>`).join("")}</select><button class="btn sm" data-act="pfrefresh">Refresh</button><button class="btn sm" data-act="pfreport" title="A printable page: open it and use Print, then Save as PDF">Monthly review</button></div></div>`;
   const pills = `<div class="seg">${VIEWS.map((v) => `<button class="${v === view ? "on" : ""}" data-act="pfview" data-v="${v}">${v}</button>`).join("")}</div>`;
   const empty = !A.holds.length && !["Transactions", "Tax", "Performance", "Swing desk"].includes(view);
   return `<div class="pf">${head(`${T.n} holding${T.n === 1 ? "" : "s"} · ${A.sectors.filter((s) => s.name !== "Unclassified").length} sectors · against ${esc(A.benchName)}`, hero + pills)}${
@@ -387,8 +542,8 @@ export function csv(kind) {                                 // a download built 
   const A = calc(), r2 = (v) => (v == null ? "" : Math.round(v * 100) / 100), cell = (v) => (/[",\n]/.test(String(v)) ? '"' + String(v).replace(/"/g, '""') + '"' : String(v ?? ""));
   const rows = kind === "realised" ? [["Sell date", "Symbol", "Book", "Quantity", "Buy date", "Buy price", "Sell price", "Cost", "Proceeds", "Gain", "Days held", "Term", "Financial year"],
       ...A.realised.map((x) => [x.sellDate, x.sym, x.book, r2(x.qty), x.buyDate, r2(x.buyPrice), r2(x.sellPrice), r2(x.cost), r2(x.proceeds), r2(x.gain), x.days, x.term, x.fy])]
-    : [["Symbol", "Name", "Books", "Sector", "Quantity", "Avg cost", "Last price", "Invested", "Value", "P&L", "P&L %", "Weight %", "Stop-loss", "Target", "Risk to stop"],
-      ...A.holds.map((h) => [h.sym, h.name, h.books.join(" / "), h.sector, r2(h.qty), r2(h.avg), h.ltp, r2(h.invested), r2(h.value), r2(h.pnl), r2(h.pnlPct), r2(h.weight), h.sl, h.target, r2(h.risk)])];
+    : [["Symbol", "Name", "Books", "Sector", "Quantity", "Avg cost", "Last price", "Invested", "Value", "P&L", "P&L %", "Weight %", "Stop-loss", "Target", "Risk to stop", "Sector stage", "P/E", "ROE %", "ROCE %", "Quality"],
+      ...A.holds.map((h) => [h.sym, h.name, h.books.join(" / "), h.sector, r2(h.qty), r2(h.avg), h.ltp, r2(h.invested), r2(h.value), r2(h.pnl), r2(h.pnlPct), r2(h.weight), h.sl, h.target, r2(h.risk), h.stage || "", h.pe ?? "", h.roe ?? "", h.roce ?? "", h.fscore ? h.fscore[0] + "/" + h.fscore[1] : ""])];
   const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([rows.map((r) => r.map(cell).join(",")).join("\n")], { type: "text/csv" }));
   a.download = kind === "realised" ? "arka_realised_pnl.csv" : "arka_portfolio.csv"; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
   toast("Downloaded " + a.download);

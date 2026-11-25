@@ -90,6 +90,8 @@ function ctx(sym) {
     status: { notes: S.me && S.me.role ? "configured" : "on demand" } };
 }
 
+export function newsFor(sym) { const D = dataOf(sym); lazy(D, sym, "CN"); return D.news || null; }       // for the news panel's stock view
+
 // ── page ──
 const cell = (k, v, c = "") => `<div class="sw-st"><small>${k}</small><b class="${c}">${v}</b></div>`;
 const r2 = (v) => (v == null ? "—" : "₹" + num(v, 2));

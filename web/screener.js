@@ -35,6 +35,15 @@ function frames(doc) {
     return { cols, rows, all: g.head.flat().concat(g.body.flat()) };
   });
 }
+export function tables(html, headerRows = 0) {              // pandas.read_html columns as lists of header levels; headerRows = 3 is read_html(header=[0, 1, 2])
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  return [...doc.querySelectorAll("table")].map((t) => {
+    const g = grid(t), all = g.head.concat(g.body), head = headerRows ? all.slice(0, headerRows) : g.head, body = headerRows ? all.slice(headerRows) : g.body;
+    const n = Math.max(0, ...head.map((r) => r.length), ...body.map((r) => r.length));
+    const parts = Array.from({ length: n }, (_, i) => head.length ? head.map((r, k) => r[i] || (head.length > 1 ? `Unnamed: ${i}_level_${k}` : `Unnamed: ${i}`)) : [String(i)]);
+    return { parts, rows: body.filter((r) => r.length).map((r) => Array.from({ length: n }, (_, i) => r[i] ?? "")) };
+  });
+}
 function match(tables, must) {                             // screener_scraper._find_tables_by_header
   return tables.filter((t) => {
     const blob = (t.rows.flat().join(" ") + " " + t.cols.join(" ")).toLowerCase().replace(/\s+/g, " ");

@@ -197,11 +197,30 @@ export function concentration(holds) {
 }
 export function groupBy(holds, key) {
   const agg = {};
-  for (const h of holds) { const k = h[key] || "Unclassified", a = (agg[k] = agg[k] || { name: k, n: 0, syms: [], invested: 0, investedV: 0, value: 0, day: 0 });
-    a.n++; a.syms.push(h.sym); a.invested += h.invested; if (h.value != null) { a.value += h.value; a.investedV += h.invested; } if (h.dayPnl != null) a.day += h.dayPnl; }
+  for (const h of holds) { const k = h[key] || "Unclassified", a = (agg[k] = agg[k] || { name: k, n: 0, syms: [], invested: 0, investedV: 0, value: 0, day: 0, stage: null });
+    a.n++; a.stage = a.stage || h.stage || null; a.syms.push(h.sym); a.invested += h.invested; if (h.value != null) { a.value += h.value; a.investedV += h.invested; } if (h.dayPnl != null) a.day += h.dayPnl; }
   const total = sum(Object.values(agg).map((a) => a.value));
   return Object.values(agg).map((a) => ({ ...a, pnl: a.value - a.investedV, pnlPct: a.investedV ? (a.value / a.investedV - 1) * 100 : null, weight: total ? (a.value / total) * 100 : 0 })).sort((a, b) => b.value - a.value);
 }
+// ── market-cap mix and value-weighted fundamentals (portfolio_page.mcap_split / weighted_fundamentals) ──
+export const LARGE_CAP_CR = 100000, MID_CAP_CR = 30000;          // approximate AMFI buckets (₹ crore)
+export function mcapSplit(holds) {
+  const b = { "Large cap": 0, "Mid cap": 0, "Small cap": 0, Unknown: 0 };
+  for (const h of holds) { if (h.value == null) continue; const m = h.mcap; b[m == null ? "Unknown" : m >= LARGE_CAP_CR ? "Large cap" : m >= MID_CAP_CR ? "Mid cap" : "Small cap"] += h.value; }
+  const tot = sum(Object.values(b));
+  return Object.entries(b).map(([name, value]) => ({ name, value, weight: tot ? (value / tot) * 100 : 0 }));
+}
+export function weightedFundamentals(holds) {
+  const tot = sum(holds.filter((h) => h.value != null).map((h) => h.value));
+  const wavg = (k) => { let num = 0, den = 0; for (const h of holds) { const v = h[k]; if (h.value == null || v == null) continue; num += h.value * v; den += h.value; } return [den ? num / den : null, tot ? (den / tot) * 100 : 0]; };
+  let inv = 0, den = 0; for (const h of holds) { if (h.value == null || h.pe == null || h.pe <= 0) continue; inv += h.value / h.pe; den += h.value; }
+  const out = { pe: [inv ? den / inv : null, tot ? (den / tot) * 100 : 0] };
+  for (const k of ["roe", "roce", "dy"]) out[k] = wavg(k);
+  const fw = holds.filter((h) => h.fscore && h.value && h.fscore[1]).map((h) => [h.fscore[0] / h.fscore[1], h.value]);
+  out.fscore = fw.length ? (sum(fw.map(([a, b]) => a * b)) / sum(fw.map(([, b]) => b))) * 100 : null;
+  return out;
+}
+export const newsTone = (arts) => (arts && arts.length ? sum(arts.map((a) => a.score || 0)) / arts.length : null);   // portfolio_page._news_tone
 const variance = (a) => { const m = mean(a); return sum(a.map((x) => (x - m) ** 2)) / (a.length - 1); };
 const cov = (a, b) => { const ma = mean(a), mb = mean(b); return sum(a.map((x, i) => (x - ma) * (b[i] - mb))) / (a.length - 1); };
 function percentile(a, p) { const s = a.slice().sort((x, y) => x - y), k = ((s.length - 1) * p) / 100, f = Math.floor(k), c = Math.ceil(k); return s[f] + (s[c] - s[f]) * (k - f); }
@@ -287,7 +306,7 @@ export function journal(realised) {                        // each matched buy i
 }
 
 // ── what needs attention (the checks that need no fundamentals or news) ──
-export function flags(holds, T, conc, sectors, risk, problems) {
+export function flags(holds, T, conc, sectors, risk, problems, X = {}) {
   const out = [], add = (level, title, detail) => out.push({ level, title, detail }), n = T.n, weighted = holds.filter((h) => h.weight);
   if (conc && weighted.length) {
     const top = weighted.reduce((m, h) => (h.weight > m.weight ? h : m)), t = `${top.sym} is ${top.weight.toFixed(1)}% of the portfolio`;
@@ -307,8 +326,12 @@ export function flags(holds, T, conc, sectors, risk, problems) {
     else if (s0.weight > 30) add("watch", "Sector tilt", t + ". Not necessarily wrong, just a deliberate bet to be aware of.");
     else add("ok", "Sector spread looks healthy", t + ", your largest sector.");
   }
+  const weak = known.filter((s) => ["Weakening", "Lagging"].includes(s.stage) && s.weight >= 10);
+  if (weak.length) add("watch", "Money rotating out of your sectors", weak.slice(0, 4).map((s) => `${s.name} ${s.weight.toFixed(0)}% (${s.stage})`).join("; ") + ", per Money flow.");
   const unk = holds.filter((h) => h.sector === "Unclassified").map((h) => h.sym);
   if (unk.length) add("info", "Sector not known", "Could not classify: " + unk.slice(0, 8).join(", ") + (unk.length > 8 ? " …" : "") + ".");
+  const small = (X.mcap || []).find((m) => m.name === "Small cap");
+  if (small && small.weight > 40) add("watch", "Small-cap heavy", `${small.weight.toFixed(0)}% of value is in small caps, which are typically more volatile and less liquid.`);
   const hit = holds.filter((h) => h.slHit).map((h) => h.sym);
   if (hit.length) add("alert", "Stop-loss breached", "Price is at or below your stop-loss for: " + hit.join(", ") + ".");
   const totV = T.val || 0, uncovered = sum(holds.filter((h) => h.value && h.sl == null).map((h) => h.value));
@@ -322,6 +345,10 @@ export function flags(holds, T, conc, sectors, risk, problems) {
   }
   const losers = holds.filter((h) => h.pnlPct != null && h.pnlPct <= -20).sort((a, b) => a.pnlPct - b.pnlPct);
   if (losers.length) add("watch", "Deep losers", `${losers.length} position${losers.length !== 1 ? "s are" : " is"} down 20% or more: ` + losers.slice(0, 5).map((h) => `${h.sym} (${h.pnlPct.toFixed(0)}%)`).join(", ") + ".");
+  const lowq = holds.filter((h) => h.fscore && h.fscore[1] >= 6 && h.fscore[0] / h.fscore[1] < 0.45).map((h) => `${h.sym} (${h.fscore[0]}/${h.fscore[1]})`);
+  if (lowq.length) add("info", "Weak quality scores", "Piotroski-style score below 45%: " + lowq.slice(0, 6).join(", ") + ". See the stock's Research → HC.");
+  const negn = holds.filter((h) => h.tone != null && h.tone <= -1 && h.newsN >= 2).map((h) => h.sym);
+  if (negn.length) add("watch", "Negative news flow", `Mostly negative headlines in the last ${X.daysLabel || "24 hours"} for: ` + negn.slice(0, 6).join(", ") + ".");
   if (T.nValid < n) add("watch", "Missing prices", `${n - T.nValid} holding(s) have no live price and are excluded from totals.`);
   if (problems && problems.length) add("alert", "Transaction data needs attention", problems[0] + (problems.length > 1 ? ` (+${problems.length - 1} more, see Transactions)` : ""));
   const adj = holds.filter((h) => h.splitAdj).map((h) => h.sym);

@@ -1,5 +1,6 @@
 // Arka Trades · new app (stage 8): Home, Watchlist, Portfolio, the stock page with Research, Signals, Money flow, News, Regime, Markets, Daily brief, More. Plain JavaScript, no build step.
 import * as PFV from "./portfolio.js";
+import * as PFM from "./pf.js";
 import * as RG from "./regime.js";
 import * as HM from "./home.js";
 import * as MF from "./flow.js";
@@ -49,7 +50,7 @@ const pc = (v, d = 2) => (v == null || isNaN(v) ? "—" : sgn(v, d) + "%");
 const cls = (v) => (v == null || isNaN(v) || v === 0 ? "mu" : v > 0 ? "up" : "dn");
 const qty = (v) => (v == null ? "—" : v >= 1e7 ? num(v / 1e7, 2) + " Cr" : v >= 1e5 ? num(v / 1e5, 2) + " L" : num(v, 0));
 const frac = (v, d = 1) => pc(v == null ? null : v * 100, d);
-const rs = (v, d = 0) => (v == null || isNaN(v) ? "—" : "₹" + num(v, d));
+const rs = (v, d = 0) => (v == null || isNaN(v) ? "—" : (v < 0 ? "−₹" : "₹") + num(Math.abs(v), d));
 const srs = (v, d = 0) => (v == null || isNaN(v) ? "—" : (v > 0 ? "+" : v < 0 ? "−" : "") + "₹" + num(Math.abs(v), d));
 const todayStr = () => { const t = ist(); return t.getFullYear() + "-" + String(t.getMonth() + 1).padStart(2, "0") + "-" + String(t.getDate()).padStart(2, "0"); };
 const nice = (d) => { if (!d) return "no date"; const t = new Date(d + "T00:00:00"); return isNaN(t) ? d : t.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }); };
@@ -284,15 +285,23 @@ function paint() {
   document.querySelectorAll(".nav a[data-tab]").forEach((a) => { a.classList.toggle("on", a.dataset.tab === (S.tab === "s" ? "research" : S.tab)); a.classList.toggle("onm", a.dataset.tab === phoneTab); });
   const withRail = !["home", "watchlist", "more", "brief", "portfolio", "regime", "flow", "news", "s", "research"].includes(S.tab);
   const ae = document.activeElement;                       // typing in a Portfolio box: leave the page alone so the cursor stays put
-  if (ae && main.contains(ae) && ae.dataset.pf && ae.tagName === "INPUT" && !/range|checkbox/.test(ae.type)) { if (S.sheet && !typingInSheet()) paintSheet(); return; }
+  if (ae && main.contains(ae) && ((ae.dataset.pf && ae.tagName === "INPUT") || (S.tab === "portfolio" && /INPUT|TEXTAREA/.test(ae.tagName) && ae.closest("form"))) && !/range|checkbox/.test(ae.type)) { if (S.sheet && !typingInSheet()) paintSheet(); return; }
   const keep = ae && main.contains(ae) && ae.dataset && (ae.dataset.nw || ae.dataset.rs === "find") ? [ae.dataset.nw ? "nw" : "rs", ae.dataset.nw || ae.dataset.rs, ae.selectionStart, ae.selectionEnd] : null;
   main.className = withRail ? "rail" : ["home", "portfolio", "regime", "flow", "news", "s"].includes(S.tab) ? "wide" : "";
   const y = window.scrollY;
-  if (S.tab === "s") SK.paintInto(main); else main.innerHTML = PAGES[S.tab]() + (withRail ? rail() : "");
+  const newsSide = (S.tab === "home" || S.tab === "s") && innerWidth >= 1280, showNews = newsSide && railPref();
+  if (newsSide) {                                         // Home and the stock page on a wide screen: the news panel on the right (Streamlit's news rail)
+    let wrap = main.querySelector(":scope > .nr-wrap");
+    if (!wrap || wrap.dataset.show !== String(showNews)) { main.innerHTML = `<div class="nr-wrap${showNews ? " on" : ""}" data-show="${showNews}">${showNews ? "" : '<button class="nr-show" data-act="nrshow">Show news</button>'}<div id="nr-main"></div>${showNews ? '<aside id="nr-rail"></aside>' : ""}</div>`; wrap = main.firstElementChild; }
+    const pm = wrap.querySelector("#nr-main");
+    if (S.tab === "s") SK.paintInto(pm); else pm.innerHTML = PAGES[S.tab]();
+    if (showNews) wrap.querySelector("#nr-rail").innerHTML = NW.rail(S.tab === "s" ? S.sk.sym : "", S.tab === "s" && S.nw.rmode === "SECURITY" ? SK.newsFor(S.sk.sym) : null);
+  } else if (S.tab === "s") SK.paintInto(main); else main.innerHTML = PAGES[S.tab]() + (withRail ? rail() : "");
   window.scrollTo(0, y);
   if (keep) { const el = main.querySelector(`[data-${keep[0]}="${keep[1]}"]`); if (el) { el.focus(); try { el.setSelectionRange(keep[2], keep[3]); } catch { /* not a text box */ } } }
   if (S.sheet && !typingInSheet()) paintSheet();
 }
+const railPref = () => { try { return localStorage.getItem("arka_news_rail") !== "off"; } catch { return true; } };
 const typingInSheet = () => { const a = document.activeElement; return !!(a && $("#sheet").contains(a) && /INPUT|SELECT|TEXTAREA/.test(a.tagName)); };
 function route() {
   const parts = (location.hash.replace(/^#\/?/, "") || "home").split("/"), t = parts[0];
@@ -423,9 +432,11 @@ async function sendForm(form, path, body, method = "POST") {
   const b = form.querySelector("button[type=submit]"); if (b) b.disabled = true;
   try { await api(path, { method, body: JSON.stringify(body) }); return true; } catch (er) { formErr(form, er.message); return false; }
 }
+document.addEventListener("toggle", (e) => { if (e.target.classList && e.target.classList.contains("pf-tax")) S.pf.taxOpen = e.target.open; }, true);
 document.addEventListener("submit", async (e) => {
   const f = e.target, id = f.getAttribute("id");       // not f.id: a field named "id" would hide it
   if (id === "thesis") { e.preventDefault(); return SK.saveNote(f); }
+  if (id === "pftax") { e.preventDefault(); document.activeElement && document.activeElement.blur(); return PFV.saveTax(f); }
   if (["buy", "sell", "plan", "wmeta", "move"].includes(id)) {
     e.preventDefault();
     const v = Object.fromEntries(new FormData(f)), sym = (f.dataset.s || v.sym || "").toUpperCase().trim().replace(/\.NS$/, "");
@@ -471,6 +482,7 @@ function pfInput(el, ev) {                                // a control on the Po
   const part = PFV.partial[f ? g : k];
   if (part) { const box = document.getElementById(part[0]); if (box) box.innerHTML = part[1](PFV.calc()); return; }
   if (k === "bench") PFV.loadHistory();
+  if (k === "nDays") PFV.loadPfNews();
   paint();
 }
 let nwTimer = 0;
@@ -489,6 +501,8 @@ document.addEventListener("click", async (e) => {
     if (act === "undo") { const u = S.undo; $("#toast").innerHTML = ""; if (u) u(); return; }
     if (act === "close") { if (a.tagName === "A") { closeSheet(); return; } return closeSheet(); }
     if (SK.act(act, a)) return;
+    if (act === "nrhide" || act === "nrshow") { try { localStorage.setItem("arka_news_rail", act === "nrhide" ? "off" : "on"); } catch { /* private mode */ } return paint(); }
+    if (act === "nrmode") { S.nw.rmode = a.dataset.v; return paint(); }
     if (act === "sksheet") return openSheet(a.dataset.s);
     if (act === "range") { S.sheet.range = a.dataset.v; return paintSheet(); }
     if (act === "list") { S.wl.list = a.dataset.v; paint(); return refresh(); }
@@ -513,6 +527,10 @@ document.addEventListener("click", async (e) => {
     if (act === "rgset") { S.rg[a.dataset.k] = a.dataset.v; if (a.dataset.k === "uni") RG.loadRegime(); return paint(); }
     if (act === "pfview") { S.pf.view = a.dataset.v; window.scrollTo(0, 0); return paint(); }
     if (act === "pfcsv") return PFV.csv(a.dataset.v);
+    if (act === "pfreport") return PFV.report();
+    if (act === "pfevents") return PFV.loadEvents();
+    if (act === "pfnews") return PFV.loadPfNews(true);
+    if (act === "pftaxreset") { const f = a.closest("form"); return f && PFV.saveTax(f, { ...PFM.TAX_DEFAULTS }); }
     if (act === "pfrefresh") { S.at = {}; toast("Refreshing prices and history"); refresh(); return PFV.loadHistory(true); }
     if (act === "delsell") { if (!confirm("Delete this sell? This cannot be undone.")) return; try { await api("/api/portfolio/sell?id=" + a.dataset.id, { method: "DELETE" }); toast("Sell deleted"); } catch (er) { toast(er.message); } return loadPortfolio(); }
     if (act === "newbook") { const n = (prompt("Name for the new book (for example Trading or Long term)") || "").replace(/[^\w &.-]/g, "").trim().slice(0, 24); if (!n) return;
@@ -534,6 +552,8 @@ document.addEventListener("click", async (e) => {
 window.addEventListener("hashchange", route);
 window.addEventListener("scroll", () => { if (S.tab === "home") HM.spy(); }, { passive: true });
 document.addEventListener("visibilitychange", () => { if (!document.hidden && S.me) refresh(); });
-setInterval(() => { if (S.me && !document.hidden && marketOpen()) refresh(); if (S.me && !document.hidden && S.tab === "news") { NW.loadNews(); paint(); } }, 30000);
+setInterval(() => { if (S.me && !document.hidden && marketOpen()) refresh(); if (S.me && !document.hidden && (S.tab === "news" || ((S.tab === "home" || S.tab === "s") && innerWidth >= 1280 && railPref()))) { NW.loadNews(); paint(); } }, 30000);
+let rsTimer = 0, lastW = innerWidth;
+window.addEventListener("resize", () => { clearTimeout(rsTimer); rsTimer = setTimeout(() => { if (S.me && (innerWidth >= 1280) !== (lastW >= 1280) || (innerWidth >= 900) !== (lastW >= 900)) paint(); lastW = innerWidth; }, 200); });
 boot();
 export { S, api, paint, esc, num, sgn, pc, cls, rs, nice, todayStr, field, toast, need, ordersOf };
