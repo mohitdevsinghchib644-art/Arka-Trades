@@ -14,7 +14,7 @@
 # Where the data comes from (free and public): NSE index member lists, Yahoo Finance daily prices, NSDL FPI reports.
 # No secrets needed.
 #
-# First time: Actions tab -> "Market data" -> "Run workflow". It takes about 10 minutes.
+# First time: Actions tab -> "Market data" -> "Run workflow". It takes about 30 minutes.
 # After that it runs by itself at about 6:15 pm and 9:15 pm IST, Monday to Friday.
 name: Market data
 
@@ -34,7 +34,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
