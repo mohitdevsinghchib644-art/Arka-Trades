@@ -267,23 +267,37 @@ function viewStates(d) {
   return note("These are the <b>rule states</b>: a description of each sector from written rules (arka_flow/state.py). They are kept for reference. The rotation model on <b>Where to be</b> is what ranks sectors and is tested on <b>Does it work?</b>.")
     + `<div class="mf-board six">${cols.join("")}</div><details class="card mf-set"><summary>How states are decided</summary><pre class="mf-pre">${esc(d.states_doc)}</pre></details>`;
 }
-export function fpiRows(x, n) {                             // the classic FPI table: last fortnight, last 6 and 12, % of holdings, streak
+export function fpiRows(x, n) {                             // the classic FPI table (last fortnight, last 6 and 12, % of holdings, streak) plus the chosen window
   const k = Math.min(n, x.dates.length);
-  return Object.keys(x.net).map((s) => { const v = x.net[s].slice(-k).filter(ok); let streak = 0;
+  return Object.keys(x.net).map((s) => { const w = x.net[s].slice(-k), v = w.filter(ok); let streak = 0;
     for (const z of [...v].reverse()) { if (streak >= 0 && z > 0) streak++; else if (streak <= 0 && z < 0) streak--; else break; }
     const a = (x.auc[s] || []).slice(-k).filter(ok), aum = a.length ? a[a.length - 1] : null, sum = (m) => v.slice(-m).reduce((p, q) => p + q, 0);
-    return { s, last: v.length ? v[v.length - 1] : null, s6: sum(6), s12: sum(12), pct: aum && aum > 0 ? (sum(6) / aum) * 100 : null, streak, aum }; }).sort((a, b) => (b.pct ?? -1e9) - (a.pct ?? -1e9));
+    return { s, last: v.length ? v[v.length - 1] : null, s6: sum(6), s12: sum(12), pct: aum && aum > 0 ? (sum(6) / aum) * 100 : null, streak, aum,
+      win: sum(v.length), pos: v.filter((z) => z > 0).length, got: v.length, k, w }; }).sort((a, b) => (b.pct ?? -1e9) - (a.pct ?? -1e9));
+}
+function fpiBars(w) {                                       // one bar per fortnight in the window, oldest on the left; scaled to the sector's own largest move
+  const m = Math.max(1e-9, ...w.filter(ok).map(Math.abs)), bw = Math.max(3, Math.min(12, Math.floor(168 / w.length))), H = 28, W = bw * w.length;
+  return `<svg class="mf-fb" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" aria-hidden="true"><line x1="0" x2="${W}" y1="${H / 2}" y2="${H / 2}" stroke="#2A2A30"/>${
+    w.map((v, i) => { if (!ok(v) || !v) return ""; const h = Math.max(1, (Math.abs(v) / m) * (H / 2 - 1)); return `<rect x="${i * bw}" y="${v > 0 ? H / 2 - h : H / 2}" width="${bw - 1}" height="${h.toFixed(1)}" fill="${v > 0 ? "#2FD067" : "#FF5247"}"/>`; }).join("")}</svg>`;
 }
 function viewFpi() {
   const F = S.mf, x = F.fpi;
   let out = note("NSDL's fortnightly report of <b>foreign portfolio investor</b> net investment by sector: recorded money, but FPIs only, NSDL's own sector list, and published after the fortnight ends. Shown as context; <b>not used in the score or the test</b>.");
   if (!x) { if (!F._fpiRun && !F.fpiErr) loadFlow("fpi"); return out + note(F._live ? `Reading NSDL's fortnightly reports… ${F.fpiDone || 0} of 48` : F.fpiErr ? `FPI data NOT AVAILABLE: ${esc(F.fpiErr)}` : "Loading NSDL fortnights…"); }
-  out += `<div class="rg-ctl">${seg("mffpi", [[12, "12 fortnights"], [24, "24"], [48, "48"]], F.fpiN)}</div>`;
+  out += `<div class="rg-ctl"><span class="mf-lbl">Window</span>${seg("mffpi", [[12, "12 fortnights"], [24, "24"], [48, "48"]], F.fpiN)}</div>`;
   const n = +F.fpiN, last = x.dates[x.dates.length - 1], age = Math.round((Date.now() - Date.parse(last)) / 864e5);
-  const rows = fpiRows(x, n);
-  const cr = (v) => (ok(v) ? `<span class="${v > 0 ? "up" : v < 0 ? "dn" : ""}">${f(v, 0)}</span>` : "n/a");
-  return out + `<div class="note">${x.ok} of ${x.tried} reports loaded${x.live ? " just now (the nightly job could not reach NSDL)" : ""} · latest fortnight ended ${nice(last)} (${age} days ago) · ₹ crore, equity.</div>` + tbl([["NSDL sector"], ["Last fortnight ₹Cr", 1], ["Last 6 ₹Cr", 1], ["Last 12 ₹Cr", 1], ["Last 6 as % of FPI holdings", 1], ["Fortnights in a row (+ in / − out)", 1], ["FPI holdings ₹Cr", 1]],
-    rows.map((r) => `<tr><td><b>${esc(r.s)}</b></td><td class="r">${cr(r.last)}</td><td class="r">${cr(r.s6)}</td><td class="r">${cr(r.s12)}</td><td class="r">${ok(r.pct) ? pc(r.pct, 2, "") : "n/a"}</td><td class="r">${r.streak > 0 ? "+" + r.streak : r.streak}</td><td class="r">${ok(r.aum) ? num(r.aum, 0) : "n/a"}</td></tr>`), "stick");
+  const rows = fpiRows(x, n), k = rows.length ? rows[0].k : Math.min(n, x.dates.length), from = x.dates[x.dates.length - k];
+  const tot = rows.reduce((p, r) => p + r.win, 0), cr = (v) => (ok(v) ? `<span class="${v > 0 ? "up" : v < 0 ? "dn" : ""}">${f(v, 0)}</span>` : "n/a");
+  const lead = [...rows].sort((a, b) => b.win - a.win), top = lead.slice(0, 3).filter((r) => r.win > 0), bot = lead.slice(-3).reverse().filter((r) => r.win < 0);
+  out += `<div class="note">${x.ok} of ${x.tried} reports loaded${x.live ? " just now (the nightly job could not reach NSDL)" : ""} · latest fortnight ended ${nice(last)} (${age} days ago) · ₹ crore, equity.</div>`;
+  out += `<div class="card pad mf-txt"><p>Over the last <b>${k} fortnights</b> (${nice(from)} to ${nice(last)}, about ${num(k / 2, 0)} months) FPIs were net <b>${tot >= 0 ? "buyers" : "sellers"}</b> of ${cr(tot)} ₹Cr across these sectors.`
+    + (top.length ? ` Most bought: ${top.map((r) => `<b>${esc(r.s)}</b> ${cr(r.win)}`).join(", ")}.` : "") + (bot.length ? ` Most sold: ${bot.map((r) => `<b>${esc(r.s)}</b> ${cr(r.win)}`).join(", ")}.` : "") + `</p></div>`;
+  out += h(`Over the last ${k} fortnights`) + tbl([["NSDL sector"], [`Net ₹Cr`, 1], ["% of FPI holdings", 1], ["Fortnights buying", 1], ["Each fortnight (oldest → latest)"]],
+    lead.map((r) => `<tr><td><b>${esc(r.s)}</b></td><td class="r">${cr(r.win)}</td><td class="r">${ok(r.aum) && r.aum > 0 ? pc((r.win / r.aum) * 100, 2, "") : "n/a"}</td><td class="r">${r.pos} of ${r.got}</td><td>${fpiBars(r.w)}</td></tr>`), "stick")
+    + `<div class="note">Sorted by net money over the window. Bars: green in, red out, each scaled to that sector's own largest fortnight in the window.</div>`;
+  return out + h("Recent flows (the classic table)") + tbl([["NSDL sector"], ["Last fortnight ₹Cr", 1], ["Last 6 ₹Cr", 1], ["Last 12 ₹Cr", 1], ["Last 6 as % of FPI holdings", 1], ["Fortnights in a row (+ in / − out)", 1], ["FPI holdings ₹Cr", 1]],
+    rows.map((r) => `<tr><td><b>${esc(r.s)}</b></td><td class="r">${cr(r.last)}</td><td class="r">${cr(r.s6)}</td><td class="r">${cr(r.s12)}</td><td class="r">${ok(r.pct) ? pc(r.pct, 2, "") : "n/a"}</td><td class="r">${r.streak > 0 ? "+" + r.streak : r.streak}</td><td class="r">${ok(r.aum) ? num(r.aum, 0) : "n/a"}</td></tr>`), "stick")
+    + `<div class="note">Same columns as the old page: these use the latest fortnights, so they do not change with the window (the streak counts back within it).</div>`;
 }
 function viewMethod(d) {
   const q = d.quality;

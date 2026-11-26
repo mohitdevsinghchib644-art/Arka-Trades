@@ -873,3 +873,4 @@ select.rs-in{flex:0 1 220px}
 .ac-set{width:100%;height:640px;border:0;display:block;background:transparent}
 .ac-kv{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line);font-size:13.5px;color:var(--tx3)} .ac-kv b{color:var(--tx);font-weight:600;text-align:right}
 .ac .btn.full{margin-top:14px} .ac .btn.red{color:var(--dn)} .ac-p{font-size:14px;line-height:1.7;color:var(--tx2)} .ac-p b{color:var(--tx)} .ac-ver{padding:14px 2px}
+.mf-lbl{font-size:12.5px;color:var(--tx3);align-self:center;margin:0 -8px 12px 0} .mf-fb{display:block}
