@@ -493,7 +493,8 @@ export function nsdlUrls(day) {
   const [y, m, d] = day.split("-").map(Number), full = MONTHS[m - 1], ab = full.slice(0, 3), v = [full, ab, ab.toUpperCase(), full.toUpperCase()];
   if (m === 9) v.push("Sept", "SEPT");
   const dd = String(d).padStart(2, "0"), cdsl = "https://www.cdslindia.com/publications/FII/FortnightlySecWisePages/";
-  return [...[...new Set(v)].map((x) => `${NSDL}FIIInvestSector_${x}${dd}${y}.html`),            // NSDL, as the classic page; then CDSL's copy of the same report
+  const names = [...new Set(v)].map((x) => `FIIInvestSector_${x}${dd}${y}.html`);
+  return [...names.map((x) => NSDL + x), ...names.slice(0, 2).map((x) => "https://pilot.fpi.nsdl.co.in/StaticReports/Fortnightly_Sector_wise_FII_Investment_Data/" + x),      // NSDL, its pilot site, then CDSL's copy
     `${cdsl}${encodeURIComponent(`${full} ${dd} ${y}`)}.html`, `${cdsl}${encodeURIComponent(`${full} ${dd}, ${y}`)}.html`];
 }
 async function fpiReport(url, ctx) {
@@ -502,7 +503,7 @@ async function fpiReport(url, ctx) {
   try {
     return json(await cached("nsdl/" + day, 30 * 86400, async () => {
       for (const u of nsdlUrls(day)) {
-        const r = await fetch(u, { headers: { "user-agent": UA, accept: "text/html" } }).catch(() => null);
+        const r = await fetch(u, { headers: { "user-agent": UA, accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "accept-language": "en-IN,en;q=0.9", referer: "https://www.fpi.nsdl.co.in/web/Reports/FPI_Fortnightly_Selection.aspx" } }).catch(() => null);
         if (r && r.ok) { const t = await r.text(); if (t.includes("Sector")) return { ok: true, html: slim(t) }; }
       }
       throw new Error("no report for " + day);
@@ -829,7 +830,7 @@ async function deals(env, ctx) {
 }
 // results of the nightly "Market data" job (the Streamlit engines run in Python on GitHub); only known file names are served
 // They live on the "market-data" branch (replaced each night, so the main branch and Cloudflare builds stay small); older runs wrote to main.
-const MARKET_FILES = /^(regime_nifty(500|200|100)|meta|flow|flow_sectors|flow_fpi|names)$/;
+const MARKET_FILES = /^(regime_nifty(500|200|100)|meta|flow|flow_sectors|flow_fpi|flow_index|names|flow(_sectors)?@[a-z0-9]+-[a-z0-9]+-\dy-\d+(\.\d+)?|flow_models@[a-z0-9]+-[a-z0-9]+-\dy-\d+(\.\d+)?@\d+(\.\d+)?)$/;      // the Money flow data choices: flow@arka-n50-5y-0.5
 async function market(env, ctx, url) {
   const f = url.searchParams.get("f") || "";
   if (!MARKET_FILES.test(f)) return fail(400, "Unknown market file.");
