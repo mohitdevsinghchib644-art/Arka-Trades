@@ -275,28 +275,17 @@ function bench(M) {
     <div class="w"><span>1W<b class="${cl(m.w1)}">${pct(m.w1, 1)}</b></span><span>1M<b class="${cl(m.m1)}">${pct(m.m1, 1)}</b></span></div></button>`).join("");
   return out ? `<div class="hm-ixs">${out}</div>` : "";
 }
-function desk() {                                            // the signal desk in brief (fno_page.home_desk)
-  const d = S.sig; if (!d || !d.leaders) return "";
-  const word = { on: "approved", trial: "on trial", off: "switched off" }, f = (v, k = 1) => (ok(v) ? (v > 0 ? "+" : v < 0 ? "−" : "") + num(Math.abs(v * 100), k) + "%" : "—");
-  const pxs = (v) => (!ok(v) ? "—" : Math.abs(v) >= 5000 ? num(v, 0) : Math.abs(v) >= 100 ? num(v, 1) : num(v, 2));
-  const L = d.leaders, W = d.swing, od = ordersOf(d), w = Object.fromEntries((L.record && L.record.windows || []).map((x) => [x.key, x])), all = w.all || { book: {}, index: {} };
-  const b1 = od.length ? `<div class="hm-vd"><b>${od.length}</b><span>to place at the next open · last close shown</span></div><div class="hm-kvs">${od.slice(0, 6).map((o) => kv(`${esc(o.book)} · ${o.act.toLowerCase()}${ok(o.stop) ? " · stop " + pxs(o.stop) : ""}`, `<span class="${o.act === "Buy" ? "up" : "dn"}">${esc(o.sym)} ${pxs(o.ref)}</span>`)).join("")}${od.length > 6 ? kv(`and ${od.length - 6} more in Signals`, "") : ""}</div>`
-    : `<div class="hm-vd"><b class="mu">No orders</b><span>for the next open</span></div><div class="hm-kvs">${kv("Leaders book", L.check_today ? "checked today, no change" : "next check next week")}${kv("Swing trades open", (W.open || []).length)}${kv("Swing record", `${num(((W.record && W.record.all && W.record.all.win) || 0) * 100, 0)}% won · ${f(W.record && W.record.all && W.record.all.exp, 2)} a trade`)}</div>`;
-  const cg = all.book.cagr, dd = L.record && L.record.dd_now, tops = (L.holdings || []).slice(0, 2).map((t) => `${esc(t.sym)} ${f(t.pnl, 0)}`).join(", ") || "—";
-  const b2 = `<div class="hm-vd"><b style="color:${ok(cg) && cg > 0 ? GREEN : RED}">${f(cg)}</b><span>a year in the test, after costs</span></div><div class="hm-kvs">${kv("NIFTY 500, same period", f(all.index.cagr) + " a year")}${kv("Status", word[L.status] || "—")}${kv("Holding", (L.holdings || []).length + " stocks")}${kv("From its peak now", `<span class="${ok(dd) && dd < -0.001 ? "dn" : ""}">${f(dd)}</span>`)}${kv("Best holdings", tops)}</div>`;
-  const act = { buy: ["Buy the dip at the open", GREEN], sell: ["Sell at the open", RED], hold: ["In a dip trade", AMBER], none: ["No signal", T2] };
-  let head = null, rows = "";
-  for (const x of d.index || []) {
-    const [wd, c] = act[x.action] || act.none, fo = x.fno || {};
-    if (x.action !== "none" && !head) head = [`${x.name}: ${wd.toLowerCase()}`, c];
-    const note = x.action !== "none" ? wd : x.above200 ? "buys at or below " + pxs(x.trigger) : "below its 200-day average";
-    rows += kv(`${esc(x.name)} · ${word[x.status] || ""}`, `<span style="color:${x.action !== "none" ? c : "inherit"}">${esc(note)}</span>`) + kv("Put-call ratio · max pain", `${ok(fo.pcr) ? num(fo.pcr, 2) : "—"} · ${ok(fo.max_pain) ? num(fo.max_pain, 0) : "—"}`) + kv("Put wall · call wall", `${ok(fo.put_wall) ? num(fo.put_wall, 0) : "—"} · ${ok(fo.call_wall) ? num(fo.call_wall, 0) : "—"}`);
-  }
-  head = head || ["No index signal", T2];
-  const b3 = `<div class="hm-vd"><b style="color:${head[1]}">${esc(head[0])}</b><span>dip in an uptrend</span></div><div class="hm-kvs">${rows}</div>`;
-  const asof = d.asof ? `Signals from ${nice(d.asof).replace(/ \d{4}$/, "")} close` : "";
-  return sec("hm-desk", "Signal desk", "fixed rules tested on real prices · records, stops and sizes in Signals") +
-    `<div class="hm-g c3">${card("Orders for the next open", asof, b1)}${card("Leaders book · 20 strongest stocks", "trend", b2)}${card("NIFTY 50 and BANK NIFTY", "index", b3)}</div>`;
+function desk() {                                            // the Arka Model in brief
+  const d = S.md && S.md.d; if (!d) return "";
+  const m = d.market, L = d.books.long, Sh = d.books.short, od = ordersOf(), f = (v, k = 1) => (ok(v) ? (v > 0 ? "+" : v < 0 ? "−" : "") + num(Math.abs(v), k) + "%" : "—");
+  const pxs = (v) => (!ok(v) ? "—" : Math.abs(v) >= 5000 ? num(v, 0) : Math.abs(v) >= 100 ? num(v, 1) : num(v, 2)), bull = /bullish/i.test(m.regime), bear = /bearish|Distribution|volatility/i.test(m.regime);
+  const b1 = od.length ? `<div class="hm-vd"><b>${od.length}</b><span>for the next open · paper until a book is approved</span></div><div class="hm-kvs">${od.slice(0, 6).map((o) => kv(`${esc(o.sym)} · ${o.act.toLowerCase()}`, ok(o.stop) ? `stop ${pxs(o.stop)}` : "")).join("")}</div>`
+    : `<div class="hm-vd"><b class="mu">No trade</b><span>for the next open</span></div><div class="hm-kvs">${kv("Long book", `${L.positions.length} of ${d.rules.slots} slots`)}${kv("Short book", `${Sh.positions.length} of ${d.rules.slots} slots`)}</div>`;
+  const b2 = `<div class="hm-vd"><b style="color:${bull ? GREEN : bear ? RED : AMBER}">${esc(m.regime)}</b><span>market regime</span></div><div class="hm-kvs">${kv("NIFTY 50, next session", `<span style="color:${m.nifty_up ? GREEN : RED}">${m.nifty_up ? "tilt up" : "tilt down"}</span>`)}${kv("That call has been right", num(m.nifty_rec.right, 1) + "% of days")}${kv("Long gauge · short gauge", `${L.gauge} · ${Sh.gauge}`)}</div>`;
+  const ul = L.record.unseen || L.record.all, us = Sh.record.unseen || Sh.record.all;
+  const b3 = `<div class="hm-vd"><b style="color:${ul.book.total > 0 ? GREEN : RED}">${f(ul.book.total)}</b><span>long book on unseen data, after costs</span></div><div class="hm-kvs">${kv("Short book, same period", `<span style="color:${us.book.total > 0 ? GREEN : RED}">${f(us.book.total)}</span>`)}${kv("Period", `${nice(ul.from)} to ${nice(ul.to)}`)}${kv("Status", `long ${L.status === "live" ? "approved" : "in test"} · short ${Sh.status === "live" ? "approved" : "in test"}`)}</div>`;
+  return sec("hm-desk", "Arka Model", "machine-learning desk for F&O stocks · full record in Signals") +
+    `<div class="hm-g c3">${card("Signals for the next open", `Model run on ${nice(d.asof).replace(/ \d{4}$/, "")} close`, b1)}${card("Regime and NIFTY", "next sessions", b2)}${card("Record on unseen data", "walk-forward", b3)}</div>`;
 }
 function holdingsCard(holds, realised) {
   const right = realised ? `Realised ${inr(realised, true)} all time` : "By value";

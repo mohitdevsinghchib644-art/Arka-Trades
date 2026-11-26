@@ -2,11 +2,15 @@
 import { S, api, paint, esc, todayStr } from "./app.js";
 import * as V from "./deskview.js";
 import * as O from "./omview.js";
+import * as MD from "./model.js";
+
+const ALL = [...MD.TABS, "Leaders", "Big players", "Options map"];       // Leaders (the 20 strongest stocks, checked weekly) is back as the trend core; the Swing and Index rule books stay retired
 
 const saved = () => { try { return JSON.parse(localStorage.getItem("arka_desk_size") || "{}"); } catch { return {}; } };
-export const deskDefaults = () => { const z = saved(); return { tab: "Desk", C: null, chain: null, log: null, sectors: null, capL: z.capL ?? 200000, capS: z.capS ?? 100000, risk: z.risk ?? 1, chartL: "", chartS: "", busy: {}, om: null, omPick: "", omFlt: "All", omExp: {}, omSym: "", omS: {} }; };
+export const deskDefaults = () => { const z = saved(); return { tab: "Tonight", C: null, chain: null, log: null, sectors: null, capL: z.capL ?? 200000, capS: z.capS ?? 100000, risk: z.risk ?? 1, chartL: "", chartS: "", busy: {}, om: null, omPick: "", omFlt: "All", omExp: {}, omSym: "", omS: {} }; };
 export const sizing = () => { const D = S.fd; return { cap_l: Math.max(0, +D.capL || 0), cap_s: Math.max(0, +D.capS || 0), risk: Math.max(0.1, Math.min(5, +D.risk || 1)) / 100 }; };   // typed on the page, kept in this browser only
 export async function load() {                               // the small files the Signals workflow writes every evening
+  MD.load();
   const D = S.fd, get = async (key, path, pick) => { if (D[key] != null || D.busy[key]) return; D.busy[key] = true; try { D[key] = pick(await api(path)); } catch { D[key] = pick({}); } D.busy[key] = false; paint(); };
   get("C", "/api/desk?f=charts", (d) => d || {});
   if (D.tab === "Index") get("chain", "/api/desk?f=chain", (d) => d.rows || []);
@@ -51,11 +55,13 @@ function optionsMap() {                                      // fno_page._option
   return out + wrap(O.indexView(x, which)) + `<div class="note">F&amp;O data to ${V.day(M.asof)}. End of day, from NSE's published files.</div>`;
 }
 export function page() {
-  const D = S.fd, Sg = S.sig, head = (sub) => `<div class="hd"><div><h1>Signals</h1><div class="sub">${sub}</div></div></div>`;
-  if (S.sigErr && !Sg) return `<div>${head("")}<div class="card"><div class="empty"><b>The signal file could not be read</b>${esc(S.sigErr)}</div></div></div>`;
-  if (!Sg) return `<div>${head("Loading…")}<div class="card"><div class="note">Loading the desk…</div></div></div>`;
-  if (Sg.v !== 3) return `<div>${head("")}<div class="fd">${V.pan("Signal desk", "", V.empty(setup), "", true)}</div></div>`;
-  const tab = V.TABS.includes(D.tab) ? D.tab : "Desk", C = D.C || {}, names = S.nw.names || {}, sz = sizing(), ld = Sg.leaders, sw = Sg.swing;
+  const D = S.fd, Sg = S.sig, head = (sub) => `<div class="hd"><div><h1>Arka Model</h1><div class="sub">${sub}</div></div></div>`;
+  const tab0 = ALL.includes(D.tab) ? D.tab : "Tonight", tabs0 = `<div class="seg fd-tabs">${ALL.map((x) => `<button class="${x === tab0 ? "on" : ""}" data-act="fdtab" data-v="${x}">${x}</button>`).join("")}</div>`;
+  if (MD.TABS.includes(tab0)) return `<div class="fdp">${head("Machine-learning desk for F&O stocks · market regime, long and short signals for the next open, and the full record · end of day")}${tabs0}${MD.view(tab0)}</div>`;
+  if (S.sigErr && !Sg) return `<div class="fdp">${head("")}${tabs0}<div class="card"><div class="empty"><b>The positioning file could not be read</b>${esc(S.sigErr)}</div></div></div>`;
+  if (!Sg) return `<div class="fdp">${head("Loading…")}${tabs0}<div class="card"><div class="note">Loading…</div></div></div>`;
+  if (Sg.v !== 3) return `<div class="fdp">${head("")}${tabs0}<div class="fd">${V.pan("F&O positioning", "", V.empty(setup), "", true)}</div></div>`;
+  const tab = tab0, C = D.C || {}, names = S.nw.names || {}, sz = sizing(), ld = Sg.leaders, sw = Sg.swing;
   let body = "", extra = "";
   try {
     if (tab === "Desk") body = V.desk(Sg, C, sz, names);
@@ -69,9 +75,9 @@ export function page() {
     else if (tab === "Options map") body = "";
     else body = V.evidence(Sg, names, D.log || []);
   } catch (er) { body = V.pan("This view could not be drawn", "", V.empty(`${V.e(er.name)}: ${V.e(String(er.message).slice(0, 200))}. The other tabs still work; running the Signals workflow again usually fixes a half-written file.`), "", true); }
-  const tabs = `<div class="seg fd-tabs">${V.TABS.map((x) => `<button class="${x === tab ? "on" : ""}" data-act="fdtab" data-v="${x}">${x}</button>`).join("")}</div>`;
-  return `<div class="fdp">${head("Orders for the next open, the books behind them and the evidence · end of day")}<div class="fd">${minus(V.ticker(Sg, todayStr()))}</div>${tabs}${["Desk", "Leaders", "Swing", "Index"].includes(tab) ? sizeBox() : ""}
-    ${tab === "Options map" ? optionsMap() : ""}<div class="fd">${minus(body + extra)}<div class="fd-n" style="margin-top:4px">End-of-day signals from fixed rules tested on past prices. They can and do lose money. Not investment advice.</div></div></div>`;
+  const tabs = tabs0;
+  return `<div class="fdp">${head(tab === "Leaders" ? "Trend core: the 20 strongest stocks by 12-month strength, checked once a week · fixed rule, 11-year record" : tab === "Big players" ? "Who holds what in futures and options, and where the big money traded · end of day" : "Open interest by strike: walls, max pain and the expected range · end of day")}${tabs}${tab === "Leaders" ? sizeBox() : ""}
+    ${tab === "Options map" ? optionsMap() : ""}<div class="fd">${minus(body + extra)}<div class="fd-n" style="margin-top:4px">End-of-day positioning data from NSE. Context, not a signal. Not investment advice.</div></div></div>`;
 }
 export function input(el, ev) {                               // capital, risk or the chart choice changed
   const D = S.fd, k = el.dataset.fd;

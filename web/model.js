@@ -1,0 +1,169 @@
+// Arka Trades · Arka Model: the machine-learning desk on the Signals page. Every number comes from arka_data/model/model.json,
+// written each evening by arka_model.py (GitHub Actions). Nothing is computed here except quantities from the capital you type.
+import { S, api, paint, esc, num, nice } from "./app.js";
+import { lineChart, legend } from "./charts.js";
+
+export const TABS = ["Tonight", "Charts", "Track record", "Validation", "Method"];
+const GREEN = "#2FD067", RED = "#FF5247", AMBER = "#FF9F0A", T2 = "#A6A6AD", T3 = "#74747C", BLUE = "#5AA9FF", PURPLE = "#B58CFF";
+const savedCap = () => { try { return +localStorage.getItem("arka_model_cap") || 500000; } catch { return 500000; } };
+export const modelDefaults = () => ({ d: undefined, err: "", C: null, cap: savedCap(), sym: "", list: "Long", per: "unseen", side: "long", busy: false });
+export async function load(force) {
+  const M = S.md; if (M.busy || (M.d && !force)) return; M.busy = true;
+  try { const d = await api("/api/desk?f=model"); M.d = d && d.v >= 3 && d.books ? d : null; M.err = ""; } catch (e) { if (e.message !== "signed out") { M.err = e.message; M.d = null; } }
+  M.busy = false; paint();
+  if (M.d && !M.C) api("/api/desk?f=mcharts").then((c) => { M.C = c || {}; paint(); }).catch(() => { M.C = {}; paint(); });
+}
+const ok = (v) => v != null && isFinite(v);
+const px = (v) => (!ok(v) ? "—" : Math.abs(v) >= 5000 ? num(v, 0) : Math.abs(v) >= 100 ? num(v, 1) : num(v, 2));
+const sg = (v, d = 1, suf = "%") => (!ok(v) ? "—" : (v > 0 ? "+" : v < 0 ? "−" : "") + num(Math.abs(v), d) + suf);
+const col = (v) => (!ok(v) || v === 0 ? "" : v > 0 ? "up" : "dn");
+const symB = (s) => `<button class="nd-sym" data-sym="${esc(s)}">${esc(s)}</button>`;
+const tbl = (head, rows, cls = "") => `<div class="card tw"><table class="tb ${cls}"><thead><tr>${head.map(([t, r]) => `<th class="${r ? "r" : ""}">${t}</th>`).join("")}</tr></thead><tbody>${rows.join("") || `<tr><td colspan="${head.length}" class="mu">Nothing here tonight.</td></tr>`}</tbody></table></div>`;
+const h = (t, sub = "") => `<h2>${esc(t)}${sub ? ` <span>${esc(sub)}</span>` : ""}</h2>`;
+const tile = (l, v, s = "", c = "") => `<div class="md-k"><small>${l}</small><b class="${c}">${v}</b><span>${s}</span></div>`;
+const seg = (act, opts, cur) => `<div class="seg">${opts.map(([v, t]) => `<button class="${String(v) === String(cur) ? "on" : ""}" data-act="${act}" data-v="${esc(v)}">${esc(t)}</button>`).join("")}</div>`;
+const setup = `<div class="card"><div class="empty"><b>The model has not run yet</b>1. Add <b>arka_model.py</b> to the repository (next to app.py) and <b>.github/workflows/model.yml</b>.<br>2. In GitHub open Actions, choose "Arka Model", press Run workflow and wait for the green tick (about 15 minutes).<br>The desk fills in after that and refreshes every weekday evening.</div></div>`;
+
+const REG_C = { "Strong bullish": "g", "Weak bullish": "g", Sideways: "", Distribution: "r", "Strong bearish": "r", "High volatility": "r" };
+export const statusOf = (B) => (B.status === "live" ? ["Approved", "g"] : B.status === "forward" ? ["Passed the backtest · forward test running", "a"] : ["In test · paper only", "a"]);
+function banner(d, sides = ["long", "short"]) {
+  return `<div class="md-bans">${sides.map((k) => { const B = d.books[k], [t, c] = statusOf(B), u = B.record.unseen || B.record.all;
+    return `<div class="md-ban ${c}"><span class="chip ${c}">${k === "long" ? "Long book" : "Short book"} · ${t}</span><b>${B.status === "live" ? "Passed every gate, including the forward test." : B.status === "forward" ? "Passed the unseen-period test. Paper only until the deflated Sharpe and the forward log clear." : "Not yet proven on data it had never seen. Follow it on paper."}</b>
+      <div class="md-g4"><div><small>Unseen book</small><b class="${col(u.book.total)}">${sg(u.book.total, 1)}</b></div><div><small>Profit factor</small><b>${u.trades.pf ?? "—"}</b></div><div><small>Random books beaten</small><b>${num(u.random.beats, 0)}%</b></div><div><small>Deflated Sharpe</small><b>${ok(u.book.dsr) ? num(u.book.dsr, 0) + "%" : "—"}</b></div></div>
+      <details><summary>What approval needs</summary><small>${esc(B.status_why)} Unseen period ${nice(u.from)} to ${nice(u.to)}.</small></details></div>`; }).join("")}</div>`;
+}
+const prob = (r) => (ok(r.prob) ? `<b>${num(r.prob, 0)}%</b><small>${r.prob_n >= 1000 ? num(r.prob_n / 1000, 0) + "k" : r.prob_n} past trades</small>` : "—");
+const why = (r) => [r.sector, ok(r.strength) ? `12-month strength ${num(r.strength, 0)} of 100` : "", r.buildup, ok(r.oi5) ? `OI ${sg(r.oi5, 0)} in 5 days` : "", ok(r.ivpct) ? `IV at its ${num(r.ivpct, 0)}th percentile` : "", ok(r.d200) ? `${sg(r.d200, 0)} vs 200-day` : "", ok(r.atr) ? `ATR ₹${px(r.atr)}` : ""].filter(Boolean).join(" · ");
+function orders(d, k, slot) {                               // tonight's signals for one book: a table on desktop, cards on a phone
+  const B = d.books[k], by = Object.fromEntries(B.ranked.map((r) => [r.sym, r])), list = B.picks.map((s) => by[s]).filter(Boolean), long = k === "long", verb = long ? "Buy" : "Short";
+  const rows = list.map((r) => `<tr><td class="r">${r.rank}</td><td>${symB(r.sym)}<div class="md-why">${why(r)}</div></td><td class="r">${px(r.close)}</td><td class="r md-p">${prob(r)}</td><td class="r dn">${px(r.stop)}<small>${sg(r.stop_pct, 1)}</small></td><td class="r up">${px(r.target)}<small>${sg(r.target_pct, 1)}</small></td><td class="r">${r.close > 0 ? num(Math.floor(slot / r.close), 0) : "—"}</td><td class="r"><button class="btn sm" data-act="mdchart" data-v="${esc(r.sym)}">Chart</button></td></tr>`);
+  const cards = list.map((r) => `<div class="card pad md-buy"><div class="md-bh">${symB(r.sym)}<span class="chip ${long ? "g" : "r"}">${verb} · rank ${r.rank}</span></div><div class="md-b3"><div><small>Close</small><b>${px(r.close)}</b></div><div><small>Stop ${sg(r.stop_pct, 1)}</small><b class="dn">${px(r.stop)}</b></div><div><small>Target ${sg(r.target_pct, 1)}</small><b class="up">${px(r.target)}</b></div><div><small>Win chance</small><b>${ok(r.prob) ? num(r.prob, 0) + "%" : "—"}</b></div></div><div class="md-why">${why(r)}</div><button class="btn sm" data-act="mdchart" data-v="${esc(r.sym)}" style="margin-top:10px">Chart</button></div>`).join("");
+  const none = `<div class="card"><div class="note"><b>No ${long ? "new buy" : "new short"} tonight.</b> ${!B.slots_free ? "The book is full." : B.blocked ? `This book takes no new trade in a ${esc(d.market.regime.toLowerCase())} market.` : `The ${long ? "long" : "short"} gauge is ${B.gauge.toLowerCase()}${B.new_def ? " and nothing cleared the rules" : `, and this book only opens trades when it is supportive`}.`} No trade is a valid decision.</div></div>`;
+  return h(long ? "Buy at the next open" : "Sell short at the next open · stock futures", `${B.gauge} for ${long ? "longs" : "shorts"} · up to ${B.new} new tonight · ${B.positions.length} of ${d.rules.slots} slots used`)
+    + (list.length ? `<div class="only-d">${tbl([["#", 1], ["Stock"], ["Close", 1], ["Win chance", 1], [`Stop · ${d.rules.stop_atr} ATR`, 1], [`Target · ${d.rules.target_atr} ATR`, 1], ["Qty", 1], ["", 1]], rows, "md-t")}</div><div class="only-m">${cards}</div>` : none);
+}
+function tonight(d) {
+  const M = S.md, m = d.market, L = d.books.long, Sh = d.books.short, slot = Math.max(0, +M.cap || 0) / d.rules.slots, rc = REG_C[m.regime] || "", N = m.nifty_rec;
+  const pnlOf = (B) => { const o = B.positions.filter((p) => !p.pending); return o.length ? o.reduce((a, p) => a + (p.pnl || 0), 0) / d.rules.slots : 0; };
+  const hero = `<div class="md-hero">
+    <div class="md-card ${rc} md-reg"><small>Market regime · ${nice(d.asof)}</small><b>${esc(m.regime)}</b><p>${esc(m.action)}</p><ul>${m.why.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>
+      <div class="md-dots">${m.regime_last.slice(-40).map((x) => `<i title="${esc(x.d)} · ${esc(x.r)}" style="background:${REG_C[x.r] === "g" ? GREEN : REG_C[x.r] === "r" ? RED : "#4a4a52"};opacity:${/Strong|High/.test(x.r) ? 1 : 0.55}"></i>`).join("")}</div><span>Last 40 sessions: green bullish, grey sideways, red distribution, bearish or high volatility</span></div>
+    <div class="md-card ${m.nifty_up ? "g" : "r"}"><small>NIFTY 50 · next session</small><b>${m.nifty_up ? "Tilt up" : "Tilt down"}</b><p>Right on <b>${num(N.right, 1)}%</b> of ${num(N.n, 0)} scored days (always saying up: ${num(N.always_up, 1)}%)${ok(N.unseen_right) ? `; on unseen days <b>${num(N.unseen_right, 1)}%</b> against ${num(N.unseen_always_up, 1)}%` : ""}. A tilt, not a forecast.</p>
+      <div class="md-dots">${m.last.slice(-24).map((x) => `<i title="${esc(x.d)}" style="background:${!ok(x.next) ? "#2A2A30" : (x.next > 0) === x.up ? GREEN : RED}"></i>`).join("")}</div><span>Last 24 calls: green right, red wrong, grey not known yet</span></div>
+    <div class="md-card"><small>Tonight's decision</small><b>${esc(d.decision === "NO TRADE" ? "No trade" : d.decision.replace("BUY", "to buy").replace("SHORT", "to short"))}</b><p>${d.decision === "NO TRADE" ? "Nothing cleared the rules. Staying out is a decision too." : "Signals are for the next open. Both books are paper books until their banner says Approved."}</p>
+      <div class="md-two"><div><small>Long book</small><b>${L.positions.length} of ${d.rules.slots} · <span class="${col(pnlOf(L))}">${sg(pnlOf(L), 2)}</span></b></div><div><small>Short book</small><b>${Sh.positions.length} of ${d.rules.slots} · <span class="${col(pnlOf(Sh))}">${sg(pnlOf(Sh), 2)}</span></b></div></div><span>Open-trade result on each book's capital</span></div></div>`;
+  const cap = `<div class="card pad md-cap"><label class="f"><span>Capital for one book (₹)</span><input data-md="cap" type="number" min="0" step="10000" value="${esc(M.cap)}" inputmode="decimal"></label><div class="mini">One slot is a tenth of this: <b>₹${num(slot, 0)}</b>. At most ${d.rules.sector_cap} names from one sector in a book. Stays in this browser.</div></div>`;
+  const posRows = (B, side) => B.positions.map((p) => `<tr><td><span class="chip ${side === "long" ? "g" : "r"}">${side === "long" ? "Long" : "Short"}</span></td><td>${symB(p.sym)}</td><td>${nice(p.signal)}</td><td class="r">${p.pending ? "next open" : px(p.entry)}</td><td class="r">${px(p.price)}</td><td class="r ${col(p.pnl)}">${sg(p.pnl, 2)}</td><td class="r dn">${px(p.stop)}</td><td class="r up">${px(p.target)}</td><td class="r">${p.left ? p.left + " left" : "exit at the close"}</td></tr>`);
+  const lst = M.list === "Stay away" ? L.avoid : M.list === "Short" ? Sh.ranked : L.ranked, dec = d.decisions || {}, dc = { BUY: "g", SHORT: "r", AVOID: "r", WATCH: "", "WATCH SHORT": "" };
+  const rows = lst.map((r) => `<tr><td class="r">${r.rank}</td><td>${symB(r.sym)}${dec[r.sym] ? ` <span class="chip ${dc[dec[r.sym]] || ""}">${dec[r.sym].toLowerCase()}</span>` : ""}${r.held ? ' <span class="chip">held</span>' : ""}</td><td class="r">${px(r.close)}</td><td class="r">${ok(r.prob) ? num(r.prob, 0) + "%" : "—"}</td><td class="r">${ok(r.strength) ? num(r.strength, 0) : "—"}</td><td class="r ${col(r.r5)}">${sg(r.r5, 1)}</td><td class="r ${col(r.d200)}">${sg(r.d200, 1)}</td><td>${esc(r.buildup)}</td><td class="r ${col(r.oi5)}">${sg(r.oi5, 1)}</td><td class="r">${ok(r.ivpct) ? num(r.ivpct, 0) : "—"}</td><td class="r">${ok(r.pcr) ? num(r.pcr, 2) : "—"}</td><td>${esc(r.sector || "")}</td></tr>`);
+  const U = L.record.unseen || L.record.all;
+  return banner(d) + hero + cap + orders(d, "long", slot) + orders(d, "short", slot)
+    + `<div class="note">Stop and target are shown from the last close. After the fill, set the stop ${d.rules.stop_atr} ATR from your price and the target ${d.rules.target_atr} ATR (the ATR is shown under each stock). If neither is hit, close at the end of session ${d.rules.hold}. "Win chance" is the share of earlier out-of-sample trades with a similar reading that made money after costs; it is not a promise. Shorts are tested on the stock's own price: a futures contract adds lot size, margin and rollover.</div>`
+    + h("Open trades in the two paper books") + tbl([["Book"], ["Stock"], ["Signal"], ["Entry", 1], ["Price", 1], ["Result", 1], ["Stop", 1], ["Target", 1], ["Time", 1]], [...posRows(L, "long"), ...posRows(Sh, "short")])
+    + h(M.list === "Stay away" ? "Lowest ranked for longs tonight" : M.list === "Short" ? "Tonight's short ranking" : "Tonight's long ranking", `${d.data.stocks} F&O stocks in the history · decision shown beside each name`) + seg("mdlist", [["Long", "Long · top 25"], ["Short", "Short · top 25"], ["Stay away", "Stay away"]], M.list)
+    + tbl([["#", 1], ["Stock"], ["Close", 1], ["Win chance", 1], ["12m strength", 1], ["5 days", 1], ["vs 200-day", 1], ["Futures"], ["OI 5d", 1], ["IV pct", 1], ["PCR", 1], ["Sector"]], rows, "stick")
+    + (M.list === "Stay away" ? `<div class="note">In the unseen period the 20 lowest-ranked stocks returned ${sg(U.avoid.mean, 2)} a long trade (all stocks: ${sg(U.all.mean, 2)}).</div>` : "");
+}
+
+function candles(c, lines = []) {                           // candles with the model book's buys (▲) and sells (▼)
+  const n = c.d.length, W = 960, H = 380, L = 8, Rm = 58, T = 14, B = 26, lo = Math.min(...c.l, ...lines.map((x) => x[0]).filter(ok)), hi = Math.max(...c.h, ...lines.map((x) => x[0]).filter(ok)), pad = (hi - lo) * 0.06 || 1;
+  const Y = (v) => T + (1 - (v - (lo - pad)) / (hi - lo + 2 * pad)) * (H - T - B), st = (W - L - Rm) / n, X = (i) => L + (i + 0.5) * st, bw = Math.max(1.5, st * 0.62), ix = Object.fromEntries(c.d.map((d, i) => [d, i]));
+  let out = "";
+  for (let k = 0; k <= 4; k++) { const v = lo - pad + ((hi - lo + 2 * pad) * k) / 4; out += `<line x1="${L}" x2="${W - Rm}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}" stroke="#1F1F23"/><text x="${W - Rm + 6}" y="${(Y(v) + 4).toFixed(1)}" fill="${T3}" font-size="11">${px(v)}</text>`; }
+  for (let i = 0; i < n; i += Math.ceil(n / 6)) out += `<text x="${X(i).toFixed(1)}" y="${H - 8}" fill="${T3}" font-size="11" text-anchor="middle">${esc(nice(c.d[i]).replace(/ \d{4}$/, ""))}</text>`;
+  for (let i = 0; i < n; i++) { const up = c.c[i] >= c.o[i], k = up ? GREEN : RED, y1 = Y(Math.max(c.o[i], c.c[i])), y2 = Y(Math.min(c.o[i], c.c[i]));
+    out += `<line x1="${X(i).toFixed(1)}" x2="${X(i).toFixed(1)}" y1="${Y(c.h[i]).toFixed(1)}" y2="${Y(c.l[i]).toFixed(1)}" stroke="${k}"/><rect x="${(X(i) - bw / 2).toFixed(1)}" y="${y1.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(1, y2 - y1).toFixed(1)}" fill="${k}"/>`; }
+  for (const [v, t, k] of lines) if (ok(v)) out += `<line x1="${L}" x2="${W - Rm}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}" stroke="${k}" stroke-dasharray="5 4"/><text x="${L + 4}" y="${(Y(v) - 5).toFixed(1)}" fill="${k}" font-size="11">${t} ${px(v)}</text>`;
+  for (const m of c.m || []) { const i = ix[m.d]; if (i == null || !ok(m.p)) continue; const x = X(i), open = m.k === "b" || m.k === "ss", buy = m.k === "b" || m.k === "sc", y = buy ? Y(c.l[i]) + 16 : Y(c.h[i]) - 16, k = m.k === "b" ? BLUE : m.k === "ss" ? PURPLE : m.r > 0 ? GREEN : RED;
+    out += `<path d="${buy ? `M${x} ${y - 10}l7 11h-14z` : `M${x} ${y + 10}l7 -11h-14z`}" fill="${k}" stroke="#0B0B0C"/><text x="${x.toFixed(1)}" y="${(buy ? y + 13 : y - 6).toFixed(1)}" fill="${k}" font-size="10.5" font-weight="600" text-anchor="middle">${open ? (m.k === "b" ? "B" : "S") : sg(m.r, 1)}</text>`; }
+  return `<div class="md-ch"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Price chart with the model's trades">${out}</svg></div>`;
+}
+function charts(d) {
+  const M = S.md, C = M.C, L = d.books.long, Sh = d.books.short;
+  if (!C) return `<div class="card"><div class="note">Loading the charts…</div></div>`;
+  const syms = Object.keys(C); if (!syms.length) return `<div class="card"><div class="note">No chart file yet. It appears after the next model run.</div></div>`;
+  const first = [...L.picks, ...Sh.picks].find((s) => C[s]) || syms[0], sym = syms.includes(M.sym) ? M.sym : first, c = C[sym], isS = Sh.picks.includes(sym) || Sh.positions.some((x) => x.sym === sym);
+  const B = isS ? Sh : L, r = B.ranked.find((x) => x.sym === sym), p = B.positions.find((x) => x.sym === sym);
+  const lines = p ? [[p.stop, "Stop", RED], [p.target, "Target", GREEN], [p.entry, "Entry", T2]] : r && B.picks.includes(sym) ? [[r.stop, "Stop", RED], [r.target, "Target", GREEN]] : [];
+  const tr = (c.m || []).filter((m) => m.k === "s" || m.k === "sc"), wins = tr.filter((m) => m.r > 0).length, dec = (d.decisions || {})[sym];
+  const tag = (s) => (L.picks.includes(s) ? " · buy" : Sh.picks.includes(s) ? " · short" : L.positions.some((x) => x.sym === s) ? " · long open" : Sh.positions.some((x) => x.sym === s) ? " · short open" : "");
+  return `<div class="card pad md-pick"><label class="f"><span>Stock</span><select data-md="sym">${syms.map((s) => `<option value="${esc(s)}"${s === sym ? " selected" : ""}>${esc(s)}${tag(s)}</option>`).join("")}</select></label>
+      <div class="md-two"><div><small>Model trades on this chart</small><b>${tr.length}</b></div><div><small>Won</small><b>${tr.length ? wins + " of " + tr.length : "—"}</b></div><div><small>Tonight</small><b>${dec ? dec[0] + dec.slice(1).toLowerCase() : "Wait"}</b></div><div><small>Win chance</small><b>${r && ok(r.prob) ? num(r.prob, 0) + "%" : "—"}</b></div></div></div>`
+    + candles(c, lines) + legend([["Bought (long book)", BLUE], ["Sold short (short book)", PURPLE], ["Closed at a gain", GREEN], ["Closed at a loss", RED]])
+    + `<div class="note">Every arrow is a trade a model book took in the walk-forward test or since: the model that chose it had been trained only on earlier days. The number is the result after costs. ${symB(sym)} opens the stock page.</div>`
+    + (tr.length ? tbl([["Closed"], ["Book"], ["Result", 1], ["Exit"]], tr.slice().reverse().map((m) => `<tr><td>${nice(m.d)}</td><td>${m.k === "s" ? "Long" : "Short"}</td><td class="r ${col(m.r)}">${sg(m.r, 2)}</td><td>${m.why === "stop" ? "Stop hit" : m.why === "target" ? "Target hit" : "Time: 5 sessions"}</td></tr>`)) : "");
+}
+const pers = (P) => [["unseen", "Unseen · 2025 on"], ["design", "Design · to 2024"], ["all", "All"]].filter(([k]) => P[k]);
+const sideSeg = () => seg("mdside", [["long", "Long book"], ["short", "Short book"]], S.md.side);
+function record(d) {
+  const M = S.md, B = d.books[M.side] || d.books.long, P = B.record, key = P[M.per] ? M.per : "all", r = P[key], cv = B.curve, b = r.book, mo = r.momentum;
+  const tiles = `<div class="md-kg">${tile("Model book", sg(b.total, 1), `${sg(b.cagr, 1)} a year · ${num(r.sessions, 0)} sessions`, col(b.total))}${tile("Worst fall from a peak", sg(b.maxdd, 1), `Calmar ${b.calmar ?? "—"} (yearly return ÷ worst fall)`, "dn")}
+    ${tile("Sharpe · Sortino", `${b.sharpe ?? "—"} · ${b.sortino ?? "—"}`, "return per unit of risk, yearly")}${tile("Deflated Sharpe", ok(b.dsr) ? num(b.dsr, 0) + "%" : "—", `chance the edge is real after ${d.rules.trials} tries`, ok(b.dsr) ? (b.dsr >= 95 ? "up" : b.dsr < 50 ? "dn" : "") : "")}
+    ${tile("Trades", num(r.trades.n, 0), `${num(r.trades.win, 1)}% won · profit factor ${r.trades.pf ?? "—"}`)}${tile("Average trade", sg(r.trades.mean, 2), `wins ${sg(r.trades.avg_win, 2)} · losses ${sg(r.trades.avg_loss, 2)}`, col(r.trades.mean))}
+    ${tile("12-month momentum book", sg(mo.total, 1), `same trade and rules · Sharpe ${mo.sharpe ?? "—"}`, col(mo.total))}${tile("Random-pick books beaten", num(r.random.beats, 1) + "%", `${num(r.random.sims, 0)} simulations · their median ${sg(r.random.median, 1)}`)}</div>`;
+  const chart = `<div class="card pad">${lineChart(cv.d, [{ n: "Model book", c: AMBER, v: cv.model, w: 2 }, { n: "12-month momentum, same rules", c: PURPLE, v: cv.momentum, w: 1.4 }, { n: "Random picks (median)", c: T3, v: cv.random, w: 1.4 }, { n: "NIFTY 50", c: BLUE, v: cv.nifty, w: 1.4 }], { h: 300, fmt: (v) => num(v, 1) })}${legend([["Model book", AMBER], ["12-month momentum, same rules", PURPLE], ["Random picks, same rules (median)", T3], ["NIFTY 50", BLUE]])}
+    <div class="mini">Start = 100 on ${nice(cv.d[0])}. Everything right of <b>${nice(d.rules.unseen)}</b> is the unseen period.</div></div>`;
+  const yrs = B.years.map((y) => `<tr><td><b>${y.year}</b>${y.unseen ? ' <span class="chip a">unseen</span>' : ""}</td><td class="r ${col(y.book)}">${sg(y.book, 1)}</td><td class="r dn">${sg(y.maxdd, 1)}</td><td class="r">${y.n ?? 0}</td><td class="r">${ok(y.win) ? num(y.win, 1) + "%" : "—"}</td><td class="r ${col(y.mean)}">${sg(y.mean, 2)}</td><td class="r">${y.pf ?? "—"}</td><td class="r ${col(y.avg_stock)}">${sg(y.avg_stock, 2)}</td><td class="r ${col(y.momentum)}">${sg(y.momentum, 1)}</td><td class="r ${col(y.random)}">${sg(y.random, 1)}</td><td class="r ${col(y.nifty)}">${sg(y.nifty, 1)}</td></tr>`);
+  const reg = r.by_regime.map((x) => `<tr><td>${esc(x.regime)}</td><td class="r">${num(x.n, 0)}</td><td class="r ${col(x.mean)}">${sg(x.mean, 2)}</td><td class="r">${ok(x.win) ? num(x.win, 1) + "%" : "—"}</td><td class="r">${x.pf ?? "—"}</td></tr>`);
+  const rec = B.recent.map((t) => `<tr><td>${symB(t.sym)}</td><td>${nice(t.signal)}</td><td>${nice(t.exit)}</td><td class="r">${px(t.entry)}</td><td class="r ${col(t.ret)}">${sg(t.ret, 2)}</td><td>${t.why === "stop" ? "Stop" : t.why === "target" ? "Target" : "Time"}</td><td>${esc(t.regime || "")}</td></tr>`);
+  const cmb = d.combined, cr = cmb && (cmb.record[key] || cmb.record.all);
+  const both = !cr ? "" : h("Both books on the same capital", `${nice(cr.from)} to ${nice(cr.to)} · long and short run side by side, marked to market daily`) + `<div class="md-kg">${tile("Both books", sg(cr.total, 1), `${sg(cr.cagr, 1)} a year`, col(cr.total))}${tile("Worst fall from a peak", sg(cr.maxdd, 1), `long alone ${sg(cr.long.maxdd, 1)} · short alone ${sg(cr.short.maxdd, 1)}`, "dn")}${tile("Sharpe · Sortino · Calmar", `${cr.sharpe ?? "—"} · ${cr.sortino ?? "—"} · ${cr.calmar ?? "—"}`, `deflated Sharpe ${ok(cr.dsr) ? num(cr.dsr, 0) + "%" : "—"}`)}${tile("How the two books move together", ok(cr.corr) ? num(cr.corr, 2) : "—", "daily correlation: below 0 means they offset each other")}</div>`
+    + tbl([["Year"], ["Both", 1], ["Worst fall", 1], ["Long book", 1], ["Short book", 1]], cmb.years.map((y) => `<tr><td><b>${y.year}</b>${y.unseen ? ' <span class="chip a">unseen</span>' : ""}</td><td class="r ${col(y.both)}">${sg(y.both, 1)}</td><td class="r dn">${sg(y.maxdd, 1)}</td><td class="r ${col(y.long)}">${sg(y.long, 1)}</td><td class="r ${col(y.short)}">${sg(y.short, 1)}</td></tr>`))
+    + `<div class="note">Running both books means twice the exposure on one pool of money: every rupee backs one long slot and one short slot. That needs futures margin, and a day when longs fall and shorts rise together hurts twice. Shorts are tested on the stock's own price, not on a futures contract.</div>`;
+  return banner(d, [M.side]) + `<div class="rg-ctl">${sideSeg()}${seg("mdper", pers(P), key)}</div>` + both + h(M.side === "long" ? "Long book on its own" : "Short book on its own") + tiles + h("Model book against momentum, random picks and NIFTY", "after costs") + chart
+    + h("Year by year") + tbl([["Year"], ["Book", 1], ["Worst fall", 1], ["Trades", 1], ["Won", 1], ["Avg trade", 1], ["Profit factor", 1], ["Avg stock", 1], ["Momentum book", 1], ["Random book", 1], ["NIFTY", 1]], yrs, "stick")
+    + h("By market regime", `${nice(r.from)} to ${nice(r.to)} · closed trades by the regime on the signal day`) + tbl([["Regime"], ["Trades", 1], ["Avg trade", 1], ["Won", 1], ["Profit factor", 1]], reg)
+    + `<div class="note">Book: ${d.rules.slots} equal slots, at most ${d.rules.sector_cap} names a sector, results counted when a trade closes, ${num(d.rules.cost, 2)}% cost a side. "Avg stock" is every F&O stock given the same trade every day. The momentum book takes the strongest (for shorts, the weakest) 12-month stocks with the same trade and rules. Stocks in F&O on each past date are used, but ${d.data.missing.length} renamed or delisted names have no price file and are missing, which flatters old results a little.</div>`
+    + h("Last 40 closed trades") + tbl([["Stock"], ["Signal"], ["Exit"], ["Entry", 1], ["Result", 1], ["Exit by"], ["Regime"]], rec, "stick");
+}
+function sims(d) {
+  const M = S.md, B = d.books[M.side] || d.books.long, P = B.record, key = P[M.per] ? M.per : "all", r = P[key], R = r.random, hs = R.hist, mx = Math.max(...hs, 1), W = 960, H = 220, bw = (W - 40) / hs.length, pos = (v) => 20 + ((v - R.lo) / ((R.hi - R.lo) || 1)) * (W - 40), mdl = r.book.total;
+  const xm = Math.max(22, Math.min(W - 22, pos(mdl))), bt = r.bootstrap, cal = r.calibration;
+  const hist = `<div class="md-ch"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Random-pick books">${hs.map((n, i) => `<rect x="${(20 + i * bw + 1).toFixed(1)}" y="${(H - 34 - (n / mx) * (H - 70)).toFixed(1)}" width="${(bw - 2).toFixed(1)}" height="${((n / mx) * (H - 70)).toFixed(1)}" fill="#2A2A30"/>`).join("")}
+    <line x1="${xm}" x2="${xm}" y1="18" y2="${H - 34}" stroke="${AMBER}" stroke-width="2"/><text x="${xm}" y="12" fill="${AMBER}" font-size="12" font-weight="600" text-anchor="${xm > W - 120 ? "end" : xm < 120 ? "start" : "middle"}">Model ${sg(mdl, 1)}</text>
+    <text x="20" y="${H - 12}" fill="${T3}" font-size="11">${sg(R.lo, 0)}</text><text x="${W - 20}" y="${H - 12}" fill="${T3}" font-size="11" text-anchor="end">${sg(R.hi, 0)}</text><text x="${W / 2}" y="${H - 12}" fill="${T3}" font-size="11" text-anchor="middle">total return of ${num(R.sims, 0)} books that picked stocks at random</text></svg></div>`;
+  const calRows = (cal.bins || []).map((x) => `<tr><td class="r">${num(x.said, 1)}%</td><td class="r">${num(x.won, 1)}%</td><td class="r ${Math.abs(x.won - x.said) <= 4 ? "up" : "dn"}">${sg(x.won - x.said, 1, " pts")}</td><td class="r">${num(x.n, 0)}</td></tr>`);
+  return `<div class="rg-ctl">${sideSeg()}${seg("mdper", pers(P), key)}</div>` + h("Is it skill? The same book with random stocks", `${nice(r.from)} to ${nice(r.to)}`) + hist
+    + `<div class="md-kg">${tile("Model book", sg(mdl, 1), "", col(mdl))}${tile("Random books, median", sg(R.median, 1), `9 in 10 landed between ${sg(R.p5, 1)} and ${sg(R.p95, 1)}`, col(R.median))}${tile("Random books beaten", num(R.beats, 1) + "%", "same days, gauge, stops and sector cap")}${tile("12-month momentum book", sg(r.momentum.total, 1), "a simple professional benchmark", col(r.momentum.total))}</div>`
+    + h("Is the win chance honest? Calibration", `top 10 ranks each day · ${num(cal.n || 0, 0)} signals`) + tbl([["Model said", 1], ["Actually won", 1], ["Gap", 1], ["Signals", 1]], calRows)
+    + `<div class="note">Signals are sorted by their stated win chance and cut into five groups. An honest probability has "actually won" close to "model said". Brier score ${cal.brier ?? "—"} against ${cal.brier_base ?? "—"} for always quoting the average win rate (lower is better; equal means the probability adds nothing).</div>`
+    + h("How wide is luck? The book's own days, reshuffled", `${num(R.sims, 0)} runs in two-week blocks`)
+    + `<div class="md-kg">${tile("Unlucky run (1 in 20)", sg(bt.p5, 1), "", col(bt.p5))}${tile("Middle run", sg(bt.median, 1), "", col(bt.median))}${tile("Lucky run (1 in 20)", sg(bt.p95, 1), "", col(bt.p95))}${tile("Runs that lost money", num(bt.loss, 1) + "%", "")}</div>`
+    + h("If your costs are higher", `tested at ${num(d.rules.cost, 2)}% a side`) + tbl([["Extra slippage a side"], ["Average trade", 1], ["Won", 1], ["Profit factor", 1]], r.cost.map((c) => `<tr><td>+${num(c.extra, 2)}%</td><td class="r ${col(c.mean)}">${sg(c.mean, 3)}</td><td class="r">${num(c.win, 1)}%</td><td class="r">${c.pf ?? "—"}</td></tr>`))
+    + h("Does the gauge help?") + tbl([["Top 5 picks on"], ["Trades", 1], ["Average trade", 1], ["Won", 1], ["Profit factor", 1]], [["Supportive days", r.picks_sup], ["Defensive days", r.picks_def], ["All days", r.picks]].map(([n, s]) => `<tr><td>${n}</td><td class="r">${num(s.n || 0, 0)}</td><td class="r ${col(s.mean)}">${sg(s.mean, 3)}</td><td class="r">${ok(s.win) ? num(s.win, 1) + "%" : "—"}</td><td class="r">${s.pf ?? "—"}</td></tr>`))
+    + `<div class="note">The gauge was supportive on ${num(r.sup_share, 0)}% of days. Average F&O stock: ${sg(r.all_sup, 3)} a trade on supportive days, ${sg(r.all_def, 3)} on defensive days.</div>`;
+}
+function method(d) {
+  const R = d.rules, D = d.data, p = (t) => `<p>${t}</p>`;
+  return `<div class="card pad mf-txt">${p(`<b>1 · Data.</b> ${num(D.rows, 0)} stock-days: ${D.stocks} F&O stocks over ${num(D.sessions, 0)} sessions from ${nice(D.from)}. A stock counts only on the days it was actually in F&O. For each stock and day the models read ${D.features} numbers known at that close (price trend and pullback, volume and delivery, futures basis and open interest build-up, put and call open interest, max pain and the option walls, implied volatility and skew) plus ${D.market_features} market readings (NIFTY and BANK NIFTY positioning, FII, DII, Pro and Client positions, breadth).`)}
+    ${p(`<b>2 · One fixed trade, both ways.</b> Enter at the next open. Stop ${R.stop_atr} ATR against you, target ${R.target_atr} ATR in your favour, out at the close of session ${R.hold}. ${num(R.cost, 2)}% cost a side. If a day's range covers both stop and target, the stop is assumed hit first. The long trade buys, the short trade sells short.`)}
+    ${p(`<b>3 · Independent long and short models.</b> Two separate gradient-boosted tree models: one ranks stocks for the long trade, the other for the short trade. The short model is trained on short results, not made by flipping the long one. Each has its own market gauge and its own paper book.`)}
+    ${p(`<b>4 · Market regime.</b> Six states from fixed, readable rules on NIFTY's trend, breadth, volatility and positioning: strong bullish, weak bullish, sideways, distribution, strong bearish, high volatility. The reasons are printed with it, and every book's results are split by regime on Track record.`)}
+    ${p(`<b>5 · Win chance.</b> Each signal's expected result is turned into a probability by isotonic regression fitted only on earlier out-of-sample signals. Validation shows whether stated chances match what happened, with the Brier score.`)}
+    ${p(`<b>6 · Walk-forward only.</b> Models are trained on the past with a ${6}-session gap, score the next ${R.retrain} sessions they have never seen, then are retrained. First scored day ${nice(R.first)}. Tonight's signals are produced the same way.`)}
+    ${p(`<b>7 · Design and unseen.</b> Choices were fixed on results to the end of 2024. Results from ${nice(R.unseen)} are shown separately. That period has now been looked at for version 1 and version 2, so it is no longer perfectly untouched: the live log from today is the cleanest test.`)}
+    ${p(`<b>8 · Books and risk.</b> ${R.slots} equal slots a book, no stock twice, at most ${R.sector_cap} names from one sector, open trades valued at each day's close. Long book: up to ${R.new_sup} new trades a day, only when the long gauge is supportive. Short book: up to ${R.new_sup} on a supportive day and ${d.books.short.new_def} on a defensive day, and no new short in ${esc(((R.block || {}).short || []).join(" or ").toLowerCase() || "any blocked")} markets. These book rules were picked on 2019-2024 only, from 24 combinations, and that count is used in the deflated Sharpe.`)}
+    ${p(`<b>9 · Approval.</b> A book turns to Approved only when its unseen period shows profit factor 1.2 or more, a positive result that also beats the 12-month momentum book, and a result above 95% of random-pick books. The deflated Sharpe ratio (allowing for ${R.trials} configurations tried) is shown beside it.`)}
+    ${p(`<b>Limits.</b> End-of-day data only. Short results are on the stock's own price, not a futures contract (no lot size, margin or rollover). Renamed and delisted stocks without a price file are missing (${D.missing.length} names). No news or results calendar is read. Models can and do stop working. Not investment advice.`)}</div>
+    <div class="note">Built ${esc(String(d.built).slice(0, 16).replace("T", " "))} IST by the "Arka Model" job in ${num(D.seconds, 0)} seconds · version ${d.v}. Every night's signals are appended to arka_data/model/log.csv as issued and never rewritten.</div>`;
+}
+export function view(tab) {
+  const M = S.md, d = M.d;
+  if (d === undefined) { load(); return `<div class="card"><div class="note">Loading the model…</div></div>`; }
+  if (!d) return M.err ? `<div class="card"><div class="empty"><b>The model file could not be read</b>${esc(M.err)}</div></div>` : setup;
+  try { return `<div class="md">${tab === "Charts" ? charts(d) : tab === "Track record" ? record(d) : tab === "Validation" ? sims(d) : tab === "Method" ? method(d) : tonight(d)}<div class="note">Model output from end-of-day data. It can and does lose money. Not investment advice.</div></div>`; }
+  catch (er) { return `<div class="card"><div class="empty"><b>This view could not be drawn</b>${esc(er.name)}: ${esc(String(er.message).slice(0, 200))}</div></div>`; }
+}
+export function input(el, ev) {
+  const M = S.md, k = el.dataset.md; if (ev !== "change") return;
+  if (k === "cap") { M.cap = Math.max(0, +el.value || 0); try { localStorage.setItem("arka_model_cap", String(M.cap)); } catch { /* private mode */ } }
+  if (k === "sym") M.sym = el.value;
+  paint();
+}
+export function act(name, el) {
+  const M = S.md, v = el.dataset.v;
+  if (name === "mdlist") { M.list = v; return paint(); }
+  if (name === "mdper") { M.per = v; return paint(); }
+  if (name === "mdside") { M.side = v; return paint(); }
+  if (name === "mdchart") { M.sym = v; S.fd.tab = "Charts"; window.scrollTo(0, 0); return paint(); }
+}

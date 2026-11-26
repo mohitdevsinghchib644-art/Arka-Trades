@@ -80,16 +80,16 @@ const defaultComp = (sym) => (R.SECTOR_PEERS[sym] || []).filter((p) => p !== sym
 const px_ = (x) => (x == null || !isFinite(x) ? "—" : Math.abs(x) >= 5000 ? E.fx(x, 0) : Math.abs(x) >= 100 ? E.fx(x, 1) : E.fx(x, 2));
 const pct_ = (x, d = 1) => (x == null || !isFinite(x) ? "—" : E.fx(x * 100, d, false, true) + "%");
 const day_ = (iso) => { const t = new Date(String(iso).slice(0, 10) + "T00:00:00Z"); return isNaN(t) ? "—" : `${t.getUTCDate()} ${t.toLocaleString("en-GB", { month: "short", timeZone: "UTC" })} ${t.getUTCFullYear()}`; };
-export function signalFor(sym) {
-  const s = S.sig; if (!s || s.v !== 3) return ["", ""];
-  const ld = s.leaders || {}, sw = s.swing || {};
-  for (const r of ld.buy || []) if (r.sym === sym) return ["Leaders book: buy at the next open", `12-month strength ${E.fx((r.rank || 0) * 100, 0)} of 100`];
-  for (const h of ld.holdings || []) if (h.sym === sym) return [`Leaders book: ${h.flag === "sell" ? "sell at the next open" : h.flag === "risk" ? "held, on watch" : "held"}`, `since ${day_(h.since)} · ${pct_(h.pnl, 0)} · strength ${E.fx((h.rank || 0) * 100, 0)} of 100`];
-  for (const r of sw.new || []) if (r.sym === sym) return ["Swing: buy at the next open", `stop about ${px_(r.stop)}`];
-  for (const r of sw.open || []) if (r.sym === sym) return [r.sell ? "Swing: sell at the next open" : "Swing: open trade", `entry ${px_(r.entry)} · stop ${px_(r.stop)} · ${pct_(r.pnl, 1)}`];
-  for (const r of s.avoid || []) if (r.sym === sym) return ["On the stay-away list", "weakest tenth by 12-month strength and below its 200-day average"];
-  for (const r of ld.candidates || []) if (r.sym === sym) return ["Leaders book: next in line", `12-month strength ${E.fx((r.rank || 0) * 100, 0)} of 100`];
-  return ["No signal on the desk", ""];
+export function signalFor(sym) {                             // what the Arka Model says about this stock tonight
+  const d = S.md && S.md.d; if (!d) return ["", ""];
+  for (const [k, word] of [["long", "buy"], ["short", "sell short"]]) { const B = d.books[k], t = B.status === "live" ? "" : " (in test)", r = B.ranked.find((x) => x.sym === sym), p = B.positions.find((x) => x.sym === sym);
+    if (B.picks.includes(sym) && r) return [`Arka Model: ${word} at the next open` + t, `rank ${r.rank} · win chance ${r.prob ?? "—"}% · stop ${px_(r.stop)} · target ${px_(r.target)}`];
+    if (p) return [`Arka Model: open ${k} trade` + t, `entry ${px_(p.entry)} · stop ${px_(p.stop)} · target ${px_(p.target)} · ${p.left} sessions left`]; }
+  const dec = (d.decisions || {})[sym], rl = d.books.long.ranked.find((x) => x.sym === sym), rs = d.books.short.ranked.find((x) => x.sym === sym);
+  if (dec === "AVOID") return ["Arka Model: avoid for longs tonight", "in the lowest long ranks"];
+  if (rl) return [`Arka Model: long rank ${rl.rank} tonight`, dec === "WATCH" ? "on watch, not a buy tonight" : "in the top 25"];
+  if (rs) return [`Arka Model: short rank ${rs.rank} tonight`, dec === "WATCH SHORT" ? "on watch, not a short tonight" : "in the short top 25"];
+  return ["No model signal", ""];
 }
 
 // ── the context the research screens read ──
@@ -100,8 +100,8 @@ function ctx(sym) {
   for (const p of R.SECTOR_PEERS[sym] || []) { const x = S.q[p]; if (x && x.ok) q[p] = { price: x.price, pct: x.pct }; }
   return { sym, B: D.B || empty(sym, D.busy.B ? "Loading Screener…" : D.err.B || undefined), H: D.H || null, IX: ix2, Y: D.Y && D.Y.ok ? D.Y : null, divs: D.divs || [], splits: D.splits || [],
     dlv: D.dlv || null, dlvInfo: { error: D.dlvErr || D.err.dlv }, anns: D.anns || [], today: istToday(), open: marketOpenNow(), o: { ...K.o, comp: compNames(sym) }, peers: D.peers || null,
-    quotes: q, news: D.news || [], cmp: D.cmp || {}, note: D.note, hold: D.hold || {}, holdErr: Object.fromEntries(Object.entries(D.err).filter(([k]) => k.startsWith("hold:")).map(([k, v]) => [k.slice(5), v])), holdBusy: Object.keys(D.busy).filter((k) => k.startsWith("hold:") && D.busy[k]).map((k) => k.slice(5)), fno: desk[0] && !desk[0].startsWith("No signal") ? [["Signal", desk[0]], ...(desk[1] ? [["Detail", desk[1]]] : [])] : null,
-    fnoWhy: "The full F&O view (model rank, build-up, option chain) comes with the F&O section. " + (desk[0] ? "Signal desk: " + desk[0] + (desk[1] ? " · " + desk[1] : "") + "." : ""),
+    quotes: q, news: D.news || [], cmp: D.cmp || {}, note: D.note, hold: D.hold || {}, holdErr: Object.fromEntries(Object.entries(D.err).filter(([k]) => k.startsWith("hold:")).map(([k, v]) => [k.slice(5), v])), holdBusy: Object.keys(D.busy).filter((k) => k.startsWith("hold:") && D.busy[k]).map((k) => k.slice(5)), fno: desk[0] && !desk[0].startsWith("No model signal") && !!desk[0] ? [["Signal", desk[0]], ...(desk[1] ? [["Detail", desk[1]]] : [])] : null,
+    fnoWhy: "Positioning (who holds what, option walls) is on the Signals page. " + (desk[0] ? desk[0] + (desk[1] ? " · " + desk[1] : "") + "." : ""),
     status: { notes: S.me && S.me.role ? "configured" : "on demand" } };
 }
 

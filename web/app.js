@@ -1,8 +1,9 @@
-// Arka Trades · new app (stage 20): Home, Watchlist, Portfolio, the stock page with Research, Signals, Screener, Backtest lab, Arka AI, Money flow, News, Regime, Daily brief, Account, More (world markets live on Home). Plain JavaScript, no build step.
+// Arka Trades · new app (stage 21): Home, Watchlist, Portfolio, the stock page with Research, Signals, Screener, Backtest lab, Arka AI, Money flow, News, Regime, Daily brief, Account, More (world markets live on Home). Plain JavaScript, no build step.
 import * as PFV from "./portfolio.js";
 import * as PFM from "./pf.js";
 import * as WL from "./watchlist.js";
 import * as DK from "./desk.js";
+import * as MD from "./model.js";
 import * as RG from "./regime.js";
 import * as HM from "./home.js";
 import * as MF from "./flow.js";
@@ -47,7 +48,7 @@ const TABS = [["home", "Home", '<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21
   ["more", "More", '<circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/>', true]];
 const MORE = [];                                            // every section has moved over
 
-const S = { me: null, tab: "home", q: {}, at: {}, wl: { rows: [], list: "Main", loaded: false, err: "", ...WL.wlDefaults() }, sig: null, sigErr: "", fd: DK.deskDefaults(), sigTab: "Leaders", mkTab: "India", sort: "order",
+const S = { me: null, tab: "home", q: {}, at: {}, wl: { rows: [], list: "Main", loaded: false, err: "", ...WL.wlDefaults() }, sig: null, sigErr: "", fd: DK.deskDefaults(), md: MD.modelDefaults(), sigTab: "Leaders", mkTab: "India", sort: "order",
             pf: PFV.pfDefaults(), rg: RG.rgDefaults(), qv: 0, hm: HM.homeDefaults(), mf: MF.flowDefaults(), nw: NW.newsDefaults(), sk: SK.stockDefaults(), sc: SC.scanDefaults(), bx: BX.bxDefaults(), aa: AA.aaDefaults(), br: BR.briefDefaults(), deals: null,
             sheet: null, results: null, searching: false };
 
@@ -153,30 +154,23 @@ function rail() {                                           // desktop: the watc
 }
 
 // ── pages ──
-function orders() {
-  const d = S.sig; if (!d) return null;
-  const o = [];
-  for (const r of (d.leaders && d.leaders.sell) || []) o.push(["Sell", "r", r.sym, "Leaders · " + (r.why || "leaves the book")]);
-  for (const r of (d.leaders && d.leaders.buy) || []) o.push(["Buy", "g", r.sym, "Leaders · joins the 20 strongest"]);
-  for (const r of (d.swing && d.swing.new) || []) o.push(["Buy", "g", r.sym, "Swing · leader pullback" + (r.stop ? " · stop " + num(r.stop) : "")]);
-  for (const r of (d.swing && d.swing.open) || []) if (r.sell) o.push(["Sell", "r", r.sym, "Swing · " + r.sell]);
-  for (const x of d.index || []) if (x.action && x.action !== "none") o.push([x.action === "buy" ? "Buy" : "Sell", x.action === "buy" ? "g" : "r", x.name, "Index · " + (x.why || x.setup) + (x.status === "trial" ? " · on trial" : "")]);
-  return o;
-}
-function ordersOf(d) {                                     // everything to do at the next open, across the books (fno_page.order_rows)
-  const out = [], L = d.leaders || {}, W = d.swing || {};
-  for (const r of L.sell || []) out.push({ book: "Leaders", act: "Sell", sym: r.sym, ref: r.price, stop: null });
-  for (const r of L.buy || []) out.push({ book: "Leaders", act: "Buy", sym: r.sym, ref: r.price, stop: null });
-  if (W.status !== "off") { for (const r of W.open || []) if (r.sell) out.push({ book: "Swing", act: "Sell", sym: r.sym, ref: r.price, stop: null }); for (const r of W.new || []) out.push({ book: "Swing", act: "Buy", sym: r.sym, ref: r.price, stop: r.stop }); }
-  for (const x of d.index || []) { if (x.status === "off") continue; if (x.action === "buy") out.push({ book: "Index", act: "Buy", sym: x.name, ref: x.last, stop: null }); else if (x.action === "sell") out.push({ book: "Index", act: "Sell", sym: x.name, ref: x.last, stop: null }); }
+function modelOrders() {                                    // tonight's signals from both Arka Model books
+  const d = S.md.d, out = []; if (!d) return out;
+  for (const [k, act] of [["long", "Buy"], ["short", "Short"]]) { const B = d.books[k], by = Object.fromEntries(B.ranked.map((r) => [r.sym, r]));
+    for (const s of B.picks) out.push({ book: k === "long" ? "Model long" : "Model short", act, sym: s, ref: by[s] ? by[s].close : null, stop: by[s] ? by[s].stop : null, rank: by[s] ? by[s].rank : null, test: B.status !== "live" }); }
   return out;
 }
+function orders() {
+  if (S.md.d === undefined) return null;
+  return modelOrders().map((o) => [o.act, o.act === "Buy" ? "g" : "r", o.sym, `Arka Model · rank ${o.rank ?? "—"}` + (o.stop ? " · stop " + num(o.stop) : "") + (o.test ? " · in test" : "")]);
+}
+const ordersOf = () => modelOrders();
 function ordersCard(short) {
   const o = orders();
-  if (!o) return `<div class="card"><div class="note">${S.sigErr ? esc(S.sigErr) : "Loading…"}</div></div>`;
+  if (!o) return `<div class="card"><div class="note">Loading…</div></div>`;
   const body = o.length ? o.slice(0, short ? 4 : 99).map(([a, c, sym, why]) => `<div class="order"><span class="chip ${c}">${a}</span><div><b>${esc(sym)}</b><small>${esc(why)}</small></div></div>`).join("")
     + (short && o.length > 4 ? `<div class="note">and ${o.length - 4} more</div>` : "")
-    : `<div class="empty"><b>No orders for the next open</b>Signals from the close of ${esc(S.sig.asof)}. Leaders are checked once a week; swing and index signals appear on the day they trigger.</div>`;
+    : `<div class="empty"><b>No trade for the next open</b>${S.md.d ? `Model run on the close of ${esc(S.md.d.asof)}: nothing cleared the rules. Regime: ${esc(S.md.d.market.regime)}.` : "The Arka Model has not run yet."}</div>`;
   return `<div class="card">${body}</div>`;
 }
 function more() {
@@ -200,7 +194,7 @@ function renderShell() {
     <div id="msearch"></div><main id="main"></main>
     <nav class="nav"><a class="brand only-d" href="#/home"><img src="/icon-180.png" alt="">ARKA <i>TRADES</i></a>
       ${TABS.map(([k, n, d, mob]) => `<a href="#/${k}" data-tab="${k}"${mob ? "" : ' class="only-d"'}>${icon(d)}<span>${n}</span></a>`).join("")}
-      <div class="who">Signed in as <b>${esc(AC.displayName())}</b><br>New app · stage 20</div></nav></div>`;
+      <div class="who">Signed in as <b>${esc(AC.displayName())}</b><br>New app · stage 21</div></nav></div>`;
 }
 function paint() {
   const main = $("#main"); if (!main || !S.me) return;
@@ -348,7 +342,7 @@ function renderLogin(err = "") {
     <div class="err">${esc(err)}</div><button class="btn pri full" type="submit">Sign in</button></form></div>`;
 }
 async function start() {
-  AC.applyLayout(); renderShell(); route(); loadWatchlist(); loadSignals(); loadPortfolio();
+  AC.applyLayout(); renderShell(); route(); loadWatchlist(); loadSignals(); MD.load(); loadPortfolio();
 }
 async function boot() {
   try { S.me = await api("/api/me"); start(); } catch { /* the sign-in screen is already showing */ }
@@ -419,7 +413,7 @@ function pfInput(el, ev) {                                // a control on the Po
 let nwTimer = 0;
 document.addEventListener("input", (e) => { if (e.target.id === "q" || e.target.id === "mq") onSearch(e.target.value); else if (e.target.dataset.pf) pfInput(e.target, "input"); else if (e.target.dataset.wl) WL.input(e.target, "input"); else if (e.target.dataset.sc) SC.input(e.target, "input"); else if (e.target.dataset.bx) BX.input(e.target, "input"); else if (e.target.dataset.aa) AA.input(e.target, "input"); else if (e.target.dataset.ac) AC.input(e.target, "input"); else if (e.target.dataset.rs) SK.input(e.target, "input");
   else if (e.target.dataset.nw) { S.nw[e.target.dataset.nw] = e.target.value; clearTimeout(nwTimer); nwTimer = setTimeout(paint, 180); } });
-document.addEventListener("change", (e) => { if (e.target.dataset.sc) return SC.input(e.target, "change"); if (e.target.dataset.bx) return BX.input(e.target, "change"); if (e.target.dataset.aa) return AA.input(e.target, "change"); if (e.target.dataset.ac) return AC.input(e.target, "change"); if (e.target.dataset.rs) return SK.input(e.target, "change"); if (e.target.dataset.wl) return WL.input(e.target, "change"); if (e.target.dataset.fd) return DK.input(e.target, "change"); if (e.target.dataset.mf === "pick") { S.mf.pick = e.target.value; paint(); return; } if (e.target.dataset.act === "sort") { S.sort = e.target.value; paint(); } else if (e.target.dataset.pf) pfInput(e.target, "change"); });
+document.addEventListener("change", (e) => { if (e.target.dataset.md) return MD.input(e.target, "change"); if (e.target.dataset.sc) return SC.input(e.target, "change"); if (e.target.dataset.bx) return BX.input(e.target, "change"); if (e.target.dataset.aa) return AA.input(e.target, "change"); if (e.target.dataset.ac) return AC.input(e.target, "change"); if (e.target.dataset.rs) return SK.input(e.target, "change"); if (e.target.dataset.wl) return WL.input(e.target, "change"); if (e.target.dataset.fd) return DK.input(e.target, "change"); if (e.target.dataset.mf === "pick") { S.mf.pick = e.target.value; paint(); return; } if (e.target.dataset.act === "sort") { S.sort = e.target.value; paint(); } else if (e.target.dataset.pf) pfInput(e.target, "change"); });
 document.addEventListener("pointermove", chartMove, { passive: true });
 document.addEventListener("mouseover", (e) => { if (S.tab === "screener") SC.hover(e); }, { passive: true });
 document.addEventListener("pointerdown", chartMove, { passive: true });
@@ -443,6 +437,7 @@ document.addEventListener("click", async (e) => {
     if (act === "range") { S.sheet.range = a.dataset.v; return paintSheet(); }
     if (act === "list") { S.wl.list = a.dataset.v; S.wl.flt = "All"; S.wl.q = ""; S.wl.addMsg = ""; S.wl.sel = {}; paint(); refresh(); return WL.load(); }
     if (act && act.startsWith("fd")) return DK.act(act, a);
+    if (act && /^md(list|per|chart|side)$/.test(act)) return MD.act(act, a);
     if (act && act.startsWith("sc")) return SC.act(act, a);
     if (act && act.startsWith("bx")) return BX.act(act, a);
     if (act && act.startsWith("aa")) return AA.act(act, a);
