@@ -1,7 +1,7 @@
 // Arka Trades · Money flow. Shows the files the nightly "Market data" job writes with the classic app's rotation engine
 // (money_flow.py + arka_flow), so ranks, scores, the model portfolio and its test are the same numbers as Streamlit.
-// Eight views as on the classic page. Model settings (sectors to hold, review every, regime filter) switch instantly:
-// every combination the classic page offers is computed each night.
+// Eight views as on the classic page. Data options (sectors, benchmark, history, liquidity floor) and model settings (sectors to hold,
+// review every, regime filter, round-trip cost) switch instantly: every combination the classic page offers is computed each night.
 import { S, api, paint, esc, num, nice } from "./app.js";
 import { lineChart, resetCharts, legend } from "./charts.js";
 import * as FPI from "./fpi.js";
@@ -33,13 +33,23 @@ const SOURCES = [["Moskowitz & Grinblatt (1999), Do Industries Explain Momentum?
   ["Moskowitz, Ooi & Pedersen (2012), Time Series Momentum, Journal of Financial Economics", "https://www.aqr.com/Insights/Datasets/Time-Series-Momentum-Original-Paper-Data"],
   ["Daniel & Moskowitz (2016), Momentum Crashes, Journal of Financial Economics", "https://www.nber.org/papers/w20439"]];
 export const VIEWS = ["Where to be", "Rotation map", "Sector", "Does it work?", "Breadth & activity", "Rule states", "FPI flows", "Method & data"];
-export const flowDefaults = () => ({ view: "Where to be", d: null, err: "", sec: null, secErr: "", fpi: null, fpiErr: "", n: null, every: 21, regime: true, pick: null, show: "top", tail: 10, fpiN: 24, sort: {} });
+export const flowDefaults = () => ({ view: "Where to be", d: null, err: "", sec: null, secErr: "", fpi: null, fpiErr: "", n: null, every: 21, regime: true, pick: null, show: "top", tail: 10, fpiN: 24, sort: {},
+  key: "", cost: null, idx: null, byKey: {}, secByKey: {}, mods: {}, modErr: "" });
 
 export async function loadFlow(what = "main") {
   const F = S.mf;
   const get = async (f, k, ek) => { if (F[k] || F["_" + k]) return; F["_" + k] = true; try { F[k] = await api("/api/market?f=" + f); } catch (e) { if (e.message !== "signed out") F[ek] = e.message; } F["_" + k] = false; paint(); };
-  if (what === "main") return get("flow", "d", "err");
-  if (what === "sectors") return get("flow_sectors", "sec", "secErr");
+  const sfx = F.key ? "@" + F.key : "";                      // a data choice other than the default: its own files (flow@<key>.json)
+  if (what === "main") {
+    if (!F._idx) { F._idx = true; api("/api/market?f=flow_index").then((x) => { F.idx = x; paint(); }).catch(() => { /* an older job: the default choice only */ }); }
+    await get("flow" + sfx, "d", "err"); if (F.d) F.byKey[F.key] = F.d; return;
+  }
+  if (what === "sectors") { await get("flow_sectors" + sfx, "sec", "secErr"); if (F.sec) F.secByKey[F.key] = F.sec; return; }
+  if (what === "models") {                                   // the model grid at another round-trip cost (flow_models@<key>@<cost>.json)
+    const k = (F.key || (F.idx && F.idx.default)) + "@" + F.cost; if (F.mods[k] || F["_m" + k]) return; F["_m" + k] = true; F.modErr = "";
+    try { F.mods[k] = await api("/api/market?f=" + encodeURIComponent("flow_models@" + k)); } catch (e) { if (e.message !== "signed out") F.modErr = e.message; }
+    F["_m" + k] = false; paint(); return;
+  }
   if (what === "fpi") {                                      // the nightly file first; if the job could not reach NSDL, read the reports live (4 at a time)
     if (F._fpiRun) return; F._fpiRun = true;
     await get("flow_fpi", "fpi", "fpiErr");
@@ -62,9 +72,40 @@ const tbl = (head, rows, cls = "") => `<div class="card tw"><table class="tb ${c
 const kpis = (items, n = 3) => `<div class="card kp kp${n}">${items.map(([a, b, c, cl = ""]) => `<div><span>${a}</span><b class="${cl}">${b}</b><small>${c}</small></div>`).join("")}</div>`;
 const seg = (act, opts, cur) => `<div class="seg">${opts.map(([v, t]) => `<button class="${String(v) === String(cur) ? "on" : ""}" data-act="${act}" data-v="${esc(v)}">${esc(t)}</button>`).join("")}</div>`;
 
+const costOf = (d) => (S.mf.cost == null ? d.cost : S.mf.cost);
+function modelsOf(d) {                                       // the model grid at the chosen cost (the main file holds the default cost)
+  const F = S.mf, c = costOf(d); if (Math.abs(c - d.cost) < 1e-9) return d.models;
+  const k = (F.key || (F.idx && F.idx.default)) + "@" + c; if (!F.mods[k]) loadFlow("models"); return F.mods[k] || null;
+}
 function model(d) {                                          // the model portfolio for the chosen settings
-  const F = S.mf, n = F.n || d.default.n;
-  return { n, every: F.every, regime: F.regime, m: d.models[`${n}|${F.every}|${F.regime ? 1 : 0}`], other: d.models[`${n}|${F.every}|${F.regime ? 0 : 1}`] };
+  const F = S.mf, n = F.n || d.default.n, ms = modelsOf(d) || {};
+  return { n, every: F.every, regime: F.regime, cost: costOf(d), m: ms[`${n}|${F.every}|${F.regime ? 1 : 0}`], other: ms[`${n}|${F.every}|${F.regime ? 0 : 1}`] };
+}
+// ── data choices (money_flow.render_money_flow: Sectors, Compare against, History, Min value / day): each is built nightly as its own files ──
+const KIND_HELP = { "Arka groups": "Arka's ~50 rotation groups (sector_map.py), equal-weight baskets of today's members. Breadth available for every group.",
+  "NSE indices": "Official NSE sector indices. No survivorship bias, but fewer sectors; breadth needs each index's constituent file in data/." };
+const choiceOf = (d) => d.choice || { kind: d.kind, bench: d.bench, period: d.period, min_turn: d.min_turn, key: "" };
+export function setData(field, v) {                         // pick the built choice that keeps as much of the current one as possible
+  const F = S.mf, I = F.idx, d = F.d; if (!I || !d) return;
+  const cur = { ...choiceOf(d), [field]: field === "min_turn" ? +v : v }, fields = ["kind", "bench", "period", "min_turn"];
+  let best = null, bs = -1;
+  for (const c of I.choices) { if (String(c[field]) !== String(cur[field])) continue; const sc = fields.filter((k) => String(c[k]) === String(cur[k])).length; if (sc > bs) { bs = sc; best = c; } }
+  if (!best) return;
+  const key = best.key === I.default ? "" : best.key; if (key === F.key && F.d) return paint();
+  F.key = key; F.d = F.byKey[key] || null; F.sec = F.secByKey[key] || null; F.err = ""; F.secErr = ""; F.n = null;
+  if (F.cost != null && !best.costs.some((c) => Math.abs(c - F.cost) < 1e-9)) F.cost = null;
+  paint(); loadFlow("main");
+}
+function dataCard(d) {
+  const F = S.mf, I = F.idx, ch = choiceOf(d), turnTxt = (t) => `₹${String(t).replace(/\.0$/, "")} Cr`;
+  const sum = `${esc(ch.kind)} · vs ${esc(ch.bench)} · ${esc(ch.period)} · min ${turnTxt(ch.min_turn)}/day`;
+  if (!I) return `<details class="card mf-set"><summary>Data options <span>${sum}</span></summary><div class="pad"><div class="note">The other data choices appear here after the next nightly “Market data” run.</div></div></details>`;
+  const has = (field, v) => I.choices.some((c) => String(c[field]) === String(v)), row = (label, field, opts, fmt = (x) => x) =>
+    `<div class="mf-row"><span>${label}</span><div class="seg">${opts.map((v) => `<button class="${String(v) === String(ch[field]) ? "on" : ""}" data-act="mfdata-${field}" data-v="${esc(v)}"${has(field, v) ? "" : ' disabled title="Not built in the last run"'}>${esc(fmt(v))}</button>`).join("")}</div></div>`;
+  const miss = (I.failed || []).length ? `<div class="note">Not built in the last run: ${I.failed.map((x) => esc(x[0])).join(", ")}.</div>` : "";
+  return `<details class="card mf-set"${F.dataOpen ? " open" : ""} data-mfd="1"><summary>Data options <span>${sum}</span></summary><div class="pad">
+    ${row("Sectors", "kind", I.kinds)}<div class="note" style="padding:0 0 8px">${esc(KIND_HELP[ch.kind] || "")}</div>${row("Compare against", "bench", I.benches)}${row("History", "period", I.periods)}${row("Min value / day", "min_turn", I.min_turn, turnTxt)}
+    <div class="note" style="padding:6px 0 0">Every sector, history length and liquidity floor the classic page offers is built each night. A different sector set or benchmark uses 5 years and ₹0.5 Cr; a different history or floor uses Arka groups vs NIFTY 500. 5 years of history gives the model test a far better sample.</div>${miss}</div></details>`;
 }
 function snapOf(d, M) {                                      // the classic snapshot: model-independent columns + this model's actions
   const act = {}; for (const [a, list] of Object.entries(M.m.actions || {})) for (const s of list) act[s] = a;
@@ -75,7 +116,7 @@ const slotsNow = (d, M) => (M.regime ? Math.max(1, Math.round(M.n * (d.regime.sl
 
 function status(d, M) {
   const rg = d.regime.label, q = d.quality;
-  const chips = [`As of <b>${esc(nice(d.asof))}</b> close`, `<b>${d.n_sectors}</b> sectors · ${esc(d.kind)}`, `vs <b>${esc(d.bench)}</b>`,
+  const chips = [`As of <b>${esc(nice(d.asof))}</b> close`, `<b>${d.n_sectors}</b> sectors · ${esc(d.kind)}`, `vs <b>${esc(d.bench)}</b>`, `${esc(d.period)} history`,
     `<i style="background:${REG_C[rg] || T3}"></i>Market <b>${esc(rg)}</b>`, `Model: top <b>${M.n}</b>, review every <b>${M.every}</b> sessions`, `<b>${q.used}</b> stocks used`];
   let out = `<div class="mf-status">${chips.map((c) => `<span class="mf-chip">${c}</span>`).join("")}</div>`;
   const lag = dataBehind(String(d.asof).slice(0, 10));      // checked now, against the NSE holiday list (the file's own check knows weekends only)
@@ -84,12 +125,13 @@ function status(d, M) {
   return out;
 }
 function settings(d, M) {
-  const F = S.mf;
-  return `<details class="card mf-set"><summary>Model settings <span>top ${M.n} · every ${M.every} sessions · regime filter ${M.regime ? "on" : "off"} · costs ${num(d.cost, 2)}%</span></summary><div class="pad">
+  const F = S.mf, I = F.idx, ch = I ? I.choices.find((c) => c.key === (F.key || I.default)) : null, costs = ch ? ch.costs : [d.cost];
+  return `<details class="card mf-set"${F.setOpen ? " open" : ""} data-mfs="1"><summary>Model settings <span>top ${M.n} · every ${M.every} sessions · regime filter ${M.regime ? "on" : "off"} · costs ${num(M.cost, 2)}%</span></summary><div class="pad">
+    <div class="mf-row"><span>Round-trip cost</span>${seg("mfset-cost", costs.map((x) => [x, num(x, 2) + "%" + (Math.abs(x - d.cost) < 1e-9 ? " (default)" : "")]), M.cost)}</div>
     <div class="mf-row"><span>Sectors to hold</span>${seg("mfset-n", d.options.n.map((x) => [x, x]), M.n)}</div>
     <div class="mf-row"><span>Review every</span>${seg("mfset-every", d.options.every.map((x) => [x, x + " sessions" + (x === 21 ? " (monthly)" : x === 10 ? " (fortnightly)" : "")]), F.every)}</div>
     <div class="mf-row"><span>Regime filter</span>${seg("mfset-regime", [[1, "On"], [0, "Off"]], F.regime ? 1 : 0)}</div>
-    <div class="note" style="padding:6px 0 0">Defaults: review monthly (the holding period used in the industry-momentum research) and hold roughly the top tenth of sectors. Changing a setting changes both the model and its test on Does it work?. Round-trip cost is fixed at ${num(d.cost, 2)}% (the classic page's default).</div></div></details>`;
+    <div class="note" style="padding:6px 0 0">Defaults: review monthly (the holding period used in the industry-momentum research) and hold roughly the top tenth of sectors. Changing a setting changes both the model and its test on Does it work?. Round-trip cost is brokerage + STT + stamp + slippage, both sides: check your contract notes.</div></div></details>`;
 }
 function card(r, bench) {
   const why = `Relative to ${esc(bench)}: ${pc(r.rel_63)} in 3 months, ${pc(r.rel_126)} in 6. ` + (ok(r.pct50) ? `${f(r.pct50, 0, false)}% of members above 50-EMA (${f(r.d50, 0)} pts in 20 sessions).` : "");
@@ -121,7 +163,7 @@ function viewNow(d, M, snap) {
   if (cols.some((c) => c[3].length)) out += h("If the model were reviewed today", "the next scheduled review uses the same rules") + `<div class="mf-board">${cols.map(([t, c, p, list]) => `<div class="mf-col" style="--c:${c}"><h4>${t} · ${list.length}</h4><p>${p}</p>${
     list.slice(0, 6).map((r) => `<button class="it" data-act="mfsec" data-v="${esc(r.sector)}"><b>${esc(r.sector)}</b> · rank ${r.rank} · ${esc(r.quadrant)} · 3M ${pc(r.rel_63)}</button>`).join("") || '<div class="it">None.</div>'}</div>`).join("")}</div>`;
   if (m.ok && m.metrics) { const ic = ((d.ic[String(M.every)] || {}).ic || []).find((x) => x.factor === "score");
-    out += note(`<b>On this history</b> (${m.sessions} sessions, walk-forward, costs ${num(d.cost, 2)}% round trip): the model returned <b>${f(m.metrics.cagr, 1, true, "%")}</b> a year vs <b>${f(m.bench_metrics.cagr, 1, true, "%")}</b> for ${esc(d.bench)}, worst fall ${f(m.metrics.max_dd, 1, false, "%")} vs ${f(m.bench_metrics.max_dd, 1, false, "%")}. Score IC ${f(ic && ic.mean_ic, 3)} (above +0.05 is useful, near 0 is no edge). Open <b>Does it work?</b> for the full test before acting on any of this.`); }
+    out += note(`<b>On this history</b> (${m.sessions} sessions, walk-forward, costs ${num(M.cost, 2)}% round trip): the model returned <b>${f(m.metrics.cagr, 1, true, "%")}</b> a year vs <b>${f(m.bench_metrics.cagr, 1, true, "%")}</b> for ${esc(d.bench)}, worst fall ${f(m.metrics.max_dd, 1, false, "%")} vs ${f(m.bench_metrics.max_dd, 1, false, "%")}. Score IC ${f(ic && ic.mean_ic, 3)} (above +0.05 is useful, near 0 is no edge). Open <b>Does it work?</b> for the full test before acting on any of this.`); }
   out += h("All sectors", `ranked by rotation score · green edge = held by the model · vs ${d.bench}`) + `<div class="only-d">${rankTable(snap)}</div><div class="only-m mf-cards">${snap.slice(0, 20).map((r) => card(r, d.bench)).join("")}</div>
     <div class="only-m note">Top 20 shown on a phone. The full table is on the desktop layout and in the download.</div><div class="ctl"><span class="sp"></span><button class="btn sm" data-act="mfcsv">Download ranking (CSV)</button></div>`;
   return out;
@@ -184,7 +226,7 @@ function viewProof(d, M) {
     ["Months beating benchmark", f(mm.months_beat, 0, false, "%"), `information ratio ${f(mm.info_ratio, 2, false)}`], ["Turnover", f(m.turnover, 1, false, "×/yr"), `${m.reviews} reviews over ${num(yrs, 1)} years`]]);
   const c = m.curve, series = [{ n: "Model", c: AMBER, v: c.model, w: 2 }, { n: d.bench, c: "#D4D4D8", v: c.bench, w: 1.3 }, { n: "All sectors equal-weight", c: "#71717A", v: c.ew, w: 1.2 }];
   if (c.base) series.push({ n: "Plain 6-month momentum", c: CYAN, v: c.base, w: 1.2 });
-  out += h("Growth of ₹100", `walk-forward · signal at the close, trade next close · ${num(d.cost, 2)}% round-trip cost on every change`) + `<div class="card pad">${lineChart(c.d, series, { h: 340, hlines: [[100, "#555"]], fmt: (v) => num(v, 0) })}</div>`;
+  out += h("Growth of ₹100", `walk-forward · signal at the close, trade next close · ${num(M.cost, 2)}% round-trip cost on every change`) + `<div class="card pad">${lineChart(c.d, series, { h: 340, hlines: [[100, "#555"]], fmt: (v) => num(v, 0) })}</div>`;
   const alt = [["Model (these settings)", mm], ["Plain 6-month momentum, no filters", m.base_metrics], [`Model with regime filter ${M.regime ? "off" : "on"}`, M.other && M.other.ok ? M.other.metrics : null]].filter(([, x]) => x);
   out += tbl([["Variant"], ["Per year", 1], ["vs benchmark", 1], ["Worst fall", 1], ["Sharpe", 1], ["Months beating", 1]], alt.map(([n, x]) => `<tr><td><b>${esc(n)}</b></td><td class="r">${pc(x.cagr)}</td><td class="r">${pc(x.excess_cagr, 1, " pts")}</td><td class="r">${f(x.max_dd, 1, false, "%")}</td><td class="r">${f(x.sharpe, 2, false)}</td><td class="r">${f(x.months_beat, 0, false, "%")}</td></tr>`))
     + '<div class="note">If the plain 6-month ranking does as well as the model, the extra components add nothing on this data and the simpler rule is the better one.</div>';
@@ -270,13 +312,13 @@ export function page() {
   const head = `<div class="hd"><div><h1>Money flow</h1><div class="sub">Sector rotation: where to be, and when</div></div></div>`;
   const pills = `<div class="seg">${VIEWS.map((v) => `<button class="${v === F.view ? "on" : ""}" data-act="mfview" data-v="${v}">${v}</button>`).join("")}</div>`;
   if (F.view === "FPI flows") return `<div class="mf">${head}${pills}${viewFpi()}</div>`;
-  if (!d) return `<div class="mf">${head}${pills}<div class="card"><div class="${F.err ? "empty" : "note"}">${F.err ? `<b>Money flow is not available yet</b>${esc(F.err)}` : "Loading sector rotation…"}</div></div></div>`;
+  if (!d) { if (!F._d && !F.err) loadFlow("main"); return `<div class="mf">${head}${pills}<div class="card"><div class="${F.err ? "empty" : "note"}">${F.err ? `<b>Money flow is not available yet</b>${esc(F.err)}` : "Loading sector rotation…"}</div></div></div>`; }
   const M = model(d);
-  if (!M.m) return `<div class="mf">${head}${pills}${note("This model setting was not computed in the last run.")}</div>`;
+  if (!M.m) { const wait = !modelsOf(d) && !F.modErr; return `<div class="mf">${head}${pills}${dataCard(d)}${settings(d, M)}${note(wait ? `Loading the model at ${num(M.cost, 2)}% cost…` : F.modErr ? esc(F.modErr) : "This model setting was not computed in the last run.")}</div>`; }
   const snap = snapOf(d, M);
   const body = F.view === "Where to be" ? viewNow(d, M, snap) : F.view === "Rotation map" ? viewMap(d, snap) : F.view === "Sector" ? viewSector(d, snap) : F.view === "Does it work?" ? viewProof(d, M)
     : F.view === "Breadth & activity" ? viewBreadth(d) : F.view === "Rule states" ? viewStates(d) : viewMethod(d);
-  return `<div class="mf">${head}${pills}${status(d, M)}${settings(d, M)}${body}<div class="note" style="padding:16px 2px">Research tool built on daily price, breadth and traded value. Rankings and tests describe the past; they are not forecasts or investment advice. Built nightly by the “Market data” job with the same engine as the classic app (Arka groups, against ${esc(d.bench)}, ${esc(d.period)} of history, stocks trading at least ₹${d.min_turn} Cr a day).</div></div>`;
+  return `<div class="mf">${head}${pills}${status(d, M)}${dataCard(d)}${settings(d, M)}${body}<div class="note" style="padding:16px 2px">Research tool built on daily price, breadth and traded value. Rankings and tests describe the past; they are not forecasts or investment advice. Built nightly by the “Market data” job with the same engine as the classic app (Arka groups, against ${esc(d.bench)}, ${esc(d.period)} of history, stocks trading at least ₹${d.min_turn} Cr a day).</div></div>`;
 }
 export function csv() {
   const d = S.mf.d; if (!d) return;

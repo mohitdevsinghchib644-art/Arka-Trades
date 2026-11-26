@@ -1,4 +1,4 @@
-// Arka Trades · new app (stage 18): Home, Watchlist, Portfolio, the stock page with Research, Signals, Screener, Backtest lab, Arka AI, Money flow, News, Regime, Markets, Daily brief, Account, More. Plain JavaScript, no build step.
+// Arka Trades · new app (stage 19): Home, Watchlist, Portfolio, the stock page with Research, Signals, Screener, Backtest lab, Arka AI, Money flow, News, Regime, Markets, Daily brief, Account, More. Plain JavaScript, no build step.
 import * as PFV from "./portfolio.js";
 import * as PFM from "./pf.js";
 import * as WL from "./watchlist.js";
@@ -208,7 +208,7 @@ function renderShell() {
     <div id="msearch"></div><main id="main"></main>
     <nav class="nav"><a class="brand only-d" href="#/home"><img src="/icon-180.png" alt="">ARKA <i>TRADES</i></a>
       ${TABS.map(([k, n, d, mob]) => `<a href="#/${k}" data-tab="${k}"${mob ? "" : ' class="only-d"'}>${icon(d)}<span>${n}</span></a>`).join("")}
-      <div class="who">Signed in as <b>${esc(AC.displayName())}</b><br>New app · stage 18</div></nav></div>`;
+      <div class="who">Signed in as <b>${esc(AC.displayName())}</b><br>New app · stage 19</div></nav></div>`;
 }
 function paint() {
   const main = $("#main"); if (!main || !S.me) return;
@@ -367,7 +367,7 @@ async function sendForm(form, path, body, method = "POST") {
   const b = form.querySelector("button[type=submit]"); if (b) b.disabled = true;
   try { await api(path, { method, body: JSON.stringify(body) }); return true; } catch (er) { formErr(form, er.message); return false; }
 }
-document.addEventListener("toggle", (e) => { if (e.target.classList && e.target.classList.contains("pf-tax")) S.pf.taxOpen = e.target.open; if (e.target.classList && e.target.classList.contains("wl-man")) S.wl.manage = e.target.open; if (e.target.dataset && (e.target.dataset.scd || e.target.dataset.scm)) SC.toggle(e.target); if (e.target.dataset && e.target.dataset.bxd) BX.toggle(e.target); if (e.target.dataset && e.target.dataset.aad) AA.toggle(e.target); if (e.target.dataset && e.target.dataset.acd) AC.toggle(e.target); }, true);
+document.addEventListener("toggle", (e) => { if (e.target.classList && e.target.classList.contains("pf-tax")) S.pf.taxOpen = e.target.open; if (e.target.classList && e.target.classList.contains("wl-man")) S.wl.manage = e.target.open; if (e.target.dataset && (e.target.dataset.scd || e.target.dataset.scm)) SC.toggle(e.target); if (e.target.dataset && e.target.dataset.bxd) BX.toggle(e.target); if (e.target.dataset && e.target.dataset.aad) AA.toggle(e.target); if (e.target.dataset && e.target.dataset.mfd) S.mf.dataOpen = e.target.open; if (e.target.dataset && e.target.dataset.mfs) S.mf.setOpen = e.target.open; if (e.target.dataset && e.target.dataset.acd) AC.toggle(e.target); }, true);
 document.addEventListener("submit", async (e) => {
   const f = e.target, id = f.getAttribute("id");       // not f.id: a field named "id" would hide it
   if (id === "thesis") { e.preventDefault(); return SK.saveNote(f); }
@@ -466,6 +466,7 @@ document.addEventListener("click", async (e) => {
     if (act === "nwpart") { S.nw.part = a.dataset.v; return paint(); }
     if (act === "mfview") { S.mf.view = a.dataset.v; window.scrollTo(0, 0); return paint(); }
     if (act === "mfsec") { e.preventDefault(); S.mf.pick = a.dataset.v; S.mf.view = "Sector"; window.scrollTo(0, 0); return paint(); }
+    if (act.startsWith("mfdata-")) return MF.setData(act.slice(7), a.dataset.v);
     if (act.startsWith("mfset-")) { const k = act.slice(6); S.mf[k] = k === "regime" ? a.dataset.v === "1" : +a.dataset.v; return paint(); }
     if (act === "mfshow") { S.mf.show = a.dataset.v; return paint(); }
     if (act === "mftail") { S.mf.tail = +a.dataset.v; return paint(); }
