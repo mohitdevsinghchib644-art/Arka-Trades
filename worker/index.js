@@ -804,6 +804,8 @@ async function signals(env, ctx) {
 // the desk's other files: candles for the chart picker, the index option chain (NIFTY and BANKNIFTY rows only) and the live order log
 async function deskFile(env, ctx, url) {
   const f = url.searchParams.get("f");
+  if (f === "model") { const t = await repoFile(env, ctx, "arka_data/model/model.json"); return t == null ? json({}) : raw(t); }       // the Arka Model desk (arka_model.py)
+  if (f === "mcharts") { const t = await repoFile(env, ctx, "arka_data/model/charts.json"); return t == null ? json({}) : raw(t); }
   if (f === "charts") { const t = await repoFile(env, ctx, "arka_data/signals/charts.json"); return t == null ? json({}) : raw(t); }
   if (f === "chain") { const t = await repoFile(env, ctx, "arka_data/fno/chain_latest.csv", 1800); return json({ rows: t == null ? [] : chainRows(t) }); }
   if (f === "log") { const t = await repoFile(env, ctx, "arka_data/signals/log.csv"); if (t == null) return json({ rows: [] });
