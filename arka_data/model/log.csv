@@ -1,0 +1,21 @@
+date,regime,nifty,side,rank,sym,close,stop,target,prob,signal
+2026-11-25,Strong bullish,up,long,1,PIIND,1496.78,1414.21,1634.4,53.0,0
+2026-11-25,Strong bullish,up,long,2,NATIONALUM,277.37,260.77,305.02,52.0,0
+2026-11-25,Strong bullish,up,long,3,SUZLON,34.51,32.73,37.49,52.0,0
+2026-11-25,Strong bullish,up,long,4,MANAPPURAM,246.72,228.59,276.94,51.0,0
+2026-11-25,Strong bullish,up,long,5,SYRMA,1406.8,1311.71,1565.3,51.0,0
+2026-11-25,Strong bullish,up,long,6,TIINDIA,2137.31,2032.75,2311.58,51.0,0
+2026-11-25,Strong bullish,up,long,7,MUTHOOTFIN,2398.4,2264.29,2621.92,51.0,0
+2026-11-25,Strong bullish,up,long,8,VEDL,224.37,213.5,242.49,51.0,0
+2026-11-25,Strong bullish,up,long,9,SWIGGY,166.06,155.17,184.22,51.0,0
+2026-11-25,Strong bullish,up,long,10,TATASTEEL,142.54,132.73,158.89,51.0,0
+2026-11-25,Strong bullish,up,short,1,APARINDS,14300.59,15228.26,12754.47,47.0,0
+2026-11-25,Strong bullish,up,short,2,MFSL,1506.01,1582.1,1379.2,47.0,1
+2026-11-25,Strong bullish,up,short,3,MAHABANK,98.19,102.59,90.86,47.0,0
+2026-11-25,Strong bullish,up,short,4,COFORGE,2155.86,2274.02,1958.93,47.0,0
+2026-11-25,Strong bullish,up,short,5,LTF,277.67,291.25,255.03,47.0,0
+2026-11-25,Strong bullish,up,short,6,ATHERENERG,1946.72,2052.37,1770.65,47.0,0
+2026-11-25,Strong bullish,up,short,7,KFINTECH,914.73,957.15,844.02,47.0,0
+2026-11-25,Strong bullish,up,short,8,HDFCLIFE,593.55,619.97,549.52,47.0,0
+2026-11-25,Strong bullish,up,short,9,RVNL,170.61,181.45,152.55,47.0,0
+2026-11-25,Strong bullish,up,short,10,INFY,1132.28,1182.87,1047.97,47.0,0
