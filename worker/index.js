@@ -1,8 +1,10 @@
-// Arka Trades · API (stage 8: adds the stock page and research sources: Screener, Yahoo company details, BSE filings, NSE deliveries, notes). Runs on Cloudflare for every request to /api/*.
+// Arka Trades · API (stage 17: adds Arka AI: playbook storage in Pinecone, Gemini with a system prompt, PDF and picture uploads). Runs on Cloudflare for every request to /api/*.
 // Secrets are read by NAME from the Cloudflare project settings and never sent to the browser:
 //   ADMIN_USER, ADMIN_PASS, MEMBER_USER, MEMBER_PASS, AUTH_SECRET   sign-in (same names and values as in Streamlit)
 //   SUPABASE_URL, SUPABASE_KEY                                      watchlist storage (same as in Streamlit)
-//   GEMINI_KEY                                                      Screener: reading a setup description or chart picture (same key Arka AI uses)
+//   GEMINI_KEY                                                      Screener and Arka AI (Google Gemini)
+//   PINECONE_KEY, PINECONE_HOST (optional: found by name when missing) Arka AI playbook storage, the same Pinecone index Streamlit uses
+//   ARKA_GEMINI_MODEL (optional)                                    a Gemini model to try first for Arka AI, as in Streamlit
 // Optional plain variable: GITHUB_REPO (default below) for the signal files written by the "Signals" workflow.
 // Only public market data leaves this worker (Yahoo Finance). Nothing here touches a broker account.
 
@@ -178,12 +180,13 @@ async function history(url, ctx) {
     const byDate = (from) => base + `period1=${from}&period2=9999999999`, start = yrs ? Math.floor(Date.now() / 864e5 - yrs * 365.25) * 86400 : 0;
     try {
       if (from) { const h = historyFrom(sym, await yahoo(byDate(Math.floor(Date.parse(from + "T00:00:00+05:30") / 1000)), ctx, 1800), full); return { ...h, daily: h.ok ? isDaily(h.d) : false }; }      // from a date (midnight in India), as yfinance start=
-      let h = historyFrom(sym, await yahoo(yrs ? base + "range=" + range : byDate(0), ctx, 1800));
-      if (h.ok && !isDaily(h.d)) { const again = historyFrom(sym, await yahoo(byDate(start), ctx, 1800)); if (again.ok && (isDaily(again.d) || again.d.length > h.d.length)) h = again; }
+      const ttl = full ? 300 : 1800;                    // Arka AI (range + full) reads today's candle: 5 minutes, as Streamlit's cache
+      let h = historyFrom(sym, await yahoo(yrs ? base + "range=" + range + (full ? "&includeAdjustedClose=true" : "") : byDate(0), ctx, ttl), full);      // its own cache entry, kept 5 minutes
+      if (h.ok && !isDaily(h.d)) { const again = historyFrom(sym, await yahoo(byDate(start), ctx, ttl), full); if (again.ok && (isDaily(again.d) || again.d.length > h.d.length)) h = again; }
       return { ...h, daily: h.ok ? isDaily(h.d) : false };
     } catch { return { sym, ok: false }; }
   }));
-  return json({ history: out, at: Date.now() }, 200, { "cache-control": "private, max-age=600" });
+  return json({ history: out, at: Date.now() }, 200, { "cache-control": `private, max-age=${full && !from ? 240 : 600}` });
 }
 // Home page: for each index, currency or commodity, the numbers the classic Home shows (home_page._metrics): last price,
 // change, open, day range, yesterday's high and low, 1-week / 1-month / year-to-date change, 52-week range, a 1-month sparkline,
@@ -910,11 +913,12 @@ export function pickGeminiModels(names, prefer = "gemini-2.5-flash") {     // sm
   const first = ok.includes(prefer) || !sorted.length ? prefer : sorted[0];
   return [...new Set([first, ...sorted, prefer, "gemini-flash-latest"])].slice(0, 4);
 }
-async function geminiModels(env, ctx) {
+async function geminiNames(env, ctx) {
   try { const d = await cached("gemini-models", 6 * 3600, async () => { const r = await fetch(`${GEMINI}/models?pageSize=200`, { headers: { "x-goog-api-key": env.GEMINI_KEY } }); if (!r.ok) throw new Error("models " + r.status);
       const j = await r.json(); return { names: (j.models || []).filter((m) => (m.supportedGenerationMethods || ["generateContent"]).includes("generateContent")).map((m) => String(m.name || "").split("/").pop()) }; }, ctx, 7 * 86400);
-    return pickGeminiModels(d.names || []); } catch { return pickGeminiModels([]); }
+    return d.names || []; } catch { return []; }
 }
+async function geminiModels(env, ctx) { return pickGeminiModels(await geminiNames(env, ctx)); }
 async function ai(env, ctx, request) {
   if (request.method !== "POST") return fail(405, "Not supported.");
   if (!env.GEMINI_KEY || !String(env.GEMINI_KEY).trim()) return fail(503, "Arka AI is not connected: add the secret GEMINI_KEY in the Cloudflare project settings.");
@@ -936,6 +940,122 @@ async function ai(env, ctx, request) {
   return fail(502, /^(429|503)$/.test(last) ? "Arka AI is busy right now. Try again in a minute, or use the built-in reader." : "Arka AI could not answer (" + last + ").");
 }
 
+// ── Arka AI (arka_ai.py) ──
+// Gemini exactly as Streamlit calls it: the Arka system prompt, temperature 0, the thinking budget of the chosen speed (Fast 0, Balanced 1024,
+// Deep = the model decides), a busy model is tried once more after 2.5 s and then the next one, a retired name moves on, at most 4 models.
+// Only what the page sends goes out: public prices and detections, the playbook text, a chart picture, a PDF or pictures the trader uploads.
+const ARKA_MODEL_RX = /^gemini-(\d+(?:\.\d+)?)-flash$/;
+export function rankArkaModels(names, prefer = "") {           // arka_ai._rank_models: stable gemini-<version>-flash, newest first, then safe fallbacks
+  const stable = [...new Set(names.filter((n) => ARKA_MODEL_RX.test(n)))].sort((a, b) => parseFloat(b.match(ARKA_MODEL_RX)[1]) - parseFloat(a.match(ARKA_MODEL_RX)[1]));
+  return [...new Set([prefer, ...stable, "gemini-2.5-flash", "gemini-flash-latest"].filter(Boolean))];
+}
+const busyText = (t) => /503|unavailable|high demand|overloaded|429|resource_exhausted|resource exhausted|deadline|timed out|timeout|500 internal/i.test(t);
+const goneText = (t) => /not found|404|is not supported|deprecated|no longer available|unknown model|not_found/i.test(t);
+let arkaModelOk = "", arkaNoThinking = false;                   // per running copy of the worker, like Streamlit's session values
+async function arkaAi(env, ctx, request) {
+  if (request.method !== "POST") return fail(405, "Not supported.");
+  if (!env.GEMINI_KEY || !String(env.GEMINI_KEY).trim()) return fail(503, "Gemini is not configured: add the secret GEMINI_KEY in the Cloudflare project settings.");
+  const b = await request.json().catch(() => ({})), prompt = String(b.prompt || "").slice(0, 600000);
+  if (!prompt.trim()) return fail(400, "Nothing to send.");
+  const parts = [{ text: prompt }];
+  for (const f of (Array.isArray(b.files) ? b.files : []).slice(0, 8)) { const uri = String((f && f.uri) || ""), mime = /^(application\/pdf|image\/(png|jpeg|webp))$/.test((f && f.mime) || "") ? f.mime : "";
+    if (!/^https:\/\/generativelanguage\.googleapis\.com\//.test(uri) || !mime) return fail(400, "That upload is not usable."); parts.push({ file_data: { mime_type: mime, file_uri: uri } }); }
+  for (const im of (Array.isArray(b.images) ? b.images : []).slice(0, 2)) { const data = String((im && im.data) || ""); if (!data || data.length > 2_800_000) return fail(400, "That picture is too large."); parts.push({ inline_data: { mime_type: "image/png", data } }); }
+  const wantJson = b.json !== false, budget = b.budget === null || b.budget === undefined ? null : Math.max(0, Math.min(24576, Math.trunc(Number(b.budget) || 0)));
+  const ranked = rankArkaModels(await geminiNames(env, ctx), String(env.ARKA_GEMINI_MODEL || "").trim()), models = [...new Set([arkaModelOk, ...ranked].filter(Boolean))].slice(0, 4);
+  let last = "", busy = false;
+  const call = async (model, think) => {
+    const cfg = { temperature: 0.0 }; if (wantJson) cfg.responseMimeType = "application/json"; if (think) cfg.thinkingConfig = { thinkingBudget: budget };
+    const body = { contents: [{ role: "user", parts }], generationConfig: cfg }; if (b.system !== false) body.systemInstruction = { parts: [{ text: String(b.system_text || "").slice(0, 8000) }] };
+    const r = await fetch(`${GEMINI}/models/${model}:generateContent`, { method: "POST", headers: { "x-goog-api-key": env.GEMINI_KEY, "content-type": "application/json" }, body: JSON.stringify(body) });
+    return [r.ok, r.status, await r.text()];
+  };
+  for (const model of models) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let ok, status, text;
+      try { const think = budget !== null && !arkaNoThinking; [ok, status, text] = await call(model, think);
+        if (!ok && think && /think/i.test(text)) { arkaNoThinking = true; [ok, status, text] = await call(model, false); } }        // this model takes no budget: run without it
+      catch (e) { ok = false; status = 0; text = "network: " + String(e.message || e); }
+      if (ok) { let out = ""; try { const j = JSON.parse(text), c = (j.candidates || [])[0] || {}; out = ((c.content || {}).parts || []).filter((x) => !x.thought).map((x) => x.text || "").join("").trim(); } catch { out = ""; }
+        arkaModelOk = model; return json({ ok: true, model, text: out }); }
+      last = `${status} ${text.slice(0, 300)}`;
+      if (busyText(last)) { busy = true; if (attempt === 0) { await new Promise((r) => setTimeout(r, 2500)); continue; } break; }
+      if (goneText(last)) break;
+      return fail(502, "Gemini call failed: " + last.slice(0, 240));
+    }
+  }
+  if (busy) return fail(503, "Google's AI service is busy right now (tried " + models.join(", ") + "). Nothing is wrong with your key or the app: wait a minute and press the button again.");
+  return fail(502, "Gemini call failed: " + last.slice(0, 240));
+}
+// A PDF or a picture for Arka AI: streamed to Gemini's file store (kept by Google for 48 hours), so this worker never holds the bytes.
+async function aiUpload(env, request) {
+  if (request.method !== "POST") return fail(405, "Not supported.");
+  if (!env.GEMINI_KEY || !String(env.GEMINI_KEY).trim()) return fail(503, "Gemini is not configured: add the secret GEMINI_KEY in the Cloudflare project settings.");
+  const mime = request.headers.get("x-file-type") || "", n = Number(request.headers.get("content-length") || 0);
+  if (!/^(application\/pdf|image\/(png|jpeg|webp))$/.test(mime)) return fail(400, "Only PDF, PNG and JPG files.");
+  if (!(n > 0) || !request.body) return fail(400, "The file is empty.");
+  if (n > 18 * 1024 * 1024) return fail(400, mime === "application/pdf" ? "This PDF is larger than 18 MB. Split it or export a smaller copy, then upload again." : "That picture is larger than 18 MB.");
+  const start = await fetch("https://generativelanguage.googleapis.com/upload/v1beta/files", { method: "POST", headers: { "x-goog-api-key": env.GEMINI_KEY, "X-Goog-Upload-Protocol": "resumable", "X-Goog-Upload-Command": "start",
+    "X-Goog-Upload-Header-Content-Length": String(n), "X-Goog-Upload-Header-Content-Type": mime, "content-type": "application/json" }, body: JSON.stringify({ file: { display_name: "arka-upload" } }) });
+  const to = start.headers.get("x-goog-upload-url"); if (!start.ok || !to) return fail(502, "Gemini did not accept the upload (" + start.status + ").");
+  let body = request.body; if (typeof FixedLengthStream !== "undefined") { const fl = new FixedLengthStream(n); request.body.pipeTo(fl.writable).catch(() => {}); body = fl.readable; }
+  const up = await fetch(to, { method: "POST", headers: { "Content-Length": String(n), "X-Goog-Upload-Offset": "0", "X-Goog-Upload-Command": "upload, finalize" }, body });
+  if (!up.ok) return fail(502, "The upload to Gemini failed (" + up.status + ").");
+  let f = ((await up.json().catch(() => ({}))).file) || {};
+  for (let i = 0; i < 20 && f.state === "PROCESSING" && f.name; i++) { await new Promise((r) => setTimeout(r, 1500));
+    const g = await fetch(`${GEMINI}/${f.name}`, { headers: { "x-goog-api-key": env.GEMINI_KEY } }); if (g.ok) f = await g.json(); }
+  if (!f.uri || f.state === "FAILED") return fail(502, "Gemini could not read this file.");
+  return json({ ok: true, uri: f.uri, mime: f.mimeType || mime });
+}
+// The playbook: the Pinecone index "arka-trading-rules" that Streamlit's Arka AI uses (setups, lessons, labelled zones, zone styles, logged plans).
+// Items are read back by id, the vectors are placeholders. The list goes to the page unread (no work here), the page decodes it.
+const PC_INDEX = "arka-trading-rules", PC_VER = "2025-01";
+const pcHead = (env) => ({ "Api-Key": String(env.PINECONE_KEY).trim(), "X-Pinecone-API-Version": PC_VER, "content-type": "application/json" });
+let pcInfo = null;                                              // { host, dim }
+async function pinecone(env) {
+  if (pcInfo) return pcInfo;
+  let host = String(env.PINECONE_HOST || "").trim().replace(/^https?:\/\//, "").replace(/\/+$/, ""), dim = 0;
+  if (!host) {                                                  // find the index by name, and create it when it is not there (as Streamlit does)
+    let r = await fetch(`https://api.pinecone.io/indexes/${PC_INDEX}`, { headers: pcHead(env) });
+    if (r.status === 404) { const c = await fetch("https://api.pinecone.io/indexes", { method: "POST", headers: pcHead(env), body: JSON.stringify({ name: PC_INDEX, dimension: 768, metric: "cosine", spec: { serverless: { cloud: "aws", region: "us-east-1" } } }) });
+      if (!c.ok && c.status !== 409) throw new Error("Pinecone could not create the index (" + c.status + ")."); r = await fetch(`https://api.pinecone.io/indexes/${PC_INDEX}`, { headers: pcHead(env) }); }
+    if (!r.ok) throw new Error("Pinecone answered " + r.status + "."); const j = await r.json(); host = j.host; dim = Number(j.dimension) || 0;
+    if (!host || (j.status && j.status.ready === false)) throw new Error("The Pinecone index is still being created. Try again in a minute.");
+  }
+  if (!dim) { try { const s = await fetch(`https://${host}/describe_index_stats`, { method: "POST", headers: pcHead(env), body: "{}" }); if (s.ok) dim = Number((await s.json()).dimension) || 0; } catch { /* default below */ } }
+  pcInfo = { host, dim: dim || 768 }; return pcInfo;
+}
+const pcCall = async (env, info, path, body) => { const r = await fetch(`https://${info.host}${path}`, { method: "POST", headers: pcHead(env), body: JSON.stringify(body) }); if (!r.ok) throw new Error("Pinecone answered " + r.status + ": " + (await r.text()).slice(0, 160)); return r; };
+async function arkaStore(env, ctx, request, url) {
+  const cloud = Boolean(env.PINECONE_KEY && String(env.PINECONE_KEY).trim()), ai = Boolean(env.GEMINI_KEY && String(env.GEMINI_KEY).trim());
+  if (request.method === "GET" && url.searchParams.get("op") === "status") return json({ cloud, ai, model: arkaModelOk || "" });
+  if (!cloud) return fail(503, "Playbook storage is not connected: add the secrets PINECONE_KEY (and PINECONE_HOST) in the Cloudflare project settings.");
+  try {
+    const info = await pinecone(env), vec = () => new Array(info.dim).fill(0.001);
+    if (request.method === "GET") {                             // every item: one query with the placeholder vector returns them all (up to 1,000), metadata only
+      const r = await pcCall(env, info, "/query", { vector: vec(), topK: 1000, includeMetadata: true, includeValues: false, namespace: "" });
+      return new Response(r.body, { headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-arka-ai": ai ? "1" : "0" } });
+    }
+    if (request.method !== "POST") return fail(405, "Not supported.");
+    const b = await request.json().catch(() => ({}));
+    if (b.op === "save") {
+      const kinds = ["setup", "lesson", "feedback", "style", "call"], kind = String(b.kind || ""); if (!kinds.includes(kind)) return fail(400, "Unknown item kind.");
+      const compact = JSON.stringify(b.payload ?? {}); if ([...compact].length > 34000) return fail(400, "This item is too large to store (over 34 KB). Trim it or split the document.");
+      const label = { setup: "Setup", lesson: "Lesson", feedback: "Labelled Zones", style: "Zone Style", call: "Logged Plan" }[kind];
+      const name = String(b.name || "").trim().slice(0, 200) || label, rand = [...crypto.getRandomValues(new Uint8Array(2))].map((x) => x.toString(16).padStart(2, "0")).join("");
+      const id = `${kind}_${Date.now()}_${rand}`, savedAt = new Date().toISOString().replace("Z", "000+00:00");
+      const meta = { memory_kind: kind, item_id: id, name, active: Boolean(b.active), saved_at: savedAt, source_name: String(b.source_name || "").slice(0, 300), source_text: String(b.source_text || "").slice(0, 3000), version: "arka-v10" };
+      if (kind === "setup") Object.assign(meta, { setup_id: id, setup_name: name, setup_json: compact }); else meta.item_json = compact;
+      await pcCall(env, info, "/vectors/upsert", { vectors: [{ id, values: vec(), metadata: meta }], namespace: "" });
+      for (const other of (Array.isArray(b.deactivate) ? b.deactivate : []).slice(0, 50)) await pcCall(env, info, "/vectors/update", { id: String(other), setMetadata: { active: false }, namespace: "" });    // one active zone style at a time
+      return json({ ok: true, item: { item_id: id, kind, name, active: Boolean(b.active), saved_at: savedAt, source: meta.source_name, payload: b.payload ?? {} } });
+    }
+    if (b.op === "active") { await pcCall(env, info, "/vectors/update", { id: String(b.id || ""), setMetadata: { active: Boolean(b.active) }, namespace: "" }); return json({ ok: true }); }
+    if (b.op === "delete") { await pcCall(env, info, "/vectors/delete", { ids: [String(b.id || "")], namespace: "" }); return json({ ok: true }); }
+    return fail(400, "Unknown request.");
+  } catch (e) { pcInfo = null; return fail(502, String(e.message || e).slice(0, 200)); }
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url), p = url.pathname;
@@ -943,7 +1063,7 @@ export default {
     try {
       if (p === "/api/health") {                        // which settings exist (true/false only, never a value)
         const has = (n) => Boolean(env[n] && String(env[n]).trim());
-        return json({ sign_in: has("AUTH_SECRET") && (has("ADMIN_PASS") || has("MEMBER_PASS")), storage: has("SUPABASE_URL") && has("SUPABASE_KEY"), ai: has("GEMINI_KEY") });
+        return json({ sign_in: has("AUTH_SECRET") && (has("ADMIN_PASS") || has("MEMBER_PASS")), storage: has("SUPABASE_URL") && has("SUPABASE_KEY"), ai: has("GEMINI_KEY"), playbook: has("PINECONE_KEY") });
       }
       if (p === "/api/login" && request.method === "POST") return login(env, request);
       if (p === "/api/logout" && request.method === "POST") return json({ ok: true }, 200, { "set-cookie": cookie("", 0) });
@@ -977,6 +1097,9 @@ export default {
       if (p === "/api/scan") return scanFile(env, ctx, url);
       if (p === "/api/setups") return setups(env, request, url, me);
       if (p === "/api/ai") return ai(env, ctx, request);
+      if (p === "/api/ai/arka") return arkaAi(env, ctx, request);
+      if (p === "/api/ai/upload") return aiUpload(env, request);
+      if (p === "/api/arka") return arkaStore(env, ctx, request, url);
       if (["/api/portfolio", "/api/portfolio/sell", "/api/portfolio/plan", "/api/portfolio/move", "/api/portfolio/snapshot", "/api/portfolio/settings"].includes(p)) return portfolio(env, request, url, p.slice("/api/portfolio".length));
       return fail(404, "Not found.");
     } catch (e) {
