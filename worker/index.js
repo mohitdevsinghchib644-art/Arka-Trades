@@ -1,9 +1,10 @@
-// Arka Trades · API (stage 17: adds Arka AI: playbook storage in Pinecone, Gemini with a system prompt, PDF and picture uploads). Runs on Cloudflare for every request to /api/*.
+// Arka Trades · API (stage 18: the full Daily brief with past editions and writing it from the website; the Account page). Runs on Cloudflare for every request to /api/*.
 // Secrets are read by NAME from the Cloudflare project settings and never sent to the browser:
 //   ADMIN_USER, ADMIN_PASS, MEMBER_USER, MEMBER_PASS, AUTH_SECRET   sign-in (same names and values as in Streamlit)
 //   SUPABASE_URL, SUPABASE_KEY                                      watchlist storage (same as in Streamlit)
 //   GEMINI_KEY                                                      Screener and Arka AI (Google Gemini)
 //   PINECONE_KEY, PINECONE_HOST (optional: found by name when missing) Arka AI playbook storage, the same Pinecone index Streamlit uses
+//   GH_ACTIONS_TOKEN (optional)                                     Daily brief: "Write now / again" starts the morning job on GitHub
 //   ARKA_GEMINI_MODEL (optional)                                    a Gemini model to try first for Arka AI, as in Streamlit
 // Optional plain variable: GITHUB_REPO (default below) for the signal files written by the "Signals" workflow.
 // Only public market data leaves this worker (Yahoo Finance). Nothing here touches a broker account.
@@ -42,7 +43,7 @@ async function readToken(env, request) {
   if (!body || !sig || !same(sig, await hmac(env.AUTH_SECRET, body))) return null;
   try {
     const p = JSON.parse(new TextDecoder().decode(unb64u(body)));
-    return p.x > Date.now() && (p.r === "admin" || p.r === "member") ? { role: p.r, user: p.u } : null;
+    return p.x > Date.now() && (p.r === "admin" || p.r === "member") ? { role: p.r, user: p.u, exp: p.x } : null;
   } catch { return null; }
 }
 const cookie = (value, maxAge) => `${COOKIE}=${value}; Max-Age=${maxAge}; Path=/; HttpOnly; Secure; SameSite=Lax`;
@@ -835,16 +836,52 @@ async function market(env, ctx, url) {
   const text = (await repoFile(env, ctx, `${f}.json`, 900, "market-data")) ?? (await repoFile(env, ctx, `arka_data/market/${f}.json`, 900));
   return text == null ? fail(404, "Not built yet: run the “Market data” job once in GitHub Actions.") : raw(text);
 }
-async function brief(env, ctx) {
-  if (env.SUPABASE_URL && env.SUPABASE_KEY) {              // written here when the morning job has the Supabase secrets
-    try {
-      const r = await sb(env, "arka_briefs?select=day,payload&kind=eq.am&order=day.desc&limit=1");
-      if (r && r[0]) return json({ brief: typeof r[0].payload === "string" ? JSON.parse(r[0].payload) : r[0].payload });
-    } catch { /* no such table: try the repo file */ }
+// ── Daily brief (daily_brief.render_brief): the last 7 editions, from the Supabase table arka_briefs (what Streamlit and the morning job
+// share) and the files the morning job saves in the repo (arka_data/brief/<day>.json, index.json, latest.json). Supabase wins for a day
+// in both, as in daily_brief.Store. "Write now / again" starts the morning job on GitHub (write only, no Telegram): secret GH_ACTIONS_TOKEN.
+const BRIEF_WF = "daily-brief.yml";
+async function briefText(env, ctx, path, fresh) {             // fresh: straight from GitHub (right after the job ran), else the 5-minute copy
+  if (fresh && env.GH_ACTIONS_TOKEN) {
+    const r = await fetch(`https://api.github.com/repos/${env.GITHUB_REPO || REPO}/contents/${path}?ref=main`, { headers: { authorization: `Bearer ${env.GH_ACTIONS_TOKEN}`, accept: "application/vnd.github.raw+json", "user-agent": UA, "x-github-api-version": "2022-11-28" } });
+    return r.ok ? r.text() : null;
   }
-  const text = await repoFile(env, ctx, "arka_data/brief/latest.json", 300);
-  if (text) { try { return json({ brief: JSON.parse(text) }); } catch { /* fall through */ } }
-  return json({ brief: null });
+  return repoFile(env, ctx, path, fresh ? 30 : 300);
+}
+async function brief(env, ctx, url, request, me) {
+  if (request.method === "POST") return briefWrite(env, request, me);
+  if (url.searchParams.get("op") === "run") return briefRun(env, ctx);
+  const fresh = url.searchParams.get("fresh") === "1", want = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("day") || "") ? url.searchParams.get("day") : "";
+  let sbDays = [], table = null;                            // table: true = arka_briefs is there, false = it is not, null = no Supabase
+  if (env.SUPABASE_URL && env.SUPABASE_KEY) {
+    try { sbDays = ((await sb(env, "arka_briefs?select=day&kind=eq.am&order=day.desc&limit=7")) || []).map((r) => String(r.day).slice(0, 10)); table = true; }
+    catch (e) { table = e.status === 503 ? null : false; }
+  }
+  let repoDays = [], latest = null;
+  const idx = await briefText(env, ctx, "arka_data/brief/index.json", fresh); if (idx) { try { repoDays = (JSON.parse(idx).days || []).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)); } catch { /* no list */ } }
+  const lt = await briefText(env, ctx, "arka_data/brief/latest.json", fresh); if (lt) { try { latest = JSON.parse(lt); if (latest && latest.day && !repoDays.includes(latest.day)) repoDays.push(latest.day); } catch { latest = null; } }
+  const days = [...new Set([...sbDays, ...repoDays])].sort().reverse().slice(0, 7), pick = days.includes(want) ? want : days[0];
+  let out = null;
+  if (pick && sbDays.includes(pick)) { try { const r = await sb(env, `arka_briefs?select=payload&kind=eq.am&day=eq.${pick}&limit=1`); if (r && r[0]) out = typeof r[0].payload === "string" ? JSON.parse(r[0].payload) : r[0].payload; } catch { out = null; } }
+  if (!out && pick) { if (latest && latest.day === pick) out = latest; else { const t = await briefText(env, ctx, `arka_data/brief/${pick}.json`, fresh); if (t) { try { out = JSON.parse(t); } catch { out = null; } } } }
+  return json({ brief: out, days, table, can_write: Boolean(env.GH_ACTIONS_TOKEN), admin: me.role === "admin" });
+}
+async function briefWrite(env, request, me) {
+  if (!env.GH_ACTIONS_TOKEN) return fail(503, "Writing from the website is not set up: add the secret GH_ACTIONS_TOKEN (a GitHub token that may start Actions in this repository) in Cloudflare.");
+  const b = await request.json().catch(() => ({})), again = b.again === true;
+  if (again && me.role !== "admin") return fail(403, "Only the desk can write the brief again.");
+  const r = await fetch(`https://api.github.com/repos/${env.GITHUB_REPO || REPO}/actions/workflows/${BRIEF_WF}/dispatches`, { method: "POST",
+    headers: { authorization: `Bearer ${env.GH_ACTIONS_TOKEN}`, accept: "application/vnd.github+json", "user-agent": UA, "x-github-api-version": "2022-11-28", "content-type": "application/json" },
+    body: JSON.stringify({ ref: "main", inputs: { app: again ? "again" : "now" } }) });
+  if (r.status !== 204) return fail(502, `GitHub did not start the job (${r.status}). Check that GH_ACTIONS_TOKEN may run Actions in this repository.`);
+  return json({ ok: true, at: Date.now() });
+}
+async function briefRun(env, ctx) {                         // the latest website-started run: queued, running, done or failed
+  if (!env.GH_ACTIONS_TOKEN) return json({ run: null });
+  const r = await fetch(`https://api.github.com/repos/${env.GITHUB_REPO || REPO}/actions/workflows/${BRIEF_WF}/runs?event=workflow_dispatch&per_page=1`, { headers: { authorization: `Bearer ${env.GH_ACTIONS_TOKEN}`, accept: "application/vnd.github+json", "user-agent": UA, "x-github-api-version": "2022-11-28" } });
+  if (!r.ok) return json({ run: null });
+  const run = ((await r.json()).workflow_runs || [])[0]; if (!run) return json({ run: null });
+  let status = null; if (run.status === "completed") { const t = await briefText(env, ctx, "arka_data/brief/status.json", true); if (t) { try { status = JSON.parse(t); } catch { status = null; } } }
+  return json({ run: { status: run.status, conclusion: run.conclusion, created: Date.parse(run.created_at), url: run.html_url }, status });
 }
 
 // ── Screener (smart_scan_page.py): price files from the "Screener data" job, saved setups, and the AI reader ──
@@ -1092,7 +1129,7 @@ export default {
       if (p === "/api/signals") return signals(env, ctx);
       if (p === "/api/desk") return deskFile(env, ctx, url);
       if (p === "/api/deals") return deals(env, ctx);
-      if (p === "/api/brief") return brief(env, ctx);
+      if (p === "/api/brief") return brief(env, ctx, url, request, me);
       if (p === "/api/market") return market(env, ctx, url);
       if (p === "/api/scan") return scanFile(env, ctx, url);
       if (p === "/api/setups") return setups(env, request, url, me);
