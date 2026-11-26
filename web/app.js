@@ -1,4 +1,4 @@
-// Arka Trades · new app (stage 19): Home, Watchlist, Portfolio, the stock page with Research, Signals, Screener, Backtest lab, Arka AI, Money flow, News, Regime, Markets, Daily brief, Account, More. Plain JavaScript, no build step.
+// Arka Trades · new app (stage 20): Home, Watchlist, Portfolio, the stock page with Research, Signals, Screener, Backtest lab, Arka AI, Money flow, News, Regime, Daily brief, Account, More (world markets live on Home). Plain JavaScript, no build step.
 import * as PFV from "./portfolio.js";
 import * as PFM from "./pf.js";
 import * as WL from "./watchlist.js";
@@ -32,7 +32,7 @@ const MARKETS = {
   Crypto: [["Bitcoin", "BTC-USD"], ["Ethereum", "ETH-USD"]],
 };
 const NAMES = Object.fromEntries([...INDICES, ...SECTORS, ...Object.values(MARKETS).flat()].map(([n, s]) => [s, n]));
-// [key, name, icon, shown in the phone's bottom bar]. Markets and the brief sit under More on a phone.
+// [key, name, icon, shown in the phone's bottom bar]. The brief sits under More on a phone.
 const TABS = [["home", "Home", '<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/>', true], ["watchlist", "Watchlist", '<path d="M6 3h12v18l-6-4.5L6 21z"/>', true],
   ["portfolio", "Portfolio", '<path d="M3 7h18v13H3z"/><path d="M8 7V4h8v3M3 12h18"/>', true], ["signals", "Signals", '<path d="M3 17l5-6 4 4 8-10"/><path d="M15 5h5v5"/>', true],
   ["research", "Research", '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/><path d="M8 12.5v-2M10.5 12.5v-4M13 12.5v-3"/>', false],
@@ -42,7 +42,6 @@ const TABS = [["home", "Home", '<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21
   ["flow", "Money flow", '<path d="M4 17c3-6 5 2 8-4s5-1 8-6"/><path d="M4 21h16"/>', false],
   ["news", "News", '<path d="M4 5h13v14H6a2 2 0 0 1-2-2z"/><path d="M17 9h3v8a2 2 0 0 1-2 2"/><path d="M8 9h5M8 13h5"/>', false],
   ["regime", "Regime", '<path d="M3 20h18"/><path d="M6 16l4-5 3 3 5-7"/><circle cx="18" cy="7" r="1.6"/>', false],
-  ["markets", "Markets", '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.2 3 14.8 0 18M12 3c-3 3.2-3 14.8 0 18"/>', false],
   ["brief", "Daily brief", '<path d="M5 3h11l3 3v15H5z"/><path d="M8 9h8M8 13h8M8 17h5"/>', false],
   ["account", "Account", '<circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/>', false],
   ["more", "More", '<circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/>', true]];
@@ -128,7 +127,6 @@ function pageSymbols() {
   if (S.tab === "portfolio") return [...new Set(S.pf.lots.map((l) => l.sym)), ...wl.slice(0, 12)];
   if (S.tab === "news") return [...new Set([...S.wl.rows.map((r) => r.sym), ...S.pf.lots.map((l) => l.sym)])].slice(0, 120);
   if (S.tab === "research") return [...new Set([...(() => { try { return JSON.parse(localStorage.getItem("arka_recent") || "[]"); } catch { return []; } })(), ...S.pf.lots.map((l) => l.sym), ...wl])].slice(0, 40);
-  if (S.tab === "markets") return [...MARKETS[S.mkTab].map((x) => x[1]), ...wl.slice(0, 12)];
   if (S.tab === "s") return [S.sk.sym, ...(S.sk.code === "RV" ? [] : [])].filter(Boolean);
   return wl.slice(0, 12);
 }
@@ -181,21 +179,15 @@ function ordersCard(short) {
     : `<div class="empty"><b>No orders for the next open</b>Signals from the close of ${esc(S.sig.asof)}. Leaders are checked once a week; swing and index signals appear on the day they trigger.</div>`;
   return `<div class="card">${body}</div>`;
 }
-function markets() {
-  const rows = MARKETS[S.mkTab].map(([n, s]) => stockRow(s, { title: n, name: " " })).join("");
-  return `<div><div class="hd"><div><h1>Markets</h1><div class="sub">Indices, commodities, currencies and rates</div></div></div>
-    <div class="seg">${Object.keys(MARKETS).map((t) => `<button class="${t === S.mkTab ? "on" : ""}" data-act="mktab" data-v="${esc(t)}">${esc(t)}</button>`).join("")}</div>
-    <div class="card">${rows}</div><div class="note" style="padding:14px 2px">Changes are from the previous close. For rupee pairs a rise means a weaker rupee.</div></div>`;
-}
 function more() {
   return `<div><div class="hd"><div><h1>More</h1></div></div>
-    <div class="links only-m" style="margin-bottom:10px"><a class="link" href="#/research"><b>Research</b><small>Chart, financials, valuation and filings for any stock.</small></a><a class="link" href="#/screener"><b>Screener</b><small>Describe a setup, scan the market, test it on the past.</small></a><a class="link" href="#/backtest"><b>Backtest lab</b><small>Write a setup in plain words and test it on years of prices.</small></a><a class="link" href="#/arka"><b>Arka AI</b><small>Zones, levels and a trade plan checked against your own playbook.</small></a><a class="link" href="#/news"><b>News desk</b><small>Market wire, your stocks and exchange filings.</small></a><a class="link" href="#/flow"><b>Money flow</b><small>Sector rotation: where to be, and when.</small></a><a class="link" href="#/regime"><b>Market regime</b><small>Trend, breadth and volatility: how hard to push today.</small></a><a class="link" href="#/markets"><b>Markets</b><small>Indices, commodities, currencies and rates.</small></a>
+    <div class="links only-m" style="margin-bottom:10px"><a class="link" href="#/research"><b>Research</b><small>Chart, financials, valuation and filings for any stock.</small></a><a class="link" href="#/screener"><b>Screener</b><small>Describe a setup, scan the market, test it on the past.</small></a><a class="link" href="#/backtest"><b>Backtest lab</b><small>Write a setup in plain words and test it on years of prices.</small></a><a class="link" href="#/arka"><b>Arka AI</b><small>Zones, levels and a trade plan checked against your own playbook.</small></a><a class="link" href="#/news"><b>News desk</b><small>Market wire, your stocks and exchange filings.</small></a><a class="link" href="#/flow"><b>Money flow</b><small>Sector rotation: where to be, and when.</small></a><a class="link" href="#/regime"><b>Market regime</b><small>Trend, breadth and volatility: how hard to push today.</small></a>
       <a class="link" href="#/brief"><b>Daily brief</b><small>What happened overnight and what can move stocks today.</small></a><a class="link" href="#/account"><b>Account</b><small>Profile, display, chart settings and this device.</small></a></div>
     ${MORE.length ? `<h2 style="margin-top:8px">Still in the classic app <span>opens in a new tab</span></h2>
     <div class="links">${MORE.map(([t, d]) => `<a class="link" href="${CLASSIC}" target="_blank" rel="noopener"><b>${t}</b><small>${d}</small></a>`).join("")}</div>` : ""}
     <h2>Account <a href="#/account">Open</a></h2><div class="card pad"><div style="margin-bottom:12px">Signed in as <b>${esc(AC.displayName())}</b> <span class="chip">${esc(S.me.role)}</span></div><button class="btn" data-act="logout">Sign out</button></div></div>`;
 }
-const PAGES = { home: HM.page, watchlist: WL.page, portfolio: PFV.page, regime: RG.page, flow: MF.page, news: NW.page, s: SK.page, research: SK.landing, signals: DK.page, screener: SC.page, backtest: BX.page, arka: AA.page, markets, brief: BR.page, account: AC.page, more };
+const PAGES = { home: HM.page, watchlist: WL.page, portfolio: PFV.page, regime: RG.page, flow: MF.page, news: NW.page, s: SK.page, research: SK.landing, signals: DK.page, screener: SC.page, backtest: BX.page, arka: AA.page, brief: BR.page, account: AC.page, more };
 
 // ── painting ──
 function renderShell() {
@@ -208,11 +200,11 @@ function renderShell() {
     <div id="msearch"></div><main id="main"></main>
     <nav class="nav"><a class="brand only-d" href="#/home"><img src="/icon-180.png" alt="">ARKA <i>TRADES</i></a>
       ${TABS.map(([k, n, d, mob]) => `<a href="#/${k}" data-tab="${k}"${mob ? "" : ' class="only-d"'}>${icon(d)}<span>${n}</span></a>`).join("")}
-      <div class="who">Signed in as <b>${esc(AC.displayName())}</b><br>New app · stage 19</div></nav></div>`;
+      <div class="who">Signed in as <b>${esc(AC.displayName())}</b><br>New app · stage 20</div></nav></div>`;
 }
 function paint() {
   const main = $("#main"); if (!main || !S.me) return;
-  const phoneTab = TABS.some(([k, , , mob]) => k === S.tab && mob) ? S.tab : "more";      // Markets and the brief light up More on a phone
+  const phoneTab = TABS.some(([k, , , mob]) => k === S.tab && mob) ? S.tab : "more";      // the brief lights up More on a phone
   document.querySelectorAll(".nav a[data-tab]").forEach((a) => { a.classList.toggle("on", a.dataset.tab === (S.tab === "s" ? "research" : S.tab)); a.classList.toggle("onm", a.dataset.tab === phoneTab); });
   const withRail = !["home", "watchlist", "more", "brief", "portfolio", "regime", "flow", "news", "s", "research", "signals", "screener", "backtest", "arka", "account"].includes(S.tab);
   const ae = document.activeElement;                       // typing in a Portfolio box: leave the page alone so the cursor stays put
@@ -236,6 +228,7 @@ const railPref = () => { try { return localStorage.getItem("arka_news_rail") !==
 const typingInSheet = () => { const a = document.activeElement; return !!(a && $("#sheet").contains(a) && /INPUT|SELECT|TEXTAREA/.test(a.tagName)); };
 function route() {
   const parts = (location.hash.replace(/^#\/?/, "") || "home").split("/"), t = parts[0];
+  if (t === "markets") { history.replaceState(null, "", "#/home"); S.tab = "home"; paint(); refresh(); setTimeout(() => { const el = document.getElementById("hm-world"); if (el) el.scrollIntoView(); }, 60); return; }   // the old Markets page: everything it showed is in Home's World section
   S.tab = PAGES[t] ? t : "home";
   if (S.tab === "s") { const sym = decodeURIComponent(parts[1] || "").toUpperCase().replace(/[^A-Z0-9&._-]/g, "");
     if (!sym) { location.hash = "#/home"; return; } SK.open(sym, (parts[2] || "").toUpperCase()); }
@@ -486,7 +479,6 @@ document.addEventListener("click", async (e) => {
       S.pf.extraBooks = [...new Set([...(S.pf.extraBooks || []), n])]; paint(); return toast("Book “" + n + "” is ready. Choose it when you add a buy."); }
     if (act === "newlist") { const n = (prompt("Name for the new list (for example Swing or Long term)") || "").replace(/[^\w &.-]/g, "").trim().slice(0, 24); if (!n) return;
       S.wl.extra = [...new Set([...(S.wl.extra || []), n])]; S.wl.list = n; paint(); return toast("List “" + n + "” is ready. It is saved when you add its first stock."); }
-    if (act === "mktab") { S.mkTab = a.dataset.v; paint(); return refresh(); }
     if (act === "search") return toggleMobileSearch(!S.searching);
     if (act === "logout") { try { await api("/api/logout", { method: "POST" }); } catch { /* ignore */ } S.me = null; return renderLogin(); }
   }

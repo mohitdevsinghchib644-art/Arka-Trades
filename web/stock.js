@@ -59,6 +59,19 @@ function lazy(D, sym, code) {                                // sources only som
       for (const n of want) { const h = (d.history || []).find((x) => x.sym === n); D.cmp[n] = h && h.ok ? { d: h.d, v: h.c } : null; } });
   }
   if (code === "RV" && !D.peers && R.SECTOR_PEERS[sym]) need(R.SECTOR_PEERS[sym]);
+  if (code === "MF" && D.B && D.B.resolved) {                // named holders over 1%, from Screener's shareholding breakdown
+    const o = S.sk.o, c = o.mfc === "Foreign institutions" ? "foreign_institutions" : "domestic_institutions", p = (o.mfp || "Quarterly").toLowerCase(), key = c + "/" + p;
+    D.hold = D.hold || {};
+    if (!(key in D.hold) && !D.busy["hold:" + key]) step(D, "hold:" + key, async () => {
+      let last = "Screener's company id is not on its page";
+      for (const id of D.B.peer_ids || []) {
+        const d = await api(`/api/screener/holders?id=${id}&c=${c}&p=${p}`).catch((e) => ({ ok: false, err: e.message }));
+        if (d.ok) { D.hold[key] = d.data; return; }
+        last = d.err || last;
+      }
+      D.hold[key] = null; throw new Error(last);
+    });
+  }
 }
 const compNames = (sym) => String(S.sk.o.compq ?? defaultComp(sym)).split(",").map((t) => t.trim().toUpperCase()).filter(Boolean).slice(0, 6);
 const defaultComp = (sym) => (R.SECTOR_PEERS[sym] || []).filter((p) => p !== sym).join(", ") || "NIFTY 500, NIFTY 50";
@@ -87,7 +100,7 @@ function ctx(sym) {
   for (const p of R.SECTOR_PEERS[sym] || []) { const x = S.q[p]; if (x && x.ok) q[p] = { price: x.price, pct: x.pct }; }
   return { sym, B: D.B || empty(sym, D.busy.B ? "Loading Screener…" : D.err.B || undefined), H: D.H || null, IX: ix2, Y: D.Y && D.Y.ok ? D.Y : null, divs: D.divs || [], splits: D.splits || [],
     dlv: D.dlv || null, dlvInfo: { error: D.dlvErr || D.err.dlv }, anns: D.anns || [], today: istToday(), open: marketOpenNow(), o: { ...K.o, comp: compNames(sym) }, peers: D.peers || null,
-    quotes: q, news: D.news || [], cmp: D.cmp || {}, note: D.note, fno: desk[0] && !desk[0].startsWith("No signal") ? [["Signal", desk[0]], ...(desk[1] ? [["Detail", desk[1]]] : [])] : null,
+    quotes: q, news: D.news || [], cmp: D.cmp || {}, note: D.note, hold: D.hold || {}, holdErr: Object.fromEntries(Object.entries(D.err).filter(([k]) => k.startsWith("hold:")).map(([k, v]) => [k.slice(5), v])), holdBusy: Object.keys(D.busy).filter((k) => k.startsWith("hold:") && D.busy[k]).map((k) => k.slice(5)), fno: desk[0] && !desk[0].startsWith("No signal") ? [["Signal", desk[0]], ...(desk[1] ? [["Detail", desk[1]]] : [])] : null,
     fnoWhy: "The full F&O view (model rank, build-up, option chain) comes with the F&O section. " + (desk[0] ? "Signal desk: " + desk[0] + (desk[1] ? " · " + desk[1] : "") + "." : ""),
     status: { notes: S.me && S.me.role ? "configured" : "on demand" } };
 }
@@ -292,6 +305,7 @@ function controls(code, C) {
   const o = S.sk.o;
   if (code === "FA") return seg("fin", ["Quarterly", "Yearly"], o.fin || "Quarterly");
   if (code === "HDS") return seg("sh", ["Quarterly", "Yearly"], o.sh || "Quarterly");
+  if (code === "MF") return `<div class="rs-ctl">${seg("mfc", ["Mutual funds", "All domestic institutions", "Foreign institutions"], o.mfc || "Mutual funds")}${seg("mfp", ["Quarterly", "Yearly"], o.mfp || "Quarterly")}</div>`;
   if (code === "DLV") return `<div class="rs-ctl">${seg("dlv", ["Daily", "Weekly", "Monthly"], o.dlv || "Weekly")}${seg("dlvn", [60, 120, 250], o.dlvn || 60, (v) => `Last ${v} sessions`)}</div>`;
   if (code === "HP") return seg("hp", ["1M", "3M", "6M", "1Y", "5Y"], o.hp || "3M");
   if (code === "COMP") return `<div class="rs-ctl"><input class="rs-in" data-rs="compq" value="${esc(o.compq ?? defaultComp(C.sym))}" placeholder="Symbols or indices, comma separated: TCS, INFY, NIFTY 500, NIFTY IT">${seg("comprng", ["3M", "6M", "1Y", "2Y"], o.comprng || "1Y")}</div>`;

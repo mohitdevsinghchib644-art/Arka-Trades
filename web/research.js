@@ -33,7 +33,7 @@ export const GROUPS = [
     ["BETA", "Beta", "Regression against the index: beta, alpha, R-squared, rolling beta"], ["HVG", "Volatility", "Realised volatility 20 / 60 / 120 sessions, percentile, ATR"],
     ["PERF", "vs NIFTY 50", "Relative performance, alpha, beta, volatility, drawdown"]]],
   ["Ownership", [["HDS", "Shareholding", "Promoter / FII / DII / public holding trend"], ["DLV", "Deliveries", "Delivered vs traded quantity and delivery %, daily / weekly / monthly (NSE)"],
-    ["FNO", "F&O positioning", "Futures and options: model rank, build-up, option chain, days like today and signal status"], ["MF", "MF holdings", "Mutual fund positions (ScanX, optional source)"]]],
+    ["FNO", "F&O positioning", "Futures and options: model rank, build-up, option chain, days like today and signal status"], ["MF", "MF holdings", "Funds and institutions holding over 1%, quarter by quarter, from company filings"]]],
   ["Events & news", [["EVTS", "Events", "Timeline of results, board meetings, dividends, splits and material filings"], ["CN", "News", "Company news timeline"],
     ["CACS", "Filings", "Exchange filings from BSE, by category"], ["DVD", "Dividends", "Dividend history, splits and bonus issues"]]],
   ["Workspace", [["NOTE", "Thesis notes", "Your bull / bear case, catalysts, risks and target"], ["SRC", "Sources", "Where every number on this screen comes from"]]],
@@ -458,10 +458,57 @@ function SYN(C) {
     ["text", "Not available", Ev.unknown.join("; ") + ".", true],
     H_("AI synthesis · Gemini reads the evidence sheet above, nothing else"), ["synth", { company: C.B.name || C.sym, symbol: C.sym, facts: Ev.facts, contradictions: con, unknown: Ev.unknown }]];
 }
+// MF: named holders over 1% (Screener's investors breakdown of the shareholding table, from company filings)
+const MON = { Jan: 1, Feb: 2, Mar: 3, Apr: 4, May: 5, Jun: 6, Jul: 7, Aug: 8, Sep: 9, Oct: 10, Nov: 11, Dec: 12 };
+const perKey = (p) => { const m = /^([A-Z][a-z]{2})\s+(\d{4})$/.exec(String(p).trim()); return m && MON[m[1]] ? +m[2] * 100 + MON[m[1]] : null; };
+const holdNum = (v) => { if (v == null || v === "") return null; const x = parseFloat(String(v).replace(/[%,\s]/g, "")); return isFinite(x) ? x : null; };
+export function parseHolders(d) {                          // {holder: {"Sep 2026": "1.23", ...}} -> {periods (oldest first), rows: [{name, v: []}]}
+  const per = new Set(), rows = [];
+  for (const [name, o] of Object.entries(d || {})) {
+    if (!o || typeof o !== "object" || Array.isArray(o)) continue;
+    const vals = {}; for (const [k, v] of Object.entries(o)) if (perKey(k) != null) { per.add(k.trim()); vals[k.trim()] = holdNum(v); }
+    if (Object.keys(vals).length) rows.push({ name: String(name).replace(/\s+/g, " ").trim(), vals });
+  }
+  const periods = [...per].sort((x, y) => perKey(x) - perKey(y));
+  return { periods, rows: rows.map((r) => ({ name: r.name, v: periods.map((p) => (r.vals[p] ?? null)) })) };
+}
+const IS_MF1 = /mutual fund|\bmf\b|trustee|\ba\/c\b/i, IS_INS = /insurance|assurance|\blic\b|life insurance/i, IS_MF = /\bfunds?\b|\bscheme\b|\betf\b/i, NOT_MF = /pension|provident|gratuity|superannuation|\bnps\b|employees/i;
+export const holderKind = (n) => (IS_MF1.test(n) && !NOT_MF.test(n) ? "Mutual fund" : IS_INS.test(n) ? "Insurance" : IS_MF.test(n) && !NOT_MF.test(n) ? "Mutual fund" : "Other institution");
 function MF(C) {
-  const m = C.mf;
-  if (m && m.rows && m.rows.length) return [H_("Mutual fund holdings · ScanX (optional source)", "live"), T(m.heads, m.rows, [], `${C.sym}_mf`)];
-  return [H_("Mutual fund holdings · ScanX (optional source)", "unavailable"), NA("MF holdings", "ScanX company page or mftransaction endpoint (needs an ISIN mapping)", "Optional source — not required by the rest of the terminal.")];
+  const o = C.o, view = o.mfc || "Mutual funds", foreign = view === "Foreign institutions", mode = o.mfp || "Quarterly", key = (foreign ? "foreign_institutions" : "domestic_institutions") + "/" + mode.toLowerCase();
+  const title = `${view} holding over 1% (${mode.toLowerCase()}) · Screener, from company filings`;
+  if (!C.B.resolved) return [H_(title, "unavailable"), NA("Named holders", "the company's Screener page", C.B.reason)];
+  const raw = C.hold[key];
+  if (raw === undefined) return [H_(title), ["note", C.holdErr[key] ? "" : "Loading the holder list from Screener…"]].concat(C.holdErr[key] ? [NA("Named holders", "Screener's shareholding breakdown", C.holdErr[key])] : []);
+  if (raw === null) return [H_(title, "unavailable"), NA("Named holders", "Screener's shareholding breakdown", C.holdErr[key] || "Screener did not return a holder list for this company.")];
+  const P = parseHolders(raw), n = P.periods.length;
+  let rows = P.rows.map((r) => ({ ...r, kind: foreign ? "Foreign institution" : holderKind(r.name) }));
+  if (view === "Mutual funds") rows = rows.filter((r) => r.kind === "Mutual fund");
+  const out = [H_(title, "live", "Companies must name every holder with more than 1% of the shares in their shareholding filing. Smaller positions are not named, so this list is a floor, not the full fund ownership.")];
+  if (!n) return [...out, NA("Named holders", "Screener's shareholding breakdown", "Screener returned no dated holdings.")];
+  if (!rows.length) return [...out, ["text", "No named holder", `No ${view === "Mutual funds" ? "mutual fund" : view.toLowerCase().replace(/s$/, "")} held more than 1% of ${C.B.name || C.sym} in any of the last ${n} ${mode === "Quarterly" ? "quarters" : "years"} shown. Funds can still own it below 1%.`]];
+  const cur = (r) => r.v[n - 1], prev = (r) => (n >= 2 ? r.v[n - 2] : null);
+  const status = (r) => { const a = prev(r), b = cur(r); if (b == null || b <= 0) return a > 0 ? "Below 1% or sold" : "Not in the latest"; if (a == null || a <= 0) return n >= 2 ? "New" : "Holds"; const d = b - a; return d >= 0.05 ? "Added" : d <= -0.05 ? "Cut" : "Held"; };
+  const sumAt = (i) => rows.reduce((p, r) => p + (r.v[i] > 0 ? r.v[i] : 0), 0), cnt = (i) => rows.filter((r) => r.v[i] > 0).length;
+  const tNow = sumAt(n - 1), tPrev = n >= 2 ? sumAt(n - 2) : null, st = rows.map(status);
+  const nNew = st.filter((x) => x === "New").length, nOut = st.filter((x) => x === "Below 1% or sold").length, nAdd = st.filter((x) => x === "Added").length, nCut = st.filter((x) => x === "Cut").length;
+  const catRow = ((C.o.mfp === "Yearly" ? C.B.shareholding_yearly : C.B.shareholding) || { rows: [] }).rows.find((r) => r.label.toLowerCase().startsWith(foreign ? "fiis" : "diis"));
+  const catRec = (C.o.mfp === "Yearly" ? C.B.shareholding_yearly : C.B.shareholding) || null, catAt = (p) => { if (!catRow || !catRec) return null; const i = catRec.periods.indexOf(p); return i < 0 ? null : nums(catRow)[i]; };
+  const catNow = catAt(P.periods[n - 1]), catPrev = n >= 2 ? catAt(P.periods[n - 2]) : null, lp = P.periods[n - 1], pp = n >= 2 ? P.periods[n - 2] : null;
+  out.push(K([[`Named ${view === "Mutual funds" ? "funds" : "holders"} · ${lp}`, String(cnt(n - 1)), pp ? `${cnt(n - 2)} in ${pp}` : ""],
+    ["Their combined stake", `${fx(tNow, 2, false)}%`, tPrev != null ? `${fx(tNow - tPrev, 2, false, true)} pp vs ${pp}` : "", tPrev != null ? (tNow > tPrev ? "g" : tNow < tPrev ? "r" : null) : null],
+    [foreign ? "All FIIs (filing total)" : "All DIIs (filing total)", catNow != null ? `${fx(catNow, 2, false)}%` : "N/A", catNow != null && catPrev != null ? `${fx(catNow - catPrev, 2, false, true)} pp vs ${pp}` : "Screener shareholding table", catNow != null && catPrev != null ? (catNow > catPrev ? "g" : catNow < catPrev ? "r" : null) : null],
+    [`Changes since ${pp || "—"}`, pp ? `${nNew} new · ${nAdd} added` : "—", pp ? `${nCut} cut · ${nOut} below 1% or sold` : "", pp ? (nNew + nAdd > nCut + nOut ? "g" : nNew + nAdd < nCut + nOut ? "r" : null) : null]], 4));
+  if (n >= 2) { const ser = [{ name: `Named ${view === "Mutual funds" ? "funds" : "holders"} over 1%`, color: "a", y: P.periods.map((_, i) => sumAt(i)), width: 2, markers: true }];
+    if (catRow) ser.push({ name: foreign ? "All FIIs" : "All DIIs", color: "t2", y: P.periods.map(catAt), markers: true });
+    out.push(["chart", { kind: "line", x: P.periods, series: ser, h: 280 }]); }
+  const show = Math.min(n, 8), heads = [...P.periods.slice(-show), "Change pp", "Status", ...(view === "All domestic institutions" ? ["Type"] : [])];
+  const order = rows.map((r, i) => [r, st[i]]).sort((x, y) => (cur(y[0]) ?? -1) - (cur(x[0]) ?? -1) || (prev(y[0]) ?? -1) - (prev(x[0]) ?? -1));
+  out.push(T(heads, order.map(([r, s]) => { const a = prev(r), b = cur(r), d = a != null || b != null ? (b || 0) - (a || 0) : null;
+    return { label: r.name, values: [...r.v.slice(-show).map((v) => (v == null ? "—" : fx(v, 2, false))), n >= 2 && d != null ? fx(d, 2, false, true) : "—", s, ...(view === "All domestic institutions" ? [r.kind] : [])] }; }), [], `${C.sym}_holders_${view.replace(/\s+/g, "_").toLowerCase()}_${mode.toLowerCase()}`));
+  if (view === "Mutual funds") out.push(["text", "How funds are picked out", "A holder counts as a mutual fund when its filed name says mutual fund, fund, scheme or ETF and is not an insurer or a pension or provident fund. Switch to All domestic institutions to see every named holder with its type."]);
+  out.push(["text", "Limits", `Quarterly filings, so the newest figure is up to a quarter old. "Below 1% or sold" means the holder is no longer named: it may have sold everything or just dropped under 1%. Monthly fund portfolios are not used here.`, true]);
+  return out;
 }
 function NOTEFN(C) { return [["thesis", C.note || {}]]; }
 function SRC(C) {
@@ -471,7 +518,7 @@ function SRC(C) {
     { label: `Benchmark (${BENCH[1]})`, values: [`Yahoo ${BENCH[0]}`, idxHist(C, "NIFTY 50") ? "live" : "on demand"] }, { label: "Health check, valuation, P/E band", values: ["Computed from the above", "on demand"] },
     { label: "Analyst / dividends / fallbacks", values: ["Yahoo Finance", C.Y ? (C.Y.ok ? "live" : "unavailable") : "on demand"] }, { label: "News", values: ["News desk / Google News", "on demand"] },
     { label: "Delivery (DLV)", values: ["NSE daily bhavcopy, saved nightly", C.dlv && C.dlv.d.length ? "live" : "on demand"] }, { label: "Announcements (CACS)", values: ["BSE API", C.anns ? (C.anns.length ? "live" : "no filings returned") : "on demand"] },
-    { label: "MF holdings", values: ["ScanX (optional)", "on demand"] }, { label: "Storage for notes", values: ["Supabase", st.notes || "on demand"] }, { label: "AI synthesis (SYN)", values: ["Gemini", st.ai || "set up with Arka AI"] }]),
+    { label: "MF holdings (holders over 1%)", values: ["Screener, from company filings", Object.values(C.hold || {}).some(Boolean) ? "live" : "on demand"] }, { label: "Storage for notes", values: ["Supabase", st.notes || "on demand"] }, { label: "AI synthesis (SYN)", values: ["Gemini", st.ai || "set up with Arka AI"] }]),
     ["text", "Integrity rule", "Values are shown only when a source returns them or when they are computed directly from returned values (formula shown on screen). Missing data says DATA UNAVAILABLE; nothing is estimated or invented."]];
 }
 
