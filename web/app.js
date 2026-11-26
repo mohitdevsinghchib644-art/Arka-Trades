@@ -1,4 +1,4 @@
-// Arka Trades · new app (stage 16): Home, Watchlist, Portfolio, the stock page with Research, Signals, Screener, Backtest lab, Money flow, News, Regime, Markets, Daily brief, More. Plain JavaScript, no build step.
+// Arka Trades · new app (stage 17): Home, Watchlist, Portfolio, the stock page with Research, Signals, Screener, Backtest lab, Arka AI, Money flow, News, Regime, Markets, Daily brief, More. Plain JavaScript, no build step.
 import * as PFV from "./portfolio.js";
 import * as PFM from "./pf.js";
 import * as WL from "./watchlist.js";
@@ -10,6 +10,7 @@ import * as NW from "./news.js";
 import * as SK from "./stock.js";
 import * as SC from "./scan.js";
 import * as BX from "./btlab.js";
+import * as AA from "./arkaai.js";
 import { chartMove } from "./charts.js";
 const CLASSIC = "https://arka-trades-1.streamlit.app";       // the Streamlit app, for sections that have not moved yet
 const $ = (s) => document.querySelector(s);
@@ -35,16 +36,17 @@ const TABS = [["home", "Home", '<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21
   ["research", "Research", '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/><path d="M8 12.5v-2M10.5 12.5v-4M13 12.5v-3"/>', false],
   ["screener", "Screener", '<path d="M3 5h18l-7 8.5V20l-4-2v-4.5z"/>', false],
   ["backtest", "Backtest lab", '<path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 1.7 3h10.6a2 2 0 0 0 1.7-3l-5-9V3"/><path d="M7.5 14h9"/>', false],
+  ["arka", "Arka AI", '<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/>', false],
   ["flow", "Money flow", '<path d="M4 17c3-6 5 2 8-4s5-1 8-6"/><path d="M4 21h16"/>', false],
   ["news", "News", '<path d="M4 5h13v14H6a2 2 0 0 1-2-2z"/><path d="M17 9h3v8a2 2 0 0 1-2 2"/><path d="M8 9h5M8 13h5"/>', false],
   ["regime", "Regime", '<path d="M3 20h18"/><path d="M6 16l4-5 3 3 5-7"/><circle cx="18" cy="7" r="1.6"/>', false],
   ["markets", "Markets", '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.2 3 14.8 0 18M12 3c-3 3.2-3 14.8 0 18"/>', false],
   ["brief", "Daily brief", '<path d="M5 3h11l3 3v15H5z"/><path d="M8 9h8M8 13h8M8 17h5"/>', false],
   ["more", "More", '<circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/>', true]];
-const MORE = [["Arka AI", "Chart reading with your own playbook."]];
+const MORE = [];                                            // every section has moved over
 
 const S = { me: null, tab: "home", q: {}, at: {}, wl: { rows: [], list: "Main", loaded: false, err: "", ...WL.wlDefaults() }, sig: null, sigErr: "", fd: DK.deskDefaults(), sigTab: "Leaders", mkTab: "India", sort: "order",
-            pf: PFV.pfDefaults(), rg: RG.rgDefaults(), qv: 0, hm: HM.homeDefaults(), mf: MF.flowDefaults(), nw: NW.newsDefaults(), sk: SK.stockDefaults(), sc: SC.scanDefaults(), bx: BX.bxDefaults(), deals: null, brief: undefined,
+            pf: PFV.pfDefaults(), rg: RG.rgDefaults(), qv: 0, hm: HM.homeDefaults(), mf: MF.flowDefaults(), nw: NW.newsDefaults(), sk: SK.stockDefaults(), sc: SC.scanDefaults(), bx: BX.bxDefaults(), aa: AA.aaDefaults(), deals: null, brief: undefined,
             sheet: null, results: null, searching: false };
 
 // ── small helpers ──
@@ -204,13 +206,13 @@ function brief() {
 }
 function more() {
   return `<div><div class="hd"><div><h1>More</h1></div></div>
-    <div class="links only-m" style="margin-bottom:10px"><a class="link" href="#/research"><b>Research</b><small>Chart, financials, valuation and filings for any stock.</small></a><a class="link" href="#/screener"><b>Screener</b><small>Describe a setup, scan the market, test it on the past.</small></a><a class="link" href="#/backtest"><b>Backtest lab</b><small>Write a setup in plain words and test it on years of prices.</small></a><a class="link" href="#/news"><b>News desk</b><small>Market wire, your stocks and exchange filings.</small></a><a class="link" href="#/flow"><b>Money flow</b><small>Sector rotation: where to be, and when.</small></a><a class="link" href="#/regime"><b>Market regime</b><small>Trend, breadth and volatility: how hard to push today.</small></a><a class="link" href="#/markets"><b>Markets</b><small>Indices, commodities, currencies and rates.</small></a>
+    <div class="links only-m" style="margin-bottom:10px"><a class="link" href="#/research"><b>Research</b><small>Chart, financials, valuation and filings for any stock.</small></a><a class="link" href="#/screener"><b>Screener</b><small>Describe a setup, scan the market, test it on the past.</small></a><a class="link" href="#/backtest"><b>Backtest lab</b><small>Write a setup in plain words and test it on years of prices.</small></a><a class="link" href="#/arka"><b>Arka AI</b><small>Zones, levels and a trade plan checked against your own playbook.</small></a><a class="link" href="#/news"><b>News desk</b><small>Market wire, your stocks and exchange filings.</small></a><a class="link" href="#/flow"><b>Money flow</b><small>Sector rotation: where to be, and when.</small></a><a class="link" href="#/regime"><b>Market regime</b><small>Trend, breadth and volatility: how hard to push today.</small></a><a class="link" href="#/markets"><b>Markets</b><small>Indices, commodities, currencies and rates.</small></a>
       <a class="link" href="#/brief"><b>Daily brief</b><small>What happened overnight and what can move stocks today.</small></a></div>
-    <h2 style="margin-top:8px">Still in the classic app <span>opens in a new tab</span></h2>
-    <div class="links">${MORE.map(([t, d]) => `<a class="link" href="${CLASSIC}" target="_blank" rel="noopener"><b>${t}</b><small>${d}</small></a>`).join("")}</div>
+    ${MORE.length ? `<h2 style="margin-top:8px">Still in the classic app <span>opens in a new tab</span></h2>
+    <div class="links">${MORE.map(([t, d]) => `<a class="link" href="${CLASSIC}" target="_blank" rel="noopener"><b>${t}</b><small>${d}</small></a>`).join("")}</div>` : ""}
     <h2>Account</h2><div class="card pad"><div style="margin-bottom:12px">Signed in as <b>${esc(S.me.user)}</b> <span class="chip">${esc(S.me.role)}</span></div><button class="btn" data-act="logout">Sign out</button></div></div>`;
 }
-const PAGES = { home: HM.page, watchlist: WL.page, portfolio: PFV.page, regime: RG.page, flow: MF.page, news: NW.page, s: SK.page, research: SK.landing, signals: DK.page, screener: SC.page, backtest: BX.page, markets, brief, more };
+const PAGES = { home: HM.page, watchlist: WL.page, portfolio: PFV.page, regime: RG.page, flow: MF.page, news: NW.page, s: SK.page, research: SK.landing, signals: DK.page, screener: SC.page, backtest: BX.page, arka: AA.page, markets, brief, more };
 
 // ── painting ──
 function renderShell() {
@@ -223,17 +225,17 @@ function renderShell() {
     <div id="msearch"></div><main id="main"></main>
     <nav class="nav"><a class="brand only-d" href="#/home"><img src="/icon-180.png" alt="">ARKA <i>TRADES</i></a>
       ${TABS.map(([k, n, d, mob]) => `<a href="#/${k}" data-tab="${k}"${mob ? "" : ' class="only-d"'}>${icon(d)}<span>${n}</span></a>`).join("")}
-      <div class="who">Signed in as <b>${esc(S.me.user)}</b><br>New app · stage 16</div></nav></div>`;
+      <div class="who">Signed in as <b>${esc(S.me.user)}</b><br>New app · stage 17</div></nav></div>`;
 }
 function paint() {
   const main = $("#main"); if (!main || !S.me) return;
   const phoneTab = TABS.some(([k, , , mob]) => k === S.tab && mob) ? S.tab : "more";      // Markets and the brief light up More on a phone
   document.querySelectorAll(".nav a[data-tab]").forEach((a) => { a.classList.toggle("on", a.dataset.tab === (S.tab === "s" ? "research" : S.tab)); a.classList.toggle("onm", a.dataset.tab === phoneTab); });
-  const withRail = !["home", "watchlist", "more", "brief", "portfolio", "regime", "flow", "news", "s", "research", "signals", "screener", "backtest"].includes(S.tab);
+  const withRail = !["home", "watchlist", "more", "brief", "portfolio", "regime", "flow", "news", "s", "research", "signals", "screener", "backtest", "arka"].includes(S.tab);
   const ae = document.activeElement;                       // typing in a Portfolio box: leave the page alone so the cursor stays put
-  if (ae && main.contains(ae) && ((ae.dataset.pf && ae.tagName === "INPUT") || (ae.dataset.fd && ae.tagName === "INPUT") || (ae.dataset.sc && /INPUT|TEXTAREA/.test(ae.tagName)) || (ae.dataset.bx && /INPUT|TEXTAREA/.test(ae.tagName)) || (S.tab === "portfolio" && /INPUT|TEXTAREA/.test(ae.tagName) && ae.closest("form"))) && !/range|checkbox|file/.test(ae.type)) { if (S.sheet && !typingInSheet()) paintSheet(); return; }
+  if (ae && main.contains(ae) && ((ae.dataset.pf && ae.tagName === "INPUT") || (ae.dataset.fd && ae.tagName === "INPUT") || (ae.dataset.sc && /INPUT|TEXTAREA/.test(ae.tagName)) || (ae.dataset.bx && /INPUT|TEXTAREA/.test(ae.tagName)) || (ae.dataset.aa && /INPUT|TEXTAREA/.test(ae.tagName)) || (S.tab === "portfolio" && /INPUT|TEXTAREA/.test(ae.tagName) && ae.closest("form"))) && !/range|checkbox|file/.test(ae.type)) { if (S.sheet && !typingInSheet()) paintSheet(); return; }
   const keep = ae && main.contains(ae) && ae.dataset && (ae.dataset.nw || ae.dataset.rs === "find" || ae.dataset.wl === "q") ? [ae.dataset.nw ? "nw" : ae.dataset.wl ? "wl" : "rs", ae.dataset.nw || ae.dataset.wl || ae.dataset.rs, ae.selectionStart, ae.selectionEnd] : null;
-  main.className = withRail ? "rail" : ["home", "portfolio", "regime", "flow", "news", "s", "signals", "screener", "backtest"].includes(S.tab) ? "wide" : "";
+  main.className = withRail ? "rail" : ["home", "portfolio", "regime", "flow", "news", "s", "signals", "screener", "backtest", "arka"].includes(S.tab) ? "wide" : "";
   const y = window.scrollY;
   const newsSide = (S.tab === "home" || S.tab === "s" || S.tab === "watchlist") && innerWidth >= 1280, showNews = newsSide && railPref();
   if (newsSide) {                                         // Home and the stock page on a wide screen: the news panel on the right (Streamlit's news rail)
@@ -262,6 +264,7 @@ function route() {
   if (S.tab === "watchlist" && S.wl.loaded) WL.load();
   if (S.tab === "signals") DK.load();
   if (S.tab === "screener") SC.load();
+  if (S.tab === "arka") AA.open(decodeURIComponent(parts[1] || "").toUpperCase().replace(/[^A-Z0-9&._^-]/g, ""));
 }
 
 // ── stock sheet ──
@@ -307,7 +310,7 @@ function paintSheet() {
     : sh.err ? `<div class="note">${esc(sh.err)}</div>` : '<div class="note">Loading numbers…</div>';
   const has = inList(sh.sym), wlx = isStock && S.tab === "watchlist" ? WL.sheetBlocks(sh.sym) : null;
   const acts = isStock ? `<div class="acts"><button class="btn ${has ? "red" : "pri"}" data-act="${has ? "remove" : "add"}" data-s="${esc(sh.sym)}">${has ? "Remove" : "Add to watchlist"}</button>
-      <button class="btn" data-act="buyform" data-s="${esc(sh.sym)}">Add a buy</button></div><a class="btn full stockpage" href="#/s/${encodeURIComponent(sh.sym)}" data-act="close">Open the stock page · chart and full research</a>` : "";
+      <button class="btn" data-act="buyform" data-s="${esc(sh.sym)}">Add a buy</button></div><a class="btn full stockpage" href="#/s/${encodeURIComponent(sh.sym)}" data-act="close">Open the stock page · chart and full research</a><a class="btn full stockpage" href="#/arka/${encodeURIComponent(sh.sym)}" data-act="close">Arka AI analysis</a>` : "";
   $("#sheet").innerHTML = `<div class="scrim" data-act="close"></div><section class="sheet" role="dialog" aria-label="${esc(title)}"><div class="grab"></div>
     <div class="hd"><div><h1>${esc(title)}</h1><small>${esc(name)}</small></div><button class="ib" data-act="close" aria-label="Close">${icon('<path d="M6 6l12 12M18 6 6 18"/>')}</button></div>
     <div class="px">${q.price != null ? num(q.price) : '<span class="sk">0000.00</span>'}<small class="${cls(q.pct)}">${q.price != null ? sgn(q.chg) + " (" + pc(q.pct) + ")" : ""}</small></div>
@@ -381,7 +384,7 @@ async function sendForm(form, path, body, method = "POST") {
   const b = form.querySelector("button[type=submit]"); if (b) b.disabled = true;
   try { await api(path, { method, body: JSON.stringify(body) }); return true; } catch (er) { formErr(form, er.message); return false; }
 }
-document.addEventListener("toggle", (e) => { if (e.target.classList && e.target.classList.contains("pf-tax")) S.pf.taxOpen = e.target.open; if (e.target.classList && e.target.classList.contains("wl-man")) S.wl.manage = e.target.open; if (e.target.dataset && (e.target.dataset.scd || e.target.dataset.scm)) SC.toggle(e.target); if (e.target.dataset && e.target.dataset.bxd) BX.toggle(e.target); }, true);
+document.addEventListener("toggle", (e) => { if (e.target.classList && e.target.classList.contains("pf-tax")) S.pf.taxOpen = e.target.open; if (e.target.classList && e.target.classList.contains("wl-man")) S.wl.manage = e.target.open; if (e.target.dataset && (e.target.dataset.scd || e.target.dataset.scm)) SC.toggle(e.target); if (e.target.dataset && e.target.dataset.bxd) BX.toggle(e.target); if (e.target.dataset && e.target.dataset.aad) AA.toggle(e.target); }, true);
 document.addEventListener("submit", async (e) => {
   const f = e.target, id = f.getAttribute("id");       // not f.id: a field named "id" would hide it
   if (id === "thesis") { e.preventDefault(); return SK.saveNote(f); }
@@ -437,15 +440,16 @@ function pfInput(el, ev) {                                // a control on the Po
   paint();
 }
 let nwTimer = 0;
-document.addEventListener("input", (e) => { if (e.target.id === "q" || e.target.id === "mq") onSearch(e.target.value); else if (e.target.dataset.pf) pfInput(e.target, "input"); else if (e.target.dataset.wl) WL.input(e.target, "input"); else if (e.target.dataset.sc) SC.input(e.target, "input"); else if (e.target.dataset.bx) BX.input(e.target, "input"); else if (e.target.dataset.rs) SK.input(e.target, "input");
+document.addEventListener("input", (e) => { if (e.target.id === "q" || e.target.id === "mq") onSearch(e.target.value); else if (e.target.dataset.pf) pfInput(e.target, "input"); else if (e.target.dataset.wl) WL.input(e.target, "input"); else if (e.target.dataset.sc) SC.input(e.target, "input"); else if (e.target.dataset.bx) BX.input(e.target, "input"); else if (e.target.dataset.aa) AA.input(e.target, "input"); else if (e.target.dataset.rs) SK.input(e.target, "input");
   else if (e.target.dataset.nw) { S.nw[e.target.dataset.nw] = e.target.value; clearTimeout(nwTimer); nwTimer = setTimeout(paint, 180); } });
-document.addEventListener("change", (e) => { if (e.target.dataset.sc) return SC.input(e.target, "change"); if (e.target.dataset.bx) return BX.input(e.target, "change"); if (e.target.dataset.rs) return SK.input(e.target, "change"); if (e.target.dataset.wl) return WL.input(e.target, "change"); if (e.target.dataset.fd) return DK.input(e.target, "change"); if (e.target.dataset.mf === "pick") { S.mf.pick = e.target.value; paint(); return; } if (e.target.dataset.act === "sort") { S.sort = e.target.value; paint(); } else if (e.target.dataset.pf) pfInput(e.target, "change"); });
+document.addEventListener("change", (e) => { if (e.target.dataset.sc) return SC.input(e.target, "change"); if (e.target.dataset.bx) return BX.input(e.target, "change"); if (e.target.dataset.aa) return AA.input(e.target, "change"); if (e.target.dataset.rs) return SK.input(e.target, "change"); if (e.target.dataset.wl) return WL.input(e.target, "change"); if (e.target.dataset.fd) return DK.input(e.target, "change"); if (e.target.dataset.mf === "pick") { S.mf.pick = e.target.value; paint(); return; } if (e.target.dataset.act === "sort") { S.sort = e.target.value; paint(); } else if (e.target.dataset.pf) pfInput(e.target, "change"); });
 document.addEventListener("pointermove", chartMove, { passive: true });
 document.addEventListener("mouseover", (e) => { if (S.tab === "screener") SC.hover(e); }, { passive: true });
 document.addEventListener("pointerdown", chartMove, { passive: true });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") { if (S.sheet) closeSheet(); else endSearch(); }
   if (e.key === "Enter" && e.target.dataset && /^k\.t(Sym|Date)$/.test(e.target.dataset.sc || "")) { e.preventDefault(); return SC.act("sctest", e.target); }
   if (e.key === "Enter" && e.target.dataset && e.target.dataset.bx === "q") { e.preventDefault(); return BX.enter(e.target); }
+  if (e.key === "Enter" && e.target.dataset && e.target.dataset.aa && e.target.tagName === "INPUT") { if (AA.enter(e.target)) e.preventDefault(); return; }
   if (e.key === "Enter" && e.target.dataset && e.target.dataset.rs) { e.preventDefault(); SK.input(e.target, e.target.dataset.rs === "cmd" ? "enter" : "change"); } });
 document.addEventListener("click", async (e) => {
   const a = e.target.closest("[data-act]"), act = a && a.dataset.act;
@@ -464,6 +468,7 @@ document.addEventListener("click", async (e) => {
     if (act && act.startsWith("fd")) return DK.act(act, a);
     if (act && act.startsWith("sc")) return SC.act(act, a);
     if (act && act.startsWith("bx")) return BX.act(act, a);
+    if (act && act.startsWith("aa")) return AA.act(act, a);
     if (act === "buyform") { S.sheet = { form: "buy", sym: a.dataset.s || "" }; paintSheet(); const i = $("#buy input[name=" + (a.dataset.s ? "qty" : "sym") + "]"); if (i) i.focus(); return; }
     if (act === "dellot") { if (!confirm("Delete this buy? This cannot be undone.")) return; try { await api("/api/portfolio?id=" + a.dataset.id, { method: "DELETE" }); toast("Buy deleted"); } catch (er) { toast(er.message); }
       await loadPortfolio(); return paintSheet(); }
@@ -516,4 +521,4 @@ setInterval(() => { if (S.me && !document.hidden && marketOpen() && !(S.tab === 
 let rsTimer = 0, lastW = innerWidth;
 window.addEventListener("resize", () => { clearTimeout(rsTimer); rsTimer = setTimeout(() => { if (S.me && (innerWidth >= 1280) !== (lastW >= 1280) || (innerWidth >= 900) !== (lastW >= 900)) paint(); lastW = innerWidth; }, 200); });
 boot();
-export { S, api, paint, esc, num, sgn, pc, cls, rs, nice, todayStr, field, toast, need, ordersOf };
+export { S, api, paint, esc, num, sgn, pc, cls, rs, nice, todayStr, field, toast, need, ordersOf, addStock };

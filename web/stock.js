@@ -117,6 +117,7 @@ function parts() {
   const acts = `<div class="sw-act"><button class="btn ${inWl ? "" : "pri"}" data-act="${inWl ? "remove" : "add"}" data-s="${esc(sym)}">${inWl ? "✓ In watchlist" : "+ Add to watchlist"}</button>
     <button class="btn" data-act="buyform" data-s="${esc(sym)}">${held ? "Add another buy" : "Add to portfolio"}</button>
     <button class="btn" data-act="sksheet" data-s="${esc(sym)}">${inWl || held ? "Note, alerts and position" : "Quick view"}</button>
+    <a class="btn" href="#/arka/${encodeURIComponent(sym)}">Arka AI analysis</a>
     <button class="btn" data-act="skgo" data-v="research">Full research ↓</button></div>`;
   const rv = m.rel_vol;
   const session = H ? `<div class="sw-card"><div class="sw-h">Session<span>${esc(m.date || "")}</span></div><div class="sw-grid">${cell("Open", r2(m.open))}${cell("Previous close", r2(m.prev))}${cell("Day high", r2(m.day_hi))}${cell("Day low", r2(m.day_lo))}

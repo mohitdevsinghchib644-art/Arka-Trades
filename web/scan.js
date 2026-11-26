@@ -140,7 +140,7 @@ function detail(r, near) {                                   // the opened row: 
   const rows = r.checks.map((ck) => `<tr class="${ck.close ? "cl" : ck.ok ? "ok" : "no"}"><td>${ck.close ? "≈" : ck.ok ? "✓" : "✗"}</td><td>${esc(ck.desc)}</td><td>${esc(ck.detail)}</td></tr>`).join("");
   return `<div class="sc-open"><div class="ch"><div class="cap"><b>${esc(r.symbol)}</b> · 60 candles · <span class="e">EMA 20</span> · <span class="s">SMA 50</span></div>${svgChart(r.chart, 520, 250)}</div>
     <div class="rl"><div class="tw"><table class="sc-t rules"><thead><tr><th></th><th>Rule</th><th>What the stock shows</th></tr></thead><tbody>${rows}</tbody></table></div>
-    ${near && r.miss ? `<div class="mini">${esc(r.miss)}</div>` : ""}<div class="acts"><a class="btn sm" href="#/s/${encodeURIComponent(r.symbol)}">Open the stock page</a></div></div></div>`;
+    ${near && r.miss ? `<div class="mini">${esc(r.miss)}</div>` : ""}<div class="acts"><a class="btn sm" href="#/s/${encodeURIComponent(r.symbol)}">Open the stock page</a> <a class="btn sm" href="#/arka/${encodeURIComponent(r.symbol)}" title="Open in Arka AI and start the analysis">Arka AI</a></div></div></div>`;
 }
 function resultsTable(rows, near, past, audit) {
   const C = S.sc, wl = mineSet(), head = ["", "#", "Stock", "Fit", past ? "Close" : "Price", "Day", "Turnover", "Vol ×", "RSI"].concat(past ? ["Since then"] : [], ["Rule checks"], near ? ["Missed rule"] : [], audit ? ["AI"] : []), right = new Set([4, 5, 6, 7, 8].concat(past ? [9] : []));
