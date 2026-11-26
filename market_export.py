@@ -135,6 +135,18 @@ def run_regime(out: Path, panel=None) -> list:
 
 # ═════════════════════════ Money flow ═════════════════════════
 FLOW_N, FLOW_EVERY, FLOW_COST = [2, 3, 4, 5, 6, 8, 10], [10, 21, 42, 63], 0.30
+# The data choices of the classic page (money_flow.render_money_flow), each built as its own set of files:
+FLOW_KINDS = {"Arka groups": "arka", "NSE indices": "nse"}
+FLOW_BENCHES = {"NIFTY 500": "n500", "NIFTY 50": "n50", "Equal-weight market": "ew"}
+FLOW_PERIODS = ["5y", "3y", "2y"]
+FLOW_MIN_TURN = [0.5, 0.25, 1.0, 2.0, 5.0]
+FLOW_COSTS = [0.10, 0.20, 0.30, 0.50, 0.75, 1.00]             # round-trip cost choices (the page's default is 0.30)
+FLOW_DEFAULT = ("Arka groups", "NIFTY 500", "5y", 0.5)
+
+
+def flow_key(kind, bench, period, min_turn) -> str:
+    """'arka-n500-5y-0.5': the name the page asks for (flow@<key>.json)."""
+    return f"{FLOW_KINDS[kind]}-{FLOW_BENCHES[bench]}-{period}-{min_turn:g}"
 
 
 def _ser(x, d=2):
@@ -172,13 +184,38 @@ def _pf_json(pf, base=None, stab=None):
             "stability": stab}
 
 
-def run_flow(out: Path, E=None, fpi_n: int = 48) -> list:
+def flow_models(H, F, reg, cost) -> dict:
+    """Every model setting the page offers (sectors to hold x review every x regime filter), at one round-trip cost."""
+    from arka_flow import rotation as rot
+    models = {}
+    idx = F["score"].dropna(how="all").index
+    cut = idx[int(len(idx) * 0.6)] if len(idx) > 120 else None
+    for every in FLOW_EVERY:
+        for n in FLOW_N:
+            base = rot.run_portfolio(H, F, reg, n=n, every=every, cost_pct=cost, use_regime=False, score_key="momentum_only")
+            for use_reg in (True, False):
+                pf = rot.run_portfolio(H, F, reg, n=n, every=every, cost_pct=cost, use_regime=use_reg)
+                stab = None
+                if cut is not None:
+                    stab = []
+                    for kw in ({"end": cut}, {"start": cut}):
+                        x = rot.run_portfolio(H, F, reg, n=n, every=every, cost_pct=cost, use_regime=use_reg, **kw)
+                        stab.append(_metrics_json(x.get("metrics")))
+                snap = rot.snapshot(H, F, reg, pf, n)
+                j = _pf_json(pf, base, stab)
+                j["target"] = snap.loc[snap["target"], "sector"].tolist()
+                j["actions"] = {a: snap.loc[snap["action"] == a, "sector"].tolist() for a in ("Hold", "Rotate in", "Rotate out", "Watch: improving")}
+                models[f"{n}|{every}|{int(use_reg)}"] = j
+    return models
+
+
+def run_flow(out: Path, E=None, fpi_n: int = 48, choice=FLOW_DEFAULT, tag: str = "", with_fpi: bool = True) -> list:
     import money_flow as mf
     from arka_flow import MODEL_VERSION, fpi, report, rotation as rot, state as rstate
     from arka_flow.config import MIN_SECTOR_COVERAGE
     from arka_flow.data import validation as val
     out.mkdir(parents=True, exist_ok=True)
-    kind, bench, period, min_turn = "Arka groups", "NIFTY 500", "5y", 0.5
+    kind, bench, period, min_turn = choice
     if E is None:
         meta, source = mf._universe_cached()
         E = mf._engine(tuple(meta["symbol"]), period, kind, bench, float(min_turn))
@@ -200,8 +237,8 @@ def run_flow(out: Path, E=None, fpi_n: int = 48) -> list:
         row["why"] = rot.explain(pd.Series(r2), n_sec, H["bench_name"], rg)
         row["contrib"] = {k: _num(v, 4) for k, v in rot.contributions(pd.Series(r)).items()}
         sectors.append(row)
-    # every model setting the page offers (cost stays at the page default)
-    models, ic = {}, {}
+    # every model setting the page offers (at the page's default cost; other costs: flow_models@<key>@<cost>.json)
+    models, ic = flow_models(H, F, reg, FLOW_COST), {}
     for every in FLOW_EVERY:
         t = rot.score_test(H, F, h=every)
         idx = F["score"].dropna(how="all").index
@@ -215,21 +252,6 @@ def run_flow(out: Path, E=None, fpi_n: int = 48) -> list:
                           "quintiles": [{k: (x[k] if k == "quintile" else _num(x[k], 4)) for k in ("quintile", "mean_excess", "beat_pct", "dates")} for x in t["quintiles"].to_dict("records")],
                           "dates": t["dates"], "spread_mean": _num(t["spread_mean"], 4), "spread_beat": _num(t["spread_beat"], 2),
                           "cut": _day(cut) if cut is not None else None, "half_ic": halves}
-        for n in FLOW_N:
-            base = rot.run_portfolio(H, F, reg, n=n, every=every, cost_pct=FLOW_COST, use_regime=False, score_key="momentum_only")
-            for use_reg in (True, False):
-                pf = rot.run_portfolio(H, F, reg, n=n, every=every, cost_pct=FLOW_COST, use_regime=use_reg)
-                stab = None
-                if cut is not None:
-                    stab = []
-                    for kw in ({"end": cut}, {"start": cut}):
-                        x = rot.run_portfolio(H, F, reg, n=n, every=every, cost_pct=FLOW_COST, use_regime=use_reg, **kw)
-                        stab.append(_metrics_json(x.get("metrics")))
-                snap = rot.snapshot(H, F, reg, pf, n)
-                j = _pf_json(pf, base, stab)
-                j["target"] = snap.loc[snap["target"], "sector"].tolist()
-                j["actions"] = {a: snap.loc[snap["action"] == a, "sector"].tolist() for a in ("Hold", "Rotate in", "Rotate out", "Watch: improving")}
-                models[f"{n}|{every}|{int(use_reg)}"] = j
     tail = 20
     rrg = {"d": [_day(x) for x in F["rs_ratio"].index[-tail:]], "s": {s: [_ser(F["rs_ratio"][s].iloc[-tail:], 3), _ser(F["rs_mom"][s].iloc[-tail:], 3)] for s in H["levels"].columns}}
     c = E["close"]
@@ -270,9 +292,12 @@ def run_flow(out: Path, E=None, fpi_n: int = 48) -> list:
                   "p200": _ser(H["pct200"][s].iloc[-250:], 1) if s in H["pct200"] else [], "n_members": len(mem),
                   "stocks": [{k: (r.get(k) if isinstance(r.get(k), (str, bool)) or r.get(k) is None else _num(r.get(k), 2)) for k in keep} for r in stk.to_dict("records")]}
     sect = {"d252": [_day(x) for x in d252], "d180": [_day(x) for x in F["rs_ratio"].index[-180:]], "d250": [_day(x) for x in H["pct50"].index[-250:]], "s": det}
-    (out / "flow.json").write_text(json.dumps(page, separators=(",", ":"), allow_nan=False, default=str))
-    (out / "flow_sectors.json").write_text(json.dumps(sect, separators=(",", ":"), allow_nan=False, default=str))
-    written = ["flow.json", "flow_sectors.json"]
+    page["choice"] = {"kind": kind, "bench": bench, "period": period, "min_turn": min_turn, "key": flow_key(kind, bench, period, min_turn)}
+    (out / f"flow{tag}.json").write_text(json.dumps(page, separators=(",", ":"), allow_nan=False, default=str))
+    (out / f"flow_sectors{tag}.json").write_text(json.dumps(sect, separators=(",", ":"), allow_nan=False, default=str))
+    written = [f"flow{tag}.json", f"flow_sectors{tag}.json"]
+    if tag or not with_fpi:
+        return written
     # NSDL fortnightly FPI flows by sector (context only, as on the classic page)
     try:
         from concurrent.futures import ThreadPoolExecutor
@@ -394,10 +419,62 @@ def run_delivery(out: Path, sessions: int = 260, max_new: int = 330) -> list:
     return ["dlv/"]
 
 
+def run_flow_all(out: Path, budget_s: float = 45 * 60) -> list:
+    """The default Money flow files (as before, with FPI and meta), then every other data choice and round-trip cost the classic
+    page offers, each as its own files, and flow_index.json listing what was built. A choice that fails is left out, never faked."""
+    import time
+    import money_flow as mf
+    t0 = time.time()
+    written = run_flow(out)
+    if not written:
+        return written
+    meta, source = mf._universe_cached()
+    syms = tuple(meta["symbol"])
+    kind0, bench0, period0, turn0 = FLOW_DEFAULT
+    choices = [FLOW_DEFAULT]
+    for period in FLOW_PERIODS:                              # one price download per history length, in this order
+        if period == period0:
+            choices += [(k, b, period0, turn0) for k in FLOW_KINDS for b in FLOW_BENCHES if (k, b) != (kind0, bench0)]
+            choices += [(kind0, bench0, period0, t) for t in FLOW_MIN_TURN if t != turn0]
+        else:
+            choices.append((kind0, bench0, period, turn0))
+    built, failed = [], []
+    for ch in choices:
+        key = flow_key(*ch)
+        if time.time() - t0 > budget_s:
+            failed.append([key, "time budget used up"])
+            continue
+        try:
+            E = mf._engine(syms, ch[2], ch[0], ch[1], float(ch[3]))
+            E.setdefault("_source", source)
+            if ch != FLOW_DEFAULT:
+                written += run_flow(out, E=E, choice=ch, tag="@" + key, with_fpi=False)
+            costs = []
+            for c in FLOW_COSTS:
+                if abs(c - FLOW_COST) < 1e-9:
+                    costs.append(c)
+                    continue
+                f = out / f"flow_models@{key}@{c:g}.json"
+                f.write_text(json.dumps(flow_models(E["H"], E["F"], E["reg"], c), separators=(",", ":"), allow_nan=False, default=str))
+                written.append(f.name)
+                costs.append(c)
+            built.append({"key": key, "kind": ch[0], "bench": ch[1], "period": ch[2], "min_turn": ch[3], "costs": costs})
+            print(f"flow choice {key}: ok ({time.time() - t0:.0f} s)")
+        except Exception as exc:
+            failed.append([key, f"{type(exc).__name__}: {exc}"[:200]])
+            print(f"flow choice {key}: skipped ({exc})", file=sys.stderr)
+    idx = {"built": datetime.now(qd.IST).isoformat(timespec="minutes"), "default": flow_key(*FLOW_DEFAULT), "default_cost": FLOW_COST,
+           "kinds": list(FLOW_KINDS), "benches": list(FLOW_BENCHES), "periods": FLOW_PERIODS, "min_turn": FLOW_MIN_TURN, "costs": FLOW_COSTS,
+           "choices": built, "failed": failed}
+    (out / "flow_index.json").write_text(json.dumps(idx, indent=1))
+    written.append("flow_index.json")
+    return written
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("what", choices=["regime", "flow", "names", "delivery"])
     ap.add_argument("--out", default=str(OUT))
     a = ap.parse_args()
-    got = {"regime": run_regime, "flow": run_flow, "names": run_names, "delivery": run_delivery}[a.what](Path(a.out))
+    got = {"regime": run_regime, "flow": run_flow_all, "names": run_names, "delivery": run_delivery}[a.what](Path(a.out))
     sys.exit(0 if got else 1)
