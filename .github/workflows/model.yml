@@ -1,0 +1,57 @@
+# Arka Trades · Arka Model
+# Every weekday evening this trains the machine-learning models on the F&O history and cash prices, scores tonight's
+# stocks, replays the whole walk-forward record with its simulations, and saves three small files under arka_data/model/.
+# The app only reads those files.
+#
+# Data (all free and public): arka_data/fno in this repository (written by "F&O data"), github.com/BennyThadikaran/eod2_data
+# and NSE's own daily files for the newest sessions. No secrets are used.
+#
+# First time: Actions tab -> "Arka Model" -> "Run workflow". It takes about 40 minutes (two models over ten years of history).
+# After that it runs by itself at about 8:50 pm and 11:50 pm IST, Monday to Friday (after "F&O data").
+name: Arka Model
+
+on:
+  schedule:
+    - cron: "20 15 * * 1-5"       # 20:50 IST
+    - cron: "20 18 * * 1-5"       # 23:50 IST, in case NSE published late
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: arka-model
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 170
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install --quiet requests "pandas>=3,<4" numpy "scikit-learn>=1.5"
+
+      - name: Price history
+        run: git clone --quiet --depth 1 https://github.com/BennyThadikaran/eod2_data.git "$RUNNER_TEMP/eod2_data"
+
+      - name: Train, score and test
+        run: python arka_model.py --eod "$RUNNER_TEMP/eod2_data"
+
+      - name: Save to the repository
+        run: |
+          git config user.name "arka-data-bot"
+          git config user.email "arka-data-bot@users.noreply.github.com"
+          git add arka_data/model || true
+          if git diff --cached --quiet; then
+            echo "Nothing new to save."
+            exit 0
+          fi
+          git commit -m "Arka Model $(date -u +%Y-%m-%d)"
+          git pull --rebase --autostash origin "$GITHUB_REF_NAME" || true
+          git push
