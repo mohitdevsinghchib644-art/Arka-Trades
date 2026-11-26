@@ -484,11 +484,13 @@ function MF(C) {
   const P = parseHolders(raw), n = P.periods.length;
   let rows = P.rows.map((r) => ({ ...r, kind: foreign ? "Foreign institution" : holderKind(r.name) }));
   if (view === "Mutual funds") rows = rows.filter((r) => r.kind === "Mutual fund");
+  const show = Math.min(n, 8), lastAt = (r) => { for (let i = n - 1; i >= 0; i--) if (r.v[i] > 0) return i; return -1; };
+  rows = rows.filter((r) => lastAt(r) >= n - show);           // Screener sends every holder back to its first filing: keep those named inside the window shown
   const out = [H_(title, "live", "Companies must name every holder with more than 1% of the shares in their shareholding filing. Smaller positions are not named, so this list is a floor, not the full fund ownership.")];
   if (!n) return [...out, NA("Named holders", "Screener's shareholding breakdown", "Screener returned no dated holdings.")];
-  if (!rows.length) return [...out, ["text", "No named holder", `No ${view === "Mutual funds" ? "mutual fund" : view.toLowerCase().replace(/s$/, "")} held more than 1% of ${C.B.name || C.sym} in any of the last ${n} ${mode === "Quarterly" ? "quarters" : "years"} shown. Funds can still own it below 1%.`]];
+  if (!rows.length) return [...out, ["text", "No named holder", `No ${view === "Mutual funds" ? "mutual fund" : view.toLowerCase().replace(/s$/, "")} held more than 1% of ${C.B.name || C.sym} in any of the last ${show} ${mode === "Quarterly" ? "quarters" : "years"} shown. Funds can still own it below 1%.`]];
   const cur = (r) => r.v[n - 1], prev = (r) => (n >= 2 ? r.v[n - 2] : null);
-  const status = (r) => { const a = prev(r), b = cur(r); if (b == null || b <= 0) return a > 0 ? "Below 1% or sold" : "Not in the latest"; if (a == null || a <= 0) return n >= 2 ? "New" : "Holds"; const d = b - a; return d >= 0.05 ? "Added" : d <= -0.05 ? "Cut" : "Held"; };
+  const status = (r) => { const a = prev(r), b = cur(r); if (b == null || b <= 0) return a > 0 ? "Below 1% or sold" : `Not named since ${P.periods[lastAt(r)]}`; if (a == null || a <= 0) return n >= 2 ? "New" : "Holds"; const d = b - a; return d >= 0.05 ? "Added" : d <= -0.05 ? "Cut" : "Held"; };
   const sumAt = (i) => rows.reduce((p, r) => p + (r.v[i] > 0 ? r.v[i] : 0), 0), cnt = (i) => rows.filter((r) => r.v[i] > 0).length;
   const tNow = sumAt(n - 1), tPrev = n >= 2 ? sumAt(n - 2) : null, st = rows.map(status);
   const nNew = st.filter((x) => x === "New").length, nOut = st.filter((x) => x === "Below 1% or sold").length, nAdd = st.filter((x) => x === "Added").length, nCut = st.filter((x) => x === "Cut").length;
@@ -502,12 +504,12 @@ function MF(C) {
   if (n >= 2) { const ser = [{ name: `Named ${view === "Mutual funds" ? "funds" : "holders"} over 1%`, color: "a", y: P.periods.map((_, i) => sumAt(i)), width: 2, markers: true }];
     if (catRow) ser.push({ name: foreign ? "All FIIs" : "All DIIs", color: "t2", y: P.periods.map(catAt), markers: true });
     out.push(["chart", { kind: "line", x: P.periods, series: ser, h: 280 }]); }
-  const show = Math.min(n, 8), heads = [...P.periods.slice(-show), "Change pp", "Status", ...(view === "All domestic institutions" ? ["Type"] : [])];
-  const order = rows.map((r, i) => [r, st[i]]).sort((x, y) => (cur(y[0]) ?? -1) - (cur(x[0]) ?? -1) || (prev(y[0]) ?? -1) - (prev(x[0]) ?? -1));
-  out.push(T(heads, order.map(([r, s]) => { const a = prev(r), b = cur(r), d = a != null || b != null ? (b || 0) - (a || 0) : null;
+  const heads = [...P.periods.slice(-show), "Change pp", "Status", ...(view === "All domestic institutions" ? ["Type"] : [])];
+  const order = rows.map((r, i) => [r, st[i]]).sort((x, y) => (cur(y[0]) ?? -1) - (cur(x[0]) ?? -1) || lastAt(y[0]) - lastAt(x[0]) || (y[0].v[lastAt(y[0])] ?? 0) - (x[0].v[lastAt(x[0])] ?? 0));
+  out.push(T(heads, order.map(([r, s]) => { const a = prev(r), b = cur(r), d = a > 0 || b > 0 ? (b || 0) - (a || 0) : null;
     return { label: r.name, values: [...r.v.slice(-show).map((v) => (v == null ? "—" : fx(v, 2, false))), n >= 2 && d != null ? fx(d, 2, false, true) : "—", s, ...(view === "All domestic institutions" ? [r.kind] : [])] }; }), [], `${C.sym}_holders_${view.replace(/\s+/g, "_").toLowerCase()}_${mode.toLowerCase()}`));
   if (view === "Mutual funds") out.push(["text", "How funds are picked out", "A holder counts as a mutual fund when its filed name says mutual fund, fund, scheme or ETF and is not an insurer or a pension or provident fund. Switch to All domestic institutions to see every named holder with its type."]);
-  out.push(["text", "Limits", `Quarterly filings, so the newest figure is up to a quarter old. "Below 1% or sold" means the holder is no longer named: it may have sold everything or just dropped under 1%. Monthly fund portfolios are not used here.`, true]);
+  out.push(["text", "Limits", `Quarterly filings, so the newest figure is up to a quarter old. "Below 1% or sold" means the holder was named last quarter but not now: it may have sold everything or just dropped under 1%. "Not named since" is the same, further back. Only holders named in the ${show} ${mode === "Quarterly" ? "quarters" : "years"} shown are listed. Monthly fund portfolios are not used here.`, true]);
   return out;
 }
 function NOTEFN(C) { return [["thesis", C.note || {}]]; }
