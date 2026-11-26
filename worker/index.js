@@ -387,6 +387,21 @@ async function screenerPeers(url, ctx) {                // data_engine._peers_ca
     }, ctx));
   } catch (e) { return json({ ok: false, err: String(e.message || e).slice(0, 80) }); }
 }
+// Named holders over 1% (Screener's "investors" breakdown of the shareholding table, from company filings): who the funds are, quarter by quarter.
+const HOLDER_KINDS = new Set(["domestic_institutions", "foreign_institutions", "promoters", "public", "government"]);
+async function screenerHolders(url, ctx) {
+  const id = String(url.searchParams.get("id") || ""), c = String(url.searchParams.get("c") || ""), p = String(url.searchParams.get("p") || "quarterly");
+  if (!/^\d{1,9}$/.test(id) || !HOLDER_KINDS.has(c) || !/^(quarterly|yearly)$/.test(p)) return fail(400, "Which holders?");
+  try {
+    return json(await cached(`holders/${id}/${c}/${p}`, 6 * 3600, async () => {
+      const r = await fetch(`${SCREENER}/api/3/${id}/investors/${c}/${p}/`, { headers: { "user-agent": UA, accept: "application/json, text/plain, */*", "x-requested-with": "XMLHttpRequest", referer: SCREENER + "/" } });
+      if (!r.ok) throw new Error("Screener answered " + r.status);
+      const t = await r.text(); let d; try { d = JSON.parse(t); } catch { throw new Error("Screener did not send a holder list"); }
+      if (!d || typeof d !== "object" || Array.isArray(d)) throw new Error("Screener did not send a holder list");
+      return { ok: true, data: d };
+    }, ctx));
+  } catch (e) { return json({ ok: false, err: String(e.message || e).slice(0, 80) }); }
+}
 // Yahoo company details: profile, analyst targets and ratings, rating changes, next results date, and the yearly statement lines
 // the classic page reads through yfinance (info, analyst_price_targets, recommendations, upgrades_downgrades, balance_sheet, cashflow).
 async function yahooAuth(ctx) {
@@ -1118,6 +1133,7 @@ export default {
       if (p === "/api/search") return search(url, ctx);
       if (p === "/api/screener") return screener(url, ctx);
       if (p === "/api/screener/peers") return screenerPeers(url, ctx);
+      if (p === "/api/screener/holders") return screenerHolders(url, ctx);
       if (p === "/api/yinfo") return yinfo(url, ctx);
       if (p === "/api/bse") return bse(url, ctx);
       if (p === "/api/dlv") return dlv(env, ctx, url);
