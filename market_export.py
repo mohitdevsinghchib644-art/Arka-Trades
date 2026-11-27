@@ -484,7 +484,10 @@ def run_tokens(out: Path) -> list:
         if sym.endswith("-EQ") and tk.isdigit():
             s[sym[:-3]] = tk
         elif x.get("instrumenttype") == "AMXIDX" and tk.isdigit():          # every NSE index, under its name with only letters and digits ("Nifty Midcap 100" -> NIFTYMIDCAP100)
-            ix["".join(ch for ch in sym.upper() if ch.isalnum())] = tk
+            for label in (sym, str(x.get("name", ""))):             # under both of Angel One's labels for it
+                key = "".join(ch for ch in label.upper() if ch.isalnum())
+                if key:
+                    ix.setdefault(key, tk)
             if sym in ("Nifty 50", "Nifty Bank"):
                 s["NIFTY" if sym == "Nifty 50" else "BANKNIFTY"] = tk
     if len(s) < 500:
