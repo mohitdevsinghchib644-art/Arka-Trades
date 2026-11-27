@@ -476,20 +476,22 @@ def run_tokens(out: Path) -> list:
     The full file is tens of megabytes, far too big for the Worker to read, so it is reduced here every night."""
     import requests
     r = requests.get("https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json", timeout=120, headers={"user-agent": "Mozilla/5.0"})
-    r.raise_for_status(); rows = r.json(); s = {}
+    r.raise_for_status(); rows = r.json(); s, ix = {}, {}
     for x in rows:
         if x.get("exch_seg") != "NSE":
             continue
         sym, tk = str(x.get("symbol", "")), str(x.get("token", ""))
         if sym.endswith("-EQ") and tk.isdigit():
             s[sym[:-3]] = tk
-        elif x.get("instrumenttype") == "AMXIDX" and sym in ("Nifty 50", "Nifty Bank"):
-            s["NIFTY" if sym == "Nifty 50" else "BANKNIFTY"] = tk
+        elif x.get("instrumenttype") == "AMXIDX" and tk.isdigit():          # every NSE index, under its name with only letters and digits ("Nifty Midcap 100" -> NIFTYMIDCAP100)
+            ix["".join(ch for ch in sym.upper() if ch.isalnum())] = tk
+            if sym in ("Nifty 50", "Nifty Bank"):
+                s["NIFTY" if sym == "Nifty 50" else "BANKNIFTY"] = tk
     if len(s) < 500:
         raise SystemExit(f"Angel One's symbol file looked wrong: only {len(s)} NSE shares found")
     out.mkdir(parents=True, exist_ok=True)
-    (out / "angel_tokens.json").write_text(json.dumps({"built": datetime.now().isoformat(timespec="minutes"), "n": len(s), "s": s}, separators=(",", ":")))
-    print(f"Angel One tokens: {len(s)} NSE shares and indices")
+    (out / "angel_tokens.json").write_text(json.dumps({"built": datetime.now().isoformat(timespec="minutes"), "n": len(s), "s": s, "i": ix}, separators=(",", ":")))
+    print(f"Angel One tokens: {len(s)} NSE shares, {len(ix)} indices: {', '.join(sorted(ix)[:80])}")
     return ["angel_tokens.json"]
 
 
