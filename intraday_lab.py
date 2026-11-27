@@ -70,19 +70,31 @@ def run(days, syms, A, picks):
 
     # 1 · the day book on five-minute prices
     if picks is not None and len(picks):
-        sidx = {s: i for i, s in enumerate(syms)}; sig = sorted(picks.date.unique()); by = {d: g for d, g in picks.groupby("date")}; entries = {"9:15 (the open)": 0, "9:20": 1, "9:30": 3, "10:00": 9}; daily = {k: [] for k in entries}; paths, n_tr, used = [], 0, 0
+        sidx = {s: i for i, s in enumerate(syms)}; sig = sorted(picks.date.unique()); by = {d: g for d, g in picks.groupby("date")}; entries = {"9:15 (the open)": 0, "9:20": 1, "9:30": 3, "10:00": 9}; daily = {k: [] for k in entries}; paths, n_tr, used = [], 0, 0; risk = {"stop": [], "basket": []}; n_stop = n_bask = 0
         for di in range(nd):
             prior = [x for x in sig if x < days[di]]
             if not prior or (di > 0 and prior[-1] != days[di - 1]) or (di == 0 and (pd.Timestamp(days[di]) - pd.Timestamp(prior[-1])).days > 5):
                 for k in entries: daily[k].append(np.nan)
+                for k in risk: risk[k].append(np.nan)
                 continue
             g = by[prior[-1]]; ix = [sidx[s] for s in g[g["rank"] <= 10].sym if s in sidx]; used += 1
             for k, b in entries.items():
                 e = o[di, ix, b].astype("float64"); x = cf[di, ix, LAST].astype("float64"); r = -(x / e - 1) - COST_DAY; r = r[np.isfinite(r)]; daily[k].append(r.sum() / 10 if len(r) else np.nan); n_tr += len(r) if b == 0 else 0
-            e0 = o[di, ix, 0].astype("float64"); p = cf[di, ix, :].astype("float64") / e0[:, None] - 1; p = p[np.isfinite(e0)]
+            e0 = o[di, ix, 0].astype("float64"); p = cf[di, ix, :].astype("float64") / e0[:, None] - 1; good = np.isfinite(e0)
+            # the risk rules, on the trade sold at 9:15: each stock is bought back if it trades 1 ATR above its sale price; with the basket rule everything is bought back once the ten together are down 1%
+            if good.any():
+                pg = p[good]; hi = np.fmax.accumulate(np.nan_to_num(h[di, ix, :].astype("float64")[good] / e0[good][:, None] - 1, nan=-9.0), axis=1); lim = (atr[di, ix][good] / e0[good]); lim = np.where(np.isfinite(lim) & (lim > 0), lim, 9.0)
+                hit = hi >= lim[:, None]; first = np.where(hit.any(axis=1), hit.argmax(axis=1), BARS); pnl = np.where(np.arange(BARS)[None, :] >= first[:, None], -lim[:, None], -pg)            # each stock's result so far, bar by bar
+                risk["stop"].append((pnl[:, LAST] - COST_DAY).sum() / 10); n_stop += int((first <= LAST).sum())
+                bk = np.nansum(pnl[:, :LAST + 1], axis=0) / 10; out_bar = int(np.argmax(bk <= -0.01)) if (bk <= -0.01).any() else LAST; risk["basket"].append((pnl[:, out_bar] - COST_DAY).sum() / 10); n_bask += int(out_bar < LAST)
+            else:
+                for k in risk: risk[k].append(np.nan)
+            p = p[good]
             if len(p): paths.append(np.nanmean(p, axis=0))
         for k in entries:
             tests.append({"id": "day_" + k.split(" ")[0].replace(":", ""), "group": "Day book: ten best short ranks, sold for the day", "name": f"Sold at {k}, bought back at 3:25 pm", "cost": COST_DAY * 100, **stats(daily[k], n_tr if k.startswith("9:15") else None)})
+        tests.append({"id": "day_stop", "group": "Day book: risk rules (sold at 9:15)", "name": "Each stock bought back if it trades 1 ATR above the sale price", "cost": COST_DAY * 100, **stats(risk["stop"], n_tr), "note": f"{n_stop} stops hit"})
+        tests.append({"id": "day_basket", "group": "Day book: risk rules (sold at 9:15)", "name": "The same, and everything bought back once the ten together are down 1%", "cost": COST_DAY * 100, **stats(risk["basket"], n_tr), "note": f"the basket rule ended {n_bask} days early"})
         if paths:
             pm = np.nanmean(np.array(paths), axis=0) * 100; extra["day_path"] = {"t": [f"{(555 + 5 * (i + 1)) // 60}:{(555 + 5 * (i + 1)) % 60:02d}" for i in range(LAST + 1)], "pct": [round(float(x), 3) for x in pm[:LAST + 1]], "days": used,
                                                                                  "note": "Average move of the ten picks from the 9:15 price, before costs. A falling line is good for a short. If most of the fall is in the first minutes, a late sale misses it."}
