@@ -1,4 +1,4 @@
-// Arka Trades · new app (stage 26): Home, Watchlist, Portfolio, the stock page with Research, Signals, Screener, Backtest lab, Arka AI, Money flow, News, Regime, Daily brief, Account, More (world markets live on Home). Plain JavaScript, no build step.
+// Arka Trades · new app (stage 29): Home, Watchlist, Portfolio, the stock page with Research, Signals, Screener, Backtest lab, Arka AI, Money flow, News, Regime, Daily brief, Account, More (world markets live on Home). Plain JavaScript, no build step.
 import * as PFV from "./portfolio.js";
 import * as PFM from "./pf.js";
 import * as WL from "./watchlist.js";
@@ -89,17 +89,17 @@ async function api(path, init) {
 }
 
 // ── data ──
-async function need(symbols) {                             // fetch quotes that are older than 25 seconds, 40 at a time
+async function need(symbols) {                             // fetch quotes that are older than 25 seconds, 20 at a time (40 at once ran past the Worker's time limit and the whole batch was lost)
   const now = Date.now(), want = [...new Set(symbols)].filter((s) => s && now - (S.at[s] || 0) > 25000);
   if (!want.length) return;
   want.forEach((s) => (S.at[s] = now));
-  for (let i = 0; i < want.length; i += 40) {
+  for (let i = 0; i < want.length; i += 20) {
     try {
-      const d = await api("/api/quotes?s=" + encodeURIComponent(want.slice(i, i + 40).join(",")));
+      const d = await api("/api/quotes?s=" + encodeURIComponent(want.slice(i, i + 20).join(",")));
       if (d.live > 0 && !S.live) { S.live = true; const mk = document.querySelector(".mk"); if (mk && !mk.querySelector(".lv")) mk.insertAdjacentHTML("beforeend", '<i class="lv" title="Share and index prices are live from Angel One">Live</i>'); }
       for (const q of d.quotes) S.q[q.sym] = q;
       S.qv++;
-    } catch (e) { want.slice(i, i + 40).forEach((s) => { if (!S.q[s]) S.q[s] = { sym: s, ok: false }; }); }
+    } catch (e) { want.slice(i, i + 20).forEach((s) => { if (!S.q[s]) S.q[s] = { sym: s, ok: false }; S.at[s] = 0; }); }
     paint();
   }
 }
@@ -129,6 +129,7 @@ function pageSymbols() {
   if (S.tab === "portfolio") return [...new Set(S.pf.lots.map((l) => l.sym)), ...wl.slice(0, 12)];
   if (S.tab === "news") return [...new Set([...S.wl.rows.map((r) => r.sym), ...S.pf.lots.map((l) => l.sym)])].slice(0, 120);
   if (S.tab === "research") return [...new Set([...(() => { try { return JSON.parse(localStorage.getItem("arka_recent") || "[]"); } catch { return []; } })(), ...S.pf.lots.map((l) => l.sym), ...wl])].slice(0, 40);
+  if (S.tab === "signals") return MD.liveCore();
   if (S.tab === "s") return [S.sk.sym, ...(S.sk.code === "RV" ? [] : [])].filter(Boolean);
   return wl.slice(0, 12);
 }
@@ -195,7 +196,7 @@ function renderShell() {
     <div id="msearch"></div><main id="main"></main>
     <nav class="nav"><a class="brand only-d" href="#/home"><img src="/icon-180.png" alt="">ARKA <i>TRADES</i></a>
       ${TABS.map(([k, n, d, mob]) => `<a href="#/${k}" data-tab="${k}"${mob ? "" : ' class="only-d"'}>${icon(d)}<span>${n}</span></a>`).join("")}
-      <div class="who">Signed in as <b>${esc(AC.displayName())}</b><br>New app · stage 26</div></nav></div>`;
+      <div class="who">Signed in as <b>${esc(AC.displayName())}</b><br>New app · stage 29</div></nav></div>`;
 }
 function paint() {
   const main = $("#main"); if (!main || !S.me) return;
@@ -438,7 +439,7 @@ document.addEventListener("click", async (e) => {
     if (act === "range") { S.sheet.range = a.dataset.v; return paintSheet(); }
     if (act === "list") { S.wl.list = a.dataset.v; S.wl.flt = "All"; S.wl.q = ""; S.wl.addMsg = ""; S.wl.sel = {}; paint(); refresh(); return WL.load(); }
     if (act && act.startsWith("fd")) return DK.act(act, a);
-    if (act && /^md(list|per|chart|side)$/.test(act)) return MD.act(act, a);
+    if (act && /^md(list|per|chart|side|live|lsort)$/.test(act)) return MD.act(act, a);
     if (act && act.startsWith("sc")) return SC.act(act, a);
     if (act && act.startsWith("bx")) return BX.act(act, a);
     if (act && act.startsWith("aa")) return AA.act(act, a);
@@ -495,16 +496,18 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden && S.
 // Live prices from Angel One, every 5 seconds while the market is open: only the price fields are replaced, nothing else is refetched.
 let liveBusy = false;
 async function liveTick() {
-  if (!S.me || !S.live || liveBusy || document.hidden || !marketOpen()) return;
+  if (!S.me || !S.live || liveBusy || document.hidden || (!marketOpen() && !(S.tab === "signals" && MD.afterHours()))) return;
   const el = document.activeElement; if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return;      // do not repaint under someone typing
   const ov = S.tab === "home" ? HM.allTickers().filter((t) => /^\^(NSE|CNX|CRS|INDIAVIX|NSMIDCP)|^NIFTY_/.test(t)) : [];
-  const syms = [...new Set([...pageSymbols(), ...ov])].filter((x) => x && !/=|-USD$/.test(x)).slice(0, 150); if (!syms.length) return;
+  const syms = [...new Set([...pageSymbols(), ...ov, ...(S.tab === "signals" ? MD.monitorChunk() : [])])].filter((x) => x && !/=|-USD$/.test(x)).slice(0, 150); if (!syms.length) return;
   liveBusy = true; let hit = 0;
   try {
     for (let i = 0; i < syms.length; i += 50) {
       const d = await api("/api/angel?op=quote&s=" + encodeURIComponent(syms.slice(i, i + 50).join(",")));
       for (const [k, v] of Object.entries(d.quotes || {})) { if (!(v.ltp > 0)) continue; hit++;
-        const q = S.q[k]; if (q && q.ok) { const prev = v.prev > 0 ? v.prev : q.prev; Object.assign(q, { price: v.ltp, prev, chg: prev ? v.ltp - prev : q.chg, pct: prev ? (v.ltp / prev - 1) * 100 : q.pct, high: v.high > 0 ? v.high : q.high, low: v.low > 0 ? v.low : q.low, open: v.open > 0 ? v.open : q.open, vol: v.vol ?? q.vol, t: v.t, live: true }); S.at[k] = Date.now(); }
+        if (!/^\^|\./.test(k) && !(S.q[k] && S.q[k].ok)) S.q[k] = { sym: k, ok: true, name: "", hi52: v.hi52 ?? null, lo52: v.lo52 ?? null, cur: "INR", spark: [], pts: [], high: null, low: null, open: null, vol: null, prev: v.prev > 0 ? v.prev : null, chg: null, pct: null };      // a share Yahoo did not answer for
+        if (/^\^|\./.test(k) && !(S.hm.ov[k] && S.hm.ov[k].ok) && v.prev > 0) S.hm.ov[k] = { sym: k, ok: true, d: todayStr(), price: v.ltp, prev: v.prev, pts: 0, chg: 0, open: null, high: null, low: null, pdh: null, pdl: null, w1: null, m1: null, ytd: null, hi52: v.hi52 ?? null, lo52: v.lo52 ?? null, spark: [], angelOnly: true };      // an index Yahoo did not answer for
+        const q = S.q[k]; if (q && q.ok) { const prev = v.prev > 0 ? v.prev : q.prev; Object.assign(q, { price: v.ltp, prev, chg: prev ? v.ltp - prev : q.chg, pct: prev ? (v.ltp / prev - 1) * 100 : q.pct, high: v.high > 0 ? v.high : q.high, low: v.low > 0 ? v.low : q.low, open: v.open > 0 ? v.open : q.open, vol: v.vol ?? q.vol, bq: v.buy ?? null, sq: v.sell ?? null, t: v.t, live: true }); S.at[k] = Date.now(); }
         const o = S.hm.ov[k]; if (o && o.ok) { const prev = v.prev > 0 ? v.prev : o.prev; Object.assign(o, { price: v.ltp, prev, pts: v.ltp - prev, chg: prev ? (v.ltp / prev - 1) * 100 : o.chg, high: v.high > 0 ? v.high : o.high, low: v.low > 0 ? v.low : o.low, open: v.open > 0 ? v.open : o.open, live: true }); } }
     }
     if (hit) { S.qv++; paint(); }
