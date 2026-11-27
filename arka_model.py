@@ -52,8 +52,9 @@ STOP_K, TGT_K, HOLD, COST = 1.5, 2.5, 5, 0.0015
 FIRST, UNSEEN = "2019-01-01", "2025-01-01"          # first scored day · start of the period no choice was made on
 STEP, PURGE, SEEDS = 63, 6, (7, 11)
 FORWARD_DAYS = 60                                     # sessions of signals logged before the open that a book needs before it can be approved
-MAX_TRAIN, SECTOR_CAP, TRIALS = 220_000, 3, 30
+MAX_TRAIN, SECTOR_CAP, TRIALS = 220_000, 3, 40
 BLOCK = {"long": (), "short": ("High volatility", "Strong bearish")}      # regimes in which a book takes no new trade
+VOL_SIZE = False                                      # size each slot by the stock's volatility (calmer stock, bigger slot; between half and one and a half slots)
 DEF_NEW = {"long": 0, "short": 1}                     # new trades allowed on a day that book's gauge is defensive
 # Both rules were chosen on the design period only (2019-2024), from 24 book configurations: longs only when the long gauge is
 # supportive; no new short in a panic or after the market has already broken down (shorts were squeezed there).
@@ -165,7 +166,8 @@ def dataset(P, say=print):
             miss.append(sym); continue
         d = {k: P[k][sym].astype(float) for k in ("O", "H", "L", "C", "V", "DQ")}
         frames.append(stock_frame(sym, d, u))
-    D = pd.concat(frames, ignore_index=True); M = market(U, part); g = D.groupby("date")
+    D = pd.concat(frames, ignore_index=True); M = market(U, part)
+    g = D.groupby("date")
     B = pd.DataFrame({"br_up": g["r1"].apply(lambda x: (x > 0).mean()), "br_d50": g["d50"].apply(lambda x: (x > 0).mean()), "br_d200": g["d200"].apply(lambda x: (x > 0).mean()),
                       "br_r5": g["r5"].median(), "br_oi1": g["oi1"].median(), "br_iv": g["iv"].median(), "br_pcr": g["pcr"].median(), "br_longbu": g["longbu"].apply(lambda x: (x > 0).mean()),
                       "br_shortbu": g["shortbu"].apply(lambda x: (x > 0).mean()), "br_disp": g["r5"].std()})
@@ -231,7 +233,7 @@ def make_days(D, side, order=None):
     K = SIDE[side]; S = D[D[K["score"]].notna() & D[K["live"]].notna()]; by = {}
     for t, g in S.groupby("t"):
         g = g.sort_values(order or K["score"], ascending=False)
-        by[t] = (g.k.to_numpy(), g[K["live"]].to_numpy(), g[K["xt"]].to_numpy().astype(int), bool(g[K["g"]].iloc[0] > 0), g[K["fin"]].to_numpy(), g.index.to_numpy(), g.sec.to_numpy(), g.o1.to_numpy(), g.regime.iloc[0] in BLOCK[side], K["sign"], DEF_NEW[side])
+        by[t] = (g.k.to_numpy(), g[K["live"]].to_numpy(), g[K["xt"]].to_numpy().astype(int), bool(g[K["g"]].iloc[0] > 0), g[K["fin"]].to_numpy(), g.index.to_numpy(), g.sec.to_numpy(), g.o1.to_numpy(), g.regime.iloc[0] in BLOCK[side], K["sign"], DEF_NEW[side], (np.clip(np.nanmedian(g.atrp) / g.atrp.to_numpy(), 0.5, 1.5) if VOL_SIZE else np.ones(len(g))))
     return by
 
 
@@ -252,14 +254,14 @@ def book(by, t0, t1, rng=None, gauge=True):
             if o[6] < t and px == px and o[8] > 0: mtm += o[3] * (o[9] * (px / o[8] - 1) - COST)
         curve[t - t0] = eq + mtm; g = by.get(t)
         if g is None or g[8]: continue
-        code, y, xt, sup, fin, idx, sec, o1, _, sign, nd = g; cap = min(NEW_SUP if (sup or not gauge) else nd, SLOTS - len(open_))
+        code, y, xt, sup, fin, idx, sec, o1, _, sign, nd, wt = g; cap = min(NEW_SUP if (sup or not gauge) else nd, SLOTS - len(open_))
         if cap <= 0: continue
         held, k, secs = {o[1] for o in open_}, 0, {}
         for o in open_: secs[o[7]] = secs.get(o[7], 0) + 1
         for i in (rng.permutation(len(code)) if rng is not None else range(len(code))):
             if k >= cap: break
             if code[i] in held or (sec[i] >= 0 and secs.get(sec[i], 0) >= SECTOR_CAP): continue
-            open_.append((xt[i], code[i], y[i], eq / SLOTS, fin[i], idx[i], t, sec[i], o1[i], sign)); trades.append((t, code[i], y[i], sup, fin[i], idx[i], xt[i])); secs[sec[i]] = secs.get(sec[i], 0) + 1; k += 1
+            open_.append((xt[i], code[i], y[i], eq / SLOTS * wt[i], fin[i], idx[i], t, sec[i], o1[i], sign)); trades.append((t, code[i], y[i], sup, fin[i], idx[i], xt[i])); secs[sec[i]] = secs.get(sec[i], 0) + 1; k += 1
     return curve, trades, open_
 
 
@@ -391,6 +393,10 @@ def build(P, say=print):
                           "avg_stock": f_(sub[K["y"]].mean() * 100, 3), "momentum": round(float(cmom[b - t0 - 1] / cmom[a - t0] - 1) * 100, 1), "random": round(float(A["_rand"][b - t0 - 1] / A["_rand"][a - t0] - 1) * 100, 1), "nifty": round(float(ni[b - t0 - 1] / ni[a - t0] - 1) * 100, 1)})
         for r in rec.values():
             for k in [k for k in r if k.startswith("_")]: del r[k]
+        hs = D[(D.t >= t0) & (D.t < last_full) & D[K["y"]].notna() & D[K["score"]].notna()]; hs = hs[hs.groupby("t")[K["score"]].rank(ascending=False, method="first") <= 10]; outcomes = []
+        for rg in REGIMES:                                  # what happened to the ten best-ranked signals a day, by the regime they were issued in
+            x = hs[hs.regime == rg]
+            if len(x) >= 100: outcomes.append({"regime": rg, "n": int(len(x)), "stop": round(float((x[K["why"]] == 1).mean()) * 100, 0), "target": round(float((x[K["why"]] == 2).mean()) * 100, 0), "time": round(float((x[K["why"]] == 0).mean()) * 100, 0), "won": round(float((x[K["y"]] > 0).mean()) * 100, 0), "mean": f_(x[K["y"]].mean() * 100, 2)})
         Ts = T.sort_values(K["score"], ascending=False); sup = bool(g[K["g"]] > 0); held = {names[o[1]] for o in open_}; free = max(SLOTS - len(open_), 0); blocked = reg in BLOCK[side]; cap = 0 if blocked else min(NEW_SUP if sup else DEF_NEW[side], free)
         def row(r, i):
             a_ = r.atr; return {"sym": r.sym, "rank": int(i + 1), "close": f_(r.c), "atr": f_(a_), "stop": f_(r.c - sg_ * STOP_K * a_), "target": f_(r.c + sg_ * TGT_K * a_), "stop_pct": f_(-sg_ * STOP_K * a_ / r.c * 100, 1), "target_pct": f_(sg_ * TGT_K * a_ / r.c * 100, 1),
@@ -415,7 +421,7 @@ def build(P, say=print):
         why_ = "Unseen period: profit factor %s, book %s%%, 12-month-momentum book %s%%, better than %s%% of random-pick books, deflated Sharpe %s%%. Forward log: %d of %d sessions. Approval needs profit factor 1.2 or more, a positive book that beats the momentum book, 95%% of random books, a deflated Sharpe of 95%% or more, and %d sessions of signals logged before the open." % (
             (U or {}).get("trades", {}).get("pf"), (U or {}).get("book", {}).get("total"), (U or {}).get("momentum", {}).get("total"), (U or {}).get("random", {}).get("beats"), dsr, fwd, FORWARD_DAYS, FORWARD_DAYS)
         out["books"][side] = {"status": stage, "status_why": why_, "gauge": "Supportive" if sup else "Defensive", "gauge_pct": f_(float((hist[K["g"]] < g[K["g"]]).mean()) * 100, 0), "new": int(cap), "slots_free": int(free), "blocked": bool(blocked), "new_def": DEF_NEW[side],
-                              "picks": picks, "ranked": ranked[:25], "avoid": ranked[::-1][:15] if side == "long" else [], "positions": pos, "recent": recent, "record": rec, "years": years, "curve": curve}
+                              "outcomes": outcomes, "picks": picks, "ranked": ranked[:25], "avoid": ranked[::-1][:15] if side == "long" else [], "positions": pos, "recent": recent, "record": rec, "years": years, "curve": curve}
         want += picks + [p["sym"] for p in pos] + [r["sym"] for r in ranked[:8]] + [r["sym"] for r in recent[:6]]
         for x in trades:
             r = D.loc[x[5]]; m = marks.setdefault(r.sym, [])
