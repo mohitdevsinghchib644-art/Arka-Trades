@@ -99,13 +99,101 @@ export function quoteFrom(sym, data) {
            high: m.regularMarketDayHigh ?? null, low: m.regularMarketDayLow ?? null, vol: m.regularMarketVolume ?? null,
            hi52: m.fiftyTwoWeekHigh ?? null, lo52: m.fiftyTwoWeekLow ?? null, t: m.regularMarketTime ?? null, cur: m.currency || "", spark: thin(closes, 36), open: open != null ? +open.toFixed(2) : null, pts };
 }
-async function quotes(url, ctx) {
+async function quotes(url, ctx, env) {
   const list = [...new Set((url.searchParams.get("s") || "").toUpperCase().split(",").map((s) => s.trim()).filter((s) => SYM_OK.test(s)))].slice(0, 40);
   const out = await Promise.all(list.map(async (sym) => {
     try { return quoteFrom(sym, await yahoo(`/v8/finance/chart/${encodeURIComponent(ySym(sym))}?range=1d&interval=5m&includePrePost=false`, ctx, 45)); }
     catch { return { sym, ok: false }; }
   }));
-  return json({ quotes: out, at: Date.now() });
+  let live = 0;
+  try { live = await angelOverlay(env, ctx, out); } catch { /* Angel One is an extra: Yahoo prices stay when it fails */ }
+  return json({ quotes: out, at: Date.now(), live });
+}
+// ── Angel One SmartAPI: live prices and intraday candles. DATA CALLS ONLY: this file never calls an order, GTT, funds or
+// portfolio endpoint. Secrets (names only): ANGEL_API_KEY, ANGEL_CLIENT_CODE, ANGEL_PIN, ANGEL_TOTP_SECRET. The session token stays
+// in the Worker's cache and is never sent to the browser. Symbol -> token comes from angel_tokens.json, written nightly by "Market data".
+const ANGEL = "https://apiconnect.angelone.in", ANGEL_IX = { "^NSEI": "NIFTY", "^NSEBANK": "BANKNIFTY" };
+const angelOn = (env) => !!(env && env.ANGEL_API_KEY && env.ANGEL_CLIENT_CODE && env.ANGEL_PIN && env.ANGEL_TOTP_SECRET);
+export async function totp(secret, at = Date.now()) {       // RFC 6238, 30 seconds, 6 digits, SHA-1 (what Angel One's QR code uses)
+  const abc = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567", clean = String(secret).toUpperCase().replace(/[^A-Z2-7]/g, ""); let bits = "";
+  for (const ch of clean) bits += abc.indexOf(ch).toString(2).padStart(5, "0");
+  const key = new Uint8Array(Math.floor(bits.length / 8)); for (let i = 0; i < key.length; i++) key[i] = parseInt(bits.slice(i * 8, i * 8 + 8), 2);
+  const msg = new Uint8Array(8); let c = Math.floor(at / 30000); for (let i = 7; i >= 0; i--) { msg[i] = c & 255; c = Math.floor(c / 256); }
+  const k = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-1" }, false, ["sign"]), h = new Uint8Array(await crypto.subtle.sign("HMAC", k, msg)), o = h[19] & 15;
+  return String((((h[o] & 127) << 24) | (h[o + 1] << 16) | (h[o + 2] << 8) | h[o + 3]) % 1000000).padStart(6, "0");
+}
+const angelHead = (env, jwt) => ({ "content-type": "application/json", accept: "application/json", "x-usertype": "USER", "x-sourceid": "WEB", "x-clientlocalip": "127.0.0.1", "x-clientpublicip": "127.0.0.1",
+  "x-macaddress": "00:00:00:00:00:00", "x-privatekey": env.ANGEL_API_KEY, ...(jwt ? { authorization: "Bearer " + jwt } : {}) });
+async function angelLogin(env, ctx, fresh = false) {        // one login is reused for 5 hours; a failed login is not retried for 90 seconds
+  const cache = typeof caches !== "undefined" && caches.default, key = new Request("https://cache.arka/angel-session");
+  if (cache && !fresh) { const hit = await cache.match(key); if (hit) { const v = await hit.json(); if (v.err) throw new Error(v.err); return v.jwt; } }
+  let v;
+  try {
+    const r = await fetch(ANGEL + "/rest/auth/angelbroking/user/v1/loginByPassword", { method: "POST", headers: angelHead(env), body: JSON.stringify({ clientcode: env.ANGEL_CLIENT_CODE, password: env.ANGEL_PIN, totp: await totp(env.ANGEL_TOTP_SECRET) }) });
+    const d = await r.json().catch(() => null);
+    v = d && d.status && d.data && d.data.jwtToken ? { jwt: d.data.jwtToken } : { err: "Angel One login refused: " + String((d && (d.message || d.errorcode)) || "HTTP " + r.status).slice(0, 120) };
+  } catch (e) { v = { err: "Angel One could not be reached: " + String(e.message || e).slice(0, 80) }; }
+  if (cache) { const put = cache.put(key, new Response(JSON.stringify(v), { headers: { "cache-control": `max-age=${v.jwt ? 18000 : 90}` } })); ctx && ctx.waitUntil ? ctx.waitUntil(put) : await put; }
+  if (v.err) throw new Error(v.err);
+  return v.jwt;
+}
+async function angelCall(env, ctx, path, body) {            // a data call; logs in again once if the session has expired
+  for (const fresh of [false, true]) {
+    const jwt = await angelLogin(env, ctx, fresh), r = await fetch(ANGEL + path, { method: "POST", headers: angelHead(env, jwt), body: JSON.stringify(body) }), d = await r.json().catch(() => null);
+    if (d && d.status) return d.data;
+    const why = String((d && (d.message || d.errorcode)) || "HTTP " + r.status);
+    if (fresh || !/token|session|AG8001|AG8002|AB8050|AB8051|AB1010|401/i.test(why + " " + r.status)) throw new Error("Angel One: " + why.slice(0, 120));
+  }
+}
+async function angelTokens(env, ctx) {                      // {SYMBOL: token} for NSE shares, plus the two indices
+  const t = await repoFile(env, ctx, "angel_tokens.json", 21600, "market-data");
+  try { return t ? JSON.parse(t) : null; } catch { return null; }
+}
+const angelTime = (s) => { const m = /^(\d{2})-(\w{3})-(\d{4}) (\d{2}):(\d{2}):(\d{2})$/.exec(String(s || "")); if (!m) return null; const mo = "JanFebMarAprMayJunJulAugSepOctNovDec".indexOf(m[2]) / 3;
+  return mo < 0 || mo % 1 ? null : Math.floor(Date.UTC(+m[3], mo, +m[1], +m[4], +m[5], +m[6]) / 1000) - 19800; };
+async function angelQuotes(env, ctx, syms) {                // -> {SYMBOL: Angel's quote row}; up to 50 tokens a call
+  const T = await angelTokens(env, ctx); if (!T) throw new Error("angel_tokens.json is not on the market-data branch yet: run the Market data job once");
+  const want = {}; for (const s of syms) { const tk = (T.s || {})[ANGEL_IX[s] || s]; if (tk) want[String(tk)] = s; }
+  const ids = Object.keys(want).slice(0, 50), out = {}; if (!ids.length) return out;
+  const d = await angelCall(env, ctx, "/rest/secure/angelbroking/market/v1/quote/", { mode: "FULL", exchangeTokens: { NSE: ids } });
+  for (const q of (d && d.fetched) || []) { const s = want[String(q.symbolToken)]; if (s) out[s] = q; }
+  return out;
+}
+export async function angelOverlay(env, ctx, out) {                // put Angel One's live numbers on top of the Yahoo rows; returns how many rows were replaced
+  if (!angelOn(env)) return 0;
+  const rows = out.filter((q) => q && q.ok && (ANGEL_IX[q.sym] || /^[A-Z0-9&_-]+$/.test(q.sym))); if (!rows.length) return 0;
+  const A = await angelQuotes(env, ctx, rows.map((q) => q.sym)); let n = 0;
+  for (const q of rows) { const a = A[q.sym]; if (!a || !(a.ltp > 0)) continue; const prev = a.close > 0 ? a.close : q.prev;
+    Object.assign(q, { price: a.ltp, prev, chg: prev ? a.ltp - prev : q.chg, pct: prev ? (a.ltp / prev - 1) * 100 : q.pct, high: a.high > 0 ? a.high : q.high, low: a.low > 0 ? a.low : q.low,
+      open: a.open > 0 ? a.open : q.open, vol: a.tradeVolume ?? q.vol, t: angelTime(a.exchTradeTime || a.exchFeedTime) ?? q.t, live: true }); n++; }
+  return n;
+}
+const ANGEL_INT = { ONE_MINUTE: 30, THREE_MINUTE: 60, FIVE_MINUTE: 100, FIFTEEN_MINUTE: 200, THIRTY_MINUTE: 200, ONE_HOUR: 400, ONE_DAY: 2000 };       // most days one call may ask for
+export async function angelApi(env, ctx, url) {
+  const op = url.searchParams.get("op") || "status";
+  if (op === "status") {                                    // a health check that shows which step fails, never a secret
+    const st = { secrets: { ANGEL_API_KEY: !!env.ANGEL_API_KEY, ANGEL_CLIENT_CODE: !!env.ANGEL_CLIENT_CODE, ANGEL_PIN: !!env.ANGEL_PIN, ANGEL_TOTP_SECRET: !!env.ANGEL_TOTP_SECRET }, tokens: null, login: null, quote: null };
+    if (!angelOn(env)) return json({ ...st, ok: false, next: "Add the four ANGEL_ secrets in Cloudflare (type Secret), then deploy again." });
+    const T = await angelTokens(env, ctx); st.tokens = T ? Object.keys(T.s || {}).length : 0;
+    try { await angelLogin(env, ctx, url.searchParams.get("fresh") === "1"); st.login = "ok"; } catch (e) { st.login = String(e.message); return json({ ...st, ok: false, next: "Check the client code, PIN and TOTP secret. The TOTP secret is the letters printed under the QR code, not the 6-digit code." }); }
+    if (!st.tokens) return json({ ...st, ok: false, next: "Run the Market data job once: it writes the symbol list Angel One needs." });
+    try { const q = await angelQuotes(env, ctx, ["RELIANCE", "^NSEI"]); st.quote = Object.fromEntries(Object.entries(q).map(([k, v]) => [k, { ltp: v.ltp, close: v.close, time: v.exchTradeTime || v.exchFeedTime || null }])); }
+    catch (e) { st.quote = String(e.message); return json({ ...st, ok: false, next: "Login works but the price call failed. Send this line to fix it." }); }
+    return json({ ...st, ok: Object.keys(st.quote).length > 0, next: Object.keys(st.quote).length ? "Live prices are on." : "Angel One returned no rows for RELIANCE and NIFTY." });
+  }
+  if (!angelOn(env)) return fail(503, "Angel One is not set up.");
+  try {
+    if (op === "quote") { const syms = (url.searchParams.get("s") || "").toUpperCase().split(",").map((x) => x.trim()).filter((x) => SYM_OK.test(x)).slice(0, 50), q = await angelQuotes(env, ctx, syms);
+      return json({ at: Date.now(), quotes: Object.fromEntries(Object.entries(q).map(([k, v]) => [k, { ltp: v.ltp, open: v.open, high: v.high, low: v.low, prev: v.close, pct: v.percentChange, vol: v.tradeVolume, oi: v.opnInterest ?? null, buy: v.totBuyQuan ?? null, sell: v.totSellQuan ?? null, time: v.exchTradeTime || null }])) }); }
+    if (op === "candles") {                                 // intraday or daily candles for one share: ?s=SBIN&i=FIVE_MINUTE&days=5
+      const sym = (url.searchParams.get("s") || "").toUpperCase().trim(), iv = url.searchParams.get("i") || "FIVE_MINUTE"; if (!SYM_OK.test(sym) || !ANGEL_INT[iv]) return fail(400, "Which share and interval?");
+      const T = await angelTokens(env, ctx), tk = T && (T.s || {})[ANGEL_IX[sym] || sym]; if (!tk) return fail(404, "No Angel One token for " + sym + ".");
+      const days = Math.max(1, Math.min(ANGEL_INT[iv], +url.searchParams.get("days") || 5)), ist = (ms) => new Date(ms + 19800000).toISOString().slice(0, 16).replace("T", " "), now = Date.now();
+      const rows = (await angelCall(env, ctx, "/rest/secure/angelbroking/historical/v1/getCandleData", { exchange: "NSE", symboltoken: String(tk), interval: iv, fromdate: ist(now - days * 86400000), todate: ist(now) })) || [];
+      return json({ sym, interval: iv, t: rows.map((r) => r[0]), o: rows.map((r) => r[1]), h: rows.map((r) => r[2]), l: rows.map((r) => r[3]), c: rows.map((r) => r[4]), v: rows.map((r) => r[5]) });
+    }
+  } catch (e) { return fail(502, String(e.message || e).slice(0, 160)); }
+  return fail(400, "Unknown request.");
 }
 const ret = (c, n) => (c.length > n && c[c.length - 1 - n] ? (c[c.length - 1] / c[c.length - 1 - n] - 1) * 100 : null);
 export function stockFrom(sym, day, hist) {
@@ -1125,7 +1213,8 @@ export default {
       const me = await readToken(env, request);
       if (!me) return fail(401, "Please sign in.");
       if (p === "/api/me") return json(me);
-      if (p === "/api/quotes") return quotes(url, ctx);
+      if (p === "/api/quotes") return quotes(url, ctx, env);
+      if (p === "/api/angel") return angelApi(env, ctx, url);
       if (p === "/api/stock") return stock(url, ctx);
       if (p === "/api/history") return history(url, ctx);
       if (p === "/api/overview") return overview(url, ctx);
