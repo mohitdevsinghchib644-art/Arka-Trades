@@ -893,3 +893,5 @@ select.rs-in{flex:0 1 220px}
 .md-p b{display:block;font-size:15px} .md-p small{color:var(--tx3)} @media (max-width:860px){.md-hero{grid-template-columns:1fr}}
 .md-ban{flex-direction:column;gap:8px} .md-ban>b{font-size:13.5px} .md-g4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px} .md-g4 small{display:block;font-size:11.5px;color:var(--tx3);margin:0} .md-g4 b{font-size:16px;font-weight:700}
 .md-ban details summary{cursor:pointer;font-size:12.5px;color:var(--tx3)} .md-ban details small{margin-top:6px}
+.md-out{padding:0 2px 10px} .md-out b{font-weight:600}
+.mk .lv{font-style:normal;font-size:11px;font-weight:600;color:var(--up);margin-left:8px;padding:1px 7px;border-radius:999px;background:rgba(47,208,103,.12)}
