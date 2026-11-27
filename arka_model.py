@@ -350,33 +350,64 @@ def forward_days():
 
 
 DAY_N, DAY_COST, DAY_STOP = 10, 0.0016, 1.0       # the day book: names a day, cost of one round trip (sell and buy back), intraday stop in ATRs above the open
+DAY_X = ("i1", "i5", "i20", "n1", "n5", "n20", "up20", "dn20", "oh20")      # the day model's own readings: open-to-close and overnight returns over 1, 5 and 20 sessions, the usual rise and fall from the open, how often the open was the day's high
 
 
-def day_book(D, P, days, t0, tu):
-    """The day book. Research on the 10 years showed where the short model's edge sits: its picks fall between the open and the close and
-    rise again overnight ("tug of war", Lou, Polk and Skouras 2019). So this book sells the DAY_N best short ranks at the next open and buys
-    them back at that day's close: no position is held overnight. Every day, no gauge, no regime rule. Returns the record and the history of picks."""
-    pidx = P["C"].index.to_numpy(); pos = pd.Series(np.arange(len(pidx)), index=pidx); n = len(pidx); pp = pos.reindex(D.date.to_numpy()).to_numpy(); nx = {k: np.full(len(D), np.nan) for k in "OHLC"}
+def day_frame(D, P):
+    """Next session's open, high, low and close for every row, and the day model's readings (all known at the signal close)."""
+    pidx = P["C"].index.to_numpy(); pos = pd.Series(np.arange(len(pidx)), index=pidx); n = len(pidx); pp = pos.reindex(D.date.to_numpy()).to_numpy().astype(int); new = {k: np.full(len(D), np.nan) for k in ("o1x", "h1x", "l1x", "c1x") + DAY_X}
     for sym, idx in D.groupby("sym").indices.items():
-        j = pp[idx].astype(int) + 1; ok = j < n; j = np.minimum(j, n - 1)
-        for k in "OHLC": nx[k][idx] = np.where(ok, P[k][sym].to_numpy(float)[j], np.nan)
-    S = pd.DataFrame({"t": D.t.to_numpy(), "sym": D.sym.to_numpy(), "sc": D.score_s.to_numpy(), "atr": D.atr.to_numpy(), "o": nx["O"], "h": nx["H"], "l": nx["L"], "c": nx["C"]}); S = S[(S.t >= t0) & S.sc.notna()]
-    S["rk"] = S.groupby("t").sc.rank(ascending=False, method="first"); hist = S[S.rk <= 2 * DAY_N]; T = S[(S.rk <= DAY_N) & (S.o > 0) & (S.c > 0)].copy()
+        o, h, l, c = (P[k][sym].to_numpy(float) for k in "OHLC"); j = np.minimum(pp[idx] + 1, n - 1); ok = pp[idx] + 1 < n
+        for k, a in (("o1x", o), ("h1x", h), ("l1x", l), ("c1x", c)): new[k][idx] = np.where(ok, a[j], np.nan)
+        idr = pd.Series(c / o - 1); ovn = pd.Series(np.r_[np.nan, o[1:] / c[:-1] - 1]); up = pd.Series(h / o - 1); dn = pd.Series(1 - l / o); oh = pd.Series((o >= h * 0.999).astype(float))
+        for k, v in (("i1", idr), ("i5", idr.rolling(5).mean()), ("i20", idr.rolling(20).mean()), ("n1", ovn), ("n5", ovn.rolling(5).mean()), ("n20", ovn.rolling(20).mean()), ("up20", up.rolling(20).mean()), ("dn20", dn.rolling(20).mean()), ("oh20", oh.rolling(20).mean())): new[k][idx] = v.to_numpy()[pp[idx]]
+    return pd.DataFrame(new, index=D.index)
+
+
+def walk_day(D, F, say=print):
+    """A third model, for the day book only: it learns the next session's open-to-close fall (against that day's average stock),
+    walk-forward on the same calendar as the other two. Scored only on sessions after its training data."""
+    X = [c for c in D.columns if c not in NOT_X and c not in ("score", "score_s")]; W = pd.concat([D[X], F[list(DAY_X)]], axis=1); X = list(W.columns); yd = -(F.c1x / F.o1x - 1); y = yd - yd.groupby(D.date).transform("mean")
+    days = np.array(sorted(D.date.unique())); i0 = int(np.searchsorted(days, np.datetime64(FIRST))); rng = np.random.default_rng(3); out = pd.Series(np.nan, index=D.index)
+    for a in range(i0, len(days), STEP):
+        te = ((D.date >= days[a]) & (D.date <= days[min(a + STEP, len(days)) - 1])).to_numpy(); past = np.flatnonzero((D.date <= days[a - 3]).to_numpy() & y.notna().to_numpy())      # the target is known one session later, so two sessions are left out before the test block
+        if len(past) > MAX_TRAIN: past = np.sort(rng.choice(past, MAX_TRAIN, replace=False))
+        Xtr = W.iloc[past]; use = [c for c in X if Xtr[c].notna().sum() >= 200 and Xtr[c].nunique() > 1]; p = np.zeros(int(te.sum()))
+        for sd in SEEDS: p += HistGradientBoostingRegressor(**GB, random_state=sd).fit(Xtr[use], y.iloc[past]).predict(W.loc[te, use])
+        out[te] = p / len(SEEDS)
+    say(f"  day model: {len(X)} readings, scored {str(days[i0])[:10]} onward"); return out
+
+
+def day_rank(S):
+    """Rank for the day book inside one frame of rows (columns t, sym, sc, sd): the 5-session short score and the day model's score, each as
+    a percentile of that day, added. Then at most SECTOR_CAP names from one sector among the names taken."""
+    S = S.copy(); S["bl"] = S.groupby("t").sc.rank(pct=True) + S.groupby("t").sd.rank(pct=True).fillna(S.groupby("t").sc.rank(pct=True)); S["r0"] = S.groupby("t").bl.rank(ascending=False, method="first")
+    S = S.sort_values(["t", "r0"]); S["sec"] = [SECTOR.get(x) or x for x in S.sym]; S["ns"] = S.groupby(["t", "sec"]).cumcount(); S["rk"] = np.where(S.ns < SECTOR_CAP, 1.0, np.nan); S["rk"] = S.groupby("t").rk.cumsum().where(S.ns < SECTOR_CAP)
+    return S
+
+
+def day_book(D, F, days, t0, tu):
+    """The day book. Research on the 10 years showed where the short model's edge sits: its picks fall between the open and the close and
+    rise again overnight ("tug of war", Lou, Polk and Skouras 2019). So this book sells the DAY_N best ranks at the next open and buys
+    them back at that day's close: no position is held overnight. Every day, no gauge, no regime rule. Returns the record and the history of picks."""
+    S = pd.DataFrame({"t": D.t.to_numpy(), "sym": D.sym.to_numpy(), "sc": D.score_s.to_numpy(), "sd": D.score_d.to_numpy(), "atr": D.atr.to_numpy(), "o": F.o1x.to_numpy(), "h": F.h1x.to_numpy(), "l": F.l1x.to_numpy(), "c": F.c1x.to_numpy()}); S = day_rank(S[(S.t >= t0) & S.sc.notna()])
+    hist = S[S.rk <= 2 * DAY_N]; T = S[(S.rk <= DAY_N) & (S.o > 0) & (S.c > 0)].copy()
     T["gross"] = -(T.c / T.o - 1); hit = T.h >= T.o + DAY_STOP * T.atr; T["r"] = np.where(hit, -DAY_STOP * T.atr / T.o, T.gross); span = np.arange(t0 + 1, len(days))
     def daily(cost, col="r", frame=T):
         g = (frame[col] - cost).groupby(frame.t).sum() / DAY_N; g.index = g.index + 1; return g.reindex(span).fillna(0).to_numpy()
     x = daily(DAY_COST); a = span < tu; curve = np.concatenate([[1.0], np.cumprod(1 + x)]); cut = int(a.sum()) + 1
     part = lambda v: {"days": int(len(v)), "won": f_((v > 0).mean() * 100, 0), "avg": f_(v.mean() * 100, 3)} if len(v) else None
     R = S[S.o.notna() & S.c.notna()].copy(); R["rk2"] = R.groupby("t").sc.transform(lambda v: np.random.default_rng(len(v) + int(v.index[0])).permutation(len(v)) + 1); R = R[R.rk2 <= DAY_N]; R["r"] = -(R.c / R.o - 1); xr = daily(DAY_COST, "r", R)
+    old = S[S.o.notna() & S.c.notna()].copy(); old["rk3"] = old.groupby("t").sc.rank(ascending=False, method="first"); old = old[old.rk3 <= DAY_N]; old["r"] = np.where(old.h >= old.o + DAY_STOP * old.atr, -DAY_STOP * old.atr / old.o, -(old.c / old.o - 1)); xo = daily(DAY_COST, "r", old)
     eq = lambda v: np.concatenate([[1.0], np.cumprod(1 + v)]); yr = pd.to_datetime(days[span]).year; nn = len(curve); step = max(1, nn // 300); pick = list(range(0, nn, step)); pick = pick if pick[-1] == nn - 1 else pick + [nn - 1]
-    out = {"rules": {"n": DAY_N, "cost": DAY_COST * 100, "stop_atr": DAY_STOP}, "record": {"design": cstats(curve[:cut]), "unseen": cstats(curve[cut - 1:]) if (~a).sum() > 20 else None, "all": cstats(curve)},
+    two = lambda v: {"design": cstats(eq(v[a]))["cagr"], "unseen": cstats(eq(v[~a]))["cagr"] if (~a).sum() > 20 else None}
+    out = {"rules": {"n": DAY_N, "cost": DAY_COST * 100, "stop_atr": DAY_STOP, "sector_cap": SECTOR_CAP}, "record": {"design": cstats(curve[:cut]), "unseen": cstats(curve[cut - 1:]) if (~a).sum() > 20 else None, "all": cstats(curve)},
            "daily": {"design": part(x[a]), "unseen": part(x[~a])}, "gross": {"design": f_(T[T.t < tu - 1].gross.mean() * 100, 3), "unseen": f_(T[T.t >= tu - 1].gross.mean() * 100, 3)}, "stopped": f_(hit.mean() * 100, 0),
-           "costs": [{"cost": c * 100, "design": cstats(eq(daily(c)[a]))["cagr"], "unseen": cstats(eq(daily(c)[~a]))["cagr"] if (~a).sum() > 20 else None} for c in (0.0010, 0.0016, 0.0020, 0.0030, 0.0040)],
-           "random": {"design": cstats(eq(xr[a]))["cagr"], "unseen": cstats(eq(xr[~a]))["cagr"] if (~a).sum() > 20 else None},
-           "ranks": [{"from": lo, "to": hi, "design": f_(-(v[v.t < tu - 1].c / v[v.t < tu - 1].o - 1).mean() * 100, 3), "unseen": f_(-(v[v.t >= tu - 1].c / v[v.t >= tu - 1].o - 1).mean() * 100, 3)} for lo, hi in ((1, 5), (6, 10), (11, 20), (21, 40), (41, 80), (81, 999)) for v in [S[(S.rk >= lo) & (S.rk <= hi) & (S.o > 0)]]],
+           "costs": [{"cost": c * 100, **two(daily(c))} for c in (0.0010, 0.0016, 0.0020, 0.0030, 0.0040)], "random": two(xr), "short_score_only": two(xo),
+           "ranks": [{"from": lo, "to": hi, "design": f_(-(v[v.t < tu - 1].c / v[v.t < tu - 1].o - 1).mean() * 100, 3), "unseen": f_(-(v[v.t >= tu - 1].c / v[v.t >= tu - 1].o - 1).mean() * 100, 3)} for lo, hi in ((1, 5), (6, 10), (11, 20), (21, 40), (41, 80), (81, 999)) for v in [S[(S.r0 >= lo) & (S.r0 <= hi) & (S.o > 0)]]],
            "years": [{"year": int(y), "unseen": str(y) >= UNSEEN[:4], "ret": f_((np.prod(1 + x[yr == y]) - 1) * 100, 1), "maxdd": f_(float((eq(x[yr == y]) / np.maximum.accumulate(eq(x[yr == y])) - 1).min()) * 100, 1), "won": f_((x[yr == y] > 0).mean() * 100, 0)} for y in sorted(set(yr))],
            "curve": {"d": [str(days[t0 + i])[:10] for i in pick], "model": [round(float(curve[i]) * 100, 2) for i in pick], "random": [round(float(eq(xr)[i]) * 100, 2) for i in pick]}}
-    hist = hist.assign(date=[str(days[t])[:10] for t in hist.t], rank=hist.rk.astype(int))[["date", "sym", "rank"]].sort_values(["date", "rank"])
+    hist = hist.assign(date=[str(days[t])[:10] for t in hist.t], rank=hist.rk.astype(int))[["date", "sym", "rank"]].sort_values(["date", "rank"]); out["_curve"] = curve
     return out, hist
 
 
@@ -388,6 +419,12 @@ def build(P, say=print):
     else:
         D, M, miss = dataset(P, say); D["score"], D["score_s"], nx = walk_stock(D, say); G, nm = walk_market(M)
         if cache: pickle.dump((D, M, miss, G, nx, nm), open(cache, "wb"))
+    D = D.reset_index(drop=True); DF = day_frame(D, P); dcache = cache + ".day" if cache else None
+    if dcache and os.path.exists(dcache): sd = pickle.load(open(dcache, "rb")); say("day scores read from " + dcache)
+    else:
+        sd = walk_day(D, DF, say)
+        if dcache: pickle.dump(sd, open(dcache, "wb"))
+    D["score_d"] = np.asarray(sd); D = pd.concat([D, DF[["o1x", "h1x", "l1x", "c1x"]]], axis=1)       # the next session's prices travel with each row from here on
     for k in ("t_n1", "t_mkt", "t_mkts"): G[k] = M[k]
     M["regime"] = [regime_of(r)[0] for r in M.itertuples()]
     D = D.merge(G[["g_mkt", "g_mkts", "g_n1"]], left_on="date", right_index=True, how="left").merge(M[["regime"]], left_on="date", right_index=True, how="left")
@@ -484,9 +521,17 @@ def build(P, say=print):
     rkl = {r.sym: i + 1 for i, r in enumerate(T.sort_values("score", ascending=False).itertuples())}; rks = {r.sym: i + 1 for i, r in enumerate(T.sort_values("score_s", ascending=False).itertuples())}
     out["universe"] = [{"sym": r.sym, "c": f_(r.c), "atr": f_(r.atr), "adv": f_(math.exp(r.turn) / r.c, 0) if r.turn == r.turn and r.c > 0 else None, "sec": SECTOR.get(r.sym, ""), "rl": rkl.get(r.sym), "rs": rks.get(r.sym),
                         "pl": f_(r.p_long * 100, 0), "ps": f_(r.p_short * 100, 0), "str": f_(r.x_m12 * 100, 0), "pdh": f_(r.h), "pdl": f_(r.l), "hi20": f_(r.c / (1 + r.hi20)) if r.hi20 == r.hi20 else None, "d50": f_(r.d50 * 100, 1), "oi5": f_(r.oi5 * 100, 1), **{k: v for k, v in facts(r).items() if k in ("buildup", "deliv", "ivpct", "pcr", "volx")}} for r in T.itertuples()]
-    day, day_hist = day_book(D, P, days, t0, tu); TS = T.sort_values("score_s", ascending=False).head(DAY_N)
+    day, day_hist = day_book(D, D, days, t0, tu); TS = day_rank(pd.DataFrame({"t": T.t.to_numpy(), "sym": T.sym.to_numpy(), "sc": T.score_s.to_numpy(), "sd": T.score_d.to_numpy()}, index=T.index)); TS = T.loc[TS[TS.rk <= DAY_N].sort_values("rk").index]
     day["picks"] = [{"sym": r.sym, "rank": i + 1, "close": f_(r.c), "atr": f_(r.atr), "stop_pct": f_(DAY_STOP * r.atr / r.c * 100, 1), "sector": SECTOR.get(r.sym, ""), **facts(r)} for i, r in enumerate(TS.itertuples())]
     day["status"], day["status_why"] = "test", "Backtested on daily opening and closing prices only. It has to be confirmed on five-minute prices and in the live paper journal before it can be trusted: the whole result depends on selling at the opening price."
+    cdy = day.pop("_curve"); n_ = min(len(cl), len(cdy))                # the long book and the day book on the same capital: long positions overnight, the ten shorts only inside the day
+    ld = lambda a, b: 1 + (cl[a - t0:b - t0] / cl[a - t0] - 1) + (cdy[a - t0:b - t0] / cdy[a - t0] - 1); cb2 = {k: (a, min(b, t0 + n_)) for k, (a, b) in cb.items()}
+    day["with_long"] = {"record": {k: {"from": str(days[a])[:10], "to": str(days[b - 1])[:10], **cstats(ld(a, b))} for k, (a, b) in cb2.items()},
+                        "corr": f_(np.corrcoef(np.diff(cl[:n_]) / cl[:n_ - 1], np.diff(cdy[:n_]) / cdy[:n_ - 1])[0, 1], 2), "years": []}
+    for y in sorted({str(d)[:4] for d in days[t0:last_full]}):
+        a, b = max(t0, int(np.searchsorted(days, np.datetime64(y + "-01-01")))), min(last_full, t0 + n_, int(np.searchsorted(days, np.datetime64(str(int(y) + 1) + "-01-01"))))
+        if b - a < 20: continue
+        c = ld(a, b); day["with_long"]["years"].append({"year": y, "unseen": y >= UNSEEN[:4], "both": round(float(c[-1] - 1) * 100, 1), "maxdd": round(float((c / np.maximum.accumulate(c) - 1).min()) * 100, 1)})
     out["day"] = day; out["_day_hist"] = day_hist
     out["decisions"] = dec; out["decision"] = "NO TRADE" if not (L["picks"] or Sh["picks"]) else " · ".join(([f"{len(L['picks'])} BUY"] if L["picks"] else []) + ([f"{len(Sh['picks'])} SHORT"] if Sh["picks"] else []))
     for sym in list(dict.fromkeys(want))[:40]:
