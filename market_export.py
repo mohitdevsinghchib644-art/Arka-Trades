@@ -471,10 +471,32 @@ def run_flow_all(out: Path, budget_s: float = 45 * 60) -> list:
     return written
 
 
+def run_tokens(out: Path) -> list:
+    """Angel One's symbol list, cut down to what the site needs: {SYMBOL: token} for NSE ordinary shares plus NIFTY and BANKNIFTY.
+    The full file is tens of megabytes, far too big for the Worker to read, so it is reduced here every night."""
+    import requests
+    r = requests.get("https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json", timeout=120, headers={"user-agent": "Mozilla/5.0"})
+    r.raise_for_status(); rows = r.json(); s = {}
+    for x in rows:
+        if x.get("exch_seg") != "NSE":
+            continue
+        sym, tk = str(x.get("symbol", "")), str(x.get("token", ""))
+        if sym.endswith("-EQ") and tk.isdigit():
+            s[sym[:-3]] = tk
+        elif x.get("instrumenttype") == "AMXIDX" and sym in ("Nifty 50", "Nifty Bank"):
+            s["NIFTY" if sym == "Nifty 50" else "BANKNIFTY"] = tk
+    if len(s) < 500:
+        raise SystemExit(f"Angel One's symbol file looked wrong: only {len(s)} NSE shares found")
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "angel_tokens.json").write_text(json.dumps({"built": datetime.now().isoformat(timespec="minutes"), "n": len(s), "s": s}, separators=(",", ":")))
+    print(f"Angel One tokens: {len(s)} NSE shares and indices")
+    return ["angel_tokens.json"]
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("what", choices=["regime", "flow", "names", "delivery"])
+    ap.add_argument("what", choices=["regime", "flow", "names", "delivery", "tokens"])
     ap.add_argument("--out", default=str(OUT))
     a = ap.parse_args()
-    got = {"regime": run_regime, "flow": run_flow_all, "names": run_names, "delivery": run_delivery}[a.what](Path(a.out))
+    got = {"regime": run_regime, "flow": run_flow_all, "names": run_names, "delivery": run_delivery, "tokens": run_tokens}[a.what](Path(a.out))
     sys.exit(0 if got else 1)
