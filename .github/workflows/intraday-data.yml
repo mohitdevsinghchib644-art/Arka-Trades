@@ -43,7 +43,7 @@ jobs:
           echo "OUT=$RUNNER_TEMP/intraday" >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/intraday"
           if git fetch --quiet --depth 1 origin intraday-data; then git archive FETCH_HEAD | tar -x -C "$RUNNER_TEMP/intraday"; fi
-          ls -la "$RUNNER_TEMP/intraday" "$RUNNER_TEMP/intraday/m5" 2>/dev/null | tail -40
+          ls "$RUNNER_TEMP/intraday/m5" 2>/dev/null | tail -40 || true      # nothing is there on the very first run
 
       - name: Collect candles
         env:
