@@ -115,12 +115,14 @@ async function quotes(url, ctx, env) {
 const ANGEL = "https://apiconnect.angelone.in";
 // the site's index symbols (Yahoo's names) -> the names Angel One may use for the same index, letters and digits only
 const ANGEL_IX = { "^NSEI": ["NIFTY50", "NIFTY"], "^NSEBANK": ["NIFTYBANK", "BANKNIFTY"], "^INDIAVIX": ["INDIAVIX"], "^CRSLDX": ["NIFTY500"], "^NSMIDCP": ["NIFTYNEXT50", "NIFTYJR"],
-  "^CRSMID": ["NIFTYMIDCAP100"], "NIFTY_MIDCAP_100.NS": ["NIFTYMIDCAP100"], "^CNXSC": ["NIFTYSMLCAP100", "NIFTYSMALLCAP100"], "NIFTY_SMLCAP_100.NS": ["NIFTYSMLCAP100", "NIFTYSMALLCAP100"],
+  "^CRSMID": ["NIFTYMIDCAP100", "NIFTYMID100", "MIDCAP100"], "NIFTY_MIDCAP_100.NS": ["NIFTYMIDCAP100", "NIFTYMID100", "MIDCAP100"], "^CNXSC": ["NIFTYSMLCAP100", "NIFTYSMALLCAP100", "NIFTYSMALL100", "SMALLCAP100"], "NIFTY_SMLCAP_100.NS": ["NIFTYSMLCAP100", "NIFTYSMALLCAP100", "NIFTYSMALL100", "SMALLCAP100"],
   "NIFTY_FIN_SERVICE.NS": ["NIFTYFINSERVICE", "NIFTYFINANCIALSERVICES", "FINNIFTY"], "NIFTY_PVT_BANK.NS": ["NIFTYPVTBANK", "NIFTYPRIVATEBANK"], "^CNXPSUBANK": ["NIFTYPSUBANK"], "^CNXIT": ["NIFTYIT"],
   "^CNXAUTO": ["NIFTYAUTO"], "^CNXFMCG": ["NIFTYFMCG"], "^CNXPHARMA": ["NIFTYPHARMA"], "^CNXMETAL": ["NIFTYMETAL"], "^CNXENERGY": ["NIFTYENERGY"], "^CNXREALTY": ["NIFTYREALTY"], "^CNXMEDIA": ["NIFTYMEDIA"],
   "^CNXINFRA": ["NIFTYINFRA", "NIFTYINFRASTRUCTURE"], "^CNXPSE": ["NIFTYPSE"], "^CNXCMDT": ["NIFTYCOMMODITIES"], "^CNXCONSUM": ["NIFTYCONSUMPTION", "NIFTYINDIACONSUMPTION"], "^CNXMNC": ["NIFTYMNC"], "^CNXSERVICE": ["NIFTYSERVSECTOR", "NIFTYSERVICESSECTOR"] };
 const angelToken = (T, sym) => { const names = ANGEL_IX[sym]; if (!names) return (T.s || {})[sym];
-  for (const n of names) { const t = (T.i || {})[n] || (T.s || {})[n]; if (t) return t; } return null; };
+  for (const n of names) { const t = (T.i || {})[n] || (T.s || {})[n]; if (t) return t; } return ANGEL_FIX[sym] || null; };
+// Angel One's own published index tokens (SmartAPI forum announcement of the AMXIDX indices), used when the nightly symbol list has no index names yet.
+const ANGEL_FIX = { "^NSEI": "99926000", "^NSEBANK": "99926009", "^CRSMID": "99926011", "NIFTY_MIDCAP_100.NS": "99926011", "^NSMIDCP": "99926013", "^INDIAVIX": "99926017", "^CNXSC": "99926032", "NIFTY_SMLCAP_100.NS": "99926032" };
 const angelOn = (env) => !!(env && env.ANGEL_API_KEY && env.ANGEL_CLIENT_CODE && env.ANGEL_PIN && env.ANGEL_TOTP_SECRET);
 export async function totp(secret, at = Date.now()) {       // RFC 6238, 30 seconds, 6 digits, SHA-1 (what Angel One's QR code uses)
   const abc = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567", clean = String(secret).toUpperCase().replace(/[^A-Z2-7]/g, ""); let bits = "";
@@ -154,7 +156,7 @@ async function angelCall(env, ctx, path, body) {            // a data call; logs
   }
 }
 async function angelTokens(env, ctx) {                      // {SYMBOL: token} for NSE shares, plus the two indices
-  const t = await repoFile(env, ctx, "angel_tokens.json", 21600, "market-data");
+  const t = await repoFile(env, ctx, "angel_tokens.json", 900, "market-data");
   try { return t ? JSON.parse(t) : null; } catch { return null; }
 }
 const angelTime = (s) => { const m = /^(\d{2})-(\w{3})-(\d{4}) (\d{2}):(\d{2}):(\d{2})$/.exec(String(s || "")); if (!m) return null; const mo = "JanFebMarAprMayJunJulAugSepOctNovDec".indexOf(m[2]) / 3;
@@ -167,13 +169,14 @@ async function angelQuotes(env, ctx, syms) {                // -> {SYMBOL: Angel
   for (const q of (d && d.fetched) || []) { const s = want[String(q.symbolToken)]; if (s) out[s] = q; }
   return out;
 }
-export async function angelOverlay(env, ctx, out) {                // put Angel One's live numbers on top of the Yahoo rows; returns how many rows were replaced
+export async function angelOverlay(env, ctx, out) {         // Angel One's live numbers on top of the Yahoo rows; a row Yahoo could not give is built from Angel One alone
   if (!angelOn(env)) return 0;
-  const rows = out.filter((q) => q && q.ok && (ANGEL_IX[q.sym] || /^[A-Z0-9&_-]+$/.test(q.sym))); if (!rows.length) return 0;
+  const rows = out.filter((q) => q && q.sym && (ANGEL_IX[q.sym] || /^[A-Z0-9&_-]+$/.test(q.sym))); if (!rows.length) return 0;
   const A = await angelQuotes(env, ctx, rows.map((q) => q.sym)); let n = 0;
-  for (const q of rows) { const a = A[q.sym]; if (!a || !(a.ltp > 0)) continue; const prev = a.close > 0 ? a.close : q.prev;
-    Object.assign(q, { price: a.ltp, prev, chg: prev ? a.ltp - prev : q.chg, pct: prev ? (a.ltp / prev - 1) * 100 : q.pct, high: a.high > 0 ? a.high : q.high, low: a.low > 0 ? a.low : q.low,
-      open: a.open > 0 ? a.open : q.open, vol: a.tradeVolume ?? q.vol, t: angelTime(a.exchTradeTime) ?? angelTime(a.exchFeedTime) ?? Math.floor(Date.now() / 1000), live: true }); n++; }
+  for (const q of rows) { const a = A[q.sym]; if (!a || !(a.ltp > 0)) continue; const prev = a.close > 0 ? a.close : q.prev, t = angelTime(a.exchTradeTime) ?? angelTime(a.exchFeedTime) ?? Math.floor(Date.now() / 1000);
+    if (!q.ok) Object.assign(q, { ok: true, name: "", hi52: a["52WeekHigh"] > 0 ? a["52WeekHigh"] : null, lo52: a["52WeekLow"] > 0 ? a["52WeekLow"] : null, cur: "INR", spark: [], pts: [], high: null, low: null, open: null, vol: null });
+    Object.assign(q, { price: a.ltp, prev: prev ?? null, chg: prev ? a.ltp - prev : null, pct: prev ? (a.ltp / prev - 1) * 100 : null, high: a.high > 0 ? a.high : q.high, low: a.low > 0 ? a.low : q.low,
+      open: a.open > 0 ? a.open : q.open, vol: a.tradeVolume ?? q.vol, t, live: true }); n++; }
   return n;
 }
 const ANGEL_INT = { ONE_MINUTE: 30, THREE_MINUTE: 60, FIVE_MINUTE: 100, FIFTEEN_MINUTE: 200, THIRTY_MINUTE: 200, ONE_HOUR: 400, ONE_DAY: 2000 };       // most days one call may ask for
@@ -182,7 +185,8 @@ export async function angelApi(env, ctx, url) {
   if (op === "status") {                                    // a health check that shows which step fails, never a secret
     const st = { secrets: { ANGEL_API_KEY: !!env.ANGEL_API_KEY, ANGEL_CLIENT_CODE: !!env.ANGEL_CLIENT_CODE, ANGEL_PIN: !!env.ANGEL_PIN, ANGEL_TOTP_SECRET: !!env.ANGEL_TOTP_SECRET }, tokens: null, login: null, quote: null };
     if (!angelOn(env)) return json({ ...st, ok: false, next: "Add the four ANGEL_ secrets in Cloudflare (type Secret), then deploy again." });
-    const T = await angelTokens(env, ctx); st.tokens = T ? Object.keys(T.s || {}).length : 0; st.indices = T ? Object.keys(ANGEL_IX).filter((k) => angelToken(T, k)).length + " of " + Object.keys(ANGEL_IX).length + " site indices matched" : null;
+    const T = await angelTokens(env, ctx); st.tokens = T ? Object.keys(T.s || {}).length : 0; st.indices = T ? Object.keys(ANGEL_IX).filter((k) => angelToken(T, k)).length + " of " + Object.keys(ANGEL_IX).length + " site indices matched" : null; st.unmatched = T ? Object.keys(ANGEL_IX).filter((k) => !angelToken(T, k)) : null;
+    if (url.searchParams.get("names") === "1" && T) st.angel_index_names = Object.keys(T.i || {}).filter((k) => /NIFTY|VIX/.test(k)).sort();
     try { await angelLogin(env, ctx, url.searchParams.get("fresh") === "1"); st.login = "ok"; } catch (e) { st.login = String(e.message); return json({ ...st, ok: false, next: "Check the client code, PIN and TOTP secret. The TOTP secret is the letters printed under the QR code, not the 6-digit code." }); }
     if (!st.tokens) return json({ ...st, ok: false, next: "Run the Market data job once: it writes the symbol list Angel One needs." });
     try { const q = await angelQuotes(env, ctx, ["RELIANCE", "^NSEI"]); st.quote = Object.fromEntries(Object.entries(q).map(([k, v]) => [k, { ltp: v.ltp, close: v.close, time: angelTime(v.exchTradeTime) ? v.exchTradeTime : angelTime(v.exchFeedTime) ? v.exchFeedTime : "no trade time (index)" }])); }
@@ -192,7 +196,7 @@ export async function angelApi(env, ctx, url) {
   if (!angelOn(env)) return fail(503, "Angel One is not set up.");
   try {
     if (op === "quote") { const syms = (url.searchParams.get("s") || "").toUpperCase().split(",").map((x) => x.trim()).filter((x) => SYM_OK.test(x)).slice(0, 50), q = await angelQuotes(env, ctx, syms);
-      return json({ at: Date.now(), quotes: Object.fromEntries(Object.entries(q).map(([k, v]) => [k, { ltp: v.ltp, open: v.open, high: v.high, low: v.low, prev: v.close, pct: v.percentChange, vol: v.tradeVolume, oi: v.opnInterest ?? null, buy: v.totBuyQuan ?? null, sell: v.totSellQuan ?? null, t: angelTime(v.exchTradeTime) ?? angelTime(v.exchFeedTime) ?? Math.floor(Date.now() / 1000) }])) }); }
+      return json({ at: Date.now(), quotes: Object.fromEntries(Object.entries(q).map(([k, v]) => [k, { ltp: v.ltp, open: v.open, high: v.high, low: v.low, prev: v.close, pct: v.percentChange, vol: v.tradeVolume, oi: v.opnInterest ?? null, buy: v.totBuyQuan ?? null, sell: v.totSellQuan ?? null, hi52: v["52WeekHigh"] > 0 ? v["52WeekHigh"] : null, lo52: v["52WeekLow"] > 0 ? v["52WeekLow"] : null, t: angelTime(v.exchTradeTime) ?? angelTime(v.exchFeedTime) ?? Math.floor(Date.now() / 1000) }])) }); }
     if (op === "candles") {                                 // intraday or daily candles for one share: ?s=SBIN&i=FIVE_MINUTE&days=5
       const sym = (url.searchParams.get("s") || "").toUpperCase().trim(), iv = url.searchParams.get("i") || "FIVE_MINUTE"; if (!SYM_OK.test(sym) || !ANGEL_INT[iv]) return fail(400, "Which share and interval?");
       const T = await angelTokens(env, ctx), tk = T && angelToken(T, sym); if (!tk) return fail(404, "No Angel One token for " + sym + ".");
@@ -306,7 +310,7 @@ export function overviewFrom(sym, data, full) {
   return out;
 }
 const marketHours = () => { const t = new Date(Date.now() + 330 * 60000), m = t.getUTCHours() * 60 + t.getUTCMinutes(); return t.getUTCDay() >= 1 && t.getUTCDay() <= 5 && m >= 540 && m <= 945; };
-async function overview(url, ctx) {
+async function overview(url, ctx, env) {
   const pick = (k) => [...new Set((url.searchParams.get(k) || "").toUpperCase().split(",").map((x) => x.trim()).filter((x) => SYM_OK.test(x)))];
   const list = pick("s").slice(0, 15), full = new Set(pick("full")), ttl = marketHours() ? 60 : 900;
   const cache = typeof caches !== "undefined" && caches.default;
@@ -319,6 +323,12 @@ async function overview(url, ctx) {
     if (cache && o.ok) { const put = cache.put(key, new Response(JSON.stringify(o), { headers: { "cache-control": `max-age=${ttl}` } })); ctx && ctx.waitUntil ? ctx.waitUntil(put) : await put; }
     return o;
   }));
+  // An index Yahoo has no answer for (Midcap 100 and Smallcap 100, most days) is filled from Angel One, in or out of market hours.
+  const miss = out.filter((o) => !o.ok && ANGEL_IX[o.sym]).map((o) => o.sym);
+  if (miss.length && angelOn(env)) { try { const A = await angelQuotes(env, ctx, miss), day = new Date(Date.now() + 19800000).toISOString().slice(0, 10);
+    for (let i = 0; i < out.length; i++) { const a = A[out[i].sym]; if (out[i].ok || !a || !(a.ltp > 0) || !(a.close > 0)) continue;
+      out[i] = { sym: out[i].sym, ok: true, d: day, price: a.ltp, prev: a.close, pts: a.ltp - a.close, chg: (a.ltp / a.close - 1) * 100, open: a.open > 0 ? a.open : null, high: a.high > 0 ? a.high : null, low: a.low > 0 ? a.low : null, pdh: null, pdl: null, w1: null, m1: null, ytd: null,
+        hi52: a["52WeekHigh"] > 0 ? a["52WeekHigh"] : null, lo52: a["52WeekLow"] > 0 ? a["52WeekLow"] : null, spark: [], angelOnly: true, live: true }; } } catch { /* the tile stays empty and the live tick tries again */ } }
   return json({ overview: out, at: Date.now() });
 }
 // Market mood index from Tickertape (public page), as the classic Home reads it; the last good reading is kept for a week.
@@ -701,6 +711,84 @@ async function sb(env, path, init = {}) {
   if (!r.ok) throw Object.assign(new Error(text.slice(0, 200) || "Storage error " + r.status), { status: r.status, body: text });
   return text ? JSON.parse(text) : null;
 }
+// ── Journal (Supabase): the model's paper trades followed on live prices, and snapshots of the F&O list through the day.
+// Written by a Cloudflare cron trigger (see "triggers" in wrangler.jsonc), read by the Journal tab. Paper only: nothing here can place an order.
+// Tables: model_trades, intraday_snaps (supabase_arka_journal.sql).
+const istNow = () => new Date(Date.now() + 19800000), istDayOf = (sec) => new Date(sec * 1000 + 19800000).toISOString().slice(0, 10);
+async function liveModel(env, ctx) {                        // the small file arka_model.py writes for this job; the full model file when it is not there yet
+  let t = await repoFile(env, ctx, "arka_data/model/live.json", 600);
+  if (t) { try { const d = JSON.parse(t); if (d && d.asof && d.rules) return d; } catch { /* fall through */ } }
+  t = await repoFile(env, ctx, "arka_data/model/model.json", 600); if (!t) return null;
+  let d; try { d = JSON.parse(t); } catch { return null; } if (!d || !d.books || !d.rules) return null;
+  const picks = []; for (const k of ["long", "short"]) { const by = Object.fromEntries((d.books[k].ranked || []).map((r) => [r.sym, r])); for (const x of d.books[k].picks || []) { const r = by[x]; if (r) picks.push({ sym: x, side: k, rank: r.rank, prob: r.prob, atr: r.atr }); } }
+  return { v: d.v, asof: d.asof, regime: d.market && d.market.regime, rules: { stop_atr: d.rules.stop_atr, target_atr: d.rules.target_atr, hold: d.rules.hold, cost: d.rules.cost }, picks, universe: (d.universe || []).map((u) => u.sym),
+    day: d.day ? { rules: d.day.rules, picks: (d.day.picks || []).map((x) => ({ sym: x.sym, rank: x.rank, atr: x.atr })) } : null };
+}
+const r2 = (v) => (v == null || !isFinite(v) ? null : Math.round(v * 100) / 100), r3 = (v) => (v == null || !isFinite(v) ? null : Math.round(v * 1000) / 1000);
+export async function journalStep(env, ctx) {               // opens the day's new model trades at the opening price and moves every open one along
+  const L = await liveModel(env, ctx); if (!L) return { ok: false, why: "no model file" };
+  const now = istNow(), today = now.toISOString().slice(0, 10), mins = now.getUTCHours() * 60 + now.getUTCMinutes(), R = L.rules, cost2 = 2 * (R.cost ?? 0.15);
+  const open = (await sb(env, "model_trades?status=eq.open&select=*&order=id")) || [], used = L.asof < today && mins >= 556 ? (await sb(env, "model_trades?signal_date=eq." + encodeURIComponent(L.asof) + "&select=symbol,side,kind,trade_date")) || [] : [];
+  // A signal is traded on the first session after it and never later: once any of its trades carries an earlier date, or it is more than five days old, nothing new opens from it.
+  const stale = !(L.asof < today && mins >= 556) || used.some((r) => r.trade_date < today) || (Date.parse(today) - Date.parse(L.asof)) / 864e5 > 5, has = new Set(used.map((r) => r.symbol + "|" + r.side + "|" + r.kind));
+  const fresh = stale ? [] : (L.picks || []).filter((x) => !has.has(x.sym + "|" + x.side + "|swing"));
+  const DR = (L.day && L.day.rules) || {}, dayNew = !stale && mins < 600 && L.day ? (L.day.picks || []).filter((x) => !has.has(x.sym + "|short|day")) : [];      // day trades open only in the first 45 minutes: later than that is another trade
+  const syms = [...new Set([...open.map((r) => r.symbol), ...fresh.map((x) => x.sym), ...dayNew.map((x) => x.sym)])].slice(0, 50); if (!syms.length) return { ok: true, open: 0, opened: 0, closed: 0 };
+  const Q = await angelQuotes(env, ctx, syms), live = (q) => { const t = q && (angelTime(q.exchTradeTime) ?? angelTime(q.exchFeedTime)); return !!t && istDayOf(t) === today && q.ltp > 0; };      // a price counts only when the share traded today
+  const add = [];
+  for (const x of fresh) { const q = Q[x.sym], sg = x.side === "long" ? 1 : -1; if (!live(q) || !(q.open > 0) || !(x.atr > 0) || open.some((r) => r.symbol === x.sym && r.side === x.side && r.kind !== "day")) continue;
+    add.push({ kind: "swing", signal_date: L.asof, trade_date: today, symbol: x.sym, side: x.side, model_v: L.v ?? null, rank: x.rank ?? null, prob: x.prob ?? null, regime: L.regime || null, atr: x.atr, entry: q.open, stop: r2(q.open - sg * R.stop_atr * x.atr), target: r2(q.open + sg * R.target_atr * x.atr),
+      hold: R.hold, days: 1, last_day: today, hi: q.high, lo: q.low, last_price: q.ltp, status: "open" }); }
+  for (const x of dayNew) { const q = Q[x.sym]; if (!live(q) || !(q.open > 0) || !(x.atr > 0)) continue;       // the day book: sold at the open, bought back at the close. Both prices are kept: the official open and what the market showed when this ran
+    add.push({ kind: "day", signal_date: L.asof, trade_date: today, symbol: x.sym, side: "short", model_v: L.v ?? null, rank: x.rank ?? null, regime: L.regime || null, atr: x.atr, entry: q.open, entry_live: q.ltp, entry_at: new Date().toISOString(),
+      stop: r2(q.open + (DR.stop_atr ?? 1) * x.atr), target: null, hold: 1, days: 1, last_day: today, hi: q.high, lo: q.low, last_price: q.ltp, status: "open" }); }
+  if (add.length) await sb(env, "model_trades?on_conflict=signal_date,symbol,side,kind", { method: "POST", headers: { prefer: "resolution=ignore-duplicates,return=minimal" }, body: JSON.stringify(add) });
+  let closed = 0, moved = 0;
+  for (const r of open) { const q = Q[r.symbol]; if (!live(q)) continue;                    // a holiday or a halted share changes nothing
+    const sg = r.side === "long" ? 1 : -1, first = r.trade_date === today, days = r.last_day === today ? r.days : r.days + 1, hi = Math.max(r.hi ?? q.high, q.high), lo = Math.min(r.lo ?? q.low, q.low);
+    const isDay = r.kind === "day", stop = sg > 0 ? q.low <= r.stop : q.high >= r.stop, tgt = r.target != null && (sg > 0 ? q.high >= r.target : q.low <= r.target), c2 = isDay ? (DR.cost ?? 0.16) : cost2; let exit = null, why = null;      // the same order as the backtest: a gap through the level exits at the open, and the stop is assumed before the target
+    if (isDay && !first) { exit = q.close > 0 ? q.close : q.ltp; why = "missed"; }           // a day trade the job could not close on its day: closed at that day's closing price
+    else if (stop) { exit = !first && q.open > 0 && (sg > 0 ? q.open <= r.stop : q.open >= r.stop) ? q.open : r.stop; why = "stop"; }
+    else if (tgt) { exit = !first && q.open > 0 && (sg > 0 ? q.open >= r.target : q.open <= r.target) ? q.open : r.target; why = "target"; }
+    else if (days >= (r.hold || R.hold) && mins >= 925) { exit = q.ltp; why = isDay ? "close" : "time"; }
+    const patch = { days, last_day: today, hi, lo, last_price: q.ltp, mfe_pct: r3((sg > 0 ? hi / r.entry - 1 : 1 - lo / r.entry) * 100), mae_pct: r3((sg > 0 ? lo / r.entry - 1 : 1 - hi / r.entry) * 100), updated_at: new Date().toISOString() };
+    if (exit) { const g = sg * (exit / r.entry - 1) * 100; Object.assign(patch, { status: "closed", exit_price: r2(exit), exit_date: today, exit_reason: why, gross_pct: r3(g), net_pct: r3(g - c2), net_live_pct: r.entry_live > 0 ? r3(sg * (exit / r.entry_live - 1) * 100 - c2) : null }); closed++; }
+    await sb(env, "model_trades?id=eq." + encodeURIComponent(r.id), { method: "PATCH", body: JSON.stringify(patch) }); moved++; }
+  if (mins >= 925) { try { await sb(env, "intraday_snaps?ts=lt." + new Date(Date.now() - 400 * 864e5).toISOString(), { method: "DELETE" }); } catch { /* cleaning up can wait */ } }
+  return { ok: true, open: open.length - closed + add.length, opened: add.length, closed, moved };
+}
+export async function snapStep(env, ctx, chunk) {           // one slice of 50 F&O stocks: price, running volume, the buy and sell queues and the best bid and offer
+  const L = await liveModel(env, ctx), U = (L && L.universe) || [], syms = U.slice(chunk * 50, chunk * 50 + 50); if (!syms.length) return { ok: true, n: 0 };
+  const Q = await angelQuotes(env, ctx, syms), today = istNow().toISOString().slice(0, 10), ts = new Date(Math.floor(Date.now() / 60000) * 60000).toISOString(), rows = [];
+  for (const [sym, q] of Object.entries(Q)) { const t = angelTime(q.exchTradeTime) ?? angelTime(q.exchFeedTime); if (!t || istDayOf(t) !== today || !(q.ltp > 0)) continue; const dp = q.depth || {}, b = (dp.buy || [])[0], a = (dp.sell || [])[0];
+    rows.push({ ts, symbol: sym, ltp: q.ltp, pct: q.percentChange ?? null, vol: q.tradeVolume ?? null, buy_q: q.totBuyQuan ?? null, sell_q: q.totSellQuan ?? null, bid: b && b.price > 0 ? b.price : null, ask: a && a.price > 0 ? a.price : null, open: q.open ?? null, high: q.high ?? null, low: q.low ?? null }); }
+  if (rows.length) await sb(env, "intraday_snaps?on_conflict=symbol,ts", { method: "POST", headers: { prefer: "resolution=ignore-duplicates,return=minimal" }, body: JSON.stringify(rows) });
+  return { ok: true, n: rows.length };
+}
+export async function cronTick(env, ctx, force) {           // every minute in market hours: a snapshot slice in the first minutes of each quarter hour, the journal three times in between
+  if (!angelOn(env) || !env.SUPABASE_URL || !env.SUPABASE_KEY) return { ok: false, why: "Angel One or Supabase is not set up" };
+  const now = istNow(), d = now.getUTCDay(), m = now.getUTCHours() * 60 + now.getUTCMinutes(), k = m % 15, out = { ok: true, at: now.toISOString().slice(0, 16).replace("T", " ") };
+  if (!force && (d === 0 || d === 6 || m < 556 || m > 931)) return { ...out, idle: true };
+  try { if (force === "all") { out.journal = await journalStep(env, ctx); out.snap = await snapStep(env, ctx, 0); } else if (k < 6) out.snap = await snapStep(env, ctx, k); else if (k === 7 || k === 10 || k === 13) out.journal = await journalStep(env, ctx); }
+  catch (e) { out.ok = false; out.err = String((e && e.message) || e).slice(0, 200); }
+  return out;
+}
+async function journalApi(env, ctx, url, me) {
+  const op = url.searchParams.get("op") || "list", setup = "Run supabase_arka_journal.sql in the Supabase SQL editor once, then add the cron trigger in wrangler.jsonc.";
+  if (op === "run") { if (me.role !== "admin") return fail(403, "Only the desk can run this."); return json(await cronTick(env, ctx, "all")); }
+  try {
+    const rows = (await sb(env, "model_trades?select=*&order=trade_date.desc,id.desc&limit=400")) || [];
+    let snaps = null; try { const last = await sb(env, "intraday_snaps?select=ts&order=ts.desc&limit=1"); snaps = { last: last && last[0] ? last[0].ts : null }; } catch { snaps = { last: null, missing: true }; }
+    const done = rows.filter((r) => r.status === "closed" && r.net_pct != null), side = (k) => { const v = done.filter((r) => (k === "day" ? r.kind === "day" : r.kind !== "day" && (!k || r.side === k))), w = v.filter((r) => r.net_pct > 0), sum = (a) => a.reduce((x, r) => x + r.net_pct, 0);
+      return { n: v.length, won: v.length ? (w.length / v.length) * 100 : null, avg: v.length ? sum(v) / v.length : null, total: sum(v), stop: v.filter((r) => r.exit_reason === "stop").length, target: v.filter((r) => r.exit_reason === "target").length, time: v.filter((r) => r.exit_reason === "time").length,
+        pf: sum(w) > 0 && v.length > w.length ? sum(w) / -sum(v.filter((r) => r.net_pct <= 0)) : null,
+        live: (() => { const z = v.filter((r) => r.net_live_pct != null); return z.length ? z.reduce((x, r) => x + r.net_live_pct, 0) / z.length : null; })(), slip: (() => { const z = v.filter((r) => r.entry_live > 0 && r.entry > 0); return z.length ? z.reduce((x, r) => x + (r.side === "short" ? 1 - r.entry_live / r.entry : r.entry_live / r.entry - 1) * 100, 0) / z.length : null; })() }; };
+    return json({ ready: true, rows, stats: { all: side(), long: side("long"), short: side("short"), day: side("day") }, open: rows.filter((r) => r.status === "open").length, snaps, admin: me.role === "admin" });
+  } catch (e) {
+    if (e.status === 503) return json({ ready: false, why: "Supabase is not connected.", setup });
+    return json({ ready: false, why: /does not exist|not find|PGRST205|42P01|404/.test(String(e.body || e.message)) ? "The journal tables are not in Supabase yet." : String(e.message).slice(0, 160), setup });
+  }
+}
 async function deskList(env, request, url, me) {            // the Arka desk list (table admin_watchlist): everyone reads, only the admin changes it
   try {
     if (request.method === "GET") {
@@ -901,6 +989,7 @@ async function signals(env, ctx) {
 async function deskFile(env, ctx, url) {
   const f = url.searchParams.get("f");
   if (f === "model") { const t = await repoFile(env, ctx, "arka_data/model/model.json"); return t == null ? json({}) : raw(t); }       // the Arka Model desk (arka_model.py)
+  if (f === "ilab") { const t = await repoFile(env, ctx, "lab.json", 1800, "intraday-data"); return t == null ? json({}) : raw(t); }       // intraday_lab.py results
   if (f === "mcharts") { const t = await repoFile(env, ctx, "arka_data/model/charts.json"); return t == null ? json({}) : raw(t); }
   if (f === "charts") { const t = await repoFile(env, ctx, "arka_data/signals/charts.json"); return t == null ? json({}) : raw(t); }
   if (f === "chain") { const t = await repoFile(env, ctx, "arka_data/fno/chain_latest.csv", 1800); return json({ rows: t == null ? [] : chainRows(t) }); }
@@ -1208,6 +1297,7 @@ async function arkaStore(env, ctx, request, url) {
 }
 
 export default {
+  async scheduled(event, env, ctx) { ctx.waitUntil(cronTick(env, ctx).catch(() => null)); },      // the cron trigger: snapshots and the paper-trade journal
   async fetch(request, env, ctx) {
     const url = new URL(request.url), p = url.pathname;
     if (!p.startsWith("/api/")) return env.ASSETS ? env.ASSETS.fetch(request) : fail(404, "Not found.");
@@ -1225,7 +1315,7 @@ export default {
       if (p === "/api/angel") return angelApi(env, ctx, url);
       if (p === "/api/stock") return stock(url, ctx);
       if (p === "/api/history") return history(url, ctx);
-      if (p === "/api/overview") return overview(url, ctx);
+      if (p === "/api/overview") return overview(url, ctx, env);
       if (p === "/api/mmi") return mmi(ctx);
       if (p === "/api/gift") return gift(ctx);
       if (p === "/api/feed") return feed(url, ctx);
@@ -1244,6 +1334,7 @@ export default {
       if (p === "/api/cal") return calMany(url, ctx);
       if (p === "/api/signals") return signals(env, ctx);
       if (p === "/api/desk") return deskFile(env, ctx, url);
+      if (p === "/api/journal") return journalApi(env, ctx, url, me);
       if (p === "/api/deals") return deals(env, ctx);
       if (p === "/api/brief") return brief(env, ctx, url, request, me);
       if (p === "/api/market") return market(env, ctx, url);
