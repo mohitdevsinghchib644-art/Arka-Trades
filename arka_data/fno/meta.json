@@ -1,14 +1,14 @@
 {
- "chain_date": "2026-11-26",
- "ban_for": "27-NOV-2026",
+ "chain_date": "2026-11-27",
+ "ban_for": "30-NOV-2026",
  "ban": [
   "APLAPOLLO",
   "MANAPPURAM"
  ],
  "v": 1,
- "asof": "2026-11-26",
+ "asof": "2026-11-27",
  "first": "2016-11-07",
- "days": 2482,
- "participant_days": 2236,
- "built": "2026-11-27T06:38:23+05:30"
+ "days": 2483,
+ "participant_days": 2237,
+ "built": "2026-11-28T04:20:24+05:30"
 }
