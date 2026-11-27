@@ -9,8 +9,9 @@ What this script may call, and nothing else:
     2. getCandleData            historical candles
 It never calls an order, GTT, funds, holdings or position endpoint, and never prints or stores the session.
 
-    python intraday_data.py --out DIR              the last 7 days (the daily run)
-    python intraday_data.py --out DIR --days 730   go back two years (the first run; about 20 minutes)
+    python intraday_data.py --out DIR              two years back. Windows that are stored already are skipped, so the first
+                                                   run takes two to three hours and a daily run a few minutes. A run that is
+                                                   cut short (time limit, Angel One asking for a pause) continues next time.
 
 Needs four environment values (GitHub Actions secrets): ANGEL_API_KEY, ANGEL_CLIENT_CODE, ANGEL_PIN, ANGEL_TOTP_SECRET.
 """
@@ -20,7 +21,8 @@ from pathlib import Path
 
 BASE = os.environ.get("ARKA_ANGEL_BASE", "https://apiconnect.angelone.in")
 MASTER = os.environ.get("ARKA_ANGEL_MASTER", "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json")
-INTERVAL, WINDOW, GAP = "FIVE_MINUTE", 90, float(os.environ.get("ARKA_ANGEL_GAP", "0.4"))    # Angel One allows 100 days a call for this interval and 3 calls a second
+INTERVAL, WINDOW, GAP = "FIVE_MINUTE", 90, float(os.environ.get("ARKA_ANGEL_GAP", "0.5"))
+WAIT = float(os.environ.get("ARKA_ANGEL_WAIT", "1"))        # 0 in tests: no real pauses    # Angel One allows 100 days a call for this interval and 3 calls a second
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 INDICES = {"NIFTY": ("NIFTY", "NIFTY50"), "BANKNIFTY": ("BANKNIFTY", "NIFTYBANK")}
 ALLOWED = ("/rest/auth/angelbroking/user/v1/loginByPassword", "/rest/secure/angelbroking/historical/v1/getCandleData")
@@ -102,21 +104,34 @@ def fno_symbols(root: Path) -> list[str]:
     return sorted(out)
 
 
-def candles(jwt: str, key: str, token: str, a: dt.datetime, b: dt.datetime) -> list | None:
-    """One window of candles. None means the call failed for good; [] means there were none."""
-    body = {"exchange": "NSE", "symboltoken": str(token), "interval": INTERVAL, "fromdate": a.strftime("%Y-%m-%d %H:%M"), "todate": b.strftime("%Y-%m-%d %H:%M")}
-    for attempt in range(5):
-        time.sleep(GAP)
-        d = call(ALLOWED[1], body, key, jwt)
-        if d.get("status"):
-            return d.get("data") or []
-        msg = str(d.get("message") or d.get("errorcode") or "")
-        if "rate" in msg.lower() or "HTTP4" in str(d.get("errorcode")) or "HTTP5" in str(d.get("errorcode")) or not msg:
-            time.sleep(1.5 * (attempt + 1)); continue                       # too fast or a passing error: wait and try again
-        if "no data" in msg.lower():
-            return []
-        print("    refused:", msg[:100]); return None
-    return None
+class Session:
+    """The login, the pace of the calls and the clock. Angel One answers "Too many requests" when it wants a pause: the pace then
+    slows down and the same call is tried again, so a busy minute never costs a stock its history."""
+    def __init__(self, env: dict, minutes: float):
+        self.env, self.jwt, self.pace, self.clean, self.waits, self.t0, self.budget = env, login(env), GAP, 0, 0, time.time(), minutes * 60
+
+    def out_of_time(self) -> bool:
+        return time.time() - self.t0 > self.budget
+
+    def candles(self, token: str, a: dt.datetime, b: dt.datetime) -> list | None:
+        """One window of candles. None means the call failed for good; [] means there were none."""
+        body = {"exchange": "NSE", "symboltoken": str(token), "interval": INTERVAL, "fromdate": a.strftime("%Y-%m-%d %H:%M"), "todate": b.strftime("%Y-%m-%d %H:%M")}; relogged = False
+        for attempt in range(8):
+            time.sleep(self.pace * WAIT)
+            d = call(ALLOWED[1], body, self.env["ANGEL_API_KEY"], self.jwt)
+            if d.get("status"):
+                self.clean += 1
+                if self.clean % 40 == 0: self.pace = max(GAP, self.pace * 0.8)          # things are calm: speed up again, slowly
+                return d.get("data") or []
+            msg, code = str(d.get("message") or ""), str(d.get("errorcode") or ""); low = msg.lower()
+            if "no data" in low: return []
+            if ("token" in low or "session" in low or code in ("AG8001", "AG8002", "AB8050", "AB8051")) and not relogged:      # the session ran out: log in again once
+                try: self.jwt = login(self.env); relogged = True; continue
+                except SystemExit: return None
+            if any(w in low for w in ("too many", "rate", "exceed", "limit", "access denied", "try again", "timeout", "timed out")) or code.startswith("HTTP") or not msg:
+                self.pace = min(8.0, max(1.0, self.pace * 2)); self.clean = 0; wait = min(90, 6 * 2 ** attempt); self.waits += 1; time.sleep(wait * WAIT); continue      # asked to slow down, or a passing fault
+            print("    refused:", msg[:100]); return None
+        print("    still refused after eight tries (the last answer was a request to slow down)"); return None
 
 
 def load_month(out: Path, m: str) -> dict:
@@ -156,44 +171,59 @@ def summary(out: Path) -> dict:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(); ap.add_argument("--out", required=True); ap.add_argument("--days", type=int, default=7); ap.add_argument("--root", default=".")
+    ap = argparse.ArgumentParser(); ap.add_argument("--out", required=True); ap.add_argument("--days", type=int, default=730); ap.add_argument("--root", default="."); ap.add_argument("--minutes", type=float, default=300)
     ap.add_argument("--only", default="", help="comma-separated symbols, for a quick test"); a = ap.parse_args()
     env = {k: os.environ.get(k, "").strip() for k in ("ANGEL_API_KEY", "ANGEL_CLIENT_CODE", "ANGEL_PIN", "ANGEL_TOTP_SECRET")}
     missing = [k for k, v in env.items() if not v]
     if missing:
         raise SystemExit("Missing in GitHub Actions secrets: " + ", ".join(missing))
-    out = Path(a.out); days = max(1, min(2000, a.days)); now = dt.datetime.now(IST).replace(tzinfo=None, second=0, microsecond=0)
+    out = Path(a.out); days = max(1, min(2000, a.days)); now = dt.datetime.now(IST).replace(tzinfo=None, second=0, microsecond=0); fmt = "%Y-%m-%d %H:%M"
     S, IX = tokens(); syms = [x for x in (a.only.upper().split(",") if a.only else fno_symbols(Path(a.root))) if x]
     want = [(s, S[s]) for s in syms if s in S] + ([] if a.only else [(n, next((IX[k] for k in keys if k in IX), None)) for n, keys in INDICES.items()])
     want = [(s, t) for s, t in want if t]; skipped = [s for s in syms if s not in S]
-    print(f"{len(want)} symbols, {days} days back, five-minute candles" + (f" · no Angel One token for: {', '.join(skipped[:20])}" if skipped else ""))
-    jwt = login(env); print("Logged in.")
+    prev = {}
+    try: prev = json.loads((out / "m5" / "index.json").read_text())
+    except Exception: pass
+    req = {k: list(v) for k, v in (prev.get("req") or {}).items()}      # for each symbol, the span of time already asked for (and stored): [from, to]
+    P = lambda x: dt.datetime.strptime(x, fmt)
+    print(f"{len(want)} symbols, {days} days back, five-minute candles · {len(req)} already have candles stored" + (f" · no Angel One token for: {', '.join(skipped[:20])}" if skipped else ""))
+    ses = Session(env, a.minutes); print("Logged in.")
     # Newest window first, every stock inside it: only about four months are ever held in memory, however far back the run goes.
-    added, failed, done, end, floor = 0, set(), set(), now, now - dt.timedelta(days=days)
-    while end > floor and len(done) + len(failed) < len(want):
+    # A window a stock already has is not asked for again, so a run that was cut short simply continues where it stopped.
+    added, failed, end, floor, stopped, asked, skipped_w = 0, set(), now, now - dt.timedelta(days=days), False, 0, 0
+    while end > floor and not stopped:
         start = max(end - dt.timedelta(days=WINDOW), floor); M, touched, got = {}, set(), 0
         for sym, tk in want:
-            if sym in done or sym in failed:
-                continue
-            rows = candles(jwt, env["ANGEL_API_KEY"], tk, start, end)
+            if sym in failed: continue
+            r = req.get(sym); lo, hi = start, end
+            if r:
+                rf, rt = P(r[0]), P(r[1])
+                if rf <= start and rt >= end: skipped_w += 1; continue                # this window is stored
+                if rf <= start < rt: lo = max(start, rt - dt.timedelta(days=1))       # only what came after the last stored candle
+            if ses.out_of_time(): stopped = True; break
+            rows = ses.candles(tk, lo, hi); asked += 1
             if rows is None:
-                failed.add(sym); continue
-            if not rows and (now - end).days >= WINDOW:                     # nothing in a window well in the past: Angel One has nothing older for this stock
-                done.add(sym); continue
-            for r in rows:
-                t = str(r[0])[:16].replace("T", " "); m = t[:7]; k = sym + "," + t; v = ",".join(f"{float(x):g}" for x in r[1:5]) + "," + str(int(float(r[5] or 0)))
+                failed.add(sym); continue                    # left for the next run, which continues from its last stored window
+            if not rows and (now - end).days >= WINDOW:      # nothing in a window well in the past: Angel One has nothing older for this stock
+                req[sym] = ["2000-01-01 00:00", max(r[1], hi.strftime(fmt)) if r else hi.strftime(fmt)]; continue
+            for row in rows:
+                t = str(row[0])[:16].replace("T", " "); m = t[:7]; k = sym + "," + t; v = ",".join(f"{float(x):g}" for x in row[1:5]) + "," + str(int(float(row[5] or 0)))
                 if m not in M:
                     M[m] = load_month(out, m)
                 if M[m].get(k) != v:
                     M[m][k] = v; touched.add(m); got += 1
+            req[sym] = [min(r[0], lo.strftime(fmt)) if r else lo.strftime(fmt), max(r[1], hi.strftime(fmt)) if r else hi.strftime(fmt)]
         for m in sorted(touched):
             save_month(out, m, M[m])
-        added += got; print(f"  {start:%d %b %Y} to {end:%d %b %Y}: {got:,} candles new or changed · {len(done)} stocks have no older history · {len(failed)} failed")
+        added += got; print(f"  {start:%d %b %Y} to {end:%d %b %Y}: {got:,} candles new or changed · {len(failed)} stocks left for the next run · pace {ses.pace:.1f}s a call, {ses.waits} pauses, {(time.time() - ses.t0) / 60:.0f} min", flush=True)
+        (out / "m5").mkdir(parents=True, exist_ok=True); (out / "m5" / "index.json").write_text(json.dumps({**prev, "req": req}))      # progress is written after every window
         end = start
-    info = {"built": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%MZ"), "interval": INTERVAL, **summary(out), "added": added, "failed": sorted(failed), "no_token": skipped}
-    (out / "m5").mkdir(parents=True, exist_ok=True); (out / "m5" / "index.json").write_text(json.dumps(info, indent=1))
-    print(f"Done: {sum(info['rows'].values()):,} candles stored, {info['first']} to {info['last']}, {len(failed)} symbols failed" + (": " + ", ".join(sorted(failed)[:15]) if failed else ""))
-    return 0 if len(failed) < max(5, len(want) // 4) else 1
+    summ = summary(out); need = [x for x, _ in want if x not in req or P(req[x][0]) > floor]
+    info = {"built": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%MZ"), "interval": INTERVAL, **summ, "added": added, "failed": sorted(failed), "no_token": skipped, "req": req, "complete": not need, "to_do": len(need), "calls": asked}
+    (out / "m5").mkdir(parents=True, exist_ok=True); (out / "m5" / "index.json").write_text(json.dumps(info))
+    total = sum(summ["rows"].values())
+    print(f"Done: {total:,} candles stored, {summ['first']} to {summ['last']} · {asked} calls, {skipped_w} windows already stored · " + ("the history is complete." if not need else f"{len(need)} stocks still need older history: run it again and it continues from here." + (" (stopped at the time limit)" if stopped else "")))
+    return 0 if total else 1
 
 
 if __name__ == "__main__":
