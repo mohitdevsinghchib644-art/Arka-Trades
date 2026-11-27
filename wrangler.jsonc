@@ -1,5 +1,5 @@
 {
-  // Arka Trades · new app (stage 1). Cloudflare reads this file when the repo is connected: it serves the folder "web"
+  // Arka Trades · new app. Cloudflare reads this file when the repo is connected: it serves the folder "web"
   // as the site and runs worker/index.js for every address that starts with /api/.
   "name": "arka-trades",
   "main": "./worker/index.js",
@@ -9,5 +9,10 @@
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/api/*"]
+  },
+  // Every minute from 8:30 am to 4:29 pm IST, Monday to Friday. The job itself only works between 9:16 am and 3:31 pm:
+  // it saves snapshots of the F&O stocks and moves the paper-trade journal along (Supabase). It never places an order.
+  "triggers": {
+    "crons": ["* 3-10 * * 1-5"]
   }
 }
