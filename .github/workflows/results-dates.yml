@@ -1,0 +1,47 @@
+# Arka Trades · Results dates
+# Reads from BSE's public announcements when each F&O company published its quarterly results and keeps the list in
+# arka_data/results/dates.csv. The model needs this history before it can test anything around results.
+# Public data only: no login and no secret.
+#
+# First time: Actions tab -> "Results dates" -> "Run workflow". It goes back to 2016 and takes 30 to 60 minutes.
+# After that it runs by itself every Saturday and adds the new ones.
+name: Results dates
+
+on:
+  schedule:
+    - cron: "30 3 * * 6"          # Saturday 9:00 am IST
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: results-dates
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Read the results dates
+        run: python results_dates.py
+
+      - name: Save to the repository
+        run: |
+          git config user.name "arka-data-bot"
+          git config user.email "arka-data-bot@users.noreply.github.com"
+          git add arka_data/results || true
+          if git diff --cached --quiet; then
+            echo "Nothing new to save."
+            exit 0
+          fi
+          git commit -m "Results dates $(date -u +%Y-%m-%d)"
+          git pull --rebase --autostash origin "$GITHUB_REF_NAME" || true
+          git push
