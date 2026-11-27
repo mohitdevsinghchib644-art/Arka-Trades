@@ -1,0 +1,74 @@
+# Arka Trades · Intraday data
+# Collects five-minute candles for every F&O stock, NIFTY and BANK NIFTY from Angel One and keeps them on the
+# "intraday-data" branch, one file a month (m5/YYYY-MM.csv.gz). This is the history intraday rules are tested on.
+#
+# It only logs in and reads candles. It cannot place, change or cancel an order: the script refuses any other address.
+#
+# Needs four repository secrets (Settings -> Secrets and variables -> Actions -> New repository secret), with the same
+# names and values as in Cloudflare:  ANGEL_API_KEY  ANGEL_CLIENT_CODE  ANGEL_PIN  ANGEL_TOTP_SECRET
+#
+# First time: Actions tab -> "Intraday data" -> "Run workflow" -> put 730 in "Days to go back" -> Run. About 20 to 40 minutes.
+# After that it runs by itself at about 4:10 pm IST, Monday to Friday, and adds the day.
+name: Intraday data
+
+on:
+  schedule:
+    - cron: "40 10 * * 1-5"       # 16:10 IST, after the close
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Days to go back (7 for a normal day, 730 for the first run)"
+        default: "7"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: intraday-data
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Last published files
+        run: |
+          echo "OUT=$RUNNER_TEMP/intraday" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/intraday"
+          if git fetch --quiet --depth 1 origin intraday-data; then git archive FETCH_HEAD | tar -x -C "$RUNNER_TEMP/intraday"; fi
+          ls -la "$RUNNER_TEMP/intraday" "$RUNNER_TEMP/intraday/m5" 2>/dev/null | tail -40
+
+      - name: Collect candles
+        env:
+          ANGEL_API_KEY: ${{ secrets.ANGEL_API_KEY }}
+          ANGEL_CLIENT_CODE: ${{ secrets.ANGEL_CLIENT_CODE }}
+          ANGEL_PIN: ${{ secrets.ANGEL_PIN }}
+          ANGEL_TOTP_SECRET: ${{ secrets.ANGEL_TOTP_SECRET }}
+          DAYS: ${{ github.event.inputs.days || '7' }}
+        run: python intraday_data.py --out "$OUT" --days "${DAYS//[^0-9]/}"
+
+      - name: Intraday lab (tests the ideas on the candles)
+        continue-on-error: true
+        run: |
+          pip install --quiet "pandas>=2,<4" "numpy>=1.26"
+          python intraday_lab.py --data "$OUT" --picks arka_data/model/day_picks.csv --out "$OUT/lab.json"
+
+      - name: Publish on the intraday-data branch
+        run: |
+          cd "$OUT"
+          test -f m5/index.json
+          rm -rf .git
+          git init --quiet -b intraday-data
+          git config user.name "arka-data-bot"
+          git config user.email "arka-data-bot@users.noreply.github.com"
+          git add -A
+          git commit --quiet -m "Intraday data $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push --quiet --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" intraday-data
+          cat m5/index.json
