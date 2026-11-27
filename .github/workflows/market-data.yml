@@ -68,6 +68,10 @@ jobs:
         continue-on-error: true
         run: python market_export.py delivery --out "$OUT"
 
+      - name: Angel One symbol list
+        continue-on-error: true
+        run: python market_export.py tokens --out "$OUT"
+
       - name: Money flow
         continue-on-error: true
         run: python market_export.py flow --out "$OUT"
