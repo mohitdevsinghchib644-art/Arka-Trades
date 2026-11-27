@@ -1,9 +1,10 @@
 # Arka Trades · Results dates
-# Reads from BSE's public announcements when each F&O company published its quarterly results and keeps the list in
-# arka_data/results/dates.csv. The model needs this history before it can test anything around results.
-# Public data only: no login and no secret.
+# Reads from Yahoo Finance when each F&O company published its quarterly results (and the surprise against what analysts
+# expected, where Yahoo has it) and keeps the list in arka_data/results/dates.csv. The model needs this history before it
+# can test anything around results. Public data only: no login and no secret.
+# (BSE's own list was tried first; BSE refuses calls from GitHub's servers.)
 #
-# First time: Actions tab -> "Results dates" -> "Run workflow". It goes back to 2016 and takes 30 to 60 minutes.
+# First time: Actions tab -> "Results dates" -> "Run workflow". About 10 minutes.
 # After that it runs by itself every Saturday and adds the new ones.
 name: Results dates
 
@@ -22,13 +23,16 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - name: Install
+        run: pip install --quiet yfinance "pandas>=2,<4" lxml html5lib beautifulsoup4 || echo "yfinance could not be installed; Yahoo is asked directly instead"
 
       - name: Read the results dates
         run: python results_dates.py
