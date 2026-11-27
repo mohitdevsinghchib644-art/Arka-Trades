@@ -1,4 +1,4 @@
-// Arka Trades · new app (stage 29): Home, Watchlist, Portfolio, the stock page with Research, Signals, Screener, Backtest lab, Arka AI, Money flow, News, Regime, Daily brief, Account, More (world markets live on Home). Plain JavaScript, no build step.
+// Arka Trades · new app (stage 31): Home, Watchlist, Portfolio, the stock page with Research, Signals, Screener, Backtest lab, Arka AI, Money flow, News, Regime, Daily brief, Account, More (world markets live on Home). Plain JavaScript, no build step.
 import * as PFV from "./portfolio.js";
 import * as PFM from "./pf.js";
 import * as WL from "./watchlist.js";
@@ -196,7 +196,7 @@ function renderShell() {
     <div id="msearch"></div><main id="main"></main>
     <nav class="nav"><a class="brand only-d" href="#/home"><img src="/icon-180.png" alt="">ARKA <i>TRADES</i></a>
       ${TABS.map(([k, n, d, mob]) => `<a href="#/${k}" data-tab="${k}"${mob ? "" : ' class="only-d"'}>${icon(d)}<span>${n}</span></a>`).join("")}
-      <div class="who">Signed in as <b>${esc(AC.displayName())}</b><br>New app · stage 29</div></nav></div>`;
+      <div class="who">Signed in as <b>${esc(AC.displayName())}</b><br>New app · stage 31</div></nav></div>`;
 }
 function paint() {
   const main = $("#main"); if (!main || !S.me) return;
