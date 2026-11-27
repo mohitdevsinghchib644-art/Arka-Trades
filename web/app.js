@@ -1,4 +1,4 @@
-// Arka Trades · new app (stage 25): Home, Watchlist, Portfolio, the stock page with Research, Signals, Screener, Backtest lab, Arka AI, Money flow, News, Regime, Daily brief, Account, More (world markets live on Home). Plain JavaScript, no build step.
+// Arka Trades · new app (stage 26): Home, Watchlist, Portfolio, the stock page with Research, Signals, Screener, Backtest lab, Arka AI, Money flow, News, Regime, Daily brief, Account, More (world markets live on Home). Plain JavaScript, no build step.
 import * as PFV from "./portfolio.js";
 import * as PFM from "./pf.js";
 import * as WL from "./watchlist.js";
@@ -195,7 +195,7 @@ function renderShell() {
     <div id="msearch"></div><main id="main"></main>
     <nav class="nav"><a class="brand only-d" href="#/home"><img src="/icon-180.png" alt="">ARKA <i>TRADES</i></a>
       ${TABS.map(([k, n, d, mob]) => `<a href="#/${k}" data-tab="${k}"${mob ? "" : ' class="only-d"'}>${icon(d)}<span>${n}</span></a>`).join("")}
-      <div class="who">Signed in as <b>${esc(AC.displayName())}</b><br>New app · stage 25</div></nav></div>`;
+      <div class="who">Signed in as <b>${esc(AC.displayName())}</b><br>New app · stage 26</div></nav></div>`;
 }
 function paint() {
   const main = $("#main"); if (!main || !S.me) return;
@@ -492,6 +492,26 @@ document.addEventListener("click", async (e) => {
 window.addEventListener("hashchange", route);
 window.addEventListener("scroll", () => { if (S.tab === "home") HM.spy(); }, { passive: true });
 document.addEventListener("visibilitychange", () => { if (!document.hidden && S.me) refresh(); });
+// Live prices from Angel One, every 5 seconds while the market is open: only the price fields are replaced, nothing else is refetched.
+let liveBusy = false;
+async function liveTick() {
+  if (!S.me || !S.live || liveBusy || document.hidden || !marketOpen()) return;
+  const el = document.activeElement; if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return;      // do not repaint under someone typing
+  const ov = S.tab === "home" ? HM.allTickers().filter((t) => /^\^(NSE|CNX|CRS|INDIAVIX|NSMIDCP)|^NIFTY_/.test(t)) : [];
+  const syms = [...new Set([...pageSymbols(), ...ov])].filter((x) => x && !/=|-USD$/.test(x)).slice(0, 150); if (!syms.length) return;
+  liveBusy = true; let hit = 0;
+  try {
+    for (let i = 0; i < syms.length; i += 50) {
+      const d = await api("/api/angel?op=quote&s=" + encodeURIComponent(syms.slice(i, i + 50).join(",")));
+      for (const [k, v] of Object.entries(d.quotes || {})) { if (!(v.ltp > 0)) continue; hit++;
+        const q = S.q[k]; if (q && q.ok) { const prev = v.prev > 0 ? v.prev : q.prev; Object.assign(q, { price: v.ltp, prev, chg: prev ? v.ltp - prev : q.chg, pct: prev ? (v.ltp / prev - 1) * 100 : q.pct, high: v.high > 0 ? v.high : q.high, low: v.low > 0 ? v.low : q.low, open: v.open > 0 ? v.open : q.open, vol: v.vol ?? q.vol, t: v.t, live: true }); S.at[k] = Date.now(); }
+        const o = S.hm.ov[k]; if (o && o.ok) { const prev = v.prev > 0 ? v.prev : o.prev; Object.assign(o, { price: v.ltp, prev, pts: v.ltp - prev, chg: prev ? (v.ltp / prev - 1) * 100 : o.chg, high: v.high > 0 ? v.high : o.high, low: v.low > 0 ? v.low : o.low, open: v.open > 0 ? v.open : o.open, live: true }); } }
+    }
+    if (hit) { S.qv++; paint(); }
+  } catch { /* the 30-second refresh still runs */ }
+  liveBusy = false;
+}
+setInterval(liveTick, 5000);
 setInterval(() => { if (S.me && !document.hidden && marketOpen() && !(S.tab === "watchlist" && !S.wl.auto)) refresh(); if (S.me && !document.hidden && S.tab === "watchlist") paint(); if (S.me && !document.hidden && (S.tab === "news" || ((S.tab === "home" || S.tab === "s" || S.tab === "watchlist") && innerWidth >= 1280 && railPref()))) { NW.loadNews(); paint(); } }, 30000);
 let rsTimer = 0, lastW = innerWidth;
 window.addEventListener("resize", () => { clearTimeout(rsTimer); rsTimer = setTimeout(() => { if (S.me && (innerWidth >= 1280) !== (lastW >= 1280) || (innerWidth >= 900) !== (lastW >= 900)) paint(); lastW = innerWidth; }, 200); });
