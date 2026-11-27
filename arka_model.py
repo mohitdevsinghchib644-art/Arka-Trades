@@ -52,7 +52,7 @@ STOP_K, TGT_K, HOLD, COST = 1.5, 2.5, 5, 0.0015
 FIRST, UNSEEN = "2019-01-01", "2025-01-01"          # first scored day · start of the period no choice was made on
 STEP, PURGE, SEEDS = 63, 6, (7, 11)
 FORWARD_DAYS = 60                                     # sessions of signals logged before the open that a book needs before it can be approved
-MAX_TRAIN, SECTOR_CAP, TRIALS = 220_000, 3, 40
+MAX_TRAIN, SECTOR_CAP, TRIALS = 220_000, 3, 120
 BLOCK = {"long": (), "short": ("High volatility", "Strong bearish")}      # regimes in which a book takes no new trade
 VOL_SIZE = False                                      # size each slot by the stock's volatility (calmer stock, bigger slot; between half and one and a half slots)
 DEF_NEW = {"long": 0, "short": 1}                     # new trades allowed on a day that book's gauge is defensive
@@ -349,6 +349,37 @@ def forward_days():
         return 0
 
 
+DAY_N, DAY_COST, DAY_STOP = 10, 0.0016, 1.0       # the day book: names a day, cost of one round trip (sell and buy back), intraday stop in ATRs above the open
+
+
+def day_book(D, P, days, t0, tu):
+    """The day book. Research on the 10 years showed where the short model's edge sits: its picks fall between the open and the close and
+    rise again overnight ("tug of war", Lou, Polk and Skouras 2019). So this book sells the DAY_N best short ranks at the next open and buys
+    them back at that day's close: no position is held overnight. Every day, no gauge, no regime rule. Returns the record and the history of picks."""
+    pidx = P["C"].index.to_numpy(); pos = pd.Series(np.arange(len(pidx)), index=pidx); n = len(pidx); pp = pos.reindex(D.date.to_numpy()).to_numpy(); nx = {k: np.full(len(D), np.nan) for k in "OHLC"}
+    for sym, idx in D.groupby("sym").indices.items():
+        j = pp[idx].astype(int) + 1; ok = j < n; j = np.minimum(j, n - 1)
+        for k in "OHLC": nx[k][idx] = np.where(ok, P[k][sym].to_numpy(float)[j], np.nan)
+    S = pd.DataFrame({"t": D.t.to_numpy(), "sym": D.sym.to_numpy(), "sc": D.score_s.to_numpy(), "atr": D.atr.to_numpy(), "o": nx["O"], "h": nx["H"], "l": nx["L"], "c": nx["C"]}); S = S[(S.t >= t0) & S.sc.notna()]
+    S["rk"] = S.groupby("t").sc.rank(ascending=False, method="first"); hist = S[S.rk <= 2 * DAY_N]; T = S[(S.rk <= DAY_N) & (S.o > 0) & (S.c > 0)].copy()
+    T["gross"] = -(T.c / T.o - 1); hit = T.h >= T.o + DAY_STOP * T.atr; T["r"] = np.where(hit, -DAY_STOP * T.atr / T.o, T.gross); span = np.arange(t0 + 1, len(days))
+    def daily(cost, col="r", frame=T):
+        g = (frame[col] - cost).groupby(frame.t).sum() / DAY_N; g.index = g.index + 1; return g.reindex(span).fillna(0).to_numpy()
+    x = daily(DAY_COST); a = span < tu; curve = np.concatenate([[1.0], np.cumprod(1 + x)]); cut = int(a.sum()) + 1
+    part = lambda v: {"days": int(len(v)), "won": f_((v > 0).mean() * 100, 0), "avg": f_(v.mean() * 100, 3)} if len(v) else None
+    R = S[S.o.notna() & S.c.notna()].copy(); R["rk2"] = R.groupby("t").sc.transform(lambda v: np.random.default_rng(len(v) + int(v.index[0])).permutation(len(v)) + 1); R = R[R.rk2 <= DAY_N]; R["r"] = -(R.c / R.o - 1); xr = daily(DAY_COST, "r", R)
+    eq = lambda v: np.concatenate([[1.0], np.cumprod(1 + v)]); yr = pd.to_datetime(days[span]).year; nn = len(curve); step = max(1, nn // 300); pick = list(range(0, nn, step)); pick = pick if pick[-1] == nn - 1 else pick + [nn - 1]
+    out = {"rules": {"n": DAY_N, "cost": DAY_COST * 100, "stop_atr": DAY_STOP}, "record": {"design": cstats(curve[:cut]), "unseen": cstats(curve[cut - 1:]) if (~a).sum() > 20 else None, "all": cstats(curve)},
+           "daily": {"design": part(x[a]), "unseen": part(x[~a])}, "gross": {"design": f_(T[T.t < tu - 1].gross.mean() * 100, 3), "unseen": f_(T[T.t >= tu - 1].gross.mean() * 100, 3)}, "stopped": f_(hit.mean() * 100, 0),
+           "costs": [{"cost": c * 100, "design": cstats(eq(daily(c)[a]))["cagr"], "unseen": cstats(eq(daily(c)[~a]))["cagr"] if (~a).sum() > 20 else None} for c in (0.0010, 0.0016, 0.0020, 0.0030, 0.0040)],
+           "random": {"design": cstats(eq(xr[a]))["cagr"], "unseen": cstats(eq(xr[~a]))["cagr"] if (~a).sum() > 20 else None},
+           "ranks": [{"from": lo, "to": hi, "design": f_(-(v[v.t < tu - 1].c / v[v.t < tu - 1].o - 1).mean() * 100, 3), "unseen": f_(-(v[v.t >= tu - 1].c / v[v.t >= tu - 1].o - 1).mean() * 100, 3)} for lo, hi in ((1, 5), (6, 10), (11, 20), (21, 40), (41, 80), (81, 999)) for v in [S[(S.rk >= lo) & (S.rk <= hi) & (S.o > 0)]]],
+           "years": [{"year": int(y), "unseen": str(y) >= UNSEEN[:4], "ret": f_((np.prod(1 + x[yr == y]) - 1) * 100, 1), "maxdd": f_(float((eq(x[yr == y]) / np.maximum.accumulate(eq(x[yr == y])) - 1).min()) * 100, 1), "won": f_((x[yr == y] > 0).mean() * 100, 0)} for y in sorted(set(yr))],
+           "curve": {"d": [str(days[t0 + i])[:10] for i in pick], "model": [round(float(curve[i]) * 100, 2) for i in pick], "random": [round(float(eq(xr)[i]) * 100, 2) for i in pick]}}
+    hist = hist.assign(date=[str(days[t])[:10] for t in hist.t], rank=hist.rk.astype(int))[["date", "sym", "rank"]].sort_values(["date", "rank"])
+    return out, hist
+
+
 def build(P, say=print):
     global CM
     t_start = time.time(); cache = os.environ.get("ARKA_CACHE")
@@ -449,6 +480,14 @@ def build(P, say=print):
     for r in L["ranked"][:10]: dec.setdefault(r["sym"], "WATCH")
     for r in Sh["ranked"][:10]: dec.setdefault(r["sym"], "WATCH SHORT")
     for r in L["avoid"]: dec.setdefault(r["sym"], "AVOID")
+    # every stock scored tonight, for the live desk: yesterday's levels, usual volume and where each model ranks it
+    rkl = {r.sym: i + 1 for i, r in enumerate(T.sort_values("score", ascending=False).itertuples())}; rks = {r.sym: i + 1 for i, r in enumerate(T.sort_values("score_s", ascending=False).itertuples())}
+    out["universe"] = [{"sym": r.sym, "c": f_(r.c), "atr": f_(r.atr), "adv": f_(math.exp(r.turn) / r.c, 0) if r.turn == r.turn and r.c > 0 else None, "sec": SECTOR.get(r.sym, ""), "rl": rkl.get(r.sym), "rs": rks.get(r.sym),
+                        "pl": f_(r.p_long * 100, 0), "ps": f_(r.p_short * 100, 0), "str": f_(r.x_m12 * 100, 0), "pdh": f_(r.h), "pdl": f_(r.l), "hi20": f_(r.c / (1 + r.hi20)) if r.hi20 == r.hi20 else None, "d50": f_(r.d50 * 100, 1), "oi5": f_(r.oi5 * 100, 1), **{k: v for k, v in facts(r).items() if k in ("buildup", "deliv", "ivpct", "pcr", "volx")}} for r in T.itertuples()]
+    day, day_hist = day_book(D, P, days, t0, tu); TS = T.sort_values("score_s", ascending=False).head(DAY_N)
+    day["picks"] = [{"sym": r.sym, "rank": i + 1, "close": f_(r.c), "atr": f_(r.atr), "stop_pct": f_(DAY_STOP * r.atr / r.c * 100, 1), "sector": SECTOR.get(r.sym, ""), **facts(r)} for i, r in enumerate(TS.itertuples())]
+    day["status"], day["status_why"] = "test", "Backtested on daily opening and closing prices only. It has to be confirmed on five-minute prices and in the live paper journal before it can be trusted: the whole result depends on selling at the opening price."
+    out["day"] = day; out["_day_hist"] = day_hist
     out["decisions"] = dec; out["decision"] = "NO TRADE" if not (L["picks"] or Sh["picks"]) else " · ".join(([f"{len(L['picks'])} BUY"] if L["picks"] else []) + ([f"{len(Sh['picks'])} SHORT"] if Sh["picks"] else []))
     for sym in list(dict.fromkeys(want))[:40]:
         d = pd.DataFrame({k: P[k][sym] for k in ("O", "H", "L", "C")}).dropna().iloc[-150:]; lo = str(d.index[0])[:10]
@@ -458,7 +497,12 @@ def build(P, say=print):
 
 
 def save(out, charts):
-    OUT.mkdir(parents=True, exist_ok=True)
+    OUT.mkdir(parents=True, exist_ok=True); hist = out.pop("_day_hist", None)
+    if hist is not None: hist.to_csv(OUT / "day_picks.csv", index=False)       # every past day's 20 best short ranks: the intraday lab checks them on five-minute prices
+    live = {"v": out["v"], "asof": out["asof"], "regime": out["market"]["regime"], "rules": {k: out["rules"][k] for k in ("stop_atr", "target_atr", "hold", "cost")}, "universe": [u["sym"] for u in out.get("universe", [])], "picks": [], "day": {"rules": out["day"]["rules"], "picks": [{"sym": x["sym"], "rank": x["rank"], "atr": x["atr"]} for x in out["day"]["picks"]]} if out.get("day") else None}
+    for side, B in out["books"].items():
+        by = {r["sym"]: r for r in B["ranked"]}; live["picks"] += [{"sym": x, "side": side, "rank": by[x]["rank"], "prob": by[x]["prob"], "atr": by[x]["atr"]} for x in B["picks"] if x in by]
+    (OUT / "live.json").write_text(json.dumps(SE._clean(live), separators=(",", ":"), allow_nan=False))     # the small file the Worker's journal reads every few minutes
     (OUT / "model.json").write_text(json.dumps(SE._clean(out), separators=(",", ":"), allow_nan=False)); (OUT / "charts.json").write_text(json.dumps(SE._clean(charts), separators=(",", ":"), allow_nan=False))
     log = OUT / "log.csv"; head = "date,regime,nifty,side,rank,sym,close,stop,target,prob,signal\n"; have = log.read_text() if log.exists() else head
     if not have.startswith(head): have = head                                   # v1 log had other columns
