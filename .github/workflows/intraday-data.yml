@@ -7,8 +7,10 @@
 # Needs four repository secrets (Settings -> Secrets and variables -> Actions -> New repository secret), with the same
 # names and values as in Cloudflare:  ANGEL_API_KEY  ANGEL_CLIENT_CODE  ANGEL_PIN  ANGEL_TOTP_SECRET
 #
-# First time: Actions tab -> "Intraday data" -> "Run workflow" -> put 730 in "Days to go back" -> Run. About 20 to 40 minutes.
-# After that it runs by itself at about 4:10 pm IST, Monday to Friday, and adds the day.
+# First time: Actions tab -> "Intraday data" -> "Run workflow" -> Run. Two years of history take three to five hours.
+# Angel One sometimes answers "Too many requests": the job then waits and tries again. Whatever it has collected is always
+# saved, and the next run (by hand, or the daily one) continues from there, so nothing is fetched twice.
+# After that it runs by itself at about 4:10 pm IST, Monday to Friday, and adds the day in a few minutes.
 name: Intraday data
 
 on:
@@ -17,8 +19,8 @@ on:
   workflow_dispatch:
     inputs:
       days:
-        description: "Days to go back (7 for a normal day, 730 for the first run)"
-        default: "7"
+        description: "Days of history to keep (730 = two years). Stored days are skipped."
+        default: "730"
 
 permissions:
   contents: write
@@ -30,7 +32,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
 
@@ -51,19 +53,22 @@ jobs:
           ANGEL_CLIENT_CODE: ${{ secrets.ANGEL_CLIENT_CODE }}
           ANGEL_PIN: ${{ secrets.ANGEL_PIN }}
           ANGEL_TOTP_SECRET: ${{ secrets.ANGEL_TOTP_SECRET }}
-          DAYS: ${{ github.event.inputs.days || '7' }}
-        run: python intraday_data.py --out "$OUT" --days "${DAYS//[^0-9]/}"
+          DAYS: ${{ github.event.inputs.days || '730' }}
+        run: python intraday_data.py --out "$OUT" --days "${DAYS//[^0-9]/}" --minutes 300
 
       - name: Intraday lab (tests the ideas on the candles)
+        if: always()
         continue-on-error: true
         run: |
+          ls "$OUT"/m5/*.csv.gz >/dev/null 2>&1 || { echo "No candles yet."; exit 0; }
           pip install --quiet "pandas>=2,<4" "numpy>=1.26"
           python intraday_lab.py --data "$OUT" --picks arka_data/model/day_picks.csv --out "$OUT/lab.json"
 
       - name: Publish on the intraday-data branch
+        if: always()
         run: |
           cd "$OUT"
-          test -f m5/index.json
+          ls m5/*.csv.gz >/dev/null 2>&1 || { echo "Nothing to publish."; exit 0; }
           rm -rf .git
           git init --quiet -b intraday-data
           git config user.name "arka-data-bot"
