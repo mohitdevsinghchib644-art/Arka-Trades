@@ -150,7 +150,7 @@ async function angelTokens(env, ctx) {                      // {SYMBOL: token} f
   try { return t ? JSON.parse(t) : null; } catch { return null; }
 }
 const angelTime = (s) => { const m = /^(\d{2})-(\w{3})-(\d{4}) (\d{2}):(\d{2}):(\d{2})$/.exec(String(s || "")); if (!m) return null; const mo = "JanFebMarAprMayJunJulAugSepOctNovDec".indexOf(m[2]) / 3;
-  return mo < 0 || mo % 1 ? null : Math.floor(Date.UTC(+m[3], mo, +m[1], +m[4], +m[5], +m[6]) / 1000) - 19800; };
+  return mo < 0 || mo % 1 || +m[3] < 2000 ? null : Math.floor(Date.UTC(+m[3], mo, +m[1], +m[4], +m[5], +m[6]) / 1000) - 19800; };      // an index has no trade time: Angel One sends 01-Jan-1970 for it
 async function angelQuotes(env, ctx, syms) {                // -> {SYMBOL: Angel's quote row}; up to 50 tokens a call
   const T = await angelTokens(env, ctx); if (!T) throw new Error("angel_tokens.json is not on the market-data branch yet: run the Market data job once");
   const want = {}; for (const s of syms) { const tk = (T.s || {})[ANGEL_IX[s] || s]; if (tk) want[String(tk)] = s; }
@@ -165,7 +165,7 @@ export async function angelOverlay(env, ctx, out) {                // put Angel 
   const A = await angelQuotes(env, ctx, rows.map((q) => q.sym)); let n = 0;
   for (const q of rows) { const a = A[q.sym]; if (!a || !(a.ltp > 0)) continue; const prev = a.close > 0 ? a.close : q.prev;
     Object.assign(q, { price: a.ltp, prev, chg: prev ? a.ltp - prev : q.chg, pct: prev ? (a.ltp / prev - 1) * 100 : q.pct, high: a.high > 0 ? a.high : q.high, low: a.low > 0 ? a.low : q.low,
-      open: a.open > 0 ? a.open : q.open, vol: a.tradeVolume ?? q.vol, t: angelTime(a.exchTradeTime || a.exchFeedTime) ?? q.t, live: true }); n++; }
+      open: a.open > 0 ? a.open : q.open, vol: a.tradeVolume ?? q.vol, t: angelTime(a.exchTradeTime) ?? angelTime(a.exchFeedTime) ?? Math.floor(Date.now() / 1000), live: true }); n++; }
   return n;
 }
 const ANGEL_INT = { ONE_MINUTE: 30, THREE_MINUTE: 60, FIVE_MINUTE: 100, FIFTEEN_MINUTE: 200, THIRTY_MINUTE: 200, ONE_HOUR: 400, ONE_DAY: 2000 };       // most days one call may ask for
@@ -177,7 +177,7 @@ export async function angelApi(env, ctx, url) {
     const T = await angelTokens(env, ctx); st.tokens = T ? Object.keys(T.s || {}).length : 0;
     try { await angelLogin(env, ctx, url.searchParams.get("fresh") === "1"); st.login = "ok"; } catch (e) { st.login = String(e.message); return json({ ...st, ok: false, next: "Check the client code, PIN and TOTP secret. The TOTP secret is the letters printed under the QR code, not the 6-digit code." }); }
     if (!st.tokens) return json({ ...st, ok: false, next: "Run the Market data job once: it writes the symbol list Angel One needs." });
-    try { const q = await angelQuotes(env, ctx, ["RELIANCE", "^NSEI"]); st.quote = Object.fromEntries(Object.entries(q).map(([k, v]) => [k, { ltp: v.ltp, close: v.close, time: v.exchTradeTime || v.exchFeedTime || null }])); }
+    try { const q = await angelQuotes(env, ctx, ["RELIANCE", "^NSEI"]); st.quote = Object.fromEntries(Object.entries(q).map(([k, v]) => [k, { ltp: v.ltp, close: v.close, time: angelTime(v.exchTradeTime) ? v.exchTradeTime : angelTime(v.exchFeedTime) ? v.exchFeedTime : "no trade time (index)" }])); }
     catch (e) { st.quote = String(e.message); return json({ ...st, ok: false, next: "Login works but the price call failed. Send this line to fix it." }); }
     return json({ ...st, ok: Object.keys(st.quote).length > 0, next: Object.keys(st.quote).length ? "Live prices are on." : "Angel One returned no rows for RELIANCE and NIFTY." });
   }
