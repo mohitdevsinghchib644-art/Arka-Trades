@@ -1,0 +1,217 @@
+{
+ "built": "2026-11-28T05:35+05:30",
+ "default": "arka-n500-5y-0.5",
+ "default_cost": 0.3,
+ "kinds": [
+  "Arka groups",
+  "NSE indices"
+ ],
+ "benches": [
+  "NIFTY 500",
+  "NIFTY 50",
+  "Equal-weight market"
+ ],
+ "periods": [
+  "5y",
+  "3y",
+  "2y"
+ ],
+ "min_turn": [
+  0.5,
+  0.25,
+  1.0,
+  2.0,
+  5.0
+ ],
+ "costs": [
+  0.1,
+  0.2,
+  0.3,
+  0.5,
+  0.75,
+  1.0
+ ],
+ "choices": [
+  {
+   "key": "arka-n500-5y-0.5",
+   "kind": "Arka groups",
+   "bench": "NIFTY 500",
+   "period": "5y",
+   "min_turn": 0.5,
+   "costs": [
+    0.1,
+    0.2,
+    0.3,
+    0.5,
+    0.75,
+    1.0
+   ]
+  },
+  {
+   "key": "arka-n50-5y-0.5",
+   "kind": "Arka groups",
+   "bench": "NIFTY 50",
+   "period": "5y",
+   "min_turn": 0.5,
+   "costs": [
+    0.1,
+    0.2,
+    0.3,
+    0.5,
+    0.75,
+    1.0
+   ]
+  },
+  {
+   "key": "arka-ew-5y-0.5",
+   "kind": "Arka groups",
+   "bench": "Equal-weight market",
+   "period": "5y",
+   "min_turn": 0.5,
+   "costs": [
+    0.1,
+    0.2,
+    0.3,
+    0.5,
+    0.75,
+    1.0
+   ]
+  },
+  {
+   "key": "nse-n500-5y-0.5",
+   "kind": "NSE indices",
+   "bench": "NIFTY 500",
+   "period": "5y",
+   "min_turn": 0.5,
+   "costs": [
+    0.1,
+    0.2,
+    0.3,
+    0.5,
+    0.75,
+    1.0
+   ]
+  },
+  {
+   "key": "nse-n50-5y-0.5",
+   "kind": "NSE indices",
+   "bench": "NIFTY 50",
+   "period": "5y",
+   "min_turn": 0.5,
+   "costs": [
+    0.1,
+    0.2,
+    0.3,
+    0.5,
+    0.75,
+    1.0
+   ]
+  },
+  {
+   "key": "nse-ew-5y-0.5",
+   "kind": "NSE indices",
+   "bench": "Equal-weight market",
+   "period": "5y",
+   "min_turn": 0.5,
+   "costs": [
+    0.1,
+    0.2,
+    0.3,
+    0.5,
+    0.75,
+    1.0
+   ]
+  },
+  {
+   "key": "arka-n500-5y-0.25",
+   "kind": "Arka groups",
+   "bench": "NIFTY 500",
+   "period": "5y",
+   "min_turn": 0.25,
+   "costs": [
+    0.1,
+    0.2,
+    0.3,
+    0.5,
+    0.75,
+    1.0
+   ]
+  },
+  {
+   "key": "arka-n500-5y-1",
+   "kind": "Arka groups",
+   "bench": "NIFTY 500",
+   "period": "5y",
+   "min_turn": 1.0,
+   "costs": [
+    0.1,
+    0.2,
+    0.3,
+    0.5,
+    0.75,
+    1.0
+   ]
+  },
+  {
+   "key": "arka-n500-5y-2",
+   "kind": "Arka groups",
+   "bench": "NIFTY 500",
+   "period": "5y",
+   "min_turn": 2.0,
+   "costs": [
+    0.1,
+    0.2,
+    0.3,
+    0.5,
+    0.75,
+    1.0
+   ]
+  },
+  {
+   "key": "arka-n500-5y-5",
+   "kind": "Arka groups",
+   "bench": "NIFTY 500",
+   "period": "5y",
+   "min_turn": 5.0,
+   "costs": [
+    0.1,
+    0.2,
+    0.3,
+    0.5,
+    0.75,
+    1.0
+   ]
+  },
+  {
+   "key": "arka-n500-3y-0.5",
+   "kind": "Arka groups",
+   "bench": "NIFTY 500",
+   "period": "3y",
+   "min_turn": 0.5,
+   "costs": [
+    0.1,
+    0.2,
+    0.3,
+    0.5,
+    0.75,
+    1.0
+   ]
+  },
+  {
+   "key": "arka-n500-2y-0.5",
+   "kind": "Arka groups",
+   "bench": "NIFTY 500",
+   "period": "2y",
+   "min_turn": 0.5,
+   "costs": [
+    0.1,
+    0.2,
+    0.3,
+    0.5,
+    0.75,
+    1.0
+   ]
+  }
+ ],
+ "failed": []
+}
