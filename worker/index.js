@@ -721,36 +721,47 @@ async function liveModel(env, ctx) {                        // the small file ar
   t = await repoFile(env, ctx, "arka_data/model/model.json", 600); if (!t) return null;
   let d; try { d = JSON.parse(t); } catch { return null; } if (!d || !d.books || !d.rules) return null;
   const picks = []; for (const k of ["long", "short"]) { const by = Object.fromEntries((d.books[k].ranked || []).map((r) => [r.sym, r])); for (const x of d.books[k].picks || []) { const r = by[x]; if (r) picks.push({ sym: x, side: k, rank: r.rank, prob: r.prob, atr: r.atr }); } }
-  return { v: d.v, asof: d.asof, regime: d.market && d.market.regime, rules: { stop_atr: d.rules.stop_atr, target_atr: d.rules.target_atr, hold: d.rules.hold, cost: d.rules.cost }, picks, universe: (d.universe || []).map((u) => u.sym),
-    day: d.day ? { rules: d.day.rules, picks: (d.day.picks || []).map((x) => ({ sym: x.sym, rank: x.rank, atr: x.atr })) } : null };
+  return { v: d.v, asof: d.asof, regime: d.market && d.market.regime, rules: { stop_atr: d.rules.stop_atr, target_atr: d.rules.target_atr, hold: d.rules.hold, cost: d.rules.cost, long: d.rules.long, short: d.rules.short }, picks, universe: (d.universe || []).map((u) => u.sym),
+    ranks: Object.fromEntries((d.universe || []).filter((u) => u.rl).map((u) => [u.sym, u.rl])),
+    day: d.day ? { rules: d.day.rules, size: d.day.size ?? 1, picks: (d.day.picks || []).map((x) => ({ sym: x.sym, rank: x.rank, atr: x.atr })), longs: ((d.day_long && d.day_long.picks) || []).map((x) => ({ sym: x.sym, rank: x.rank, limit: x.limit, atr: x.atr })) } : null };
 }
 const r2 = (v) => (v == null || !isFinite(v) ? null : Math.round(v * 100) / 100), r3 = (v) => (v == null || !isFinite(v) ? null : Math.round(v * 1000) / 1000);
 export async function journalStep(env, ctx) {               // opens the day's new model trades at the opening price and moves every open one along
   const L = await liveModel(env, ctx); if (!L) return { ok: false, why: "no model file" };
   const now = istNow(), today = now.toISOString().slice(0, 10), mins = now.getUTCHours() * 60 + now.getUTCMinutes(), R = L.rules, cost2 = 2 * (R.cost ?? 0.15);
+  const RL = R.long && R.long.target_atr == null && R.long.keep_rank > 0 ? R.long : null;      // the long book's keep rule (model from 28 Nov 2026): no target, kept while ranked in the top keep_rank, at most max_hold sessions
   const open = (await sb(env, "model_trades?status=eq.open&select=*&order=id")) || [], used = L.asof < today && mins >= 556 ? (await sb(env, "model_trades?signal_date=eq." + encodeURIComponent(L.asof) + "&select=symbol,side,kind,trade_date")) || [] : [];
   // A signal is traded on the first session after it and never later: once any of its trades carries an earlier date, or it is more than five days old, nothing new opens from it.
   const stale = !(L.asof < today && mins >= 556) || used.some((r) => r.trade_date < today) || (Date.parse(today) - Date.parse(L.asof)) / 864e5 > 5, has = new Set(used.map((r) => r.symbol + "|" + r.side + "|" + r.kind));
   const fresh = stale ? [] : (L.picks || []).filter((x) => !has.has(x.sym + "|" + x.side + "|swing"));
   const DR = (L.day && L.day.rules) || {}, dayNew = !stale && mins < 600 && L.day ? (L.day.picks || []).filter((x) => !has.has(x.sym + "|short|day")) : [];      // day trades open only in the first 45 minutes: later than that is another trade
-  const syms = [...new Set([...open.map((r) => r.symbol), ...fresh.map((x) => x.sym), ...dayNew.map((x) => x.sym)])].slice(0, 50); if (!syms.length) return { ok: true, open: 0, opened: 0, closed: 0 };
-  const Q = await angelQuotes(env, ctx, syms), live = (q) => { const t = q && (angelTime(q.exchTradeTime) ?? angelTime(q.exchFeedTime)); return !!t && istDayOf(t) === today && q.ltp > 0; };      // a price counts only when the share traded today
+  const longNew = !stale && mins < 600 && L.day ? (L.day.longs || []).filter((x) => x.limit > 0 && !has.has(x.sym + "|long|day")).sort((a, b) => a.rank - b.rank) : [];      // intraday longs: a buy limit under the close, filled only if the stock OPENED at or under it
+  const syms = [...new Set([...open.map((r) => r.symbol), ...fresh.map((x) => x.sym), ...dayNew.map((x) => x.sym), ...longNew.map((x) => x.sym)])].slice(0, 150); if (!syms.length) return { ok: true, open: 0, opened: 0, closed: 0 };
+  const Q = {}; for (let i = 0; i < syms.length; i += 50) Object.assign(Q, await angelQuotes(env, ctx, syms.slice(i, i + 50)));      // 50 shares a call
+  const live = (q) => { const t = q && (angelTime(q.exchTradeTime) ?? angelTime(q.exchFeedTime)); return !!t && istDayOf(t) === today && q.ltp > 0; };      // a price counts only when the share traded today
   const add = [];
   for (const x of fresh) { const q = Q[x.sym], sg = x.side === "long" ? 1 : -1; if (!live(q) || !(q.open > 0) || !(x.atr > 0) || open.some((r) => r.symbol === x.sym && r.side === x.side && r.kind !== "day")) continue;
-    add.push({ kind: "swing", signal_date: L.asof, trade_date: today, symbol: x.sym, side: x.side, model_v: L.v ?? null, rank: x.rank ?? null, prob: x.prob ?? null, regime: L.regime || null, atr: x.atr, entry: q.open, stop: r2(q.open - sg * R.stop_atr * x.atr), target: r2(q.open + sg * R.target_atr * x.atr),
-      hold: R.hold, days: 1, last_day: today, hi: q.high, lo: q.low, last_price: q.ltp, status: "open" }); }
+    const keepL = sg > 0 && RL;
+    add.push({ kind: "swing", signal_date: L.asof, trade_date: today, symbol: x.sym, side: x.side, model_v: L.v ?? null, rank: x.rank ?? null, prob: x.prob ?? null, regime: L.regime || null, atr: x.atr, entry: q.open, stop: r2(q.open - sg * (keepL ? RL.stop_atr : R.stop_atr) * x.atr), target: keepL ? null : r2(q.open + sg * R.target_atr * x.atr),
+      hold: keepL ? RL.max_hold : R.hold, days: 1, last_day: today, hi: q.high, lo: q.low, last_price: q.ltp, status: "open" }); }
   for (const x of dayNew) { const q = Q[x.sym]; if (!live(q) || !(q.open > 0) || !(x.atr > 0)) continue;       // the day book: sold at the open, bought back at the close. Both prices are kept: the official open and what the market showed when this ran
     add.push({ kind: "day", signal_date: L.asof, trade_date: today, symbol: x.sym, side: "short", model_v: L.v ?? null, rank: x.rank ?? null, regime: L.regime || null, atr: x.atr, entry: q.open, entry_live: q.ltp, entry_at: new Date().toISOString(),
       stop: r2(q.open + (DR.stop_atr ?? 1) * x.atr), target: null, hold: 1, days: 1, last_day: today, hi: q.high, lo: q.low, last_price: q.ltp, status: "open" }); }
+  let nLong = used.filter((r) => r.kind === "day" && r.side === "long").length;
+  for (const x of longNew) { if (nLong >= 10) break; const q = Q[x.sym]; if (!live(q) || !(q.open > 0) || !(x.atr > 0) || q.open > x.limit) continue;      // at most 10 fills, best ranks first; the fill is the official open
+    add.push({ kind: "day", signal_date: L.asof, trade_date: today, symbol: x.sym, side: "long", model_v: L.v ?? null, rank: x.rank ?? null, regime: L.regime || null, atr: x.atr, entry: q.open, entry_live: q.ltp, entry_at: new Date().toISOString(),
+      stop: r2(q.open - (DR.stop_atr ?? 1) * x.atr), target: null, hold: 1, days: 1, last_day: today, hi: q.high, lo: q.low, last_price: q.ltp, status: "open" }); nLong++; }
   if (add.length) await sb(env, "model_trades?on_conflict=signal_date,symbol,side,kind", { method: "POST", headers: { prefer: "resolution=ignore-duplicates,return=minimal" }, body: JSON.stringify(add) });
   let closed = 0, moved = 0;
   for (const r of open) { const q = Q[r.symbol]; if (!live(q)) continue;                    // a holiday or a halted share changes nothing
     const sg = r.side === "long" ? 1 : -1, first = r.trade_date === today, days = r.last_day === today ? r.days : r.days + 1, hi = Math.max(r.hi ?? q.high, q.high), lo = Math.min(r.lo ?? q.low, q.low);
     const isDay = r.kind === "day", stop = sg > 0 ? q.low <= r.stop : q.high >= r.stop, tgt = r.target != null && (sg > 0 ? q.high >= r.target : q.low <= r.target), c2 = isDay ? (DR.cost ?? 0.16) : cost2; let exit = null, why = null;      // the same order as the backtest: a gap through the level exits at the open, and the stop is assumed before the target
+    const rk = L.ranks && L.ranks[r.symbol], keepT = r.kind === "swing" && sg > 0 && r.target == null && RL;      // a keep-rule long whose rank at a later close fell below the top keep_rank: sold at this session's open
     if (isDay && !first) { exit = q.close > 0 ? q.close : q.ltp; why = "missed"; }           // a day trade the job could not close on its day: closed at that day's closing price
+    else if (keepT && L.asof < today && r.trade_date <= L.asof && rk > RL.keep_rank && q.open > 0) { exit = q.open; why = "rank"; }
     else if (stop) { exit = !first && q.open > 0 && (sg > 0 ? q.open <= r.stop : q.open >= r.stop) ? q.open : r.stop; why = "stop"; }
     else if (tgt) { exit = !first && q.open > 0 && (sg > 0 ? q.open >= r.target : q.open <= r.target) ? q.open : r.target; why = "target"; }
-    else if (days >= (r.hold || R.hold) && mins >= 925) { exit = q.ltp; why = isDay ? "close" : "time"; }
+    else if (days >= (r.hold || R.hold) && mins >= (isDay ? 905 : 925)) { exit = q.ltp; why = isDay ? "close" : "time"; }      // day trades out at 3:05 pm: since 3 Aug 2026 F&O stocks close in an auction and Dhan squares equity intraday positions off at 3:10 pm
     const patch = { days, last_day: today, hi, lo, last_price: q.ltp, mfe_pct: r3((sg > 0 ? hi / r.entry - 1 : 1 - lo / r.entry) * 100), mae_pct: r3((sg > 0 ? lo / r.entry - 1 : 1 - hi / r.entry) * 100), updated_at: new Date().toISOString() };
     if (exit) { const g = sg * (exit / r.entry - 1) * 100; Object.assign(patch, { status: "closed", exit_price: r2(exit), exit_date: today, exit_reason: why, gross_pct: r3(g), net_pct: r3(g - c2), net_live_pct: r.entry_live > 0 ? r3(sg * (exit / r.entry_live - 1) * 100 - c2) : null }); closed++; }
     await sb(env, "model_trades?id=eq." + encodeURIComponent(r.id), { method: "PATCH", body: JSON.stringify(patch) }); moved++; }
@@ -779,11 +790,15 @@ async function journalApi(env, ctx, url, me) {
   try {
     const rows = (await sb(env, "model_trades?select=*&order=trade_date.desc,id.desc&limit=400")) || [];
     let snaps = null; try { const last = await sb(env, "intraday_snaps?select=ts&order=ts.desc&limit=1"); snaps = { last: last && last[0] ? last[0].ts : null }; } catch { snaps = { last: null, missing: true }; }
-    const done = rows.filter((r) => r.status === "closed" && r.net_pct != null), side = (k) => { const v = done.filter((r) => (k === "day" ? r.kind === "day" : r.kind !== "day" && (!k || r.side === k))), w = v.filter((r) => r.net_pct > 0), sum = (a) => a.reduce((x, r) => x + r.net_pct, 0);
-      return { n: v.length, won: v.length ? (w.length / v.length) * 100 : null, avg: v.length ? sum(v) / v.length : null, total: sum(v), stop: v.filter((r) => r.exit_reason === "stop").length, target: v.filter((r) => r.exit_reason === "target").length, time: v.filter((r) => r.exit_reason === "time").length,
+    let done = rows.filter((r) => r.status === "closed" && r.net_pct != null);
+    try { const all = await sb(env, "model_trades?status=eq.closed&select=kind,side,trade_date,net_pct,net_live_pct,entry,entry_live,exit_reason&order=trade_date.desc&limit=1000"); if (Array.isArray(all) && all.length) done = all.filter((r) => r.net_pct != null); } catch { /* the 400 rows above will do */ }
+    const pick = (k) => (r) => (k === "day" ? r.kind === "day" && r.side !== "long" : k === "dayl" ? r.kind === "day" && r.side === "long" : r.kind !== "day" && (!k || r.side === k));      // day: intraday shorts · dayl: intraday longs · long / short: swing trades
+    const side = (k) => { const v = done.filter(pick(k)), w = v.filter((r) => r.net_pct > 0), sum = (a) => a.reduce((x, r) => x + r.net_pct, 0), m = v.length ? sum(v) / v.length : null;
+      return { n: v.length, sessions: new Set(v.map((r) => r.trade_date)).size, sd: v.length > 1 ? Math.sqrt(v.reduce((x, r) => x + (r.net_pct - m) ** 2, 0) / (v.length - 1)) : null,
+        won: v.length ? (w.length / v.length) * 100 : null, avg: m, total: sum(v), stop: v.filter((r) => r.exit_reason === "stop").length, target: v.filter((r) => r.exit_reason === "target").length, time: v.filter((r) => r.exit_reason === "time").length,
         pf: sum(w) > 0 && v.length > w.length ? sum(w) / -sum(v.filter((r) => r.net_pct <= 0)) : null,
         live: (() => { const z = v.filter((r) => r.net_live_pct != null); return z.length ? z.reduce((x, r) => x + r.net_live_pct, 0) / z.length : null; })(), slip: (() => { const z = v.filter((r) => r.entry_live > 0 && r.entry > 0); return z.length ? z.reduce((x, r) => x + (r.side === "short" ? 1 - r.entry_live / r.entry : r.entry_live / r.entry - 1) * 100, 0) / z.length : null; })() }; };
-    return json({ ready: true, rows, stats: { all: side(), long: side("long"), short: side("short"), day: side("day") }, open: rows.filter((r) => r.status === "open").length, snaps, admin: me.role === "admin" });
+    return json({ ready: true, rows, stats: { all: side(), long: side("long"), short: side("short"), day: side("day"), dayl: side("dayl") }, open: rows.filter((r) => r.status === "open").length, snaps, admin: me.role === "admin" });
   } catch (e) {
     if (e.status === 503) return json({ ready: false, why: "Supabase is not connected.", setup });
     return json({ ready: false, why: /does not exist|not find|PGRST205|42P01|404/.test(String(e.body || e.message)) ? "The journal tables are not in Supabase yet." : String(e.message).slice(0, 160), setup });
