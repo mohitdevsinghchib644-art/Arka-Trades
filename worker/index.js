@@ -1,4 +1,4 @@
-// Arka Trades · API (stage 18: the full Daily brief with past editions and writing it from the website; the Account page). Runs on Cloudflare for every request to /api/*.
+// Arka Trades · API (stage 37: exact stops and targets for every book, trade alerts on the website and Telegram, sizing and the 60-session check). Runs on Cloudflare for every request to /api/*.
 // Secrets are read by NAME from the Cloudflare project settings and never sent to the browser:
 //   ADMIN_USER, ADMIN_PASS, MEMBER_USER, MEMBER_PASS, AUTH_SECRET   sign-in (same names and values as in Streamlit)
 //   SUPABASE_URL, SUPABASE_KEY                                      watchlist storage (same as in Streamlit)
@@ -6,8 +6,10 @@
 //   PINECONE_KEY, PINECONE_HOST (optional: found by name when missing) Arka AI playbook storage, the same Pinecone index Streamlit uses
 //   GH_ACTIONS_TOKEN (optional)                                     Daily brief: "Write now / again" starts the morning job on GitHub
 //   ARKA_GEMINI_MODEL (optional)                                    a Gemini model to try first for Arka AI, as in Streamlit
+//   ANGEL_API_KEY, ANGEL_CLIENT_CODE, ANGEL_PIN, ANGEL_TOTP_SECRET   live prices from a data-only Angel One account (login, quote and candle calls only)
+//   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (optional)                 trade alerts to your Telegram chat (stage 37); the same values the Daily brief uses
 // Optional plain variable: GITHUB_REPO (default below) for the signal files written by the "Signals" workflow.
-// Only public market data leaves this worker (Yahoo Finance). Nothing here touches a broker account.
+// Only public market data is fetched, and your own alerts go to your own Telegram chat. Nothing here touches a broker account or places an order.
 
 const REPO = "mohitdevsinghchib644-art/Arka-Trades";
 const COOKIE = "arka_s";
@@ -720,53 +722,91 @@ async function liveModel(env, ctx) {                        // the small file ar
   if (t) { try { const d = JSON.parse(t); if (d && d.asof && d.rules) return d; } catch { /* fall through */ } }
   t = await repoFile(env, ctx, "arka_data/model/model.json", 600); if (!t) return null;
   let d; try { d = JSON.parse(t); } catch { return null; } if (!d || !d.books || !d.rules) return null;
-  const picks = []; for (const k of ["long", "short"]) { const by = Object.fromEntries((d.books[k].ranked || []).map((r) => [r.sym, r])); for (const x of d.books[k].picks || []) { const r = by[x]; if (r) picks.push({ sym: x, side: k, rank: r.rank, prob: r.prob, atr: r.atr }); } }
+  const picks = []; for (const k of ["long", "short"]) { const by = Object.fromEntries((d.books[k].ranked || []).map((r) => [r.sym, r])); for (const x of d.books[k].picks || []) { const r = by[x]; if (r) picks.push({ sym: x, side: k, rank: r.rank, prob: r.prob, atr: r.atr, close: r.close, ...(r.lot ? { lot: r.lot, lot_value: r.lot_value, fut: r.fut } : {}) }); } }
+  const un = (k) => ((d.books[k] && d.books[k].record && d.books[k].record.unseen) || {}).audit || null;
   return { v: d.v, asof: d.asof, regime: d.market && d.market.regime, rules: { stop_atr: d.rules.stop_atr, target_atr: d.rules.target_atr, hold: d.rules.hold, cost: d.rules.cost, long: d.rules.long, short: d.rules.short }, picks, universe: (d.universe || []).map((u) => u.sym),
     ranks: Object.fromEntries((d.universe || []).filter((u) => u.rl).map((u) => [u.sym, u.rl])),
-    day: d.day ? { rules: d.day.rules, size: d.day.size ?? 1, picks: (d.day.picks || []).map((x) => ({ sym: x.sym, rank: x.rank, atr: x.atr })), longs: ((d.day_long && d.day_long.picks) || []).map((x) => ({ sym: x.sym, rank: x.rank, limit: x.limit, atr: x.atr })) } : null };
+    day: d.day ? { rules: d.day.rules, size: d.day.size ?? 1, picks: (d.day.picks || []).map((x) => ({ sym: x.sym, rank: x.rank, atr: x.atr, close: x.close })), long_rules: d.day_long && d.day_long.rules && d.day_long.rules.target_atr != null ? d.day_long.rules : undefined,
+      longs: ((d.day_long && d.day_long.picks) || []).map((x) => ({ sym: x.sym, rank: x.rank, limit: x.limit, atr: x.atr })) } : null,
+    nifty: d.nifty ? { call: d.nifty.call, pct: d.nifty.pct, trend: d.nifty.trend, weak: d.nifty.weak, levels: d.nifty.levels } : null, fno: d.fno || null,
+    audit: { day: (d.day && d.day.audit) || null, dayl: (d.day_long && d.day_long.audit) || null, long: un("long"), short: un("short") },
+    exits_open: (d.books.long.positions || []).filter((p) => p.exit_next).map((p) => p.sym),
+    last_session: ["long", "short"].flatMap((k) => (d.books[k].positions || []).filter((p) => !p.pending && p.left === 1 && !p.exit_next).map((p) => ({ sym: p.sym, side: k }))) };
 }
 const r2 = (v) => (v == null || !isFinite(v) ? null : Math.round(v * 100) / 100), r3 = (v) => (v == null || !isFinite(v) ? null : Math.round(v * 1000) / 1000);
+const NEW_COLS = ["pre_imb", "pre_gap", "imb15"], noCol = (e) => /PGRST204|42703|column/i.test(String((e && (e.body || e.message)) || ""));
+const strip = (rows) => rows.map((r) => { const o = { ...r }; for (const k of NEW_COLS) delete o[k]; return o; });
+async function sbRows(env, path, rows, prefer) {           // a bulk write; without the stage 37 columns when supabase_arka_alerts.sql has not been run yet
+  const go = (b) => sb(env, path, { method: "POST", headers: { prefer }, body: JSON.stringify(b) });
+  try { await go(rows); } catch (e) { if (!noCol(e)) throw e; await go(strip(rows)); }
+}
+// the columns the journal rewrites on every run (one bulk write instead of one request per trade: a Cloudflare run may make only 50 requests)
+const UP = ["kind", "signal_date", "trade_date", "symbol", "side", "entry", "status", "days", "last_day", "hi", "lo", "last_price", "mfe_pct", "mae_pct", "updated_at", "exit_price", "exit_date", "exit_reason", "gross_pct", "net_pct", "net_live_pct", "imb15"];
 export async function journalStep(env, ctx) {               // opens the day's new model trades at the opening price and moves every open one along
   const L = await liveModel(env, ctx); if (!L) return { ok: false, why: "no model file" };
   const now = istNow(), today = now.toISOString().slice(0, 10), mins = now.getUTCHours() * 60 + now.getUTCMinutes(), R = L.rules, cost2 = 2 * (R.cost ?? 0.15);
-  const RL = R.long && R.long.target_atr == null && R.long.keep_rank > 0 ? R.long : null;      // the long book's keep rule (model from 28 Nov 2026): no target, kept while ranked in the top keep_rank, at most max_hold sessions
+  const RL = R.long && R.long.keep_rank > 0 ? R.long : null;      // the long book's keep rule: kept while ranked in the top keep_rank, at most max_hold sessions, with a stop and (since stage 37) a target
+  const DR = (L.day && L.day.rules) || {}, LR = (L.day && L.day.long_rules) || { stop_atr: DR.stop_atr ?? 1, target_atr: 0, max: 10 };      // a model file from before stage 37 has no long rules: its longs used the day book's stop and no target
   const open = (await sb(env, "model_trades?status=eq.open&select=*&order=id")) || [], used = L.asof < today && mins >= 556 ? (await sb(env, "model_trades?signal_date=eq." + encodeURIComponent(L.asof) + "&select=symbol,side,kind,trade_date")) || [] : [];
   // A signal is traded on the first session after it and never later: once any of its trades carries an earlier date, or it is more than five days old, nothing new opens from it.
   const stale = !(L.asof < today && mins >= 556) || used.some((r) => r.trade_date < today) || (Date.parse(today) - Date.parse(L.asof)) / 864e5 > 5, has = new Set(used.map((r) => r.symbol + "|" + r.side + "|" + r.kind));
   const fresh = stale ? [] : (L.picks || []).filter((x) => !has.has(x.sym + "|" + x.side + "|swing"));
-  const DR = (L.day && L.day.rules) || {}, dayNew = !stale && mins < 600 && L.day ? (L.day.picks || []).filter((x) => !has.has(x.sym + "|short|day")) : [];      // day trades open only in the first 45 minutes: later than that is another trade
+  const dayNew = !stale && mins < 600 && L.day ? (L.day.picks || []).filter((x) => !has.has(x.sym + "|short|day")) : [];      // day trades open only in the first 45 minutes: later than that is another trade
   const longNew = !stale && mins < 600 && L.day ? (L.day.longs || []).filter((x) => x.limit > 0 && !has.has(x.sym + "|long|day")).sort((a, b) => a.rank - b.rank) : [];      // intraday longs: a buy limit under the close, filled only if the stock OPENED at or under it
-  const syms = [...new Set([...open.map((r) => r.symbol), ...fresh.map((x) => x.sym), ...dayNew.map((x) => x.sym), ...longNew.map((x) => x.sym)])].slice(0, 150); if (!syms.length) return { ok: true, open: 0, opened: 0, closed: 0 };
+  const imbDue = mins >= 570 && mins < 600, imbRows = imbDue ? await sb(env, "model_trades?kind=eq.day&trade_date=eq." + today + "&imb15=is.null&select=id,kind,signal_date,trade_date,symbol,side,entry,status").catch(() => []) || [] : [];      // the order book at the first check after 9:30, for idea H2
+  const syms = [...new Set([...open.map((r) => r.symbol), ...fresh.map((x) => x.sym), ...dayNew.map((x) => x.sym), ...longNew.map((x) => x.sym), ...imbRows.map((r) => r.symbol)])].slice(0, 150); if (!syms.length) return { ok: true, open: 0, opened: 0, closed: 0 };
   const Q = {}; for (let i = 0; i < syms.length; i += 50) Object.assign(Q, await angelQuotes(env, ctx, syms.slice(i, i + 50)));      // 50 shares a call
   const live = (q) => { const t = q && (angelTime(q.exchTradeTime) ?? angelTime(q.exchFeedTime)); return !!t && istDayOf(t) === today && q.ltp > 0; };      // a price counts only when the share traded today
-  const add = [];
+  const sane = (q) => !(q.close > 0) || Math.abs(q.open / q.close - 1) < 0.2;      // an open 20% or more from yesterday's close: a split, a bonus or a bad price. Not opened; one warning.
+  const add = [], odd = [];
   for (const x of fresh) { const q = Q[x.sym], sg = x.side === "long" ? 1 : -1; if (!live(q) || !(q.open > 0) || !(x.atr > 0) || open.some((r) => r.symbol === x.sym && r.side === x.side && r.kind !== "day")) continue;
-    const keepL = sg > 0 && RL;
-    add.push({ kind: "swing", signal_date: L.asof, trade_date: today, symbol: x.sym, side: x.side, model_v: L.v ?? null, rank: x.rank ?? null, prob: x.prob ?? null, regime: L.regime || null, atr: x.atr, entry: q.open, stop: r2(q.open - sg * (keepL ? RL.stop_atr : R.stop_atr) * x.atr), target: keepL ? null : r2(q.open + sg * R.target_atr * x.atr),
+    if (!sane(q)) { odd.push(x.sym); continue; }
+    const keepL = sg > 0 && RL, l_ = lv(q.open, x.atr, sg, keepL ? RL.stop_atr : R.stop_atr, keepL ? RL.target_atr || 0 : R.target_atr);
+    add.push({ kind: "swing", signal_date: L.asof, trade_date: today, symbol: x.sym, side: x.side, model_v: L.v ?? null, rank: x.rank ?? null, prob: x.prob ?? null, regime: L.regime || null, atr: x.atr, entry: q.open, stop: l_.stop, target: l_.target,
       hold: keepL ? RL.max_hold : R.hold, days: 1, last_day: today, hi: q.high, lo: q.low, last_price: q.ltp, status: "open" }); }
-  for (const x of dayNew) { const q = Q[x.sym]; if (!live(q) || !(q.open > 0) || !(x.atr > 0)) continue;       // the day book: sold at the open, bought back at the close. Both prices are kept: the official open and what the market showed when this ran
+  let PRE = {};
+  if (dayNew.length) { try { PRE = Object.fromEntries(((await sb(env, "preopen_snaps?day=eq." + today + "&select=symbol,iep,prev,buy_q,sell_q")) || []).map((p) => [p.symbol, p])); } catch { /* the 9:07 capture is optional */ } }
+  for (const x of dayNew) { const q = Q[x.sym]; if (!live(q) || !(q.open > 0) || !(x.atr > 0)) continue;       // the day book: sold at the open, bought back by 3:05 pm. Both prices are kept: the official open and what the market showed when this ran
+    if (!sane(q)) { odd.push(x.sym); continue; }
+    const l_ = lv(q.open, x.atr, -1, DR.stop_atr ?? 0.75, DR.target_atr ?? 0), p = PRE[x.sym];
     add.push({ kind: "day", signal_date: L.asof, trade_date: today, symbol: x.sym, side: "short", model_v: L.v ?? null, rank: x.rank ?? null, regime: L.regime || null, atr: x.atr, entry: q.open, entry_live: q.ltp, entry_at: new Date().toISOString(),
-      stop: r2(q.open + (DR.stop_atr ?? 1) * x.atr), target: null, hold: 1, days: 1, last_day: today, hi: q.high, lo: q.low, last_price: q.ltp, status: "open" }); }
+      stop: l_.stop, target: l_.target, hold: 1, days: 1, last_day: today, hi: q.high, lo: q.low, last_price: q.ltp, status: "open",
+      pre_imb: p && p.buy_q + p.sell_q > 0 ? r3(p.buy_q / (p.buy_q + p.sell_q)) : null, pre_gap: p && p.iep > 0 && p.prev > 0 ? r3((p.iep / p.prev - 1) * 100) : null }); }
   let nLong = used.filter((r) => r.kind === "day" && r.side === "long").length;
-  for (const x of longNew) { if (nLong >= 10) break; const q = Q[x.sym]; if (!live(q) || !(q.open > 0) || !(x.atr > 0) || q.open > x.limit) continue;      // at most 10 fills, best ranks first; the fill is the official open
+  for (const x of longNew) { if (nLong >= (LR.max || 10)) break; const q = Q[x.sym]; if (!live(q) || !(q.open > 0) || !(x.atr > 0) || q.open > x.limit || !sane(q)) continue;      // at most 10 fills, best ranks first; the fill is the official open
+    const l_ = lv(q.open, x.atr, 1, LR.stop_atr ?? 0.5, LR.target_atr ?? 0);
     add.push({ kind: "day", signal_date: L.asof, trade_date: today, symbol: x.sym, side: "long", model_v: L.v ?? null, rank: x.rank ?? null, regime: L.regime || null, atr: x.atr, entry: q.open, entry_live: q.ltp, entry_at: new Date().toISOString(),
-      stop: r2(q.open - (DR.stop_atr ?? 1) * x.atr), target: null, hold: 1, days: 1, last_day: today, hi: q.high, lo: q.low, last_price: q.ltp, status: "open" }); nLong++; }
-  if (add.length) await sb(env, "model_trades?on_conflict=signal_date,symbol,side,kind", { method: "POST", headers: { prefer: "resolution=ignore-duplicates,return=minimal" }, body: JSON.stringify(add) });
-  let closed = 0, moved = 0;
+      stop: l_.stop, target: l_.target, hold: 1, days: 1, last_day: today, hi: q.high, lo: q.low, last_price: q.ltp, status: "open" }); nLong++; }
+  if (add.length) { const cols = [...new Set(add.flatMap((r) => Object.keys(r)))], uni = add.map((r) => Object.fromEntries(cols.map((k) => [k, r[k] ?? null])));      // one shape for every row of a bulk write
+    await sbRows(env, "model_trades?on_conflict=signal_date,symbol,side,kind", uni, "resolution=ignore-duplicates,return=minimal"); }
+  let closed = 0, moved = 0; const up = [], hits = [], gone = new Set();
   for (const r of open) { const q = Q[r.symbol]; if (!live(q)) continue;                    // a holiday or a halted share changes nothing
     const sg = r.side === "long" ? 1 : -1, first = r.trade_date === today, days = r.last_day === today ? r.days : r.days + 1, hi = Math.max(r.hi ?? q.high, q.high), lo = Math.min(r.lo ?? q.low, q.low);
-    const isDay = r.kind === "day", stop = sg > 0 ? q.low <= r.stop : q.high >= r.stop, tgt = r.target != null && (sg > 0 ? q.high >= r.target : q.low <= r.target), c2 = isDay ? (DR.cost ?? 0.16) : cost2; let exit = null, why = null;      // the same order as the backtest: a gap through the level exits at the open, and the stop is assumed before the target
-    const rk = L.ranks && L.ranks[r.symbol], keepT = r.kind === "swing" && sg > 0 && r.target == null && RL;      // a keep-rule long whose rank at a later close fell below the top keep_rank: sold at this session's open
+    const isDay = r.kind === "day", stop = r.stop != null && (sg > 0 ? q.low <= r.stop : q.high >= r.stop), tgt = r.target != null && (sg > 0 ? q.high >= r.target : q.low <= r.target), c2 = isDay ? (DR.cost ?? 0.16) : cost2; let exit = null, why = null;      // the same order as the backtest: a gap through the level exits at the open, and the stop is assumed before the target
+    const rk = L.ranks && L.ranks[r.symbol], keepT = r.kind === "swing" && sg > 0 && RL && r.hold === RL.max_hold;      // a keep-rule long (opened with the keep book's hold): sold at this session's open once a later close ranked it outside the top keep_rank
     if (isDay && !first) { exit = q.close > 0 ? q.close : q.ltp; why = "missed"; }           // a day trade the job could not close on its day: closed at that day's closing price
     else if (keepT && L.asof < today && r.trade_date <= L.asof && rk > RL.keep_rank && q.open > 0) { exit = q.open; why = "rank"; }
     else if (stop) { exit = !first && q.open > 0 && (sg > 0 ? q.open <= r.stop : q.open >= r.stop) ? q.open : r.stop; why = "stop"; }
     else if (tgt) { exit = !first && q.open > 0 && (sg > 0 ? q.open >= r.target : q.open <= r.target) ? q.open : r.target; why = "target"; }
     else if (days >= (r.hold || R.hold) && mins >= (isDay ? 905 : 925)) { exit = q.ltp; why = isDay ? "close" : "time"; }      // day trades out at 3:05 pm: since 3 Aug 2026 F&O stocks close in an auction and Dhan squares equity intraday positions off at 3:10 pm
     const patch = { days, last_day: today, hi, lo, last_price: q.ltp, mfe_pct: r3((sg > 0 ? hi / r.entry - 1 : 1 - lo / r.entry) * 100), mae_pct: r3((sg > 0 ? lo / r.entry - 1 : 1 - hi / r.entry) * 100), updated_at: new Date().toISOString() };
-    if (exit) { const g = sg * (exit / r.entry - 1) * 100; Object.assign(patch, { status: "closed", exit_price: r2(exit), exit_date: today, exit_reason: why, gross_pct: r3(g), net_pct: r3(g - c2), net_live_pct: r.entry_live > 0 ? r3(sg * (exit / r.entry_live - 1) * 100 - c2) : null }); closed++; }
-    await sb(env, "model_trades?id=eq." + encodeURIComponent(r.id), { method: "PATCH", body: JSON.stringify(patch) }); moved++; }
+    if (exit) { const g = sg * (exit / r.entry - 1) * 100; Object.assign(patch, { status: "closed", exit_price: r2(exit), exit_date: today, exit_reason: why, gross_pct: r3(g), net_pct: r3(g - c2), net_live_pct: r.entry_live > 0 ? r3(sg * (exit / r.entry_live - 1) * 100 - c2) : null }); closed++; gone.add(r.id);
+      if ((why === "stop" || why === "target") && !(isDay && sg > 0)) hits.push(hitAlert(r, why, exit, g - c2, today)); }      // intraday longs are paper only: no alert
+    if (imbDue && isDay && first && r.imb15 == null && (q.totBuyQuan + q.totSellQuan) > 0) patch.imb15 = r3((q.totBuyQuan - q.totSellQuan) / (q.totBuyQuan + q.totSellQuan));
+    const row = { ...r, ...patch }; up.push(Object.fromEntries(UP.map((k) => [k, row[k] ?? null]))); moved++; }
+  for (const r of imbRows) { if (open.some((o) => o.id === r.id)) continue; const q = Q[r.symbol]; if (!live(q) || !((q.totBuyQuan + q.totSellQuan) > 0)) continue;      // a day trade already closed before the check still gets its reading (otherwise the idea would only see survivors)
+    up.push(Object.fromEntries(["kind", "signal_date", "trade_date", "symbol", "side", "entry", "status", "imb15"].map((k) => [k, k === "imb15" ? r3((q.totBuyQuan - q.totSellQuan) / (q.totBuyQuan + q.totSellQuan)) : r[k]]))); }
+  if (up.length) { const main = up.filter((x) => "days" in x), extra = up.filter((x) => !("days" in x));
+    if (main.length) await sbRows(env, "model_trades?on_conflict=signal_date,symbol,side,kind", main, "resolution=merge-duplicates,return=minimal");
+    if (extra.length) { try { await sbRows(env, "model_trades?on_conflict=signal_date,symbol,side,kind", extra, "resolution=merge-duplicates,return=minimal"); } catch { /* only the H2 reading */ } } }
   if (mins >= 925) { try { await sb(env, "intraday_snaps?ts=lt." + new Date(Date.now() - 400 * 864e5).toISOString(), { method: "DELETE" }); } catch { /* cleaning up can wait */ } }
-  return { ok: true, open: open.length - closed + add.length, opened: add.length, closed, moved };
+  // alerts: the exact levels of what just opened, the swing stops to re-enter, stops and targets reached, and prices that look wrong
+  const A = [...hits]; let al = 0;
+  if (add.length) { const shown = add.filter((r) => !(r.kind === "day" && r.side === "long")); A.push(levelsAlert(shown, L, today, shown.map((r) => r.symbol).join(",").slice(0, 150))); }
+  if (mins < 600 && Object.values(Q).some(live)) A.push(reenterAlert(open.filter((r) => r.kind === "swing" && !gone.has(r.id)), today));      // once a day, on the first run with live prices
+  for (const s of odd) A.push({ key: today + "|health|odd|" + s, day: today, kind: "health", level: "warn", title: `ARKA · ${s}: opening price looks wrong`, body: `${s} opened 20% or more away from yesterday's close (a split, a bonus or a bad price). The paper trade was not opened; check the stock before trading it.` });
+  if (A.filter(Boolean).length) { try { al = await pushAlerts(env, await getSettings(env), A); } catch { /* the journal itself is saved */ } }
+  return { ok: true, open: open.length - closed + add.length, opened: add.length, closed, moved, alerts: al };
 }
 export async function snapStep(env, ctx, chunk) {           // one slice of 50 F&O stocks: price, running volume, the buy and sell queues and the best bid and offer
   const L = await liveModel(env, ctx), U = (L && L.universe) || [], syms = U.slice(chunk * 50, chunk * 50 + 50); if (!syms.length) return { ok: true, n: 0 };
@@ -776,33 +816,323 @@ export async function snapStep(env, ctx, chunk) {           // one slice of 50 F
   if (rows.length) await sb(env, "intraday_snaps?on_conflict=symbol,ts", { method: "POST", headers: { prefer: "resolution=ignore-duplicates,return=minimal" }, body: JSON.stringify(rows) });
   return { ok: true, n: rows.length };
 }
-export async function cronTick(env, ctx, force) {           // every minute in market hours: a snapshot slice in the first minutes of each quarter hour, the journal three times in between
+export async function cronTick(env, ctx, force) {           // every minute from 8:45 am to 4 pm on trading days (Cloudflare cron "* 3-10 * * 1-5", in UTC)
   if (!angelOn(env) || !env.SUPABASE_URL || !env.SUPABASE_KEY) return { ok: false, why: "Angel One or Supabase is not set up" };
-  const now = istNow(), d = now.getUTCDay(), m = now.getUTCHours() * 60 + now.getUTCMinutes(), k = m % 15, out = { ok: true, at: now.toISOString().slice(0, 16).replace("T", " ") };
-  if (!force && (d === 0 || d === 6 || m < 556 || m > 931)) return { ...out, idle: true };
-  try { if (force === "all") { out.journal = await journalStep(env, ctx); out.snap = await snapStep(env, ctx, 0); } else if (k < 6) out.snap = await snapStep(env, ctx, k); else if (k === 7 || k === 10 || k === 13) out.journal = await journalStep(env, ctx); }
-  catch (e) { out.ok = false; out.err = String((e && e.message) || e).slice(0, 200); }
+  const now = istNow(), today = now.toISOString().slice(0, 10), m = now.getUTCHours() * 60 + now.getUTCMinutes(), k = m % 15, out = { ok: true, at: now.toISOString().slice(0, 16).replace("T", " ") };
+  if (!force && (!isSession(today) || m < 525 || m > 960)) return { ...out, idle: true };
+  const run = async (name, f) => { try { out[name] = await f(); } catch (e) { out.ok = false; out.err = String((e && e.message) || e).slice(0, 200); out[name] = { err: out.err }; } };
+  if (force === "all") { await run("journal", () => journalStep(env, ctx)); await run("snap", () => snapStep(env, ctx, 0)); return out; }
+  if (m >= 525 && m <= 540 && m % 5 === 0) await run("plan", () => planStep(env, ctx, today));          // 8:45 am; 8:50, 8:55 and 9:00 only if it did not go out
+  if (m === 547 || m === 549) await run("pre", () => preopenStep(env, ctx, today));                   // about 9:07 am, in the pre-open
+  if (m >= 556 && m <= 931) {
+    if (k < 6) await run("snap", () => snapStep(env, ctx, k));                                         // a slice of the F&O list in the first six minutes of each quarter hour
+    if (k >= 6 || m === 556 || m === 557) await run("journal", () => journalStep(env, ctx));            // 9:16 and 9:17 am, then every other minute: stops and targets are checked about once a minute
+  }
+  if ((m >= 565 && m <= 568) || (m >= 900 && m <= 903) || (m >= 915 && m <= 918)) await run("remind", () => remindStep(env, ctx, today, m));
+  if (m >= 945 && m <= 955 && m % 3 === 0) await run("summary", () => summaryStep(env, ctx, today));
+  if (!out.ok && m >= 556 && m <= 931 && out.err) {            // a failure in market hours: one warning a day (it keeps trying every minute)
+    try { await pushAlerts(env, await getSettings(env), [{ key: today + "|health|run", day: today, kind: "health", level: "warn", title: "ARKA · The live journal hit a problem", body: out.err.replace(/bot\d+:[\w-]+/g, "bot***") + "\nIt tries again every minute. This warning is sent once a day." }]); } catch { /* storage itself may be down */ }
+  }
   return out;
 }
-async function journalApi(env, ctx, url, me) {
-  const op = url.searchParams.get("op") || "list", setup = "Run supabase_arka_journal.sql in the Supabase SQL editor once, then add the cron trigger in wrangler.jsonc.";
+// ── Stage 37: exact stops and targets, alerts on the website and Telegram, sizing, and the 60-session check ──
+// Alerts are kept in the table arka_alerts (supabase_arka_alerts.sql) and also sent to Telegram when the Cloudflare secrets TELEGRAM_BOT_TOKEN and
+// TELEGRAM_CHAT_ID are set. Book sizes and margins are in arka_settings: only the admin reads or changes them. Nothing here can place an order.
+const NSE_HOLIDAYS = new Set(["2026-12-25"]);              // weekday exchange holidays still ahead (NSE circular of Dec 2025); add 2027's when NSE publishes them
+export const isSession = (d) => { const w = new Date(d + "T00:00:00Z").getUTCDay(); return w > 0 && w < 6 && !NSE_HOLIDAYS.has(d); };
+export const prevSession = (d) => { let t = Date.parse(d + "T00:00:00Z"); for (let i = 0; i < 12; i++) { t -= 864e5; const s = new Date(t).toISOString().slice(0, 10); if (isSession(s)) return s; } return null; };
+const tickOf = (p) => (p < 250 ? 0.01 : p <= 1000 ? 0.05 : p <= 5000 ? 0.1 : p <= 10000 ? 0.5 : p <= 20000 ? 1 : 5);
+// A price on the exchange's grid. NSE fixes each share's tick from a month-end close, so the tick of a price 20% higher is used: a coarser tick is a whole
+// multiple of the finer one, so the price stays valid. Stops are rounded away from the price, targets toward it (arka_model.py does the same).
+export const toTick = (p, up) => { if (!(p > 0) || !isFinite(p)) return null; const t = tickOf(p * 1.2), q = up ? Math.ceil(p / t - 1e-9) : Math.floor(p / t + 1e-9); return Math.round(q * t * 100) / 100; };
+export const lv = (e, atr, sg, sk, tk) => ({ stop: toTick(e - sg * sk * atr, sg < 0), target: tk ? toTick(e + sg * tk * atr, sg < 0) : null });      // sg +1 long, -1 short
+
+// settings (admin only): what each book is worth, the cash in the broker account (typed by hand: nothing here reads the account), margins and Telegram switches
+export const SET_DEF = { day_size: 0, long_size: 0, short_size: 0, funds: 0, mis_margin: 20, fut_margin: 20, slip: 0.1, max_loss: 0,
+  books: { day: true, long: true, short: true }, tg: { plan: true, levels: true, hits: true, reminders: true, summary: true, health: true } };
+const setMerge = (d) => ({ ...SET_DEF, ...(d || {}), books: { ...SET_DEF.books, ...((d && d.books) || {}) }, tg: { ...SET_DEF.tg, ...((d && d.tg) || {}) } });
+async function getSettings(env) { try { const r = await sb(env, "arka_settings?id=eq.1&select=data"); return setMerge(r && r[0] && r[0].data); } catch { return { ...setMerge(null), missing: true }; } }
+export function cleanSettings(b) {
+  b = b || {}; const n = (v, lo, hi, d) => { const x = +v; return v !== "" && v != null && isFinite(x) ? Math.min(hi, Math.max(lo, x)) : d; }, B = (v, d) => (typeof v === "boolean" ? v : d);
+  const o = { day_size: n(b.day_size, 0, 1e9, 0), long_size: n(b.long_size, 0, 1e9, 0), short_size: n(b.short_size, 0, 1e10, 0), funds: n(b.funds, 0, 1e10, 0), mis_margin: n(b.mis_margin, 5, 100, 20),
+    fut_margin: n(b.fut_margin, 5, 100, 20), slip: n(b.slip, 0, 2, 0.1), max_loss: n(b.max_loss, 0, 1e8, 0), books: {}, tg: {} };
+  for (const k of Object.keys(SET_DEF.books)) o.books[k] = B(b.books && b.books[k], SET_DEF.books[k]);
+  for (const k of Object.keys(SET_DEF.tg)) o.tg[k] = B(b.tg && b.tg[k], SET_DEF.tg[k]);
+  return o;
+}
+// Equal slots as in the backtests: a tenth of a book's value per stock (half the day after a bullish NIFTY call for the intraday shorts), sized so that an
+// open `slip`% worse than the price still fits. Futures go in whole lots and are never rounded up. risk = the loss at the stop, slippage included.
+export function sizeOf(S, book, price, atr, o = {}) {
+  const slip = (S.slip || 0) / 100, base = book === "day" ? S.day_size : book === "long" ? S.long_size : S.short_size, sk = o.sk ?? (book === "day" ? 0.75 : 1.5);
+  if (!(base > 0) || !(price > 0) || !(atr > 0)) return null;
+  const slot = (base / 10) * (o.half ? 0.5 : 1), per = sk * atr + price * slip;
+  if (book === "short") {
+    const lot = o.lot || 0; if (!lot) return { slot, lots: 0, note: "lot size not known" };
+    const lv_ = lot * price, fit = Math.floor(slot / lv_); let n = fit; if (S.max_loss > 0) n = Math.min(n, Math.floor(S.max_loss / (per * lot)));
+    return { slot, lot, lots: n, value: n * lv_, margin: n * lv_ * (S.fut_margin / 100), risk: n * lot * per, note: !fit ? `one lot is ${fl(lv_)}, more than a slot of ${fl(slot)}: skip` : n < fit ? "cut to your loss limit" : "" };
+  }
+  const fit = Math.floor(slot / (price * (1 + slip))); let q = fit; if (S.max_loss > 0) q = Math.min(q, Math.floor(S.max_loss / per));
+  return { slot, qty: q, value: q * price, margin: q * price * (book === "day" ? S.mis_margin / 100 : 1), risk: q * per, note: !fit ? "one share costs more than a slot" : q < fit ? "cut to your loss limit" : "" };
+}
+
+// text helpers (Indian digit grouping without relying on the runtime's locale data)
+const inr = (n) => { const s = String(Math.round(Math.abs(n))), a = s.slice(-3), b = s.slice(0, -3); return (n < 0 ? "−" : "") + (b ? b.replace(/\B(?=(\d{2})+(?!\d))/g, ",") + "," : "") + a; };
+const fr = (v) => "₹" + inr(v), fl = (v) => (v >= 1e5 ? "₹" + (v / 1e5).toFixed(2) + " lakh" : fr(v));
+export const fp = (v) => (v == null || !isFinite(v) ? "—" : v < 1000 ? v.toFixed(2) : v < 10000 ? inr(Math.floor(v)) + "." + v.toFixed(1).slice(-1) : inr(v));      // a price at its tick
+const fo = (v) => (v == null || !isFinite(v) ? "—" : v < 1000 ? v.toFixed(2) : v.toFixed(1));      // a price difference
+const DN = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"], MN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+export const dname = (d) => { const t = new Date(d + "T00:00:00Z"); return isNaN(t) ? String(d) : `${DN[t.getUTCDay()]} ${t.getUTCDate()} ${MN[t.getUTCMonth()]}`; };
+const ord = (k) => k + (k % 100 >= 11 && k % 100 <= 13 ? "th" : ["th", "st", "nd", "rd"][k % 10] || "th");
+const pct = (v, d = 2) => (v == null || !isFinite(v) ? "—" : (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v).toFixed(d) + "%");
+
+// Telegram: plain text, split under its 4,096-character limit. The token is only in the address and is never logged or returned.
+const tgOn = (env) => !!(env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID);
+async function telegram(env, text) {
+  const parts = []; let cur = "";
+  for (const line of String(text).split("\n")) { if (cur.length + line.length + 1 > 3800 && cur) { parts.push(cur); cur = ""; } cur += line + "\n"; }
+  if (cur.trim()) parts.push(cur);
+  for (const p of parts) {
+    const r = await fetch("https://api.telegram.org/bot" + env.TELEGRAM_BOT_TOKEN + "/sendMessage", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chat_id: env.TELEGRAM_CHAT_ID, text: p, disable_web_page_preview: true }) });
+    if (!r.ok) throw new Error("Telegram refused the message (HTTP " + r.status + ")");
+  }
+}
+const TG_OF = { plan: "plan", levels: "levels", reenter: "levels", stop: "hits", target: "hits", remind: "reminders", summary: "summary", health: "health" };      // the settings switch for each kind
+// Stores alerts, one per key (a repeat of a key is ignored), and sends the new ones to Telegram. tg:false keeps one on the website only.
+export async function pushAlerts(env, S, list) {
+  list = list.filter(Boolean); if (!list.length) return 0;
+  let fresh;
+  try { fresh = (await sb(env, "arka_alerts?on_conflict=key&select=key", { method: "POST", headers: { prefer: "resolution=ignore-duplicates,return=representation" },
+    body: JSON.stringify(list.map((a) => ({ key: String(a.key).slice(0, 200), day: a.day, kind: a.kind, level: a.level || "info", title: a.title, body: a.body || "", pub: a.pub ?? a.body ?? "", sent_tg: false }))) })) || []; }
+  catch (e) { if (missingTable(e)) return 0; throw e; }
+  const keys = new Set(fresh.map((r) => r.key)), sent = [];
+  if (tgOn(env)) for (const a of list) {
+    if (!keys.has(String(a.key).slice(0, 200)) || a.tg === false) continue; const sw = TG_OF[a.kind]; if (sw && S && S.tg && S.tg[sw] === false) continue;
+    try { await telegram(env, `${a.title}\n${a.body || ""}`.trim()); sent.push(String(a.key).slice(0, 200)); }
+    catch (e) { if (a.kind !== "health") { try { await pushAlerts(env, null, [{ key: a.day + "|health|telegram", day: a.day, kind: "health", level: "warn", title: "Telegram did not take an alert", body: String(e.message).slice(0, 120) + ". The website still shows every alert. Check TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in Cloudflare.", tg: false }]); } catch { /* the site still has the alert */ } } }
+  }
+  if (sent.length) { try { await sb(env, "arka_alerts?key=in.(" + encodeURIComponent(sent.map((k) => '"' + k.replace(/"/g, "") + '"').join(",")) + ")", { method: "PATCH", body: JSON.stringify({ sent_tg: true }) }); } catch { /* only a flag */ } }
+  return keys.size;
+}
+
+// ── the 60-session check (stage 37) ──
+// Each book's paper sessions against its unseen-period backtest (the "audit" numbers arka_model.py writes into live.json). A session's value is the average of
+// the trades that opened that day, as in the backtest. z = (paper mean - backtest mean) / (backtest sd / sqrt(n)). Pass at 60 sessions with a positive mean
+// and z above -1; warn for z from -2 to -1 or a mean at or below zero; fail at z of -2 or less, or early at -2.5 or less after 20 sessions. The cone is the
+// backtest's own 1st and 5th percentile of an n-session average. Win rate: binomial z against the backtest's. Entry slippage from your own fills
+// ("I placed it"): up to 0.05% is fine, up to 0.10% a warning, more a fail.
+export function auditBook(rows, A) {
+  const by = {}; for (const r of rows) (by[r.trade_date] = by[r.trade_date] || []).push(r.net_pct);
+  const sess = Object.values(by).map((v) => v.reduce((a, b) => a + b, 0) / v.length), n = sess.length, m = n ? sess.reduce((a, b) => a + b, 0) / n : null;
+  const out = { n, need: 60, mean: m, trades: rows.length }, zt = (z) => `z ${z >= 0 ? "+" : "−"}${Math.abs(z).toFixed(1)}`;
+  const f = rows.filter((r) => r.fill_price > 0 && r.entry > 0);
+  if (f.length) { out.slip = f.reduce((a, r) => a + (r.side === "short" ? 1 - r.fill_price / r.entry : r.fill_price / r.entry - 1) * 100, 0) / f.length; out.fills = f.length; out.slip_v = out.slip <= 0.05 ? "ok" : out.slip <= 0.1 ? "warn" : "fail"; }
+  if (!A || !A.session || !(A.session.sd > 0)) return { ...out, verdict: "no benchmark", why: "the model file has no backtest numbers for this book yet" };
+  out.bt = A.session.mean; out.bt_sd = A.session.sd;
+  if (!n) return { ...out, verdict: "collecting", why: "no closed trade yet" };
+  const z = (m - A.session.mean) / (A.session.sd / Math.sqrt(n)); out.z = Math.round(z * 100) / 100;
+  const ck = [10, 20, 30, 40, 60].filter((k) => n >= k).pop(); if (ck && A.cone && A.cone[ck]) { out.cone = A.cone[ck]; out.cone_n = ck; out.below = m < A.cone[ck][0] ? 1 : m < A.cone[ck][1] ? 5 : 0; }
+  const w = rows.filter((r) => r.net_pct > 0).length, p = ((A.trade && A.trade.win) || 0) / 100; out.win = (w / rows.length) * 100; out.bt_win = A.trade && A.trade.win;
+  if (rows.length >= 20 && p > 0 && p < 1) out.wz = Math.round(((w - rows.length * p) / Math.sqrt(rows.length * p * (1 - p))) * 100) / 100;
+  let verdict, why;
+  if (n < 20) { verdict = "collecting"; why = `${n} of 60 sessions`; }
+  else if (n < 60) { verdict = z <= -2.5 ? "fail" : "collecting"; why = z <= -2.5 ? `stopped early: ${n} sessions, ${zt(z)} under the backtest` : `${n} of 60 sessions · ${zt(z)}`; }
+  else if (z <= -2) { verdict = "fail"; why = `${n} sessions, ${zt(z)}: well under the backtest`; }
+  else if (z <= -1 || !(m > 0)) { verdict = "warn"; why = `${n} sessions, ${zt(z)}${m > 0 ? "" : ", not positive"}: keep it on paper`; }
+  else { verdict = "pass"; why = `${n} sessions, ${zt(z)}, positive after costs`; }
+  if (out.below === 1 && verdict !== "fail") why += " · under the backtest's 1st-percentile cone";
+  if (out.wz != null && out.wz <= -2) why += " · win rate well under the backtest's";
+  if (out.slip_v === "fail") why += " · your entry slippage is above 0.10%";
+  return { ...out, verdict, why };
+}
+const BOOKS = [["day", "Intraday shorts", (r) => r.kind === "day" && r.side !== "long"], ["dayl", "Intraday longs", (r) => r.kind === "day" && r.side === "long"], ["long", "Swing longs", (r) => r.kind !== "day" && r.side === "long"], ["short", "Swing shorts", (r) => r.kind !== "day" && r.side === "short"]];
+export const auditAll = (rows, A) => Object.fromEntries(BOOKS.map(([k, , f]) => [k, auditBook(rows.filter(f), A && A[k])]));
+const closedRows = async (env) => ((await sb(env, "model_trades?status=eq.closed&select=kind,side,symbol,trade_date,exit_date,net_pct,entry,fill_price,exit_reason,pre_imb,imb15&order=trade_date.desc&limit=3000").catch(async (e) => {
+  if (/PGRST204|42703|column/i.test(String(e.body || e.message))) return sb(env, "model_trades?status=eq.closed&select=kind,side,symbol,trade_date,exit_date,net_pct,entry,exit_reason&order=trade_date.desc&limit=3000"); throw e; })) || []).filter((r) => r.net_pct != null);
+const gateTxt = (a) => (!a ? "" : a.verdict === "pass" ? `passed the 60-session check (${a.why})` : a.verdict === "fail" ? `FAILED the paper check (${a.why})` : `paper test · ${a.why}`);
+
+// Two ideas written down on 28 Nov 2026 before any of their data existed, judged only at 120 sessions or more with one fixed test: within each session the
+// intraday shorts are split into thirds by the reading; the session's spread is the top third's average result (after costs) minus the bottom third's.
+// An idea holds only if the average spread has the predicted sign with t of 2 or more AND the same sign in both halves of the sessions. Until then
+// nothing changes. H1: a buy-heavy pre-open book at about 9:07 (buy share of the queued quantity) predicts a worse short. H2: a buy-heavy order book
+// at the first check after 9:30 (about 9:36) predicts a worse short. Both predicted spreads are negative.
+export function hypTest(rows, key, sign) {
+  const v = rows.filter((r) => r.kind === "day" && r.side !== "long" && r[key] != null && isFinite(r[key]) && r.net_pct != null), days = [...new Set(v.map((r) => r.trade_date))].sort(), sp = [];
+  for (const d of days) { const x = v.filter((r) => r.trade_date === d).sort((a, b) => a[key] - b[key]), k = Math.floor(x.length / 3); if (k < 1) continue; const mean = (a) => a.reduce((s, r) => s + r.net_pct, 0) / a.length; sp.push(mean(x.slice(-k)) - mean(x.slice(0, k))); }
+  const out = { sessions: sp.length, need: 120, predicted: sign < 0 ? "negative" : "positive" };
+  if (sp.length < 120) return { ...out, verdict: "collecting" };
+  const mean = (a) => a.reduce((x, y) => x + y, 0) / a.length, m = mean(sp), sd = Math.sqrt(sp.reduce((a, b) => a + (b - m) ** 2, 0) / (sp.length - 1)), t = sd > 0 ? m / (sd / Math.sqrt(sp.length)) : 0;
+  const h = sp.length >> 1, holds = Math.sign(m) === sign && Math.abs(t) >= 2 && Math.sign(mean(sp.slice(0, h))) === sign && Math.sign(mean(sp.slice(h))) === sign;
+  return { ...out, spread: Math.round(m * 1000) / 1000, t: Math.round(t * 100) / 100, verdict: holds ? "holds" : "fails" };
+}
+
+// ── what the alerts say ──
+const halfOf = (L) => ((L.day && L.day.size) ?? 1) < 1;
+export function planAlert(L, S, today, gate) {
+  const D = L.day || {}, DR = D.rules || {}, R = L.rules || {}, RL = R.long || {}, RS = R.short || R, half = halfOf(L), pub = [], priv = [], n = L.nifty || {};
+  const add = (p, q) => { pub.push(p); priv.push(q == null ? p : q); }, money = { day: 0, long: 0, short: 0 }, skipped = [];
+  add(`For ${dname(today)} · from the close of ${dname(L.asof)} · market orders in the pre-open, 9:00–9:05 am`);
+  if (n.call) add(`NIFTY call: ${n.call[0] + n.call.slice(1).toLowerCase()}${n.weak ? " (weak: NIFTY is above its 200-day average, where bullish calls had no edge)" : ""}${n.pct != null ? ` · score at its ${ord(Math.round(n.pct))} percentile` : ""}. No NIFTY trade.`);
+  const dp = D.picks || [];
+  if (dp.length && S.books.day !== false) {
+    add("", ""); add(`INTRADAY SHORTS · SELL · intraday (MIS) · market order · ${half ? "half size (bullish call)" : "a tenth of the intraday book each"}${gate && gate.day ? " · " + gateTxt(gate.day) : ""}`);
+    add(`Stop: your fill + ${DR.stop_atr} ATR${DR.target_atr ? ` · target: fill − ${DR.target_atr} ATR` : ""} · placed after 9:15 (exact prices at 9:16) · buy back by 3:05 pm`);
+    for (const x of dp) { const z = sizeOf(S, "day", x.close, x.atr, { half, sk: DR.stop_atr }), base = ` ${x.rank} ${x.sym}${x.close ? ` · close ${fp(x.close)}` : ""} · stop fill + ${fo(DR.stop_atr * x.atr)}${DR.target_atr ? ` · target fill − ${fo(DR.target_atr * x.atr)}` : ""}`;
+      if (z && z.qty > 0) money.day += z.margin; add(base, base + (z ? (z.qty > 0 ? ` · sell ${z.qty} (${fr(z.value)}, margin ${fr(z.margin)}, loss at stop ${fr(z.risk)})` : ` · ${z.note}`) : "")); }
+  }
+  const pk = L.picks || [], ex = L.exits_open || [], last = L.last_session || [];
+  const longs = pk.filter((x) => x.side === "long"), shorts = pk.filter((x) => x.side === "short");
+  if (longs.length && S.books.long !== false) {
+    add("", ""); add(`SWING LONGS · BUY · delivery (CNC) · market order · a tenth of the swing-long book each${gate && gate.long ? " · " + gateTxt(gate.long) : ""}`);
+    add(`Stop: fill − ${RL.stop_atr ?? R.stop_atr} ATR${RL.target_atr ? ` · target: fill + ${RL.target_atr} ATR` : ""} · sold at the next open once ranked outside the top ${RL.keep_rank} · at most ${RL.max_hold} sessions`);
+    for (const x of longs) { const z = sizeOf(S, "long", x.close, x.atr, { sk: RL.stop_atr ?? R.stop_atr }), base = ` ${x.sym}${x.close ? ` · close ${fp(x.close)}` : ""} · stop fill − ${fo((RL.stop_atr ?? R.stop_atr) * x.atr)}${RL.target_atr ? ` · target fill + ${fo(RL.target_atr * x.atr)}` : ""}`;
+      if (z && z.qty > 0) money.long += z.margin; add(base, base + (z ? (z.qty > 0 ? ` · buy ${z.qty} (${fr(z.value)}, loss at stop ${fr(z.risk)})` : ` · ${z.note}`) : "")); }
+  }
+  if (shorts.length && S.books.short !== false) {
+    add("", ""); add(`SWING SHORTS · SELL · stock futures, whole lots · market order${gate && gate.short ? " · " + gateTxt(gate.short) : ""}`);
+    add(`Stop: futures fill + ${RS.stop_atr} ATR · target: fill − ${RS.target_atr} ATR · bought back before 3:40 pm on session ${RS.hold}`);
+    for (const x of shorts) { const z = sizeOf(S, "short", x.close, x.atr, { lot: x.lot, sk: RS.stop_atr }), fut = x.fut ? `${x.fut.month} future` : "future", base = ` ${x.sym} ${fut}${x.lot ? ` · lot ${x.lot}${x.lot_value ? ` (${fl(x.lot_value)})` : ""}` : ""} · stop fill + ${fo(RS.stop_atr * x.atr)} · target fill − ${fo(RS.target_atr * x.atr)}`;
+      if (z && z.lots > 0) money.short += z.margin; if (z && !z.lots) skipped.push(x.sym); add(base, base + (z ? (z.lots > 0 ? ` · sell ${z.lots} lot${z.lots > 1 ? "s" : ""} (margin ${fr(z.margin)}, loss at stop ${fr(z.risk)})` : ` · ${z.note}`) : "")); }
+  }
+  if (ex.length) { add("", ""); add(`SELL AT THE OPEN (swing longs ranked out of the top ${RL.keep_rank}): ${ex.join(", ")} · market order 9:00–9:05, all shares`); }
+  if (last.length) { add("", ""); add(`LAST SESSION TODAY: ${last.map((x) => `${x.sym} (swing ${x.side})`).join(", ")} · longs sell in the closing auction 3:20–3:25 pm, shorts buy back futures before 3:40 pm`); }
+  const fno = L.fno || {}; if (fno.ban && fno.ban.length && fno.ban_for === today) add(`F&O ban today: ${fno.ban.join(", ")} (no new futures position there; intraday cash trades are not affected)`);
+  const tot = money.day + money.long + money.short;
+  if (tot > 0) { add("", ""); add("", `Margin for these orders ≈ ${fr(tot)} (intraday ${fr(money.day)} at ${S.mis_margin}%, swing longs ${fr(money.long)} in full, futures ${fr(money.short)} at ${S.fut_margin}%), plus what open futures already block.${S.funds > 0 ? (S.funds >= tot ? ` Your funds ${fr(S.funds)}: enough.` : ` Your funds ${fr(S.funds)}: short by ${fr(tot - S.funds)} — leave out the lowest-ranked orders.`) : " Type your funds on the Plan tab to check them."}`); }
+  if (!(S.day_size > 0 || S.long_size > 0 || S.short_size > 0)) add("", "Quantities: set the book sizes on the Plan tab (Trade settings) to see them here.");
+  add("", ""); add("9:16 am: exact stops and targets from the real opening prices follow. If your app links a stop and a target (one cancels the other), use it; otherwise place both and cancel the other as soon as one fills.");
+  const trim = (a) => a.filter((x, i) => x !== "" || (i > 0 && a[i - 1] !== "")).join("\n").replace(/\n+$/, "");
+  return { key: today + "|plan", day: today, kind: "plan", level: "action", title: `ARKA · Orders for ${dname(today)} · place 9:00–9:05 am`, body: trim(priv), pub: trim(pub) };
+}
+// The 9:16 alert: the exact levels from the official opening price of each trade the journal just opened (tick-rounded), and the offsets for your own fill.
+export function levelsAlert(rows, L, today, run) {
+  const day = rows.filter((r) => r.kind === "day" && r.side === "short"), sw = rows.filter((r) => r.kind === "swing");
+  if (!day.length && !sw.length) return null;
+  const P = Object.fromEntries((L.picks || []).map((x) => [x.sym + "|" + x.side, x])), lines = [];
+  const one = (r) => { const sg = r.side === "long" ? 1 : -1, ds = Math.abs(r.entry - r.stop), dt = r.target != null ? Math.abs(r.target - r.entry) : null, p = P[r.symbol + "|" + r.side];
+    return ` ${r.symbol}${r.kind === "swing" && r.side === "short" && p && p.fut ? ` (${p.fut.month} future)` : ""} · open ${fp(r.entry)} · stop ${fp(r.stop)} (fill ${sg > 0 ? "−" : "+"} ${fo(ds)})${dt != null ? ` · target ${fp(r.target)} (fill ${sg > 0 ? "+" : "−"} ${fo(dt)})` : ""}`; };
+  if (day.length) { lines.push("INTRADAY SHORTS · a buy stop-loss (SL-M) at the stop and a buy limit at the target:"); day.forEach((r) => lines.push(one(r))); }
+  if (sw.length) { if (lines.length) lines.push(""); lines.push("SWING TRADES · the same two orders; for futures keep the same distance from your futures fill:"); sw.forEach((r) => lines.push(one(r) + ` · swing ${r.side}`)); }
+  lines.push("", "If your fill was not the open, use the distances in brackets. When one of the two orders fills, cancel the other at once.");
+  return { key: today + "|levels|" + run, day: today, kind: "levels", level: "action", title: `ARKA · Stops and targets from today's open`, body: lines.join("\n") };
+}
+export function reenterAlert(rows, today) {      // open swing trades from earlier sessions: yesterday's stop orders expired (and the closing auction cancels them)
+  const sw = rows.filter((r) => r.kind === "swing" && r.trade_date < today); if (!sw.length) return null;
+  return { key: today + "|reenter", day: today, kind: "reenter", level: "action", title: `ARKA · Re-enter the stops of ${sw.length} open swing trade${sw.length > 1 ? "s" : ""}`,
+    body: sw.map((r) => ` ${r.symbol} swing ${r.side} · stop ${fp(r.stop)}${r.target != null ? ` · target ${fp(r.target)}` : ""} · session ${r.last_day === today ? r.days : r.days + 1} of ${r.hold}`).join("\n") + "\nStop-loss orders last one day. For futures, keep the same distance from your futures price." };
+}
+export function hitAlert(r, why, exit, net, today) {
+  const what = `${r.symbol} ${r.kind === "day" ? "intraday" : "swing"} ${r.side}`, other = why === "stop" ? "target" : "stop";
+  return { key: `${today}|${why}|${r.symbol}|${r.kind}|${r.side}`, day: today, kind: why, level: why === "stop" ? "warn" : "info", title: `ARKA · ${why === "stop" ? "Stop" : "Target"} reached · ${what}`,
+    body: `Paper exit at ${fp(exit)} (${pct(net)} after costs). If your ${why} order filled, cancel the ${other} order now. If it did not fill, close at market.` };
+}
+
+// ── the cron steps ──
+export async function planStep(env, ctx, today) {            // about 8:45 am: tonight's orders with quantities, once a day
+  const [L, S] = await Promise.all([liveModel(env, ctx), getSettings(env)]), prev = prevSession(today);
+  if (!L || L.asof !== prev) return { new: await pushAlerts(env, S, [{ key: today + "|health|model", day: today, kind: "health", level: "warn", title: "ARKA · No new orders today",
+    body: L ? `The model's newest close is ${dname(L.asof)}, not ${dname(prev)}: nothing new opens today. Open trades keep their stops and targets. Check the Arka Model job in GitHub Actions.` : "The model file could not be read from the repository." }]) };
+  let gate = null; try { gate = auditAll(await closedRows(env), L.audit); } catch { /* the plan goes out without it */ }
+  return { new: await pushAlerts(env, S, [planAlert(L, S, today, gate)]) };
+}
+export async function preopenStep(env, ctx, today) {         // about 9:07 am: the pre-open book of today's picks, for the two written-down ideas
+  const L = await liveModel(env, ctx); if (!L || L.asof !== prevSession(today)) return { n: 0 };
+  const syms = [...new Set([...((L.day && L.day.picks) || []).map((x) => x.sym), ...(L.picks || []).map((x) => x.sym)])].slice(0, 50); if (!syms.length) return { n: 0 };
+  const Q = await angelQuotes(env, ctx, syms), ts = new Date().toISOString(), rows = [];
+  for (const [s, q] of Object.entries(Q)) { const t = angelTime(q.exchFeedTime) ?? angelTime(q.exchTradeTime); if (!t || istDayOf(t) !== today) continue;      // only today's book
+    rows.push({ day: today, symbol: s, ts, iep: q.ltp > 0 ? q.ltp : null, prev: q.close > 0 ? q.close : null, buy_q: q.totBuyQuan ?? null, sell_q: q.totSellQuan ?? null }); }
+  if (rows.length) { try { await sb(env, "preopen_snaps?on_conflict=day,symbol", { method: "POST", headers: { prefer: "resolution=merge-duplicates,return=minimal" }, body: JSON.stringify(rows) }); } catch (e) { if (!missingTable(e)) throw e; } }
+  return { n: rows.length };
+}
+export async function remindStep(env, ctx, today, m) {      // 9:25 health check, 3:00 pm buy-back and 3:15 pm last-session reminders
+  const S = await getSettings(env), open = (await sb(env, "model_trades?status=eq.open&select=symbol,side,kind,trade_date,days,last_day,hold,stop,target,entry")) || [], A = [];
+  if (m >= 565 && m <= 568) {                               // the plan was fresh but nothing opened by 9:25: the live prices are not coming in
+    const L = await liveModel(env, ctx); if (L && L.asof === prevSession(today) && ((L.day && L.day.picks && L.day.picks.length) || (L.picks && L.picks.length)) && !open.some((r) => r.trade_date === today)) {
+      const done = (await sb(env, "model_trades?trade_date=eq." + today + "&select=id&limit=1")) || [];
+      if (!done.length) A.push({ key: today + "|health|noopen", day: today, kind: "health", level: "warn", title: "ARKA · No live prices by 9:25", body: "Today's paper trades could not open: Angel One's prices are not coming in. Your own orders are not affected. The Angel One check is on the Account page." });
+    }
+  }
+  if (m >= 900 && m <= 903) { const d = open.filter((r) => r.kind === "day" && r.side === "short" && r.trade_date === today);
+    if (d.length) A.push({ key: today + "|remind|300", day: today, kind: "remind", level: "action", title: `ARKA · 3:00 pm · buy back ${d.length} intraday short${d.length > 1 ? "s" : ""} now`, tg: S.books.day !== false,
+      body: `${d.map((r) => r.symbol).join(", ")}\nMarket orders by 3:05 pm (Dhan squares off at 3:10 and charges for it). Cancel their stop and target orders.` }); }
+  if (m >= 915 && m <= 918) { const sw = open.filter((r) => r.kind === "swing"), lastS = sw.filter((r) => (r.last_day === today ? r.days : r.days + 1) >= (r.hold || 5));
+    if (lastS.length) A.push({ key: today + "|remind|315", day: today, kind: "remind", level: "action", title: `ARKA · 3:15 pm · last session for ${lastS.length} swing trade${lastS.length > 1 ? "s" : ""}`,
+      body: lastS.map((r) => r.side === "long" ? ` SELL ${r.symbol} (swing long) in the closing auction, market order 3:20–3:25 pm` : ` BUY BACK ${r.symbol} futures (swing short) before 3:40 pm`).join("\n")
+        + "\nThe other swing trades stay open: their stop-loss orders are cancelled when the closing auction starts, so re-enter them tomorrow from the 9:16 alert." }); }
+  return { new: await pushAlerts(env, S, A) };
+}
+export async function summaryStep(env, ctx, today) {        // about 3:45 pm: what the paper journal did today and where each book stands
+  const [S, L] = await Promise.all([getSettings(env), liveModel(env, ctx)]), rows = await closedRows(env), t = rows.filter((r) => r.trade_date === today || r.exit_date === today);
+  const dayT = rows.filter((r) => r.kind === "day" && r.side === "short" && r.trade_date === today); if (!dayT.length && !t.length) return { new: 0 };
+  const gate = auditAll(rows, L && L.audit), avg = (a) => (a.length ? a.reduce((s, r) => s + r.net_pct, 0) / a.length : null), lines = [];
+  if (dayT.length) lines.push(`Intraday shorts: ${dayT.length} trades · ${dayT.filter((r) => r.exit_reason === "stop").length} stops · ${dayT.filter((r) => r.exit_reason === "target").length} targets · average ${pct(avg(dayT))} after costs (paper, from the open)`);
+  const sw = rows.filter((r) => r.kind === "swing" && r.trade_date !== today && (r.exit_date === today)); if (sw.length) lines.push(`Swing trades closed today: ${sw.map((r) => `${r.symbol} ${pct(r.net_pct)}`).join(", ")}`);
+  for (const [k, nm] of [["day", "Intraday shorts"], ["long", "Swing longs"], ["short", "Swing shorts"]]) if (gate[k] && gate[k].n) lines.push(`${nm}: ${gateTxt(gate[k])}`);
+  return { new: await pushAlerts(env, S, [{ key: today + "|summary", day: today, kind: "summary", level: "info", title: `ARKA · Day summary · ${dname(today)}`, body: lines.join("\n") }]) };
+}
+
+async function journalApi(env, ctx, url, me, request) {
+  const op = url.searchParams.get("op") || "list", setup = "Run supabase_arka_journal.sql, then supabase_arka_alerts.sql, in the Supabase SQL editor once; the cron trigger is in wrangler.jsonc.";
   if (op === "run") { if (me.role !== "admin") return fail(403, "Only the desk can run this."); return json(await cronTick(env, ctx, "all")); }
+  if (op === "fill") {                                      // "I placed it": your own fill on a paper trade (price and quantity), for the slippage check. Typed by you; nothing reads the broker.
+    if (me.role !== "admin" || !request || request.method !== "POST") return fail(403, "Only the desk can record fills.");
+    let b = {}; try { b = await request.json(); } catch { /* empty body */ }
+    const id = Math.floor(+b.id), price = +b.price, qty = b.qty == null || b.qty === "" ? null : Math.floor(+b.qty), which = b.which === "exit" ? "exit" : "entry";
+    if (!(id > 0) || !(price > 0) || !isFinite(price)) return fail(400, "Which trade, and at what price?");
+    const r = ((await sb(env, "model_trades?id=eq." + id + "&select=id,entry,symbol")) || [])[0]; if (!r) return fail(404, "That trade is not in the journal.");
+    if (Math.abs(price / r.entry - 1) > 0.2) return fail(400, `That price is more than 20% from the ${r.symbol} open (${r.entry}): check it.`);
+    const patch = which === "exit" ? { exit_fill: price } : { fill_price: price, fill_at: new Date().toISOString(), ...(qty > 0 ? { qty } : {}) };
+    try { await sb(env, "model_trades?id=eq." + id, { method: "PATCH", body: JSON.stringify(patch) }); }
+    catch (e) { if (noCol(e)) return fail(409, "Run supabase_arka_alerts.sql once in the Supabase SQL editor: it adds the columns for your fills."); throw e; }
+    return json({ ok: true, id, ...patch });
+  }
   try {
     const rows = (await sb(env, "model_trades?select=*&order=trade_date.desc,id.desc&limit=400")) || [];
     let snaps = null; try { const last = await sb(env, "intraday_snaps?select=ts&order=ts.desc&limit=1"); snaps = { last: last && last[0] ? last[0].ts : null }; } catch { snaps = { last: null, missing: true }; }
     let done = rows.filter((r) => r.status === "closed" && r.net_pct != null);
-    try { const all = await sb(env, "model_trades?status=eq.closed&select=kind,side,trade_date,net_pct,net_live_pct,entry,entry_live,exit_reason&order=trade_date.desc&limit=1000"); if (Array.isArray(all) && all.length) done = all.filter((r) => r.net_pct != null); } catch { /* the 400 rows above will do */ }
+    try { const all = await sb(env, "model_trades?status=eq.closed&select=kind,side,symbol,trade_date,net_pct,net_live_pct,entry,entry_live,exit_reason,fill_price,pre_imb,imb15&order=trade_date.desc&limit=3000").catch((e) => {
+        if (noCol(e)) return sb(env, "model_trades?status=eq.closed&select=kind,side,symbol,trade_date,net_pct,net_live_pct,entry,entry_live,exit_reason&order=trade_date.desc&limit=3000"); throw e; });
+      if (Array.isArray(all) && all.length) done = all.filter((r) => r.net_pct != null); } catch { /* the 400 rows above will do */ }
     const pick = (k) => (r) => (k === "day" ? r.kind === "day" && r.side !== "long" : k === "dayl" ? r.kind === "day" && r.side === "long" : r.kind !== "day" && (!k || r.side === k));      // day: intraday shorts · dayl: intraday longs · long / short: swing trades
     const side = (k) => { const v = done.filter(pick(k)), w = v.filter((r) => r.net_pct > 0), sum = (a) => a.reduce((x, r) => x + r.net_pct, 0), m = v.length ? sum(v) / v.length : null;
       return { n: v.length, sessions: new Set(v.map((r) => r.trade_date)).size, sd: v.length > 1 ? Math.sqrt(v.reduce((x, r) => x + (r.net_pct - m) ** 2, 0) / (v.length - 1)) : null,
         won: v.length ? (w.length / v.length) * 100 : null, avg: m, total: sum(v), stop: v.filter((r) => r.exit_reason === "stop").length, target: v.filter((r) => r.exit_reason === "target").length, time: v.filter((r) => r.exit_reason === "time").length,
         pf: sum(w) > 0 && v.length > w.length ? sum(w) / -sum(v.filter((r) => r.net_pct <= 0)) : null,
         live: (() => { const z = v.filter((r) => r.net_live_pct != null); return z.length ? z.reduce((x, r) => x + r.net_live_pct, 0) / z.length : null; })(), slip: (() => { const z = v.filter((r) => r.entry_live > 0 && r.entry > 0); return z.length ? z.reduce((x, r) => x + (r.side === "short" ? 1 - r.entry_live / r.entry : r.entry_live / r.entry - 1) * 100, 0) / z.length : null; })() }; };
-    return json({ ready: true, rows, stats: { all: side(), long: side("long"), short: side("short"), day: side("day"), dayl: side("dayl") }, open: rows.filter((r) => r.status === "open").length, snaps, admin: me.role === "admin" });
+    const L = await liveModel(env, ctx).catch(() => null), audit = auditAll(done, L && L.audit), hyp = { h1: hypTest(done, "pre_imb", -1), h2: hypTest(done, "imb15", -1) };
+    const out = { ready: true, rows, stats: { all: side(), long: side("long"), short: side("short"), day: side("day"), dayl: side("dayl") }, audit, hyp, open: rows.filter((r) => r.status === "open").length, snaps, admin: me.role === "admin" };
+    if (me.role !== "admin") out.rows = rows.map(({ fill_price, fill_at, qty, exit_fill, ...r }) => r);      // your own fills and quantities stay with the desk
+    return json(out);
   } catch (e) {
     if (e.status === 503) return json({ ready: false, why: "Supabase is not connected.", setup });
     return json({ ready: false, why: /does not exist|not find|PGRST205|42P01|404/.test(String(e.body || e.message)) ? "The journal tables are not in Supabase yet." : String(e.message).slice(0, 160), setup });
   }
+}
+async function alertsApi(env, request, url, me) {          // the alerts list for the bell and the pop-ups; members see them without your quantities and rupee amounts
+  const op = url.searchParams.get("op") || "list", admin = me.role === "admin";
+  if (op === "test") {
+    if (!admin || request.method !== "POST") return fail(403, "Only the desk can send a test alert.");
+    const day = istNow().toISOString().slice(0, 10), n = await pushAlerts(env, await getSettings(env), [{ key: day + "|test|" + Date.now(), day, kind: "test", level: "info", title: "ARKA · Test alert", body: "Alerts reach the website and, when it is set up, this Telegram chat. Nothing to do." }]);
+    return json({ ok: n > 0, telegram: tgOn(env), stored: n, why: n ? "" : "The alerts table is not in Supabase yet: run supabase_arka_alerts.sql once." });
+  }
+  try {
+    const since = Math.max(0, Math.floor(+url.searchParams.get("since") || 0)), rows = (await sb(env, `arka_alerts?select=id,ts,day,kind,level,title,body,pub&order=id.desc&limit=${since ? 60 : 40}${since ? "&id=gt." + since : ""}`)) || [];
+    return json({ ready: true, telegram: tgOn(env), admin, alerts: rows.map((r) => ({ id: r.id, ts: r.ts, day: r.day, kind: r.kind, level: r.level, title: r.title, body: admin ? r.body : r.pub ?? "" })) });
+  } catch (e) {
+    if (e.status === 503) return json({ ready: false, why: "Supabase is not connected.", alerts: [] });
+    if (missingTable(e)) return json({ ready: false, why: "Run supabase_arka_alerts.sql once in the Supabase SQL editor.", alerts: [] });
+    throw e;
+  }
+}
+async function settingsApi(env, request, me) {              // book sizes, funds, margins and Telegram switches: the desk only
+  if (me.role !== "admin") return fail(403, "Only the desk sees these settings.");
+  if (request.method === "POST") {
+    let b = {}; try { b = await request.json(); } catch { /* empty body */ }
+    const data = cleanSettings(b);
+    try { await sb(env, "arka_settings?on_conflict=id", { method: "POST", headers: { prefer: "resolution=merge-duplicates,return=minimal" }, body: JSON.stringify([{ id: 1, data, updated_at: new Date().toISOString() }]) }); }
+    catch (e) { if (missingTable(e)) return fail(503, "Run supabase_arka_alerts.sql once in the Supabase SQL editor."); if (e.status === 503) return fail(503, e.message); throw e; }
+    return json({ ok: true, settings: data, telegram: tgOn(env) });
+  }
+  const s = await getSettings(env); return json({ settings: s, ready: !s.missing, telegram: tgOn(env) });
 }
 async function deskList(env, request, url, me) {            // the Arka desk list (table admin_watchlist): everyone reads, only the admin changes it
   try {
@@ -1319,7 +1649,7 @@ export default {
     try {
       if (p === "/api/health") {                        // which settings exist (true/false only, never a value)
         const has = (n) => Boolean(env[n] && String(env[n]).trim());
-        return json({ sign_in: has("AUTH_SECRET") && (has("ADMIN_PASS") || has("MEMBER_PASS")), storage: has("SUPABASE_URL") && has("SUPABASE_KEY"), ai: has("GEMINI_KEY"), playbook: has("PINECONE_KEY") });
+        return json({ sign_in: has("AUTH_SECRET") && (has("ADMIN_PASS") || has("MEMBER_PASS")), storage: has("SUPABASE_URL") && has("SUPABASE_KEY"), ai: has("GEMINI_KEY"), playbook: has("PINECONE_KEY"), telegram: has("TELEGRAM_BOT_TOKEN") && has("TELEGRAM_CHAT_ID") });
       }
       if (p === "/api/login" && request.method === "POST") return login(env, request);
       if (p === "/api/logout" && request.method === "POST") return json({ ok: true }, 200, { "set-cookie": cookie("", 0) });
@@ -1349,7 +1679,9 @@ export default {
       if (p === "/api/cal") return calMany(url, ctx);
       if (p === "/api/signals") return signals(env, ctx);
       if (p === "/api/desk") return deskFile(env, ctx, url);
-      if (p === "/api/journal") return journalApi(env, ctx, url, me);
+      if (p === "/api/journal") return journalApi(env, ctx, url, me, request);
+      if (p === "/api/alerts") return alertsApi(env, request, url, me);
+      if (p === "/api/settings") return settingsApi(env, request, me);
       if (p === "/api/deals") return deals(env, ctx);
       if (p === "/api/brief") return brief(env, ctx, url, request, me);
       if (p === "/api/market") return market(env, ctx, url);
