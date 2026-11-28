@@ -323,6 +323,17 @@ def f_(x, nd=2):
     return None if x is None or x != x or abs(x) == float("inf") else round(float(x), nd)
 
 
+def next_results(asof: str, ahead: int = 45) -> dict:
+    """Each stock's next results date after the model's date, from arka_data/results/dates.csv (written by results_dates.py).
+    Shown beside a trade so that it is not held through an announcement by surprise. Upcoming dates are Yahoo's and can move."""
+    try:
+        r = pd.read_csv(Path("arka_data") / "results" / "dates.csv", usecols=["sym", "when"], dtype=str).dropna()
+        end = (pd.Timestamp(asof) + pd.Timedelta(days=ahead)).strftime("%Y-%m-%d"); r = r[(r["when"].str.slice(0, 10) > asof) & (r["when"].str.slice(0, 10) <= end)]
+        return {s: w[:16] for s, w in r.sort_values("when").groupby("sym")["when"].first().items()}
+    except Exception as e:                            # no file yet or an unreadable one: the trades are shown without the date
+        print(f"  results dates not used: {type(e).__name__}: {str(e)[:120]}"); return {}
+
+
 def facts(r):
     bu = "long build-up" if r.r1 > 0 and r.oi1 > 0 else "short covering" if r.r1 > 0 else "short build-up" if r.oi1 > 0 else "long unwinding"
     return {"strength": f_(r.x_m12 * 100, 0), "d200": f_(r.d200 * 100, 1), "r5": f_(r.r5 * 100, 1), "r21": f_(r.r21 * 100, 1), "oi5": f_(r.oi5 * 100, 1), "buildup": bu, "ivpct": f_(r.ivpct * 100, 0), "iv": f_(r.iv * 100, 1),
@@ -518,9 +529,9 @@ def build(P, say=print):
     for r in Sh["ranked"][:10]: dec.setdefault(r["sym"], "WATCH SHORT")
     for r in L["avoid"]: dec.setdefault(r["sym"], "AVOID")
     # every stock scored tonight, for the live desk: yesterday's levels, usual volume and where each model ranks it
-    rkl = {r.sym: i + 1 for i, r in enumerate(T.sort_values("score", ascending=False).itertuples())}; rks = {r.sym: i + 1 for i, r in enumerate(T.sort_values("score_s", ascending=False).itertuples())}
+    res = next_results(out["asof"]); rkl = {r.sym: i + 1 for i, r in enumerate(T.sort_values("score", ascending=False).itertuples())}; rks = {r.sym: i + 1 for i, r in enumerate(T.sort_values("score_s", ascending=False).itertuples())}
     out["universe"] = [{"sym": r.sym, "c": f_(r.c), "atr": f_(r.atr), "adv": f_(math.exp(r.turn) / r.c, 0) if r.turn == r.turn and r.c > 0 else None, "sec": SECTOR.get(r.sym, ""), "rl": rkl.get(r.sym), "rs": rks.get(r.sym),
-                        "pl": f_(r.p_long * 100, 0), "ps": f_(r.p_short * 100, 0), "str": f_(r.x_m12 * 100, 0), "pdh": f_(r.h), "pdl": f_(r.l), "hi20": f_(r.c / (1 + r.hi20)) if r.hi20 == r.hi20 else None, "d50": f_(r.d50 * 100, 1), "oi5": f_(r.oi5 * 100, 1), **{k: v for k, v in facts(r).items() if k in ("buildup", "deliv", "ivpct", "pcr", "volx")}} for r in T.itertuples()]
+                        "pl": f_(r.p_long * 100, 0), "ps": f_(r.p_short * 100, 0), "str": f_(r.x_m12 * 100, 0), "pdh": f_(r.h), "pdl": f_(r.l), "hi20": f_(r.c / (1 + r.hi20)) if r.hi20 == r.hi20 else None, "d50": f_(r.d50 * 100, 1), "oi5": f_(r.oi5 * 100, 1), **{k: v for k, v in facts(r).items() if k in ("buildup", "deliv", "ivpct", "pcr", "volx")}, **({"res": res[r.sym]} if r.sym in res else {})} for r in T.itertuples()]
     day, day_hist = day_book(D, D, days, t0, tu); TS = day_rank(pd.DataFrame({"t": T.t.to_numpy(), "sym": T.sym.to_numpy(), "sc": T.score_s.to_numpy(), "sd": T.score_d.to_numpy()}, index=T.index)); TS = T.loc[TS[TS.rk <= DAY_N].sort_values("rk").index]
     day["picks"] = [{"sym": r.sym, "rank": i + 1, "close": f_(r.c), "atr": f_(r.atr), "stop_pct": f_(DAY_STOP * r.atr / r.c * 100, 1), "sector": SECTOR.get(r.sym, ""), **facts(r)} for i, r in enumerate(TS.itertuples())]
     day["status"], day["status_why"] = "test", "Backtested on daily opening and closing prices only. It has to be confirmed on five-minute prices and in the live paper journal before it can be trusted: the whole result depends on selling at the opening price."
