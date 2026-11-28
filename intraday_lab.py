@@ -29,6 +29,8 @@ DAYX = 69                                            # the intraday book buys ba
 COST_DAY, COST_ORB, COST_IX = 0.0016, 0.0010, 0.0004  # one round trip: cash day trade as in the daily test · day trade with small size · index futures
 INDEX = ("NIFTY", "BANKNIFTY")
 FOUND, NEED = "2026-11-27", 120                       # ideas found by looking at the data up to this day are judged only on sessions after it, once there are this many
+DAY_STOP, DAY_TGT = 0.75, 2.0                         # the intraday shorts' rule since stage 37 (28 Nov 2026), chosen on 2019-24 daily bars and the first 60% of these days
+DAYL_STOP, DAYL_TGT = 0.5, 0.5                        # the intraday longs' rule since stage 37 (paper only)
 G_DAY, G_RISK, G_IDEA = "Intraday book: ten best short ranks, sold for the day", "Intraday book: risk rules (sold at 9:15)", "Intraday book: ideas found in this data, followed from here on (not rules yet)"
 G_LONG = "Intraday longs: buy limits 1% under the close on the 40 best long ranks"
 
@@ -51,6 +53,36 @@ def load(folder: str):
 def ffill(a):                                          # along the bars: the last price seen so far
     fin = np.isfinite(a); idx = np.where(fin, np.arange(a.shape[-1]), 0); np.maximum.accumulate(idx, axis=-1, out=idx); out = np.take_along_axis(a, idx, axis=-1); out[~np.logical_or.accumulate(fin, axis=-1)] = np.nan
     return out
+
+
+def sltp(o, h, l, cf, di, ix, e, a_, side, sk, tk, start=0, act=1):
+    """Stop sk ATR and target tk ATR from the entry price e, for one day's stocks ix entered at bar `start`. Both orders are placed after
+    the first bar (act=1: at 9:20, after the 9:16 alert). A bar that opens past the stop fills at its open; a target limit fills at the
+    better of the target and the bar's open; when one bar reaches both and opened past neither, the stop is assumed first. Whatever is
+    still open is closed at the close of the 15:00-15:05 bar. Returns the result before costs and why each trade ended (1 stop, 2 target, 0 time)."""
+    H = h[di, ix, start:DAYX + 1].astype("float64") / e[:, None] - 1; Lw = l[di, ix, start:DAYX + 1].astype("float64") / e[:, None] - 1; O_ = o[di, ix, start:DAYX + 1].astype("float64") / e[:, None] - 1
+    nb = H.shape[1]; b = (np.arange(nb) + start)[None, :] >= start + act; a = a_ / e
+    adv, fav, oadv = (H, -Lw, O_) if side < 0 else (-Lw, H, -O_)
+    adv, fav = np.nan_to_num(adv, nan=-9.0), np.nan_to_num(fav, nan=-9.0)
+    S_ = (sk * a)[:, None] if sk else np.full((len(e), 1), np.inf); G_ = (tk * a)[:, None] if tk else np.full((len(e), 1), np.inf)
+    shit, thit = (adv >= S_) & b, (fav >= G_) & b
+    fs = np.where(shit.any(1), shit.argmax(1), nb); ft = np.where(thit.any(1), thit.argmax(1), nb); idx = np.arange(len(e))
+    so = np.nan_to_num(oadv[idx, np.minimum(fs, nb - 1)], nan=-9.0); to = np.nan_to_num(-oadv[idx, np.minimum(ft, nb - 1)], nan=-9.0)
+    x = cf[di, ix, DAYX].astype("float64") / e - 1; res = side * x
+    same = (fs == ft) & (fs < nb); tg_open = same & (to >= G_[:, 0]); stop = (fs <= ft) & (fs < nb) & ~tg_open; tgt = ((ft < fs) | tg_open) & (ft < nb)
+    res = np.where(stop, -np.maximum(S_[:, 0], so), np.where(tgt, np.maximum(G_[:, 0], to), res))
+    return res, np.where(stop, 1, np.where(tgt, 2, 0))
+
+
+def data_checks(days, syms, A):
+    """Guards on the five-minute feed itself: missing opening bars, short days, zero or crossed prices and one-bar jumps of 10% or more."""
+    o, h, l, c = (A[k] for k in "ohlc"); have = np.isfinite(c).any(axis=2); n = int(have.sum())
+    if not n: return None
+    bars = np.isfinite(c).sum(axis=2); first = np.isfinite(o[:, :, 0]); prev = np.concatenate([np.full(c.shape[:2] + (1,), np.nan, dtype="float32"), c[:, :, :-1]], axis=2)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        jump = np.abs(o / prev - 1) >= 0.10; bad = (h < l) | (c <= 0) | (o <= 0)
+    return {"stock_days": n, "no_open_bar": round(float((have & ~first).sum()) / n * 100, 2), "short_days": round(float((have & (bars < 60)).sum()) / n * 100, 2),
+            "jumps": int(np.nansum(jump)), "bad_bars": int(np.nansum(bad)), "note": "Share of stock-days without a 9:15 bar or with fewer than 60 of the 75 bars, and counts of one-bar jumps of 10% or more and of impossible bars. Rising numbers mean the feed, not the market, changed."}
 
 
 def stats(x, trades=None):
@@ -89,14 +121,16 @@ def run(days, syms, A, picks, lpicks=None):
 
     # 1 · the day book on five-minute prices
     if picks is not None and len(picks):
-        sidx = {s: i for i, s in enumerate(syms)}; sig = sorted(picks.date.unique()); by = {d: g for d, g in picks.groupby("date")}; entries = {"9:15 (the open)": 0, "9:20": 1, "9:30": 3, "10:00": 9}; daily = {k: [] for k in entries}; paths, n_tr, used = [], 0, 0; risk = {"stop": [], "basket": []}; n_stop = n_bask = 0; late, n_late = [], 0; top5, nogap, n5, n_ng, n_skip = [], [], 0, 0, 0
+        sidx = {s: i for i, s in enumerate(syms)}; sig = sorted(picks.date.unique()); by = {d: g for d, g in picks.groupby("date")}; entries = {"9:15 (the open)": 0, "9:20": 1, "9:30": 3, "10:00": 9}; daily = {k: [] for k in entries}; paths, n_tr, used = [], 0, 0
+        live37, n37, s37, t37 = [], 0, 0, 0; risk = {"stop": [], "basket": []}; n_stop = n_bask = 0; late, n_late = [], 0; top5, nogap, n5, n_ng, n_skip = [], [], 0, 0, 0
         for di in range(nd):
             prior = [x for x in sig if x < days[di]]
             if not prior or (di > 0 and prior[-1] != days[di - 1]) or (di == 0 and (pd.Timestamp(str(days[di])) - pd.Timestamp(str(prior[-1]))).days > 5):
                 for k in entries: daily[k].append(np.nan)
                 for k in risk: risk[k].append(np.nan)
-                late.append(np.nan); top5.append(np.nan); nogap.append(np.nan); continue
+                late.append(np.nan); top5.append(np.nan); nogap.append(np.nan); live37.append(np.nan); continue
             g = by[prior[-1]]; g = g[(g["rank"] <= 10) & g.sym.isin(sidx)]; ix = [sidx[s] for s in g.sym]; rks = g["rank"].to_numpy(); used += 1
+            ma = g["atr"].to_numpy(float) if "atr" in g else np.full(len(ix), np.nan); ma = np.where(np.isfinite(ma) & (ma > 0), ma, atr[di, ix])      # the model's ATR (what the alerts use), else this file's own
             for k, b in entries.items():
                 e = o[di, ix, b].astype("float64"); x = cf[di, ix, DAYX].astype("float64"); r = -(x / e - 1) - COST_DAY; r = r[np.isfinite(r)]; daily[k].append(r.sum() / 10 if len(r) else np.nan); n_tr += len(r) if b == 0 else 0
             e0 = o[di, ix, 0].astype("float64"); p = cf[di, ix, :].astype("float64") / e0[:, None] - 1; good = np.isfinite(e0)
@@ -106,7 +140,12 @@ def run(days, syms, A, picks, lpicks=None):
                 hi1 = np.fmax.reduce(np.nan_to_num(h[di, ix, 1:DAYX + 1].astype("float64"), nan=-1.0), axis=1); lim1 = atr[di, ix] / e1; lim1 = np.where(np.isfinite(lim1) & (lim1 > 0), lim1, 9.0)
                 r1 = np.where(hi1 >= e1 * (1 + lim1), -lim1, -(cf[di, ix, DAYX].astype("float64") / e1 - 1)) - COST_DAY; late.append(float(np.nansum(r1[m1])) / 10); n_late += int(m1.sum())
             else: late.append(0.0)
-            # the risk rules, on the trade sold at 9:15: each stock is bought back if it trades 1 ATR above its sale price; with the basket rule everything is bought back once the ten together are down 1%
+            # the rule since stage 37: stop 0.75 ATR over the sale price and target 2 ATR under it, both placed at 9:20
+            if good.any():
+                aa = np.where(np.isfinite(ma[good]) & (ma[good] > 0), ma[good], 9e9); r37, why37 = sltp(o, h, l, cf, di, np.asarray(ix)[good], e0[good], aa, -1, DAY_STOP, DAY_TGT)
+                live37.append(float(np.nansum(r37 - COST_DAY)) / 10); n37 += int(len(r37)); s37 += int((why37 == 1).sum()); t37 += int((why37 == 2).sum())
+            else: live37.append(np.nan)
+            # the stage 36 risk rules, on the trade sold at 9:15: each stock is bought back if it trades 1 ATR above its sale price; with the basket rule everything is bought back once the ten together are down 1%
             if good.any():
                 pg = p[good]; hi = np.fmax.accumulate(np.nan_to_num(h[di, ix, :].astype("float64")[good] / e0[good][:, None] - 1, nan=-9.0), axis=1); lim = (atr[di, ix][good] / e0[good]); lim = np.where(np.isfinite(lim) & (lim > 0), lim, 9.0)
                 hit = hi >= lim[:, None]; first = np.where(hit.any(axis=1), hit.argmax(axis=1), BARS); pnl = np.where(np.arange(BARS)[None, :] >= first[:, None], -lim[:, None], -pg)            # each stock's result so far, bar by bar
@@ -122,13 +161,14 @@ def run(days, syms, A, picks, lpicks=None):
             if len(p): paths.append(np.nanmean(p, axis=0))
         for k in entries:
             tests.append({"id": "day_" + k.split(" ")[0].replace(":", ""), "group": G_DAY, "name": f"Sold at {k}, bought back at 3:05 pm", "cost": COST_DAY * 100, **stats(daily[k], n_tr if k.startswith("9:15") else None)})
-        tests.append({"id": "day_stop", "group": G_RISK, "name": "Each stock bought back if it trades 1 ATR above the sale price", "cost": COST_DAY * 100, **stats(risk["stop"], n_tr), "note": f"{n_stop} stops hit"})
-        tests.append({"id": "day_basket", "group": G_RISK, "name": "The same, and everything bought back once the ten together are down 1%", "cost": COST_DAY * 100, **stats(risk["basket"], n_tr), "note": f"the basket rule ended {n_bask} days early"})
+        tests.append({"id": "day_sltp", "group": G_RISK, "name": f"Stop {DAY_STOP:g} ATR over the sale price, target {DAY_TGT:g} ATR under it, both from 9:20, out at 3:05 pm (the rule now)", "cost": COST_DAY * 100, **stats(live37, n37), "note": f"{s37:,} stops and {t37:,} targets in {n37:,} trades", "live": True})
+        tests.append({"id": "day_stop", "group": G_RISK, "name": "Each stock bought back if it trades 1 ATR above the sale price (the stage 36 rule)", "cost": COST_DAY * 100, **stats(risk["stop"], n_tr), "note": f"{n_stop} stops hit"})
+        tests.append({"id": "day_basket", "group": G_RISK, "name": "The stage 36 stop, and everything bought back once the ten together are down 1%", "cost": COST_DAY * 100, **stats(risk["basket"], n_tr), "note": f"the basket rule ended {n_bask} days early"})
         tests.append(later({"id": "day_top5", "group": G_IDEA, "name": "Only the five best ranks, twice the size each, stop 1 ATR", "cost": COST_DAY * 100, **stats(top5, n5), "note": "half as many stocks, so one bad stock hurts twice as much"}, top5, days))
         tests.append(later({"id": "day_nogap", "group": G_IDEA, "name": "Leaving out the picks that open more than 0.3% below yesterday's close, stop 1 ATR", "cost": COST_DAY * 100, **stats(nogap, n_ng), "note": f"{n_skip:,} of {n_ng + n_skip:,} trades left out, their slots stay empty"}, nogap, days))
         tests.append(later({"id": "day_920_fell", "group": G_IDEA, "name": "The open was missed: sold at 9:20, only the picks that fell 0.5% or more in their first five minutes, stop 1 ATR", "cost": COST_DAY * 100, **stats(late, n_late), "note": "most of the ten slots stay empty"}, late, days))
         if lpicks is not None and len(lpicks):         # 1b · intraday LONGS: a pre-open buy limit fills at the opening price only if the stock opens at or under it
-            lsig = sorted(lpicks.date.unique()); lby = {d: g for d, g in lpicks.groupby("date")}; lres = {0: [], 1: []}; n_fill = 0
+            lsig = sorted(lpicks.date.unique()); lby = {d: g for d, g in lpicks.groupby("date")}; lres = {0: [], 1: []}; n_fill = ls_ = lt_ = 0
             for di in range(nd):
                 prior = [x for x in lsig if x < days[di]]
                 if not prior or (di > 0 and prior[-1] != days[di - 1]):
@@ -138,14 +178,16 @@ def run(days, syms, A, picks, lpicks=None):
                 if not len(g):
                     for k in lres: lres[k].append(0.0)
                     continue
-                ix = np.array([sidx[s_] for s_ in g.sym], dtype=int); lim = g["limit"].to_numpy(float)
-                e0 = o[di, ix, 0].astype("float64"); fill = np.isfinite(e0) & (e0 <= lim); ix, e0 = ix[fill][:10], e0[fill][:10]; n_fill += len(ix)
+                ix = np.array([sidx[s_] for s_ in g.sym], dtype=int); lim = g["limit"].to_numpy(float); la = g["atr"].to_numpy(float) if "atr" in g else np.full(len(ix), np.nan)
+                e0 = o[di, ix, 0].astype("float64"); fill = np.isfinite(e0) & (e0 <= lim); ix, e0, la = ix[fill][:10], e0[fill][:10], la[fill][:10]; n_fill += len(ix)
                 for b in lres:                                  # b 0: bought at the official open (the limit filled); b 1: the open was missed, bought at 9:20 at the market
                     if not len(ix): lres[b].append(0.0); continue
-                    e = e0 if b == 0 else o[di, ix, 1].astype("float64"); a_ = atr[di, ix]; a_ = np.where(np.isfinite(a_) & (a_ > 0), a_, 9e9)
-                    lo = np.fmin.reduce(np.nan_to_num(l[di, ix, b:DAYX + 1].astype("float64"), nan=9e18), axis=1); hit = lo <= e - a_
-                    r = np.where(hit, -a_ / e, cf[di, ix, DAYX].astype("float64") / e - 1) - COST_DAY; lres[b].append(float(np.nansum(r)) / 10)
-            tests.append({"id": "daylong_915", "group": G_LONG, "name": "Filled at 9:15 (the limit), stop 1 ATR under the open, sold at 3:05 pm", "cost": COST_DAY * 100, **stats(lres[0], n_fill), "note": f"{n_fill:,} fills, at most 10 a day"})
+                    e = e0 if b == 0 else o[di, ix, 1].astype("float64"); ok = np.isfinite(e) & (e > 0)
+                    a_ = np.where(np.isfinite(la) & (la > 0), la, atr[di, ix]); a_ = np.where(np.isfinite(a_) & (a_ > 0), a_, 9e9)
+                    if not ok.any(): lres[b].append(0.0); continue
+                    r, why = sltp(o, h, l, cf, di, ix[ok], e[ok], a_[ok], 1, DAYL_STOP, DAYL_TGT, start=b); lres[b].append(float(np.nansum(r - COST_DAY)) / 10)
+                    if b == 0: ls_ += int((why == 1).sum()); lt_ += int((why == 2).sum())
+            tests.append({"id": "daylong_915", "group": G_LONG, "name": f"Filled at 9:15 (the limit), stop {DAYL_STOP:g} ATR under the open and target {DAYL_TGT:g} ATR over it from 9:20, sold at 3:05 pm", "cost": COST_DAY * 100, **stats(lres[0], n_fill), "note": f"{n_fill:,} fills, at most 10 a day · {ls_:,} stops, {lt_:,} targets", "live": True})
             tests.append({"id": "daylong_920", "group": G_LONG, "name": "The same stocks bought at 9:20 instead (the open missed)", "cost": COST_DAY * 100, **stats(lres[1], n_fill)})
         if paths:
             pm = np.nanmean(np.array(paths), axis=0) * 100; extra["day_path"] = {"t": [f"{(555 + 5 * (i + 1)) // 60}:{(555 + 5 * (i + 1)) % 60:02d}" for i in range(DAYX + 1)], "pct": [round(float(x), 3) for x in pm[:DAYX + 1]], "days": used,
@@ -215,7 +257,7 @@ def main() -> int:
     days, syms, A = load(a.data); picks = pd.read_csv(a.picks, dtype={"date": "string", "sym": "string"}) if Path(a.picks).exists() else None
     print(f"{len(days)} days ({days[0]} to {days[-1]}), {len(syms)} symbols" + ("" if picks is not None else " · no day_picks.csv yet: the day-book test is skipped until the Arka Model job has run"))
     lpicks = pd.read_csv(a.long_picks, dtype={"date": "string", "sym": "string"}) if Path(a.long_picks).exists() else None
-    tests, extra = run(days, syms, A, picks, lpicks)
+    tests, extra = run(days, syms, A, picks, lpicks); extra["data_checks"] = data_checks(days, syms, A)
     out = {"built": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"), "data": {"days": int(len(days)), "first": str(days[0]), "last": str(days[-1]), "symbols": int(len(syms)), "split": int(len(days) * 0.6)}, "tests": tests, **extra,
            "rule": "An idea holds only if it is positive after costs in the whole history (t of 2 or more) and in both parts: the first 60% of days and the later 40%."}
     Path(a.out).parent.mkdir(parents=True, exist_ok=True); Path(a.out).write_text(json.dumps(clean(out), separators=(",", ":"), allow_nan=False))
