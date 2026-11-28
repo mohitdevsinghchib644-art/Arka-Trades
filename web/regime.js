@@ -2,6 +2,7 @@
 // (regime_engine.py), so the state, score, components and history are the same numbers as the classic app.
 import { S, api, paint, esc, num, sgn, nice, todayStr } from "./app.js";
 import { lineChart, resetCharts, bandsFrom, legend } from "./charts.js";
+const ordn = (v) => { const k = Math.round(v), t = k % 100; return k + (t >= 11 && t <= 13 ? "th" : ["th", "st", "nd", "rd"][k % 10] || "th"); };      // 1st, 2nd, 3rd, 11th, 21st
 
 const GREEN = "#30D158", RED = "#FF453A", AMBER = "#FF9F0A", BLUE = "#4FA3FF", PURPLE = "#BF5AF2", CYAN = "#5AC8FA", YELLOW = "#FFD60A";
 const STATE_COLOR = { "Confirmed uptrend": GREEN, "Under pressure": YELLOW, "Rally attempt": BLUE, Correction: RED };
@@ -57,7 +58,7 @@ export function page() {
     kp("Above 50 EMA", num(r.pct50, 0) + "%", `200 DMA ${num(r.pct200, 0)}% · 21 EMA ${num(r.pct20, 0)}%`),
     kp("New highs / lows", `<span class="up">${num(r.nh, 0)}</span> / <span class="dn">${num(r.nl, 0)}</span>`, "52-week, today"),
     kp("Distribution days", num(r.dd_count, 0), "last 25 sessions", r.dd_count <= 2 ? "up" : r.dd_count <= 4 ? "yl" : "dn"),
-    kp("India VIX", r.vix == null ? "—" : num(r.vix, 1), r.vix_pct == null ? "" : `${num(r.vix_pct, 0)}th percentile of 1 year`),
+    kp("India VIX", r.vix == null ? "—" : num(r.vix, 1), r.vix_pct == null ? "" : `${ordn(r.vix_pct)} percentile of 1 year`),
     kp("Advancers / decliners", `<span class="up">${num(r.adv, 0)}</span> / <span class="dn">${num(r.dec, 0)}</span>`, `McClellan ${sgn(r.mcclellan, 0)}`),
     kp("From 3-month high", sgn(r.dd_from_hi * 100, 1) + "%", "NIFTY 50")].join("")}</div>`;
   const why = d.reasons.map(([t, x]) => `<div class="rg-rs" style="--c:${TONE[t]}"><i></i><span>${esc(x)}</span></div>`).join("");

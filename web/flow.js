@@ -6,6 +6,7 @@ import { S, api, paint, esc, num, nice } from "./app.js";
 import { lineChart, resetCharts, legend } from "./charts.js";
 import * as FPI from "./fpi.js";
 import { dataBehind } from "./home.js";
+const ordn = (v) => { const k = Math.round(v), t = k % 100; return k + (t >= 11 && t <= 13 ? "th" : ["th", "st", "nd", "rd"][k % 10] || "th"); };      // 1st, 2nd, 3rd, 11th, 21st
 
 const GREEN = "#30D158", RED = "#FF453A", AMBER = "#FF9F0A", CYAN = "#5AC8FA", YELLOW = "#FFD60A", PURPLE = "#BF5AF2", T2 = "#A3A3A3", T3 = "#6B6B6B";
 const QUAD_C = { Leading: GREEN, Weakening: YELLOW, Lagging: RED, Improving: CYAN, "": T3 };
@@ -149,7 +150,7 @@ function rankTable(snap) {
 function regimeCard(d, M) {
   const r = d.regime, rg = r.label;
   const facts = [["Benchmark vs 200-session avg", f(r.bench_vs_sma, 1, true, "%"), r.above === 1 ? "above" : r.above === 0 ? "below" : "n/a"], ["Stocks above 200-EMA", f(r.breadth200, 0, false, "%"), "50%+ healthy · under 40% weak"],
-    ["Volatility, 20 sessions", f(r.vol20, 0, false, "%"), `${f(r.vol_pct, 0, false)}th percentile of its year`], ["From 1-year high", f(r.drawdown, 1, true, "%"), "stress if 10%+ down and volatile"]];
+    ["Volatility, 20 sessions", f(r.vol20, 0, false, "%"), `${ordn(r.vol_pct)} percentile of its year`], ["From 1-year high", f(r.drawdown, 1, true, "%"), "stress if 10%+ down and volatile"]];
   return `<div class="card mf-regime" style="--c:${REG_C[rg] || T3}"><div><span class="k">Market regime</span><div class="v">${esc(rg)}</div><div class="d">${esc(REG_TXT[rg] || "")}<br><b>Model slots now: ${slotsNow(d, M)} of ${M.n}</b>${M.regime ? "" : " (regime filter switched off)"}</div></div>
     <div class="mf-facts">${facts.map(([a, b, c]) => `<div><small>${a}</small><b>${b}</b><em>${c}</em></div>`).join("")}</div></div>`;
 }

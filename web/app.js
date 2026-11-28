@@ -1,4 +1,4 @@
-// Arka Trades · new app (stage 34): Home, Watchlist, Portfolio, the stock page with Research, Signals, Screener, Backtest lab, Arka AI, Money flow, News, Regime, Daily brief, Account, More (world markets live on Home). Plain JavaScript, no build step.
+// Arka Trades · new app (stage 36): Home, Watchlist, Portfolio, the stock page with Research, Signals, Screener, Backtest lab, Arka AI, Money flow, News, Regime, Daily brief, Account, More (world markets live on Home). Plain JavaScript, no build step.
 import * as PFV from "./portfolio.js";
 import * as PFM from "./pf.js";
 import * as WL from "./watchlist.js";
@@ -196,7 +196,7 @@ function renderShell() {
     <div id="msearch"></div><main id="main"></main>
     <nav class="nav"><a class="brand only-d" href="#/home"><img src="/icon-180.png" alt="">ARKA <i>TRADES</i></a>
       ${TABS.map(([k, n, d, mob]) => `<a href="#/${k}" data-tab="${k}"${mob ? "" : ' class="only-d"'}>${icon(d)}<span>${n}</span></a>`).join("")}
-      <div class="who">Signed in as <b>${esc(AC.displayName())}</b><br>New app · stage 34</div></nav></div>`;
+      <div class="who">Signed in as <b>${esc(AC.displayName())}</b><br>New app · stage 36</div></nav></div>`;
 }
 function paint() {
   const main = $("#main"); if (!main || !S.me) return;
@@ -439,7 +439,7 @@ document.addEventListener("click", async (e) => {
     if (act === "range") { S.sheet.range = a.dataset.v; return paintSheet(); }
     if (act === "list") { S.wl.list = a.dataset.v; S.wl.flt = "All"; S.wl.q = ""; S.wl.addMsg = ""; S.wl.sel = {}; paint(); refresh(); return WL.load(); }
     if (act && act.startsWith("fd")) return DK.act(act, a);
-    if (act && /^md(list|per|chart|side|live|lsort)$/.test(act)) return MD.act(act, a);
+    if (act && /^md(list|per|chart|side|live|lsort|lall)$/.test(act)) return MD.act(act, a);
     if (act && act.startsWith("sc")) return SC.act(act, a);
     if (act && act.startsWith("bx")) return BX.act(act, a);
     if (act && act.startsWith("aa")) return AA.act(act, a);

@@ -2,6 +2,7 @@
 // every screen is built here as a list of plain blocks (header, numbers, table, checklist, chart …) from the Screener page,
 // Yahoo prices and the other public sources, with the same rules, thresholds and wording as Streamlit. No page code here,
 // so the numbers can be checked against the Python in a test. stock.js draws the blocks.
+const ordn = (v) => { const k = Math.round(v), t = k % 100; return k + (t >= 11 && t <= 13 ? "th" : ["th", "st", "nd", "rd"][k % 10] || "th"); };      // 1st, 2nd, 3rd, 11th, 21st
 
 // ── number and text helpers (Python formatting) ──
 const isNum = (v) => typeof v === "number" && isFinite(v);
@@ -232,7 +233,7 @@ export function evidence(B, close, peNow = null, pePct = null, dlv = null) {
   if (salesG == null && profG == null) unk.push("8 quarters of results");
   const opm = vals(q, "OPM", "Financing Margin").filter((v) => v != null), opmD = opm.length >= 5 ? opm.at(-1) - opm.at(-5) : null;
   if (opmD != null) add("Operating margin, latest quarter vs a year ago", `${fx(opm.at(-5), 0, false)}% → ${fx(opm.at(-1), 0, false)}% (${fx(opmD, 1, false, true)} pp)`, "Screener");
-  if (peNow) add("P/E (TTM)", `${fx(peNow, 1, false)}x` + (pePct != null ? `, ${fx(pePct, 0, false)}th percentile of its own history` : ""), "Screener EPS + Yahoo price");
+  if (peNow) add("P/E (TTM)", `${fx(peNow, 1, false)}x` + (pePct != null ? `, ${ordn(pePct)} percentile of its own history` : ""), "Screener EPS + Yahoo price");
   else unk.push("P/E (needs positive TTM EPS)");
   const pr = vals(sh, "Promoters").filter((v) => v != null), promD = pr.length >= 5 ? pr.at(-1) - pr.at(-5) : null;
   if (pr.length) add("Promoter holding", `${fx(pr.at(-1), 2, false)}%` + (promD != null ? ` (${fx(promD, 2, false, true)} pp in 4 quarters)` : ""), "Screener");
@@ -252,7 +253,7 @@ export function evidence(B, close, peNow = null, pePct = null, dlv = null) {
   if (dlv && dlv.d.length >= 40 && dp.length >= 40) { dlNow = mean(dp.slice(-10)); dlBase = mean(dp.slice(0, -10)); add("Delivery share of traded quantity, last 10 sessions vs before", `${fx(dlBase, 0, false)}% → ${fx(dlNow, 0, false)}%`, "NSE bhavcopy"); }
   else unk.push("delivery data");
   const c_ = (name, numbers) => con.push({ name, numbers });
-  if (pePct != null && pePct >= 80 && profG != null && profG < 0) c_("Valuation high, profit falling", `P/E at the ${fx(pePct, 0, false)}th percentile of its own history while 4-quarter profit is ${fx(profG, 1, false, true)}%`);
+  if (pePct != null && pePct >= 80 && profG != null && profG < 0) c_("Valuation high, profit falling", `P/E at the ${ordn(pePct)} percentile of its own history while 4-quarter profit is ${fx(profG, 1, false, true)}%`);
   if (ret1y != null && ret1y > 20 && profG != null && profG < 0) c_("Price up, profit down", `price ${fx(ret1y, 1, false, true)}% in a year while 4-quarter profit is ${fx(profG, 1, false, true)}%`);
   if (ret1y != null && ret1y < -20 && profG != null && profG > 15) c_("Price down, profit up", `price ${fx(ret1y, 1, false, true)}% in a year while 4-quarter profit is ${fx(profG, 1, false, true)}%`);
   if (salesG != null && salesG > 10 && opmD != null && opmD <= -2) c_("Sales growing, margin shrinking", `sales ${fx(salesG, 1, false, true)}% while operating margin moved ${fx(opmD, 1, false, true)} pp`);
@@ -287,7 +288,7 @@ export function scorecard(B, close, bench, dlv = null) {
   const opm = nums(row(q, "OPM", "Financing Margin")).filter((v) => v != null);
   if (opm.length >= 5) add("Growth", "Operating margin vs a year ago", `${fx(opm.at(-1) - opm.at(-5), 1, false, true)} pp`, lin(opm.at(-1) - opm.at(-5), -4, 4), "0 at -4 pp, 100 at +4 pp");
   const [pe, pp] = close ? peStats(B, close) : [null, null];
-  if (pe && pp != null) add("Valuation", "P/E against its own history", `${fx(pe, 1, false)}x · ${fx(pp, 0, false)}th percentile`, 100 - pp, "100 at its cheapest, 0 at its dearest");
+  if (pe && pp != null) add("Valuation", "P/E against its own history", `${fx(pe, 1, false)}x · ${ordn(pp)} percentile`, 100 - pp, "100 at its cheapest, 0 at its dearest");
   if (pe) {
     add("Valuation", "Earnings yield", `${fx(100 / pe, 1, false)}%`, lin(100 / pe, 1.5, 8), "0 at 1.5%, 100 at 8%");
     if (pg != null && pg > 0) add("Valuation", "P/E ÷ profit growth", fx(pe / pg, 2, false), lin(pe / pg, 3, 0.7), "0 at 3, 100 at 0.7");

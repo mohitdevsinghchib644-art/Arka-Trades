@@ -4,6 +4,7 @@
 // · ["chart", spec] · ["html", key, data] for the few custom pictures. Colours are names: g r a c p t2 t3.
 // Inputs (period, window …) come in C.o with the classic defaults. Pure: no page code, so it can be tested against the Python.
 import * as E from "./rsengine.js";
+const ordn = (v) => { const k = Math.round(v), t = k % 100; return k + (t >= 11 && t <= 13 ? "th" : ["th", "st", "nd", "rd"][k % 10] || "th"); };      // 1st, 2nd, 3rd, 11th, 21st
 const { fx, pct, rs, qty, f, g, row, nums, annualMap, debtEquity, ttmEps, hist, hist2, closeS, join, mean, median, std, cov, corr, ewm, sum, retN, pctChange, atrOf, trueRange, dfmt, asof } = E;
 
 export const BENCH = ["^NSEI", "NIFTY 50"];
@@ -161,7 +162,7 @@ function VAL(C) {
   out.push(["chart", { kind: "line", x: pts.map((x) => x[0]), series: [{ name: "P/E (TTM)", color: "c", y: v, markers: true }], hlines: [[med, `median ${fx(med, 1, false)}x`]], now: pe ? [close.d.at(-1), pe] : null, h: 300 }]);
   const iMin = v.indexOf(Math.min(...v)), iMax = v.indexOf(Math.max(...v)), pctile = pe ? (v.filter((x) => x < pe).length / v.length) * 100 : null;
   out.push(K([["Min P/E", `${fx(v[iMin], 1, false)}x`, pts[iMin][0].slice(0, 7)], ["Median P/E", `${fx(med, 1, false)}x`, `${v.length} quarters`], ["Max P/E", `${fx(v[iMax], 1, false)}x`, pts[iMax][0].slice(0, 7)],
-    ["Current vs history", pctile != null ? `${fx(pctile, 0, false)}th pct` : "N/A", ttm && ttm > 0 ? `Price at median P/E: ${rs(med * ttm)}` : ""]], 4));
+    ["Current vs history", pctile != null ? `${ordn(pctile)} pct` : "N/A", ttm && ttm > 0 ? `Price at median P/E: ${rs(med * ttm)}` : ""]], 4));
   out.push(...peBand(B, close));
   return out;
 }
@@ -536,7 +537,7 @@ function OV(C) {
   }
   side.push(["mini", "Performance · vs NIFTY 500", perf.length ? perf : [["Price history", "N/A"]], "QR"]);
   const bv = f(s.book_value), price = close ? close.v.at(-1) : null;
-  side.push(["mini", "Valuation", [["P/E (TTM)", pe ? `${fx(pe, 1, false)}x` : "N/A"], ["vs own history", pp != null ? `${fx(pp, 0, false)}th percentile` : "N/A"], ["P/B", price && bv ? `${fx(price / bv, 2, false)}x` : "N/A"],
+  side.push(["mini", "Valuation", [["P/E (TTM)", pe ? `${fx(pe, 1, false)}x` : "N/A"], ["vs own history", pp != null ? `${ordn(pp)} percentile` : "N/A"], ["P/B", price && bv ? `${fx(price / bv, 2, false)}x` : "N/A"],
     ["Earnings yield", pe ? `${fx(100 / pe, 2, false)}%` : "N/A"], ["Dividend yield", s.dividend_yield ? `${s.dividend_yield}%` : "N/A"]], "VAL"]);
   const hh = hist2(C.H, "2y", "1y");
   if (hh && hh.d.length > 60) {
@@ -621,7 +622,7 @@ function HVG(C) {
   const cur = v[20].at(-1), h2 = v[20].filter((x) => x != null).slice(-504), pctl = (h2.filter((x) => x < cur).length / h2.length) * 100, atr = atrOf(h);
   const big = r.slice(-252).map((x) => Math.abs(x)), bi = big.indexOf(Math.max(...big)), bd = h.d.slice(-252)[bi];
   return [H_("Realised volatility · annualised, from daily closes", "live"),
-    K([["20-session", `${fx(cur, 0, false)}%`, `${fx(pctl, 0, false)}th percentile of the last 2 years`], ["60-session", `${fx(v[60].at(-1), 0, false)}%`, ""], ["120-session", `${fx(v[120].at(-1), 0, false)}%`, ""],
+    K([["20-session", `${fx(cur, 0, false)}%`, `${ordn(pctl)} percentile of the last 2 years`], ["60-session", `${fx(v[60].at(-1), 0, false)}%`, ""], ["120-session", `${fx(v[120].at(-1), 0, false)}%`, ""],
       ["ATR 14", rs(atr), `${fx((atr / c.at(-1)) * 100, 2, false)}% of price`], ["Days moving 3%+", String(big.filter((x) => x >= 0.03).length), "in the last 252 sessions"],
       ["Largest 1-day move", pct(r.slice(-252)[bi] * 100, 1, true), bd]], 3),
     ["chart", { kind: "line", x: h.d.filter((_, i) => v[20][i] != null).slice(-504), series: [[20, "a"], [60, "c"], [120, "p"]].map(([n, col]) => ({ name: `${n}-session`, color: col, y: v[n].filter((x) => x != null).slice(-504), width: n === 20 ? 2 : 1.3 })), h: 320 }],
