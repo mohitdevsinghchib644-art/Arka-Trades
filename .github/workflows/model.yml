@@ -4,7 +4,11 @@
 # The app only reads those files.
 #
 # Data (all free and public): arka_data/fno in this repository (written by "F&O data"), github.com/BennyThadikaran/eod2_data
-# and NSE's own daily files for the newest sessions. No secrets are used.
+# and NSE's own daily files for the newest sessions.
+#
+# Secrets (optional, names only; the same two the Daily brief already uses):
+#   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID    if both are set, the evening plan for the next session goes to Telegram once a model day
+# Nothing private is sent: the plan holds the model's public picks and levels. Quantities come later, from the website at 8:45 am.
 #
 # First time: Actions tab -> "Arka Model" -> "Run workflow". It takes about 40 minutes (two models over ten years of history).
 # After that it runs by itself at about 8:50 pm and 11:50 pm IST, Monday to Friday (after "F&O data").
@@ -41,6 +45,9 @@ jobs:
         run: git clone --quiet --depth 1 https://github.com/BennyThadikaran/eod2_data.git "$RUNNER_TEMP/eod2_data"
 
       - name: Train, score and test
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python arka_model.py --eod "$RUNNER_TEMP/eod2_data"
 
       - name: Save to the repository
