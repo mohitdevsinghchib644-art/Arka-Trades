@@ -5,12 +5,16 @@ Nothing here is a signal: an idea is only reported as "holds" when it makes mone
 both halves of it (the first 60% of days is where an idea is allowed to look good, the last 40% has to confirm it).
 
 The list was fixed before any five-minute data was seen, from published research and from the daily-data finding:
-  1. Day book timing    the model's ten best short ranks, sold for the day. Daily data says they fall from the open to the
+  1. Intraday book      the model's ten best short ranks, sold for the day. Daily data says they fall from the open to the
                         close. This checks it on real five-minute prices and shows how much is left when the sale is late.
   2. Opening range      "stocks in play" (Zarattini, Barbon, Aziz 2024): the ten stocks with the highest opening volume
                         against their own usual opening volume, traded in the direction of the first candle on a break of it.
   3. Half-hour momentum (Gao, Han, Li, Zhou 2018): the move from yesterday's close to 9:45 predicts the last half hour.
   4. Late rebound       the day's biggest losers by 3:00 pm bought for the last half hour.
+
+Three more ideas were found later, by looking at this same data (27 Nov 2026): only the five best ranks, leaving out picks
+that gap down at the open, and a late sale of picks that are already falling. Data cannot confirm an idea that was found in
+it, so these are marked "unclear" whatever their numbers and are judged only on the sessions after that day (see later()).
 
     python intraday_lab.py --data DIR --picks arka_data/model/day_picks.csv --out DIR/lab.json
 """
@@ -23,6 +27,8 @@ import numpy as np, pandas as pd
 BARS, LAST, EXIT_BAR, LATE = 75, 73, 71, 69         # 75 five-minute bars a day; 15:20-15:25 is the last one used; 15:10-15:15 closes day trades; 15:00 starts the last half hour
 COST_DAY, COST_ORB, COST_IX = 0.0016, 0.0010, 0.0004  # one round trip: cash day trade as in the daily test · day trade with small size · index futures
 INDEX = ("NIFTY", "BANKNIFTY")
+FOUND, NEED = "2026-11-27", 120                       # ideas found by looking at the data up to this day are judged only on sessions after it, once there are this many
+G_DAY, G_RISK, G_IDEA = "Intraday book: ten best short ranks, sold for the day", "Intraday book: risk rules (sold at 9:15)", "Intraday book: ideas found in this data, followed from here on (not rules yet)"
 
 
 def load(folder: str):
@@ -61,6 +67,17 @@ def stats(x, trades=None):
     return {**full, "year": round(float(x.mean()) * 250 * 100, 1), "maxdd": round(dd * 100, 1), "first": disc, "later": val, "trades": int(trades) if trades is not None else None, "verdict": verdict, "why": why}
 
 
+def later(t, series, days):
+    """An idea that was found in this same data cannot be confirmed by it. Its numbers for the whole history are shown, the verdict comes from later sessions only."""
+    new = [x for x, d in zip(series, days) if str(d) > FOUND and x is not None and np.isfinite(x)]; when = pd.Timestamp(FOUND).strftime("%d %b %Y").lstrip("0")
+    t["since"] = {"from": FOUND, "days": len(new), "need": NEED, "mean": round(float(np.mean(new)) * 100, 4) if new else None}
+    if len(new) >= NEED:
+        s2 = stats(new); t["verdict"], t["why"] = s2["verdict"], f"on the {len(new)} sessions after {when}: {s2['why']}"
+    elif t.get("verdict") in ("holds", "unclear"):
+        t["why"] = ("passes on the whole history, but " if t["verdict"] == "holds" else "") + f"it was found by looking at this same data on {when}: only later sessions count, {len(new)} of {NEED} so far"; t["verdict"] = "unclear"
+    return t
+
+
 def run(days, syms, A, picks):
     o, h, l, c, v = (A[k] for k in "ohlcv"); nd, ns, _ = c.shape; cf = ffill(c); stock = np.array([s not in INDEX for s in syms])
     O = o[:, :, 0].astype("float64"); H = np.nanmax(h, axis=2); L = np.nanmin(l, axis=2); C = cf[:, :, LAST].astype("float64")
@@ -70,31 +87,44 @@ def run(days, syms, A, picks):
 
     # 1 · the day book on five-minute prices
     if picks is not None and len(picks):
-        sidx = {s: i for i, s in enumerate(syms)}; sig = sorted(picks.date.unique()); by = {d: g for d, g in picks.groupby("date")}; entries = {"9:15 (the open)": 0, "9:20": 1, "9:30": 3, "10:00": 9}; daily = {k: [] for k in entries}; paths, n_tr, used = [], 0, 0; risk = {"stop": [], "basket": []}; n_stop = n_bask = 0
+        sidx = {s: i for i, s in enumerate(syms)}; sig = sorted(picks.date.unique()); by = {d: g for d, g in picks.groupby("date")}; entries = {"9:15 (the open)": 0, "9:20": 1, "9:30": 3, "10:00": 9}; daily = {k: [] for k in entries}; paths, n_tr, used = [], 0, 0; risk = {"stop": [], "basket": []}; n_stop = n_bask = 0; late, n_late = [], 0; top5, nogap, n5, n_ng, n_skip = [], [], 0, 0, 0
         for di in range(nd):
             prior = [x for x in sig if x < days[di]]
-            if not prior or (di > 0 and prior[-1] != days[di - 1]) or (di == 0 and (pd.Timestamp(days[di]) - pd.Timestamp(prior[-1])).days > 5):
+            if not prior or (di > 0 and prior[-1] != days[di - 1]) or (di == 0 and (pd.Timestamp(str(days[di])) - pd.Timestamp(str(prior[-1]))).days > 5):
                 for k in entries: daily[k].append(np.nan)
                 for k in risk: risk[k].append(np.nan)
-                continue
-            g = by[prior[-1]]; ix = [sidx[s] for s in g[g["rank"] <= 10].sym if s in sidx]; used += 1
+                late.append(np.nan); top5.append(np.nan); nogap.append(np.nan); continue
+            g = by[prior[-1]]; g = g[(g["rank"] <= 10) & g.sym.isin(sidx)]; ix = [sidx[s] for s in g.sym]; rks = g["rank"].to_numpy(); used += 1
             for k, b in entries.items():
                 e = o[di, ix, b].astype("float64"); x = cf[di, ix, LAST].astype("float64"); r = -(x / e - 1) - COST_DAY; r = r[np.isfinite(r)]; daily[k].append(r.sum() / 10 if len(r) else np.nan); n_tr += len(r) if b == 0 else 0
             e0 = o[di, ix, 0].astype("float64"); p = cf[di, ix, :].astype("float64") / e0[:, None] - 1; good = np.isfinite(e0)
+            # the open was missed: sold at 9:20, and only the picks that fell 0.5% or more in their first five minutes (found in the data on 27 Nov 2026 and followed since then)
+            e1 = o[di, ix, 1].astype("float64"); fall = c[di, ix, 0].astype("float64") / e0 - 1; m1 = np.isfinite(e1) & np.isfinite(fall) & (fall <= -0.005)
+            if m1.any():
+                hi1 = np.fmax.reduce(np.nan_to_num(h[di, ix, 1:LAST + 1].astype("float64"), nan=-1.0), axis=1); lim1 = atr[di, ix] / e1; lim1 = np.where(np.isfinite(lim1) & (lim1 > 0), lim1, 9.0)
+                r1 = np.where(hi1 >= e1 * (1 + lim1), -lim1, -(cf[di, ix, LAST].astype("float64") / e1 - 1)) - COST_DAY; late.append(float(np.nansum(r1[m1])) / 10); n_late += int(m1.sum())
+            else: late.append(0.0)
             # the risk rules, on the trade sold at 9:15: each stock is bought back if it trades 1 ATR above its sale price; with the basket rule everything is bought back once the ten together are down 1%
             if good.any():
                 pg = p[good]; hi = np.fmax.accumulate(np.nan_to_num(h[di, ix, :].astype("float64")[good] / e0[good][:, None] - 1, nan=-9.0), axis=1); lim = (atr[di, ix][good] / e0[good]); lim = np.where(np.isfinite(lim) & (lim > 0), lim, 9.0)
                 hit = hi >= lim[:, None]; first = np.where(hit.any(axis=1), hit.argmax(axis=1), BARS); pnl = np.where(np.arange(BARS)[None, :] >= first[:, None], -lim[:, None], -pg)            # each stock's result so far, bar by bar
                 risk["stop"].append((pnl[:, LAST] - COST_DAY).sum() / 10); n_stop += int((first <= LAST).sum())
                 bk = np.nansum(pnl[:, :LAST + 1], axis=0) / 10; out_bar = int(np.argmax(bk <= -0.01)) if (bk <= -0.01).any() else LAST; risk["basket"].append((pnl[:, out_bar] - COST_DAY).sum() / 10); n_bask += int(out_bar < LAST)
+                # two ideas found in this data, on the same trade (sold at 9:15, stop 1 ATR): only the five best ranks at twice the size; and leaving out the picks that open more than 0.3% below yesterday's close
+                res = pnl[:, LAST] - COST_DAY; t5 = rks[good] <= 5; top5.append(float(res[t5].sum()) / 5 if t5.any() else 0.0); n5 += int(t5.sum())
+                gap = e0[good] / prevC[di, ix][good] - 1; keep = ~(gap < -0.003); nogap.append(float(res[keep].sum()) / 10); n_ng += int(keep.sum()); n_skip += int((~keep).sum())
             else:
                 for k in risk: risk[k].append(np.nan)
+                top5.append(np.nan); nogap.append(np.nan)
             p = p[good]
             if len(p): paths.append(np.nanmean(p, axis=0))
         for k in entries:
-            tests.append({"id": "day_" + k.split(" ")[0].replace(":", ""), "group": "Day book: ten best short ranks, sold for the day", "name": f"Sold at {k}, bought back at 3:25 pm", "cost": COST_DAY * 100, **stats(daily[k], n_tr if k.startswith("9:15") else None)})
-        tests.append({"id": "day_stop", "group": "Day book: risk rules (sold at 9:15)", "name": "Each stock bought back if it trades 1 ATR above the sale price", "cost": COST_DAY * 100, **stats(risk["stop"], n_tr), "note": f"{n_stop} stops hit"})
-        tests.append({"id": "day_basket", "group": "Day book: risk rules (sold at 9:15)", "name": "The same, and everything bought back once the ten together are down 1%", "cost": COST_DAY * 100, **stats(risk["basket"], n_tr), "note": f"the basket rule ended {n_bask} days early"})
+            tests.append({"id": "day_" + k.split(" ")[0].replace(":", ""), "group": G_DAY, "name": f"Sold at {k}, bought back at 3:25 pm", "cost": COST_DAY * 100, **stats(daily[k], n_tr if k.startswith("9:15") else None)})
+        tests.append({"id": "day_stop", "group": G_RISK, "name": "Each stock bought back if it trades 1 ATR above the sale price", "cost": COST_DAY * 100, **stats(risk["stop"], n_tr), "note": f"{n_stop} stops hit"})
+        tests.append({"id": "day_basket", "group": G_RISK, "name": "The same, and everything bought back once the ten together are down 1%", "cost": COST_DAY * 100, **stats(risk["basket"], n_tr), "note": f"the basket rule ended {n_bask} days early"})
+        tests.append(later({"id": "day_top5", "group": G_IDEA, "name": "Only the five best ranks, twice the size each, stop 1 ATR", "cost": COST_DAY * 100, **stats(top5, n5), "note": "half as many stocks, so one bad stock hurts twice as much"}, top5, days))
+        tests.append(later({"id": "day_nogap", "group": G_IDEA, "name": "Leaving out the picks that open more than 0.3% below yesterday's close, stop 1 ATR", "cost": COST_DAY * 100, **stats(nogap, n_ng), "note": f"{n_skip:,} of {n_ng + n_skip:,} trades left out, their slots stay empty"}, nogap, days))
+        tests.append(later({"id": "day_920_fell", "group": G_IDEA, "name": "The open was missed: sold at 9:20, only the picks that fell 0.5% or more in their first five minutes, stop 1 ATR", "cost": COST_DAY * 100, **stats(late, n_late), "note": "most of the ten slots stay empty"}, late, days))
         if paths:
             pm = np.nanmean(np.array(paths), axis=0) * 100; extra["day_path"] = {"t": [f"{(555 + 5 * (i + 1)) // 60}:{(555 + 5 * (i + 1)) % 60:02d}" for i in range(LAST + 1)], "pct": [round(float(x), 3) for x in pm[:LAST + 1]], "days": used,
                                                                                  "note": "Average move of the ten picks from the 9:15 price, before costs. A falling line is good for a short. If most of the fall is in the first minutes, a late sale misses it."}
