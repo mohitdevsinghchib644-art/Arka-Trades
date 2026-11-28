@@ -35,7 +35,7 @@ import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.isotonic import IsotonicRegression
-from sklearn.linear_model import RidgeCV
+from sklearn.linear_model import LogisticRegression, RidgeCV
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 import signal_engine as SE
@@ -52,7 +52,9 @@ STOP_K, TGT_K, HOLD, COST = 1.5, 2.5, 5, 0.0015
 FIRST, UNSEEN = "2019-01-01", "2025-01-01"          # first scored day · start of the period no choice was made on
 STEP, PURGE, SEEDS = 63, 6, (7, 11)
 FORWARD_DAYS = 60                                     # sessions of signals logged before the open that a book needs before it can be approved
-MAX_TRAIN, SECTOR_CAP, TRIALS = 220_000, 3, 120
+MAX_TRAIN, SECTOR_CAP, TRIALS = 220_000, 3, 230        # TRIALS: every rule variant ever compared on this data, for the deflated Sharpe (160 after the first 28 Nov 2026 round, 230 after the second)
+KEEP_RANK, MAX_HOLD = 80, 20                           # long book (from 28 Nov 2026): no fixed target; a trade is kept while the model still ranks the stock in its top KEEP_RANK,
+                                                       # at most MAX_HOLD sessions, with the same stop. Same signals, fewer round trips: 0.30% every 5 sessions was ~15% a year of cost
 BLOCK = {"long": (), "short": ("High volatility", "Strong bearish")}      # regimes in which a book takes no new trade
 VOL_SIZE = False                                      # size each slot by the stock's volatility (calmer stock, bigger slot; between half and one and a half slots)
 DEF_NEW = {"long": 0, "short": 1}                     # new trades allowed on a day that book's gauge is defensive
@@ -90,6 +92,38 @@ def trade(o, h, l, c, atr, side=1):
             x, j = c[last], last
         ret[t], xt[t], why[t], done[t] = side * (x / e - 1) - 2 * COST, j, w, (w > 0 or last == t + HOLD)
     return ret, xt, why, done
+
+
+def trade_keep(o, h, l, c, atr, rk):
+    """The long book's trade from 28 Nov 2026. Signal at close t -> bought at open t+1. Out at the stop (a gap through it exits at the
+    open), or at the next open once a close's rank is worse than KEEP_RANK, or at the close of the MAX_HOLD-th session. No target.
+    rk[t] is the stock's long rank at the close of panel day t (nan when it was not scored: the trade is kept). Reasons: 0 time, 1 stop, 3 rank."""
+    n = len(c); ret = np.full(n, np.nan); xt = np.full(n, -1); why = np.zeros(n, dtype="int8"); done = np.zeros(n, dtype=bool)
+    for t in range(n - 1):
+        a, e = atr[t], o[t + 1]
+        if not (a > 0) or not (e > 0) or not (rk[t] == rk[t]):
+            continue
+        sl, last, x, w, j, fin = e - STOP_K * a, min(n - 1, t + MAX_HOLD), np.nan, 0, t + 1, False
+        for j in range(t + 1, last + 1):
+            if j > t + 1 and o[j] <= sl: x, w, fin = o[j], 1, True; break
+            if l[j] <= sl: x, w, fin = sl, 1, True; break
+            if j == last: x, fin = c[j], last == t + MAX_HOLD; break
+            if rk[j] == rk[j] and rk[j] > KEEP_RANK and o[j + 1] > 0: x, w, j, fin = o[j + 1], 3, j + 1, True; break
+        if not (x > 0): continue
+        ret[t], xt[t], why[t], done[t] = x / e - 1 - 2 * COST, j, w, fin
+    return ret, xt, why, done
+
+
+def keep_labels(D, P):
+    """The long book's trades under the keep rule, for every scored row: columns livek, xtk (panel index), whyk, fink and yk (the result once finished)."""
+    pidx = P["C"].index.to_numpy(); pos = pd.Series(np.arange(len(pidx)), index=pidx); pp = pos.reindex(D.date.to_numpy()).to_numpy().astype(int)
+    rk = D.groupby("date").score.rank(ascending=False, method="first").to_numpy(); new = {k: np.full(len(D), np.nan) for k in ("livek", "xtk", "whyk")}; fin = np.zeros(len(D), bool)
+    for sym, idx in D.groupby("sym").indices.items():
+        o, h, l, c = (P[k][sym].to_numpy(float) for k in "OHLC"); a = np.full(len(pidx), np.nan); r = np.full(len(pidx), np.nan); a[pp[idx]] = D.atr.to_numpy()[idx]; r[pp[idx]] = rk[idx]
+        ret, xt, why, done = trade_keep(o, h, l, c, a, r)
+        new["livek"][idx], new["xtk"][idx], new["whyk"][idx], fin[idx] = ret[pp[idx]], xt[pp[idx]], why[pp[idx]], done[pp[idx]]
+    out = pd.DataFrame(new, index=D.index); out["fink"] = fin; out["yk"] = np.where(fin, out.livek, np.nan); out["xtk"] = out.xtk.fillna(-1).astype(int); out["whyk"] = out.whyk.fillna(0).astype("int8"); out["lrank"] = rk
+    return out
 
 
 def stock_frame(sym, d, u):
@@ -215,7 +249,7 @@ def regime_of(r):
     up200, up50, br, brc, ivp, r5 = r.ni_d200 > 0, r.ni_d50 > 0, r.br_d50, r.br_d50_5, r.ni_ivpct, r.ni_r5
     why = [f"NIFTY is {abs(r.ni_d200) * 100:.1f}% {'above' if up200 else 'below'} its 200-day average and {abs(r.ni_d50) * 100:.1f}% {'above' if up50 else 'below'} its 50-day",
            f"{br * 100:.0f}% of F&O stocks are above their 50-day average ({'+' if brc >= 0 else '−'}{abs(brc) * 100:.0f} points in a week)",
-           f"NIFTY implied volatility is at its {ivp * 100:.0f}th percentile of the last 120 sessions" if ivp == ivp else "NIFTY implied volatility percentile not available",
+           f"NIFTY implied volatility is at its {ordinal(ivp * 100)} percentile of the last 120 sessions" if ivp == ivp else "NIFTY implied volatility percentile not available",
            f"FIIs hold {r.fi_ils * 100:.0f}% of their index futures long ({'+' if r.fi_ils5 >= 0 else '−'}{abs(r.fi_ils5) * 100:.0f} points in a week)" if r.fi_ils == r.fi_ils else "FII positioning not available",
            f"NIFTY put-call ratio {r.ni_pcr:.2f}" if r.ni_pcr == r.ni_pcr else ""]
     if ivp == ivp and ivp >= 0.9 and r5 <= -0.02: reg, act = "High volatility", "Sharp fall with volatility near its high. Smallest size. Wait for the range to settle before fresh longs."
@@ -228,7 +262,7 @@ def regime_of(r):
 
 
 # ───────────── the books and their statistics ─────────────
-SIDE = {"long": dict(score="score", live="live", xt="_xt", fin="fin", y="y", why="why", g="g_mkt", sign=1), "short": dict(score="score_s", live="lives", xt="_xts", fin="fins", y="ys", why="whys", g="g_mkts", sign=-1)}
+SIDE = {"long": dict(score="score", live="livek", xt="_xtk", fin="fink", y="yk", why="whyk", g="g_mkt", sign=1), "short": dict(score="score_s", live="lives", xt="_xts", fin="fins", y="ys", why="whys", g="g_mkts", sign=-1)}
 def make_days(D, side, order=None):
     K = SIDE[side]; S = D[D[K["score"]].notna() & D[K["live"]].notna()]; by = {}
     for t, g in S.groupby("t"):
@@ -319,6 +353,10 @@ def record(D, days, side, by, by_mom, G, t0, t1, sims, rng):
     return out
 
 
+def ordinal(x):
+    k = int(round(x)); return f"{k}{'th' if 11 <= k % 100 <= 13 else {1: 'st', 2: 'nd', 3: 'rd'}.get(k % 10, 'th')}"
+
+
 def f_(x, nd=2):
     return None if x is None or x != x or abs(x) == float("inf") else round(float(x), nd)
 
@@ -345,8 +383,9 @@ def calibrate(D, days, t0):
     by isotonic regression on EARLIER out-of-sample scores only, refitted every STEP sessions."""
     for side, K in SIDE.items():
         e = (D[K["score"]] + D[K["g"]]).to_numpy(); won = (D[K["y"]] > 0).to_numpy().astype(float); okv = (D[K["score"]].notna() & D[K["g"]].notna()).to_numpy(); lab = D[K["y"]].notna().to_numpy(); t = D.t.to_numpy(); p = np.full(len(D), np.nan); n = np.zeros(len(D))
+        pg = MAX_HOLD + 1 if K["y"] == "yk" else PURGE      # a keep-rule trade can run MAX_HOLD sessions: only learn from trades that had ended before the scored days
         for a in range(t0 + 250, len(days), STEP):
-            tr = okv & lab & (t >= t0) & (t <= a - PURGE - 1); te = okv & (t >= a) & (t < a + STEP)
+            tr = okv & lab & (t >= t0) & (t <= a - pg - 1); te = okv & (t >= a) & (t < a + STEP)
             if tr.sum() < 5000 or not te.any(): continue
             p[te] = IsotonicRegression(y_min=0.05, y_max=0.95, out_of_bounds="clip").fit(e[tr], won[tr]).predict(e[te]); n[te] = tr.sum()
         D["p_" + side] = p; D["pn_" + side] = n
@@ -397,22 +436,28 @@ def day_rank(S):
     return S
 
 
-def day_book(D, F, days, t0, tu):
+def day_book(D, F, days, t0, tu, call=None):
     """The day book. Research on the 10 years showed where the short model's edge sits: its picks fall between the open and the close and
     rise again overnight ("tug of war", Lou, Polk and Skouras 2019). So this book sells the DAY_N best ranks at the next open and buys
     them back at that day's close: no position is held overnight. Every day, no gauge, no regime rule. Returns the record and the history of picks."""
     S = pd.DataFrame({"t": D.t.to_numpy(), "sym": D.sym.to_numpy(), "sc": D.score_s.to_numpy(), "sd": D.score_d.to_numpy(), "atr": D.atr.to_numpy(), "o": F.o1x.to_numpy(), "h": F.h1x.to_numpy(), "l": F.l1x.to_numpy(), "c": F.c1x.to_numpy()}); S = day_rank(S[(S.t >= t0) & S.sc.notna()])
     hist = S[S.rk <= 2 * DAY_N]; T = S[(S.rk <= DAY_N) & (S.o > 0) & (S.c > 0)].copy()
     T["gross"] = -(T.c / T.o - 1); hit = T.h >= T.o + DAY_STOP * T.atr; T["r"] = np.where(hit, -DAY_STOP * T.atr / T.o, T.gross); span = np.arange(t0 + 1, len(days))
-    def daily(cost, col="r", frame=T):
-        g = (frame[col] - cost).groupby(frame.t).sum() / DAY_N; g.index = g.index + 1; return g.reindex(span).fillna(0).to_numpy()
-    x = daily(DAY_COST); a = span < tu; curve = np.concatenate([[1.0], np.cumprod(1 + x)]); cut = int(a.sum()) + 1
+    cs_ = np.full(len(days), np.nan) if call is None else np.asarray(call, float); size = lambda tt: np.where(cs_[np.asarray(tt, int)] == 1, DAY_BULL_SIZE, 1.0)      # half size the day after a BULLISH NIFTY call
+    def daily(cost, col="r", frame=T, sized=True):
+        w = size(frame.t) if sized else 1.0
+        g = ((frame[col] - cost) * w).groupby(frame.t).sum() / DAY_N; g.index = g.index + 1; return g.reindex(span).fillna(0).to_numpy()
+    x = daily(DAY_COST); x_full = daily(DAY_COST, sized=False); a = span < tu; curve = np.concatenate([[1.0], np.cumprod(1 + x)]); cut = int(a.sum()) + 1
+    cspan = cs_[span - 1]; by_call = {nm_: {lab: f_(x_full[m & (cspan == sv)].mean() * 100, 3) for lab, sv in (("bull", 1), ("chop", 0), ("bear", -1))} for nm_, m in (("design", a), ("unseen", ~a))}
     part = lambda v: {"days": int(len(v)), "won": f_((v > 0).mean() * 100, 0), "avg": f_(v.mean() * 100, 3)} if len(v) else None
     R = S[S.o.notna() & S.c.notna()].copy(); R["rk2"] = R.groupby("t").sc.transform(lambda v: np.random.default_rng(len(v) + int(v.index[0])).permutation(len(v)) + 1); R = R[R.rk2 <= DAY_N]; R["r"] = -(R.c / R.o - 1); xr = daily(DAY_COST, "r", R)
     old = S[S.o.notna() & S.c.notna()].copy(); old["rk3"] = old.groupby("t").sc.rank(ascending=False, method="first"); old = old[old.rk3 <= DAY_N]; old["r"] = np.where(old.h >= old.o + DAY_STOP * old.atr, -DAY_STOP * old.atr / old.o, -(old.c / old.o - 1)); xo = daily(DAY_COST, "r", old)
     eq = lambda v: np.concatenate([[1.0], np.cumprod(1 + v)]); yr = pd.to_datetime(days[span]).year; nn = len(curve); step = max(1, nn // 300); pick = list(range(0, nn, step)); pick = pick if pick[-1] == nn - 1 else pick + [nn - 1]
     two = lambda v: {"design": cstats(eq(v[a]))["cagr"], "unseen": cstats(eq(v[~a]))["cagr"] if (~a).sum() > 20 else None}
-    out = {"rules": {"n": DAY_N, "cost": DAY_COST * 100, "stop_atr": DAY_STOP, "sector_cap": SECTOR_CAP}, "record": {"design": cstats(curve[:cut]), "unseen": cstats(curve[cut - 1:]) if (~a).sum() > 20 else None, "all": cstats(curve)},
+    cf = np.concatenate([[1.0], np.cumprod(1 + x_full)]); tr_ = T.r - DAY_COST; td = (T.t + 1 < tu).to_numpy()
+    trades = {nm_: {"n": int(m.sum()), "avg": f_(tr_[m].mean() * 100, 3), "won": f_((tr_[m] > 0).mean() * 100, 0)} if m.any() else None for nm_, m in (("design", td), ("unseen", ~td))}
+    out = {"rules": {"n": DAY_N, "cost": DAY_COST * 100, "stop_atr": DAY_STOP, "sector_cap": SECTOR_CAP, "bull_size": DAY_BULL_SIZE}, "record": {"design": cstats(curve[:cut]), "unseen": cstats(curve[cut - 1:]) if (~a).sum() > 20 else None, "all": cstats(curve)},
+           "record_full": {"design": cstats(cf[:cut]), "unseen": cstats(cf[cut - 1:]) if (~a).sum() > 20 else None}, "by_call": by_call, "trades": trades,
            "daily": {"design": part(x[a]), "unseen": part(x[~a])}, "gross": {"design": f_(T[T.t < tu - 1].gross.mean() * 100, 3), "unseen": f_(T[T.t >= tu - 1].gross.mean() * 100, 3)}, "stopped": f_(hit.mean() * 100, 0),
            "costs": [{"cost": c * 100, **two(daily(c))} for c in (0.0010, 0.0016, 0.0020, 0.0030, 0.0040)], "random": two(xr), "short_score_only": two(xo),
            "ranks": [{"from": lo, "to": hi, "design": f_(-(v[v.t < tu - 1].c / v[v.t < tu - 1].o - 1).mean() * 100, 3), "unseen": f_(-(v[v.t >= tu - 1].c / v[v.t >= tu - 1].o - 1).mean() * 100, 3)} for lo, hi in ((1, 5), (6, 10), (11, 20), (21, 40), (41, 80), (81, 999)) for v in [S[(S.r0 >= lo) & (S.r0 <= hi) & (S.o > 0)]]],
@@ -420,6 +465,149 @@ def day_book(D, F, days, t0, tu):
            "curve": {"d": [str(days[t0 + i])[:10] for i in pick], "model": [round(float(curve[i]) * 100, 2) for i in pick], "random": [round(float(eq(xr)[i]) * 100, 2) for i in pick]}}
     hist = hist.assign(date=[str(days[t])[:10] for t in hist.t], rank=hist.rk.astype(int))[["date", "sym", "rank"]].sort_values(["date", "rank"]); out["_curve"] = curve
     return out, hist
+
+
+# ───────────── the evening NIFTY call, intraday longs, exact levels ─────────────
+NCALL_FIRST, NCALL_HI, NCALL_LO = "2018-07-01", 0.70, 0.30   # the call: tonight's prediction against its own last 250; top 30% BULLISH, bottom 30% BEARISH, the rest CHOP
+DAY_BULL_SIZE = 0.5                                   # intraday shorts at half size after a BULLISH call: in 2019-24 and 2025-26 the short book earned far less on those days
+DAYL_N, DAYL_GAP, DAYL_MAX = 40, 0.01, 10             # intraday longs: a pre-open buy limit 1% under the close on the 40 best long ranks; at most 10 fills a day
+NC_LABEL = {  # reading -> (words, unit): only these are named as reasons for the call
+    "ni_r1": ("NIFTY's move today", "pct"), "ni_r5": ("NIFTY's move this week", "pct"), "ni_r21": ("NIFTY's move this month", "pct"), "ni_d50": ("NIFTY against its 50-day average", "pct"),
+    "ni_d200": ("NIFTY against its 200-day average", "pct"), "nc_rsi2": ("2-day RSI", "num0"), "nc_cl0": ("where NIFTY closed in today's range (0 low, 100 high)", "pct0"),
+    "nc_gap0": ("today's opening gap", "pct"), "nc_id0": ("NIFTY's move from today's open", "pct"), "nc_rng0": ("today's range in ATRs", "num"), "nc_vix": ("India VIX", "num"),
+    "nc_vix1": ("India VIX change today", "num"), "nc_vix5": ("India VIX change this week", "num"), "nc_vixpct": ("India VIX against its year", "pct0"), "nc_streak": ("days up (+) or down (-) in a row", "sint"),
+    "nc_hi20": ("distance below the 20-day high", "pct"), "nc_lo20": ("distance above the 20-day low", "pct"), "nc_bkrel1": ("BANK NIFTY against NIFTY today", "pct"),
+    "fi_ils": ("FII long share of index futures", "pct0"), "fi_ils1": ("FII long share, change today", "pts"), "fi_ils5": ("FII long share, change this week", "pts"),
+    "cl_ils": ("retail long share of index futures", "pct0"), "cl_ils1": ("retail long share, change today", "pts"), "cl_ils5": ("retail long share, change this week", "pts"),
+    "pr_ils": ("prop traders' long share of index futures", "pct0"), "di_ils": ("DII long share of index futures", "pct0"), "fi_opt": ("FII option positioning (+ bullish)", "num"),
+    "fi_opt1": ("FII option positioning, change today", "num"), "cl_opt": ("retail option positioning (+ bullish)", "num"), "ni_pcr": ("NIFTY put-call ratio", "num"),
+    "ni_pcr1": ("put-call ratio change today", "num"), "ni_pcrz": ("put-call ratio against its 60 days (z)", "num"), "ni_wpcr": ("weekly-expiry put-call ratio", "num"),
+    "ni_iv": ("NIFTY implied volatility", "pct"), "ni_iv1": ("implied volatility change today", "pct"), "ni_ivpct": ("implied volatility against its 120 days", "pct0"),
+    "ni_skew": ("put minus call implied volatility", "pct"), "ni_cw": ("distance to the call wall", "pct"), "ni_pw": ("distance to the put wall", "pct"), "ni_wmp": ("distance to weekly max pain", "pct"),
+    "ni_basis": ("futures premium (30-day)", "pct"), "ni_oi1": ("NIFTY futures open interest, change today", "pct"), "ni_oi5": ("NIFTY futures open interest, change this week", "pct"),
+    "br_up": ("share of F&O stocks up today", "pct0"), "br_d50": ("share of F&O stocks above their 50-day average", "pct0"), "br_d50_5": ("that share, change this week", "pts"),
+    "br_d200": ("share above their 200-day average", "pct0"), "br_longbu": ("share of stocks with long build-up", "pct0"), "br_shortbu": ("share of stocks with short build-up", "pct0"),
+    "ni_ivrv": ("implied against realised volatility", "num")}
+
+
+def tick_of(px):
+    """NSE tick size for a cash-market price (and stock futures) since 15 Apr 2025."""
+    return 0.01 if px < 250 else 0.05 if px <= 1000 else 0.10 if px <= 5000 else 0.50 if px <= 10000 else 1.0 if px <= 20000 else 5.0
+
+
+def to_tick(px, down=True):
+    if px is None or not (px == px) or px <= 0:
+        return None
+    t = tick_of(px); q = math.floor(px / t + 1e-9) if down else math.ceil(px / t - 1e-9); return round(q * t, 2)
+
+
+def nifty_frame(P, M):
+    """NIFTY's own end-of-day readings (open, high, low, close, VIX) beside the market frame, and the next session's open-to-close move."""
+    I = P["IDX"]; n = I["NIFTY"].reindex(M.index); O, H, L, C = (n[k].astype(float) for k in ("Open", "High", "Low", "Close"))
+    flat = (H == L) & (H == C); O, H, L = O.mask(flat), H.mask(flat), L.mask(flat)      # a day patched from the F&O close only has no real open, high or low
+    C = C.fillna(M["ni_c"]); pc = C.shift(1); tr = pd.concat([H - L, (H - pc).abs(), (L - pc).abs()], axis=1).max(axis=1); atr = tr.ewm(alpha=1 / 14, adjust=False).mean()
+    F = pd.DataFrame(index=M.index); F["nc_gap0"], F["nc_id0"], F["nc_cl0"], F["nc_rng0"], F["nc_atrp"] = O / pc - 1, C / O - 1, (C - L) / (H - L).replace(0, np.nan), (H - L) / atr, atr / C
+    d = C.diff(); up = d.clip(lower=0).ewm(alpha=1 / 2, adjust=False).mean(); dn = (-d.clip(upper=0)).ewm(alpha=1 / 2, adjust=False).mean(); F["nc_rsi2"] = 100 - 100 / (1 + up / dn)
+    s = np.sign(C.diff()).fillna(0); F["nc_streak"] = (s.groupby((s != s.shift()).cumsum()).cumcount() + 1) * s
+    F["nc_hi20"], F["nc_lo20"] = C / H.rolling(20, min_periods=10).max() - 1, C / L.rolling(20, min_periods=10).min() - 1
+    vx = I["VIX"]["Close"].reindex(M.index).astype(float) if "VIX" in I else pd.Series(np.nan, index=M.index)
+    F["nc_vix"], F["nc_vix1"], F["nc_vix5"], F["nc_vixpct"] = vx, vx - vx.shift(1), vx - vx.shift(5), vx.rolling(250, min_periods=100).rank(pct=True)
+    F["nc_dow"] = M.index.dayofweek; b = I["BANKNIFTY"]["Close"].reindex(M.index).astype(float) if "BANKNIFTY" in I else pd.Series(np.nan, index=M.index); F["nc_bkrel1"] = b / b.shift(1) - C / pc
+    Y = C.shift(-1) / O.shift(-1) - 1
+    return F, Y, pd.DataFrame({"O": O, "H": H, "L": L, "C": C, "atr": atr})
+
+
+def walk_ncall(M, F, Y):
+    """The call model: a heavily regularised logistic regression on every market reading, refitted every 21 sessions on the sessions
+    whose next-day result was already known (2 purged), scored only on the sessions after. Returns the score, the last fit and its readings."""
+    X = M.drop(columns=[c for c in M.columns if c.startswith("t_")] + ["ni_c", "ba_c", "regime"], errors="ignore").select_dtypes("number"); W = pd.concat([X, F], axis=1)
+    days = M.index; i0 = int(days.searchsorted(pd.Timestamp(NCALL_FIRST))); p = pd.Series(np.nan, index=days); fit, use = None, []
+    for a in range(i0, len(days), 21):
+        y = Y.iloc[:a - 2]; ok = y.notna().to_numpy(); tr = W.iloc[:a - 2][ok]
+        use = [c for c in W.columns if tr[c].notna().sum() >= 120 and tr[c].nunique() > 1]
+        fit = make_pipeline(SimpleImputer(strategy="median"), StandardScaler(), LogisticRegression(C=0.02, max_iter=500)).fit(tr[use], (y[ok] > 0).astype(int))
+        p.iloc[a:a + 21] = fit.predict_proba(W.iloc[a:a + 21][use])[:, 1] - 0.5
+    return p, fit, use, W
+
+
+def ncall_of(pct):
+    return "BULLISH" if pct >= NCALL_HI else "BEARISH" if pct <= NCALL_LO else "CHOP"
+
+
+def nc_fmt(v, unit):
+    if v is None or v != v: return "n/a"
+    return {"pct": f"{v * 100:+.2f}%", "pct0": f"{v * 100:.0f}%", "pts": f"{v * 100:+.1f} points", "num": f"{v:.2f}", "num0": f"{v:.0f}", "sint": f"{v:+.0f}"}.get(unit, f"{v:.2f}")
+
+
+def nifty_call(P, M, days, t0, tu, last_full):
+    """The evening call for NIFTY's next session: BULLISH, BEARISH or CHOP, its reasons, the levels and its walk-forward record."""
+    F, Y, N = nifty_frame(P, M); p, fit, use, W = walk_ncall(M, F, Y)
+    pct = p.rolling(250, min_periods=120).apply(lambda w: (w[:-1] < w[-1]).mean(), raw=True)
+    state = pd.Series(np.where(pct >= NCALL_HI, 1, np.where(pct <= NCALL_LO, -1, 0)), index=p.index).where(pct.notna())
+    x = W.iloc[[-1]][use]; z = fit[1].transform(fit[0].transform(x))[0]; co = fit[2].coef_[0]; contrib = pd.Series(co * z, index=use)
+    named = contrib[[c for c in use if c in NC_LABEL]].sort_values(); raw = W.iloc[-1]
+    rs = lambda idx: [{"what": NC_LABEL[c][0], "value": nc_fmt(float(raw[c]) if raw[c] == raw[c] else None, NC_LABEL[c][1]), "weight": round(float(contrib[c]), 3)} for c in idx]
+    bulls = rs([c for c in named.index[::-1] if named[c] > 0][:4]); bears = rs([c for c in named.index if named[c] < 0][:4])
+    last = N.iloc[-1]; H, L, C, A = last.H, last.L, last.C, last.atr; full = H == H and L == L
+    Pv = (H + L + C) / 3 if full else None; mrow = M.iloc[-1]
+    lv = {"close": f_(C, 2), "high": f_(H, 2) if full else None, "low": f_(L, 2) if full else None, "atr": f_(A, 1), "pivot": f_(Pv, 1) if full else None,
+          "r1": f_(2 * Pv - L, 1) if full else None, "s1": f_(2 * Pv - H, 1) if full else None, "r2": f_(Pv + (H - L), 1) if full else None, "s2": f_(Pv - (H - L), 1) if full else None,
+          "call_wall": f_(C * (1 + mrow.ni_cw), 0) if mrow.ni_cw == mrow.ni_cw else None, "put_wall": f_(C * (1 + mrow.ni_pw), 0) if mrow.ni_pw == mrow.ni_pw else None,
+          "max_pain": f_(C * (1 + mrow.ni_wmp), 0) if mrow.ni_wmp == mrow.ni_wmp else None, "range_lo": f_(C - A, 0), "range_hi": f_(C + A, 0)}
+    rec = {}
+    for nm_, a, b in (("design", FIRST, UNSEEN), ("unseen", UNSEEN, "2100-01-01")):
+        m = (p.index >= a) & (p.index < b) & state.notna().to_numpy() & Y.notna().to_numpy(); r = {}
+        for lab, sv in (("bull", 1), ("chop", 0), ("bear", -1)):
+            y = Y[m & (state == sv).to_numpy()]
+            r[lab] = {"n": int(len(y)), "right": f_(((y > 0) if sv > 0 else (y < 0)).mean() * 100, 1) if len(y) and sv != 0 else None, "avg": f_(y.mean() * 100, 3) if len(y) else None, "move": f_(y.abs().mean() * 100, 3) if len(y) else None}
+        yb = Y[m & (state == -1).to_numpy()]; v = -yb - 0.0007
+        r["nifty_short"] = {"n": int(len(v)), "avg": f_(v.mean() * 100, 3), "t": f_(v.mean() / v.std() * math.sqrt(len(v)), 2) if len(v) > 2 else None}
+        y_all = Y[(p.index >= a) & (p.index < b) & Y.notna().to_numpy()]; r["up_share"] = f_((y_all > 0).mean() * 100, 1)
+        rec[nm_] = r
+    hist = [{"d": str(d)[:10], "c": int(s), "next": f_(float(Y.loc[d]) * 100, 2) if Y.loc[d] == Y.loc[d] else None} for d, s in state.iloc[-30:].items() if s == s]
+    fwd = {"n": 0, "calls": 0, "right": None, "need": FORWARD_DAYS}
+    try:                                                                        # the calls logged each evening since this rule went live, against what NIFTY then did
+        lg = pd.read_csv(OUT / "calls.csv", parse_dates=["date"]); yy = Y.reindex(lg.date); m = yy.notna().to_numpy(); c_ = lg.call.to_numpy()[m]; v = yy.to_numpy()[m]; d_ = c_ != "CHOP"
+        fwd = {"n": int(m.sum()), "calls": int(d_.sum()), "right": f_(np.where(c_ == "BULLISH", v > 0, v < 0)[d_].mean() * 100, 1) if d_.any() else None, "need": FORWARD_DAYS}
+    except Exception:
+        pass
+    st = state.reindex(pd.to_datetime(days)).to_numpy()            # by the panel's session index (t), for the day books
+    call = ncall_of(float(pct.iloc[-1])) if pct.iloc[-1] == pct.iloc[-1] else "CHOP"
+    return {"call": call, "pct": f_(float(pct.iloc[-1]) * 100, 0) if pct.iloc[-1] == pct.iloc[-1] else None, "asof": str(M.index[-1])[:10], "for": "next session, from the open",
+            "up": bulls, "down": bears, "levels": lv, "record": rec, "forward": fwd, "last": hist, "rules": {"hi": NCALL_HI, "lo": NCALL_LO, "first": NCALL_FIRST, "short_size_bull": DAY_BULL_SIZE}}, st
+
+
+def day_long_book(D, days, t0, tu):
+    """Intraday LONGS, the one shape that held in daily data: a pre-open BUY LIMIT DAYL_GAP under the close on the DAYL_N best long ranks
+    (low short score, low predicted day fall). It fills at the official open only when the stock opens at or under it; stop 1 ATR under
+    the open; out at the close. At most DAYL_MAX fills a day, 1/10 of the capital each. Returns the record, tonight's list and the history."""
+    S = pd.DataFrame({"t": D.t.to_numpy(), "sym": D.sym.to_numpy(), "sc": D.score_s.to_numpy(), "sd": D.score_d.to_numpy(), "atr": D.atr.to_numpy(), "c0": D.c.to_numpy(),
+                      "o": D.o1x.to_numpy(), "h": D.h1x.to_numpy(), "l": D.l1x.to_numpy(), "c": D.c1x.to_numpy()})
+    S = S[(S.t >= t0) & S.sc.notna()].copy(); g = S.groupby("t")
+    S["bl"] = g.sc.rank(pct=True, ascending=False).fillna(0.5) + g.sd.rank(pct=True, ascending=False).fillna(0.5); S["r0"] = S.groupby("t").bl.rank(ascending=False, method="first")
+    span = np.arange(t0 + 1, len(days)); a = span < tu
+    def fills(Z, col="r0"):
+        T = Z[(Z[col] <= DAYL_N) & (Z.o > 0) & (Z.c > 0) & (Z.c0 > 0)]; T = T[T.o <= T.c0 * (1 - DAYL_GAP)].sort_values(["t", col]); return T[T.groupby("t").cumcount() < DAYL_MAX].copy()
+    def res(T, cost=DAY_COST):
+        hit = T.l <= T.o - DAY_STOP * T.atr; return pd.Series(np.where(hit, -DAY_STOP * T.atr / T.o, T.c / T.o - 1) - cost, index=T.index)
+    def daily(T, r):
+        v = (r * 0.1).groupby(T.t + 1).sum().reindex(span).fillna(0).to_numpy(); return v
+    T = fills(S); r = res(T); x = daily(T, r); eq = lambda v: np.concatenate([[1.0], np.cumprod(1 + v)]); curve = eq(x); cut = int(a.sum()) + 1
+    def per(m):
+        v = r[m]; return {"n": int(len(v)), "avg": f_(v.mean() * 100, 3), "won": f_((v > 0).mean() * 100, 0), "t": f_(v.mean() / v.std() * math.sqrt(len(v)), 2) if len(v) > 2 else None} if len(v) else None
+    two = lambda v: {"design": cstats(eq(v[a]))["cagr"], "unseen": cstats(eq(v[~a]))["cagr"] if (~a).sum() > 20 else None}
+    rnd = []                                                                    # the same rule on random picks of the day's stocks: is it the ranking or just the gap?
+    for sd_ in range(8):
+        rng = np.random.default_rng(17 + sd_); R = S.copy(); R["rr"] = R.groupby("t").sc.transform(lambda v: rng.permutation(len(v)) + 1); TR = fills(R, "rr"); rnd.append(two(daily(TR, res(TR))))
+    out = {"rules": {"n": DAYL_N, "gap": DAYL_GAP * 100, "max": DAYL_MAX, "stop_atr": DAY_STOP, "cost": DAY_COST * 100},
+           "record": {"design": cstats(curve[:cut]), "unseen": cstats(curve[cut - 1:]) if (~a).sum() > 20 else None, "all": cstats(curve)},
+           "trades": {"design": per((T.t + 1 < tu).to_numpy()), "unseen": per((T.t + 1 >= tu).to_numpy())}, "fills_a_day": f_(len(T) / max(1, len(span)), 2),
+           "random": {k: f_(float(np.median([q[k] for q in rnd if q[k] is not None])), 1) if any(q[k] is not None for q in rnd) else None for k in ("design", "unseen")},
+           "costs": [{"cost": round(c * 100, 2), **two(daily(T, res(T, c)))} for c in (0.0016, 0.0025, 0.0035)]}
+    last_t = int(S.t.max()); tonight = S[(S.t == last_t) & (S.r0 <= DAYL_N)].sort_values("r0")
+    picks = [{"sym": q.sym, "rank": int(q.r0), "close": f_(q.c0), "limit": to_tick(q.c0 * (1 - DAYL_GAP)), "atr": f_(q.atr), "stop_at_limit": to_tick(q.c0 * (1 - DAYL_GAP) - DAY_STOP * q.atr), "sector": SECTOR.get(q.sym, "")} for q in tonight.itertuples()]
+    hist = S[(S.r0 <= DAYL_N) & (S.t >= int(np.searchsorted(days, np.datetime64("2024-11-01"))))].assign(date=lambda z: [str(days[t])[:10] for t in z.t], rank=lambda z: z.r0.astype(int), limit=lambda z: (z.c0 * (1 - DAYL_GAP)).round(2))[["date", "sym", "rank", "limit"]].sort_values(["date", "rank"])
+    return out, picks, hist
 
 
 def build(P, say=print):
@@ -440,13 +628,15 @@ def build(P, say=print):
     M["regime"] = [regime_of(r)[0] for r in M.itertuples()]
     D = D.merge(G[["g_mkt", "g_mkts", "g_n1"]], left_on="date", right_index=True, how="left").merge(M[["regime"]], left_on="date", right_index=True, how="left")
     days = np.array(sorted(D.date.unique())); ix = {d: i for i, d in enumerate(days)}; D["t"] = D.date.map(ix); pidx = P["C"].index.to_numpy(); big = len(days) + 99
-    for a, b in (("xt", "_xt"), ("xts", "_xts")): D[b] = [int(np.searchsorted(days, pidx[x])) if 0 <= x < len(pidx) else big for x in D[a]]
+    D = pd.concat([D, keep_labels(D, P)], axis=1); say("long book: keep-rule trades labelled (top %d, at most %d sessions, no target)" % (KEEP_RANK, MAX_HOLD))
+    for a, b in (("xt", "_xt"), ("xts", "_xts"), ("xtk", "_xtk")): D[b] = [int(np.searchsorted(days, pidx[x])) if 0 <= x < len(pidx) else big for x in D[a]]
     D["k"] = D.sym.astype("category").cat.codes; names = dict(zip(D.k, D.sym)); secs = {s: i for i, s in enumerate(sorted(set(SECTOR.values())))}; D["sec"] = [secs.get(SECTOR.get(s), -1) for s in D.sym]
     t0, tu, t1 = int(np.searchsorted(days, np.datetime64(FIRST))), int(np.searchsorted(days, np.datetime64(UNSEEN))), len(days); D = calibrate(D, days, t0)
     CM = D.pivot_table(index="t", columns="k", values="c").reindex(index=range(len(days)), columns=range(int(D.k.max()) + 1)).ffill().to_numpy()
     D["mom_l"], D["mom_s"] = D.x_m12, -D.x_m12; G = G.reindex(days); curves = {}; rng = np.random.default_rng(11); last_full = int(D[D.y.notna()].t.max()) + 1
     out = {"v": VERSION, "asof": str(days[-1])[:10], "built": datetime.now(SE.IST).isoformat(timespec="minutes"),
-           "rules": {"stop_atr": STOP_K, "target_atr": TGT_K, "hold": HOLD, "cost": COST * 100, "slots": SLOTS, "new_sup": NEW_SUP, "new_def": NEW_DEF, "retrain": STEP, "first": FIRST, "unseen": UNSEEN, "sector_cap": SECTOR_CAP, "trials": TRIALS},
+           "rules": {"stop_atr": STOP_K, "target_atr": TGT_K, "hold": HOLD, "cost": COST * 100, "slots": SLOTS, "new_sup": NEW_SUP, "new_def": NEW_DEF, "retrain": STEP, "first": FIRST, "unseen": UNSEEN, "sector_cap": SECTOR_CAP, "trials": TRIALS,
+                     "long": {"stop_atr": STOP_K, "target_atr": None, "keep_rank": KEEP_RANK, "max_hold": MAX_HOLD}, "short": {"stop_atr": STOP_K, "target_atr": TGT_K, "hold": HOLD}},
            "data": {"stocks": int(D.sym.nunique()), "rows": int(len(D)), "sessions": int(len(days)), "from": str(days[0])[:10], "features": nx, "market_features": nm, "missing": miss, "seconds": None}, "books": {}}
     T = D[D.t == t1 - 1]; g = G.iloc[-1]; mrow = M.iloc[-1]; reg, why, act = regime_of(mrow); hist = G.iloc[t0:]; charts, want, marks = {}, [], {}
     gn = G.iloc[t0:last_full].dropna(subset=["g_n1", "t_n1"]); upc = gn.g_n1 > 0; gu = gn[gn.index >= UNSEEN]
@@ -475,10 +665,11 @@ def build(P, say=print):
         hs = D[(D.t >= t0) & (D.t < last_full) & D[K["y"]].notna() & D[K["score"]].notna()]; hs = hs[hs.groupby("t")[K["score"]].rank(ascending=False, method="first") <= 10]; outcomes = []
         for rg in REGIMES:                                  # what happened to the ten best-ranked signals a day, by the regime they were issued in
             x = hs[hs.regime == rg]
-            if len(x) >= 100: outcomes.append({"regime": rg, "n": int(len(x)), "stop": round(float((x[K["why"]] == 1).mean()) * 100, 0), "target": round(float((x[K["why"]] == 2).mean()) * 100, 0), "time": round(float((x[K["why"]] == 0).mean()) * 100, 0), "won": round(float((x[K["y"]] > 0).mean()) * 100, 0), "mean": f_(x[K["y"]].mean() * 100, 2)})
+            if len(x) >= 100: outcomes.append({"regime": rg, "n": int(len(x)), "stop": round(float((x[K["why"]] == 1).mean()) * 100, 0), "target": round(float((x[K["why"]] == 2).mean()) * 100, 0), "rank": round(float((x[K["why"]] == 3).mean()) * 100, 0), "time": round(float((x[K["why"]] == 0).mean()) * 100, 0), "won": round(float((x[K["y"]] > 0).mean()) * 100, 0), "mean": f_(x[K["y"]].mean() * 100, 2)})
         Ts = T.sort_values(K["score"], ascending=False); sup = bool(g[K["g"]] > 0); held = {names[o[1]] for o in open_}; free = max(SLOTS - len(open_), 0); blocked = reg in BLOCK[side]; cap = 0 if blocked else min(NEW_SUP if sup else DEF_NEW[side], free)
+        keep = side == "long"                              # the long book has no target (keep rule); the short book keeps its target
         def row(r, i):
-            a_ = r.atr; return {"sym": r.sym, "rank": int(i + 1), "close": f_(r.c), "atr": f_(a_), "stop": f_(r.c - sg_ * STOP_K * a_), "target": f_(r.c + sg_ * TGT_K * a_), "stop_pct": f_(-sg_ * STOP_K * a_ / r.c * 100, 1), "target_pct": f_(sg_ * TGT_K * a_ / r.c * 100, 1),
+            a_ = r.atr; return {"sym": r.sym, "rank": int(i + 1), "close": f_(r.c), "atr": f_(a_), "stop": to_tick(r.c - sg_ * STOP_K * a_, down=sg_ > 0), "target": None if keep else to_tick(r.c + sg_ * TGT_K * a_, down=sg_ > 0), "stop_pct": f_(-sg_ * STOP_K * a_ / r.c * 100, 1), "target_pct": None if keep else f_(sg_ * TGT_K * a_ / r.c * 100, 1),
                                 "prob": f_(getattr(r, "p_" + side) * 100, 0), "prob_n": int(getattr(r, "pn_" + side)), "exp": f_((getattr(r, K["score"]) + g[K["g"]]) * 100, 2), "held": r.sym in held, **facts(r)}
         ranked = [row(r, i) for i, r in enumerate(Ts.itertuples())]; picks, k, sc = [], 0, {}
         for o in open_: sc[o[7]] = sc.get(o[7], 0) + 1
@@ -490,11 +681,13 @@ def build(P, say=print):
         pos = []
         for o in open_:
             r = D.loc[o[5]]; e = float(r.o1) if r.o1 == r.o1 else None; cnow = float(P["C"][r.sym].dropna().iloc[-1]); ref = e if e else float(r.c)
-            pos.append({"sym": r.sym, "signal": str(r.date)[:10], "entry": f_(e), "stop": f_(ref - sg_ * STOP_K * r.atr), "target": f_(ref + sg_ * TGT_K * r.atr), "price": f_(cnow), "pnl": f_(sg_ * (cnow / e - 1) * 100, 2) if e else None,
-                        "days": int(t1 - 1 - o[6]), "left": int(max(0, HOLD - (t1 - 1 - o[6]))), "pending": e is None, "sector": SECTOR.get(r.sym, "")})
+            rk_now = T.loc[T.sym == r.sym, "lrank"]; rk_now = float(rk_now.iloc[0]) if len(rk_now) and rk_now.iloc[0] == rk_now.iloc[0] else None
+            pos.append({"sym": r.sym, "signal": str(r.date)[:10], "entry": f_(e), "stop": to_tick(ref - sg_ * STOP_K * r.atr, down=sg_ > 0), "target": None if keep else to_tick(ref + sg_ * TGT_K * r.atr, down=sg_ > 0), "atr": f_(r.atr), "price": f_(cnow), "pnl": f_(sg_ * (cnow / e - 1) * 100, 2) if e else None,
+                        "days": int(t1 - 1 - o[6]), "left": int(max(0, (MAX_HOLD if keep else HOLD) - (t1 - 1 - o[6]))), "pending": e is None, "sector": SECTOR.get(r.sym, ""),
+                        **({"rank_now": int(rk_now) if rk_now else None, "exit_next": bool(rk_now and rk_now > KEEP_RANK and e)} if keep else {})})
         recent = []
         for x in [x for x in trades if x[4]][-40:][::-1]:
-            r = D.loc[x[5]]; recent.append({"sym": r.sym, "signal": str(r.date)[:10], "exit": str(days[min(x[6], t1 - 1)])[:10], "entry": f_(r.o1), "ret": f_(x[2] * 100, 2), "why": ["time", "stop", "target"][int(r[K["why"]])], "regime": r.regime})
+            r = D.loc[x[5]]; recent.append({"sym": r.sym, "signal": str(r.date)[:10], "exit": str(days[min(x[6], t1 - 1)])[:10], "entry": f_(r.o1), "ret": f_(x[2] * 100, 2), "why": ["time", "stop", "target", "rank"][int(r[K["why"]])], "regime": r.regime})
         U = rec.get("unseen"); okb = bool(U and U["trades"].get("pf") and U["trades"]["pf"] >= 1.2 and U["book"]["total"] > 0 and U["random"]["beats"] >= 95 and U["book"]["total"] > U["momentum"]["total"])
         dsr = (U or {}).get("book", {}).get("dsr"); fwd = forward_days(); stage = "live" if (okb and dsr is not None and dsr >= 95 and fwd >= FORWARD_DAYS) else "forward" if okb else "test"
         why_ = "Unseen period: profit factor %s, book %s%%, 12-month-momentum book %s%%, better than %s%% of random-pick books, deflated Sharpe %s%%. Forward log: %d of %d sessions. Approval needs profit factor 1.2 or more, a positive book that beats the momentum book, 95%% of random books, a deflated Sharpe of 95%% or more, and %d sessions of signals logged before the open." % (
@@ -506,7 +699,7 @@ def build(P, say=print):
             r = D.loc[x[5]]; m = marks.setdefault(r.sym, [])
             if x[0] + 1 >= t1 or r.o1 != r.o1: continue
             m.append({"d": str(days[x[0] + 1])[:10], "k": "b" if side == "long" else "ss", "p": f_(r.o1)})
-            if x[4]: m.append({"d": str(days[min(x[6], t1 - 1)])[:10], "k": "s" if side == "long" else "sc", "p": f_(r.o1 * (1 + sg_ * (x[2] + 2 * COST))), "r": f_(x[2] * 100, 2), "why": ["time", "stop", "target"][int(r[K["why"]])]})
+            if x[4]: m.append({"d": str(days[min(x[6], t1 - 1)])[:10], "k": "s" if side == "long" else "sc", "p": f_(r.o1 * (1 + sg_ * (x[2] + 2 * COST))), "r": f_(x[2] * 100, 2), "why": ["time", "stop", "target", "rank"][int(r[K["why"]])]})
     cl, cs = curves["long"], curves["short"]
     def both(a, b):
         return 1 + (cl[a - t0:b - t0] / cl[a - t0] - 1) + (cs[a - t0:b - t0] / cs[a - t0] - 1)
@@ -532,9 +725,14 @@ def build(P, say=print):
     res = next_results(out["asof"]); rkl = {r.sym: i + 1 for i, r in enumerate(T.sort_values("score", ascending=False).itertuples())}; rks = {r.sym: i + 1 for i, r in enumerate(T.sort_values("score_s", ascending=False).itertuples())}
     out["universe"] = [{"sym": r.sym, "c": f_(r.c), "atr": f_(r.atr), "adv": f_(math.exp(r.turn) / r.c, 0) if r.turn == r.turn and r.c > 0 else None, "sec": SECTOR.get(r.sym, ""), "rl": rkl.get(r.sym), "rs": rks.get(r.sym),
                         "pl": f_(r.p_long * 100, 0), "ps": f_(r.p_short * 100, 0), "str": f_(r.x_m12 * 100, 0), "pdh": f_(r.h), "pdl": f_(r.l), "hi20": f_(r.c / (1 + r.hi20)) if r.hi20 == r.hi20 else None, "d50": f_(r.d50 * 100, 1), "oi5": f_(r.oi5 * 100, 1), **{k: v for k, v in facts(r).items() if k in ("buildup", "deliv", "ivpct", "pcr", "volx")}, **({"res": res[r.sym]} if r.sym in res else {})} for r in T.itertuples()]
-    day, day_hist = day_book(D, D, days, t0, tu); TS = day_rank(pd.DataFrame({"t": T.t.to_numpy(), "sym": T.sym.to_numpy(), "sc": T.score_s.to_numpy(), "sd": T.score_d.to_numpy()}, index=T.index)); TS = T.loc[TS[TS.rk <= DAY_N].sort_values("rk").index]
-    day["picks"] = [{"sym": r.sym, "rank": i + 1, "close": f_(r.c), "atr": f_(r.atr), "stop_pct": f_(DAY_STOP * r.atr / r.c * 100, 1), "sector": SECTOR.get(r.sym, ""), **facts(r)} for i, r in enumerate(TS.itertuples())]
-    day["status"], day["status_why"] = "test", "Backtested on daily opening and closing prices only. It has to be confirmed on five-minute prices and in the live paper journal before it can be trusted: the whole result depends on selling at the opening price."
+    nc, nc_state = nifty_call(P, M, days, t0, tu, last_full); say(f"NIFTY call for the next session: {nc['call']} (score at its {ordinal(nc['pct']) if nc['pct'] is not None else '?'} percentile)")
+    day, day_hist = day_book(D, D, days, t0, tu, call=nc_state); TS = day_rank(pd.DataFrame({"t": T.t.to_numpy(), "sym": T.sym.to_numpy(), "sc": T.score_s.to_numpy(), "sd": T.score_d.to_numpy()}, index=T.index)); TS = T.loc[TS[TS.rk <= DAY_N].sort_values("rk").index]
+    day["size"] = DAY_BULL_SIZE if nc["call"] == "BULLISH" else 1.0
+    day["picks"] = [{"sym": r.sym, "rank": i + 1, "close": f_(r.c), "atr": f_(r.atr), "stop_pct": f_(DAY_STOP * r.atr / r.c * 100, 1), "stop_at_close": to_tick(r.c + DAY_STOP * r.atr, down=False), "sector": SECTOR.get(r.sym, ""), **facts(r)} for i, r in enumerate(TS.itertuples())]
+    day["status"], day["status_why"] = "test", "Backtested on daily opening and closing prices, confirmed on two years of five-minute prices. Paper only until 60 sessions of the paper journal match the backtest: the whole result depends on selling at the opening price."
+    dl, dl_picks, dl_hist = day_long_book(D, days, t0, tu)
+    out["day_long"] = {**dl, "picks": dl_picks, "status": "test", "status_why": "Worked on daily prices in 2019-24, but on five-minute prices it has lost money since August 2025. Paper only: the journal follows it so you can see whether it recovers."}
+    out["nifty"] = nc
     cdy = day.pop("_curve"); n_ = min(len(cl), len(cdy))                # the long book and the day book on the same capital: long positions overnight, the ten shorts only inside the day
     ld = lambda a, b: 1 + (cl[a - t0:b - t0] / cl[a - t0] - 1) + (cdy[a - t0:b - t0] / cdy[a - t0] - 1); cb2 = {k: (a, min(b, t0 + n_)) for k, (a, b) in cb.items()}
     day["with_long"] = {"record": {k: {"from": str(days[a])[:10], "to": str(days[b - 1])[:10], **cstats(ld(a, b))} for k, (a, b) in cb2.items()},
@@ -543,7 +741,7 @@ def build(P, say=print):
         a, b = max(t0, int(np.searchsorted(days, np.datetime64(y + "-01-01")))), min(last_full, t0 + n_, int(np.searchsorted(days, np.datetime64(str(int(y) + 1) + "-01-01"))))
         if b - a < 20: continue
         c = ld(a, b); day["with_long"]["years"].append({"year": y, "unseen": y >= UNSEEN[:4], "both": round(float(c[-1] - 1) * 100, 1), "maxdd": round(float((c / np.maximum.accumulate(c) - 1).min()) * 100, 1)})
-    out["day"] = day; out["_day_hist"] = day_hist
+    out["day"] = day; out["_day_hist"] = day_hist; out["_day_long_hist"] = dl_hist
     out["decisions"] = dec; out["decision"] = "NO TRADE" if not (L["picks"] or Sh["picks"]) else " · ".join(([f"{len(L['picks'])} BUY"] if L["picks"] else []) + ([f"{len(Sh['picks'])} SHORT"] if Sh["picks"] else []))
     for sym in list(dict.fromkeys(want))[:40]:
         d = pd.DataFrame({k: P[k][sym] for k in ("O", "H", "L", "C")}).dropna().iloc[-150:]; lo = str(d.index[0])[:10]
@@ -555,7 +753,12 @@ def build(P, say=print):
 def save(out, charts):
     OUT.mkdir(parents=True, exist_ok=True); hist = out.pop("_day_hist", None)
     if hist is not None: hist.to_csv(OUT / "day_picks.csv", index=False)       # every past day's 20 best short ranks: the intraday lab checks them on five-minute prices
-    live = {"v": out["v"], "asof": out["asof"], "regime": out["market"]["regime"], "rules": {k: out["rules"][k] for k in ("stop_atr", "target_atr", "hold", "cost")}, "universe": [u["sym"] for u in out.get("universe", [])], "picks": [], "day": {"rules": out["day"]["rules"], "picks": [{"sym": x["sym"], "rank": x["rank"], "atr": x["atr"]} for x in out["day"]["picks"]]} if out.get("day") else None}
+    lh = out.pop("_day_long_hist", None)
+    if lh is not None: lh.to_csv(OUT / "day_long_picks.csv", index=False)      # every past day's 40 best long ranks and their buy limits: the lab checks the fills on five-minute prices
+    live = {"v": out["v"], "asof": out["asof"], "regime": out["market"]["regime"], "rules": {**{k: out["rules"][k] for k in ("stop_atr", "target_atr", "hold", "cost")}, "long": out["rules"].get("long"), "short": out["rules"].get("short")},
+            "ranks": {u["sym"]: u["rl"] for u in out.get("universe", []) if u.get("rl")}, "universe": [u["sym"] for u in out.get("universe", [])], "picks": [], "nifty": {"call": out["nifty"]["call"], "pct": out["nifty"]["pct"]} if out.get("nifty") else None,
+            "day": {"rules": out["day"]["rules"], "size": out["day"].get("size", 1.0), "picks": [{"sym": x["sym"], "rank": x["rank"], "atr": x["atr"]} for x in out["day"]["picks"]],
+                    "longs": [{"sym": x["sym"], "rank": x["rank"], "limit": x["limit"], "atr": x["atr"]} for x in (out.get("day_long") or {}).get("picks", [])][:DAYL_N]} if out.get("day") else None}
     for side, B in out["books"].items():
         by = {r["sym"]: r for r in B["ranked"]}; live["picks"] += [{"sym": x, "side": side, "rank": by[x]["rank"], "prob": by[x]["prob"], "atr": by[x]["atr"]} for x in B["picks"] if x in by]
     (OUT / "live.json").write_text(json.dumps(SE._clean(live), separators=(",", ":"), allow_nan=False))     # the small file the Worker's journal reads every few minutes
@@ -566,8 +769,12 @@ def save(out, charts):
         m = out["market"]
         for side, B in out["books"].items():
             for r in B["ranked"][:10]:
-                have += f"{out['asof']},{m['regime']},{'up' if m['nifty_up'] else 'down'},{side},{r['rank']},{r['sym']},{r['close']},{r['stop']},{r['target']},{r['prob']},{int(r['sym'] in B['picks'])}\n"
+                have += f"{out['asof']},{m['regime']},{'up' if m['nifty_up'] else 'down'},{side},{r['rank']},{r['sym']},{r['close']},{r['stop']},{'' if r['target'] is None else r['target']},{r['prob']},{int(r['sym'] in B['picks'])}\n"
         log.write_text(have)
+    if out.get("nifty"):                                                        # every evening's NIFTY call, for its forward record
+        cl = OUT / "calls.csv"; h2 = "date,call,pct,close\n"; txt = cl.read_text() if cl.exists() else h2
+        if f"\n{out['asof']}," not in "\n" + txt: txt += f"{out['asof']},{out['nifty']['call']},{out['nifty']['pct']},{out['nifty']['levels']['close']}\n"
+        cl.write_text(txt)
 
 
 def main(argv=None):
