@@ -1,4 +1,4 @@
-// Arka Trades · new app (stage 36): Home, Watchlist, Portfolio, the stock page with Research, Signals, Screener, Backtest lab, Arka AI, Money flow, News, Regime, Daily brief, Account, More (world markets live on Home). Plain JavaScript, no build step.
+// Arka Trades · new app (stage 37: trade alerts on every page): Home, Watchlist, Portfolio, the stock page with Research, Signals, Screener, Backtest lab, Arka AI, Money flow, News, Regime, Daily brief, Account, More (world markets live on Home). Plain JavaScript, no build step.
 import * as PFV from "./portfolio.js";
 import * as PFM from "./pf.js";
 import * as WL from "./watchlist.js";
@@ -14,6 +14,7 @@ import * as BX from "./btlab.js";
 import * as AA from "./arkaai.js";
 import * as BR from "./brief.js";
 import * as AC from "./account.js";
+import * as AL from "./alerts.js";
 import { chartMove } from "./charts.js";
 const CLASSIC = "https://arka-trades-1.streamlit.app";       // the Streamlit app, for sections that have not moved yet
 const $ = (s) => document.querySelector(s);
@@ -192,11 +193,11 @@ function renderShell() {
     <header class="top"><a class="brand" href="#/home"><img src="/icon-180.png" alt="">ARKA <i>TRADES</i></a>
       <div class="field only-d"><svg viewBox="0 0 24 24">${SEARCH_I}</svg><input id="q" placeholder="Search a stock, for example TCS or Reliance" autocomplete="off" spellcheck="false"><div id="drop"></div></div>
       <span class="sp"></span><span class="mk ${open ? "on" : ""}"><b></b><span class="mkl"><em>Market </em>${open ? "open" : "closed"}</span>${S.live ? '<i class="lv" title="Share and index prices are live from Angel One">Live</i>' : ""}</span>
-      <button class="ib only-m" data-act="search" aria-label="Search">${icon(SEARCH_I)}</button></header>
+      ${AL.bell()}<button class="ib only-m" data-act="search" aria-label="Search">${icon(SEARCH_I)}</button></header>
     <div id="msearch"></div><main id="main"></main>
     <nav class="nav"><a class="brand only-d" href="#/home"><img src="/icon-180.png" alt="">ARKA <i>TRADES</i></a>
       ${TABS.map(([k, n, d, mob]) => `<a href="#/${k}" data-tab="${k}"${mob ? "" : ' class="only-d"'}>${icon(d)}<span>${n}</span></a>`).join("")}
-      <div class="who">Signed in as <b>${esc(AC.displayName())}</b><br>New app · stage 36</div></nav></div>`;
+      <div class="who">Signed in as <b>${esc(AC.displayName())}</b><br>New app · stage 37</div></nav></div>`;
 }
 function paint() {
   const main = $("#main"); if (!main || !S.me) return;
@@ -204,7 +205,7 @@ function paint() {
   document.querySelectorAll(".nav a[data-tab]").forEach((a) => { a.classList.toggle("on", a.dataset.tab === (S.tab === "s" ? "research" : S.tab)); a.classList.toggle("onm", a.dataset.tab === phoneTab); });
   const withRail = !["home", "watchlist", "more", "brief", "portfolio", "regime", "flow", "news", "s", "research", "signals", "screener", "backtest", "arka", "account"].includes(S.tab);
   const ae = document.activeElement;                       // typing in a Portfolio box: leave the page alone so the cursor stays put
-  if (ae && main.contains(ae) && ((ae.dataset.pf && ae.tagName === "INPUT") || (ae.dataset.fd && ae.tagName === "INPUT") || (ae.dataset.sc && /INPUT|TEXTAREA/.test(ae.tagName)) || (ae.dataset.bx && /INPUT|TEXTAREA/.test(ae.tagName)) || (ae.dataset.aa && /INPUT|TEXTAREA/.test(ae.tagName)) || (S.tab === "account" && /INPUT|TEXTAREA/.test(ae.tagName)) || (S.tab === "portfolio" && /INPUT|TEXTAREA/.test(ae.tagName) && ae.closest("form"))) && !/range|checkbox|file/.test(ae.type)) { if (S.sheet && !typingInSheet()) paintSheet(); return; }
+  if (ae && main.contains(ae) && ((ae.dataset.pf && ae.tagName === "INPUT") || (ae.dataset.fd && ae.tagName === "INPUT") || (ae.dataset.md && ae.tagName === "INPUT" && ae.type !== "checkbox") || (ae.form && ae.form.dataset && ae.form.dataset.mdfill) || (ae.dataset.sc && /INPUT|TEXTAREA/.test(ae.tagName)) || (ae.dataset.bx && /INPUT|TEXTAREA/.test(ae.tagName)) || (ae.dataset.aa && /INPUT|TEXTAREA/.test(ae.tagName)) || (S.tab === "account" && /INPUT|TEXTAREA/.test(ae.tagName)) || (S.tab === "portfolio" && /INPUT|TEXTAREA/.test(ae.tagName) && ae.closest("form"))) && !/range|checkbox|file/.test(ae.type)) { if (S.sheet && !typingInSheet()) paintSheet(); return; }
   const keep = ae && main.contains(ae) && ae.dataset && (ae.dataset.nw || ae.dataset.rs === "find" || ae.dataset.wl === "q") ? [ae.dataset.nw ? "nw" : ae.dataset.wl ? "wl" : "rs", ae.dataset.nw || ae.dataset.wl || ae.dataset.rs, ae.selectionStart, ae.selectionEnd] : null;
   main.className = withRail ? "rail" : ["home", "portfolio", "regime", "flow", "news", "s", "signals", "screener", "backtest", "arka"].includes(S.tab) ? "wide" : "";
   const y = window.scrollY;
@@ -344,7 +345,7 @@ function renderLogin(err = "") {
     <div class="err">${esc(err)}</div><button class="btn pri full" type="submit">Sign in</button></form></div>`;
 }
 async function start() {
-  AC.applyLayout(); renderShell(); route(); loadWatchlist(); loadSignals(); MD.load(); loadPortfolio();
+  AC.applyLayout(); renderShell(); route(); loadWatchlist(); loadSignals(); MD.load(); loadPortfolio(); AL.start();
 }
 async function boot() {
   try { S.me = await api("/api/me"); start(); } catch { /* the sign-in screen is already showing */ }
@@ -356,9 +357,10 @@ async function sendForm(form, path, body, method = "POST") {
   const b = form.querySelector("button[type=submit]"); if (b) b.disabled = true;
   try { await api(path, { method, body: JSON.stringify(body) }); return true; } catch (er) { formErr(form, er.message); return false; }
 }
-document.addEventListener("toggle", (e) => { if (e.target.classList && e.target.classList.contains("pf-tax")) S.pf.taxOpen = e.target.open; if (e.target.classList && e.target.classList.contains("wl-man")) S.wl.manage = e.target.open; if (e.target.dataset && (e.target.dataset.scd || e.target.dataset.scm)) SC.toggle(e.target); if (e.target.dataset && e.target.dataset.bxd) BX.toggle(e.target); if (e.target.dataset && e.target.dataset.aad) AA.toggle(e.target); if (e.target.dataset && e.target.dataset.mfd) S.mf.dataOpen = e.target.open; if (e.target.dataset && e.target.dataset.mfs) S.mf.setOpen = e.target.open; if (e.target.dataset && e.target.dataset.acd) AC.toggle(e.target); }, true);
+document.addEventListener("toggle", (e) => { if (e.target.classList && e.target.classList.contains("pf-tax")) S.pf.taxOpen = e.target.open; if (e.target.classList && e.target.classList.contains("wl-man")) S.wl.manage = e.target.open; if (e.target.dataset && (e.target.dataset.scd || e.target.dataset.scm)) SC.toggle(e.target); if (e.target.dataset && e.target.dataset.bxd) BX.toggle(e.target); if (e.target.dataset && e.target.dataset.aad) AA.toggle(e.target); if (e.target.dataset && e.target.dataset.mfd) S.mf.dataOpen = e.target.open; if (e.target.dataset && e.target.dataset.mfs) S.mf.setOpen = e.target.open; if (e.target.dataset && e.target.dataset.acd) AC.toggle(e.target); if (e.target.dataset && e.target.dataset.mdset) S.md.setOpen = e.target.open; }, true);
 document.addEventListener("submit", async (e) => {
   const f = e.target, id = f.getAttribute("id");       // not f.id: a field named "id" would hide it
+  if (f.dataset && f.dataset.mdfill) { e.preventDefault(); return MD.fill(f); }        // "I placed it" on the Live tab
   if (id === "thesis") { e.preventDefault(); return SK.saveNote(f); }
   if (id === "acprof") { e.preventDefault(); return AC.submit(f); }
   if (id === "wladd") { e.preventDefault(); const t = f.querySelector("[name=text]").value; f.querySelector("[name=text]").value = ""; document.activeElement && document.activeElement.blur(); return WL.addText(t); }
@@ -427,6 +429,7 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") { if (S.sh
 document.addEventListener("click", async (e) => {
   const a = e.target.closest("[data-act]"), act = a && a.dataset.act;
   if (act) {
+    if (act && act.startsWith("al")) { e.preventDefault(); AL.act(act, a); return; }       // the bell, the pop-ups and the test alert
     if (act && act.startsWith("wl")) { e.preventDefault(); e.stopPropagation(); return WL.act(act, a); }
     if (act === "remove") { e.preventDefault(); e.stopPropagation(); if (S.tab === "watchlist" && S.wl.list !== "Arka desk") { closeSheet(); return WL.remove([a.dataset.s], true); } await removeStock(a.dataset.s); if (S.sheet) paintSheet(); return; }
     if (act === "add") { await addStock(a.dataset.s); if (S.sheet) paintSheet(); return; }
@@ -439,7 +442,7 @@ document.addEventListener("click", async (e) => {
     if (act === "range") { S.sheet.range = a.dataset.v; return paintSheet(); }
     if (act === "list") { S.wl.list = a.dataset.v; S.wl.flt = "All"; S.wl.q = ""; S.wl.addMsg = ""; S.wl.sel = {}; paint(); refresh(); return WL.load(); }
     if (act && act.startsWith("fd")) return DK.act(act, a);
-    if (act && /^md(list|per|chart|side|live|lsort|lall)$/.test(act)) return MD.act(act, a);
+    if (act && /^md(list|per|chart|side|live|lsort|lall|setsave)$/.test(act)) return MD.act(act, a);
     if (act && act.startsWith("sc")) return SC.act(act, a);
     if (act && act.startsWith("bx")) return BX.act(act, a);
     if (act && act.startsWith("aa")) return AA.act(act, a);
