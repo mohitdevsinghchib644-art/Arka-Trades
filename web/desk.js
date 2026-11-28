@@ -4,7 +4,7 @@ import * as V from "./deskview.js";
 import * as O from "./omview.js";
 import * as MD from "./model.js";
 
-const ALL = [...MD.TABS, "Leaders", "Big players", "Options map"];       // Leaders (the 20 strongest stocks, checked weekly) is back as the trend core; the Swing and Index rule books stay retired
+const ALL = [...MD.TABS, "Leaders", "Big players", "Options map"], LABEL = { Tonight: "Overnight", "Day book": "Intraday" };       // Leaders (the 20 strongest stocks, checked weekly) is back as the trend core; the Swing and Index rule books stay retired
 
 const saved = () => { try { return JSON.parse(localStorage.getItem("arka_desk_size") || "{}"); } catch { return {}; } };
 export const deskDefaults = () => { const z = saved(); return { tab: (() => { const t = new Date(Date.now() + 330 * 60000), m = t.getUTCHours() * 60 + t.getUTCMinutes(); return t.getUTCDay() >= 1 && t.getUTCDay() <= 5 && m >= 540 && m <= 930 ? "Live" : "Tonight"; })(), C: null, chain: null, log: null, sectors: null, capL: z.capL ?? 200000, capS: z.capS ?? 100000, risk: z.risk ?? 1, chartL: "", chartS: "", busy: {}, om: null, omPick: "", omFlt: "All", omExp: {}, omSym: "", omS: {} }; };
@@ -56,7 +56,7 @@ function optionsMap() {                                      // fno_page._option
 }
 export function page() {
   const D = S.fd, Sg = S.sig, head = (sub) => `<div class="hd"><div><h1>Arka Model</h1><div class="sub">${sub}</div></div></div>`;
-  const tab0 = ALL.includes(D.tab) ? D.tab : "Tonight", tabs0 = `<div class="seg fd-tabs">${ALL.map((x) => `<button class="${x === tab0 ? "on" : ""}" data-act="fdtab" data-v="${x}">${x}</button>`).join("")}</div>`;
+  const tab0 = ALL.includes(D.tab) ? D.tab : "Tonight", tabs0 = `<div class="seg fd-tabs">${ALL.map((x) => `<button class="${x === tab0 ? "on" : ""}" data-act="fdtab" data-v="${x}">${LABEL[x] || x}</button>`).join("")}</div>`;
   if (MD.TABS.includes(tab0)) return `<div class="fdp">${head("Machine-learning desk for F&O stocks · the model's trades followed live, tonight's long and short signals, and the full record")}${tabs0}${MD.view(tab0)}</div>`;
   if (S.sigErr && !Sg) return `<div class="fdp">${head("")}${tabs0}<div class="card"><div class="empty"><b>The positioning file could not be read</b>${esc(S.sigErr)}</div></div></div>`;
   if (!Sg) return `<div class="fdp">${head("Loading…")}${tabs0}<div class="card"><div class="note">Loading…</div></div></div>`;
